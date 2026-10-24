@@ -39,7 +39,7 @@ export type ProfileDeletionPendingRequest = {
 
 export type CreateProfileDeletionRequestResult =
   | { ok: true; request: ProfileDeletionPendingRequest; eventSeq: number }
-  | { ok: false; code: 'already_pending' | 'profile_not_eligible' | 'active_participation' | 'active_ban' }
+  | { ok: false; code: 'already_pending' | 'profile_not_eligible' | 'active_tournament' | 'active_game' | 'active_ban' }
 
 export type IssueProfileDeletionRestoreTokenResult =
   | { ok: true; restoreToken: string; expiresAt: string; request: ProfileDeletionPendingRequest }
@@ -273,12 +273,14 @@ export async function createProfileDeletionRequestStore(
       // Етап 4: проверките, видими за всички процеси, са ВЪТРЕ в writer
       // lock-а. Турнирно записване в друг процес е или преди нас (виждаме го
       // тук), или след нас (тригерът върху tournament_entries го отказва).
-      if (
-        participationChecks.hasActiveTournamentDependency(profile.profile_id) ||
-        participationChecks.hasPersistedActiveGame(profile.profile_id)
-      ) {
+      // Етап 4K — отделни кодове (активна игра / турнирно участие).
+      if (participationChecks.hasPersistedActiveGame(profile.profile_id)) {
         database.exec('ROLLBACK;')
-        return { ok: false, code: 'active_participation' }
+        return { ok: false, code: 'active_game' }
+      }
+      if (participationChecks.hasActiveTournamentDependency(profile.profile_id)) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'active_tournament' }
       }
       // Етап 4G — срокът тече от часовника на базата в момента на приемане
       // (клиентският часовник не участва); повторна заявка при вече активна

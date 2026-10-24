@@ -36,7 +36,8 @@ import { writeTestLedgerAck } from './fixtures/profileDeletionCancellationKit.js
 
 const SECRET = 'profile-deletion-request-http-secret-0123456789'
 const PASSWORD = 'secret123'
-const ACTIVE_MESSAGE = 'В момента участвате в активна игра или незавършил турнир. За да подадете заявка за изтриване на профила, първо трябва да приключите участието си.'
+const ACTIVE_GAME_MESSAGE = 'Не можете да подадете заявка за изтриване, докато участвате в активна игра. Изчакайте играта да приключи и опитайте отново.'
+const TOURNAMENT_MESSAGE = 'Не можете да подадете заявка за изтриване на профила, защото сте записан за участие в турнир. Напуснете турнира или изчакайте той да приключи, след което опитайте отново.'
 
 let passed = 0
 let failed = 0
@@ -357,9 +358,10 @@ try {
     assert(res.status === 400 && res.json.code === 'CONFIRMATION_REQUIRED', `${res.status} ${JSON.stringify(res.json)}`)
   })
 
-  async function expectActiveRefusal(label: string): Promise<void> {
+  async function expectActiveRefusal(label: string, code: 'ACTIVE_GAME' | 'TOURNAMENT_REGISTRATION' = 'ACTIVE_GAME'): Promise<void> {
     const res = await submit(gamer)
-    assert(res.status === 409 && res.json.code === 'ACTIVE_GAME_OR_TOURNAMENT' && res.json.message === ACTIVE_MESSAGE, `${label}: ${res.status} ${JSON.stringify(res.json)}`)
+    const expectedMessage = code === 'ACTIVE_GAME' ? ACTIVE_GAME_MESSAGE : TOURNAMENT_MESSAGE
+    assert(res.status === 409 && res.json.code === code && res.json.message === expectedMessage,`${label}: ${res.status} ${JSON.stringify(res.json)}`)
     assert(requestCount(gamer.profileId) === 0, `${label}: създадена заявка`)
     assert((await api('/api/friends', { cookie: gamer.cookie })).status === 200, `${label}: сесията е отнета`)
   }
@@ -393,7 +395,7 @@ try {
     const tournamentId = randomUUID()
     db.prepare(`INSERT INTO tournaments (tournament_id, name, entry_fee, start_mode, status, creator_profile_id) VALUES (?, 'Активен турнир', 100, 'fill', 'open', ?);`).run(tournamentId, friend.profileId)
     db.prepare(`INSERT INTO tournament_entries (entry_id, tournament_id, profile_id, joined_as, status) VALUES (?, ?, ?, 'solo', 'confirmed');`).run(randomUUID(), tournamentId, gamer.profileId)
-    await expectActiveRefusal('турнир')
+    await expectActiveRefusal('турнир', 'TOURNAMENT_REGISTRATION')
   })
 
   await check('[E11b] Активен бан (Етап 4E6B) -> 409 PROFILE_BANNED при жива сесия; без заявка; сесията остава', async () => {

@@ -1288,7 +1288,7 @@ try {
       const user = registerUser(`Busy${label}`)
       setup(user)
       const result = requestStore.createRequest({ profileId: user.profileId, accountId: user.accountId })
-      assert(!result.ok && result.code === 'active_participation', `${label}: ${JSON.stringify(result)}`)
+      assert(!result.ok && result.code === (label === 'tournament' ? 'active_tournament' : 'active_game'), `${label}: ${JSON.stringify(result)}`)
       assertEqual(count('SELECT COUNT(*) AS c FROM profile_deletion_requests WHERE profile_id = ?;', user.profileId), 0, `${label}: без заявка`)
     }
   })

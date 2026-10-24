@@ -11675,8 +11675,21 @@ async function handleProfileBlockRequest(
 // Никакви данни на профила не се трият или променят тук — само заявката,
 // журналът, токените и отнемането на сесиите. Токенът не се логва.
 
-const PROFILE_DELETION_ACTIVE_PARTICIPATION_MESSAGE =
-  'В момента участвате в активна игра или незавършил турнир. За да подадете заявка за изтриване на профила, първо трябва да приключите участието си.'
+// Етап 4K — конкретното основание за отказ (стабилни кодове за клиента).
+type ProfileDeletionParticipationBlocker =
+  | 'ACTIVE_GAME'
+  | 'BELOT_PRIVATE_TABLE'
+  | 'LUDO_PRIVATE_TABLE'
+  | 'BELOT_MATCHMAKING'
+  | 'TOURNAMENT_REGISTRATION'
+
+const PROFILE_DELETION_PARTICIPATION_MESSAGES: Record<ProfileDeletionParticipationBlocker, string> = {
+  ACTIVE_GAME: 'Не можете да подадете заявка за изтриване, докато участвате в активна игра. Изчакайте играта да приключи и опитайте отново.',
+  BELOT_PRIVATE_TABLE: 'Имате заето място на частна маса в Белот. Напуснете масата, преди да подадете заявка за изтриване на профила.',
+  LUDO_PRIVATE_TABLE: 'Имате заето място на частна маса в „Не се сърди човече“. Напуснете масата, преди да подадете заявка за изтриване на профила.',
+  BELOT_MATCHMAKING: 'В момента търсите игра в Белот. Спрете търсенето, преди да подадете заявка за изтриване на профила.',
+  TOURNAMENT_REGISTRATION: 'Не можете да подадете заявка за изтриване на профила, защото сте записан за участие в турнир. Напуснете турнира или изчакайте той да приключи, след което опитайте отново.',
+}
 const PROFILE_DELETION_INVALID_TOKEN_MESSAGE =
   'Връзката за възстановяване е невалидна или изтекла. Влезте отново с имейла и паролата си.'
 const PROFILE_DELETION_WINDOW_CLOSED_MESSAGE = 'Срокът за отмяна на заявката за изтриване е изтекъл.'
@@ -11696,18 +11709,32 @@ function canSessionOfferProfileSelfDeletion(session: { profile: { profileId: str
   return profileId !== OFFICIAL_PIKA_PROFILE_ID && profileId !== getConfiguredOfficialPikaProfileId()
 }
 
-// Реалните състояния на игрите: in-memory (Белот стаи/сесии, чакащи маси,
-// matchmaking, Не се сърди човече, Свара — вкл. нейния постоянен snapshot,
-// fail-closed), персистираните snapshot-и за Белот/Не се сърди човече/Свара
-// (рестарт или друг процес) и незавършени турнири (creator или активно
-// участие). Етап 4: персистираните проверки се повтарят ВЪТРЕ в транзакцията
-// на createRequest; паметта на другите процеси — при realtime reconcile.
-function hasActiveParticipationForProfileDeletion(profileId: string): boolean {
-  return (
-    hasProfileActiveGameCommitment(profileId) ||
-    profileDeletionRequestStore.hasActiveGameSnapshot(profileId) ||
-    profileHardDeleteService.hasActiveTournamentDependency(profileId)
-  )
+// Реалните състояния на игрите — същите източници като досега, но с
+// конкретно основание (Етап 4K):
+//   ACTIVE_GAME — активна Белот стая (вкл. прекъсната връзка с възстановимо
+//     място: reconnectToken), активен мач в Не се сърди човече, Свара
+//     (маса или мач), персистираните snapshot-и (рестарт/друг процес);
+//   BELOT_PRIVATE_TABLE / LUDO_PRIVATE_TABLE — заето място на чакаща маса
+//     (създателят се отчита, докато заема слот; мястото се освобождава САМО
+//     от сървъра при напускане/изтичане — не от затворен прозорец);
+//   BELOT_MATCHMAKING — търсене на игра;
+//   TOURNAMENT_REGISTRATION — създател на незавършен турнир или потвърдено/
+//     финалистко участие в такъв.
+// Персистираните проверки се повтарят ВЪТРЕ в транзакцията на createRequest;
+// паметта на другите процеси — при realtime reconcile (системна отмяна).
+function findProfileDeletionParticipationBlocker(profileId: string): ProfileDeletionParticipationBlocker | null {
+  if (
+    isProfileInActiveGame(profileId) ||
+    findProfileInGameSession(profileId) !== null ||
+    ludoMatchRuntime.requestState(profileId) !== null ||
+    svaraLobby.findCommitment(profileId) !== null ||
+    profileDeletionRequestStore.hasActiveGameSnapshot(profileId)
+  ) return 'ACTIVE_GAME'
+  if (privateRoomsStore.getRoomByProfileId(profileId) !== null) return 'BELOT_PRIVATE_TABLE'
+  if (ludoRoomsStore.getRoomByProfileId(profileId) !== null) return 'LUDO_PRIVATE_TABLE'
+  if (matchmakingState.queueEntries.some((entry) => entry.profileId === profileId)) return 'BELOT_MATCHMAKING'
+  if (profileHardDeleteService.hasActiveTournamentDependency(profileId)) return 'TOURNAMENT_REGISTRATION'
+  return null
 }
 
 // Етап 4: чакащите ВХОДЯЩИ покани за турнирен партньор НЕ се отказват при
@@ -11815,8 +11842,11 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
     return true
   }
 
-  if (hasActiveParticipationForProfileDeletion(profileId)) {
-    sendJsonResponse(res, 409, { ok: false, code: 'ACTIVE_GAME_OR_TOURNAMENT', message: PROFILE_DELETION_ACTIVE_PARTICIPATION_MESSAGE })
+  // Етап 4K — отказ с конкретното основание; нищо не се променя (без заявка,
+  // сесиите остават, без напускане на маса/турнир).
+  const participationBlocker = findProfileDeletionParticipationBlocker(profileId)
+  if (participationBlocker !== null) {
+    sendJsonResponse(res, 409, { ok: false, code: participationBlocker, message: PROFILE_DELETION_PARTICIPATION_MESSAGES[participationBlocker] })
     return true
   }
 
@@ -11824,9 +11854,10 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
   if (!result.ok) {
     if (result.code === 'already_pending') {
       sendJsonResponse(res, 409, { ok: false, code: 'ALREADY_PENDING', message: 'Вече има подадена заявка за изтриване на този профил.' })
-    } else if (result.code === 'active_participation') {
+    } else if (result.code === 'active_tournament' || result.code === 'active_game') {
       // Повторната проверка ВЪТРЕ в транзакцията (видима за всички процеси).
-      sendJsonResponse(res, 409, { ok: false, code: 'ACTIVE_GAME_OR_TOURNAMENT', message: PROFILE_DELETION_ACTIVE_PARTICIPATION_MESSAGE })
+      const blocker: ProfileDeletionParticipationBlocker = result.code === 'active_tournament' ? 'TOURNAMENT_REGISTRATION' : 'ACTIVE_GAME'
+      sendJsonResponse(res, 409, { ok: false, code: blocker, message: PROFILE_DELETION_PARTICIPATION_MESSAGES[blocker] })
     } else if (result.code === 'active_ban') {
       // Етап 4E6B — проверката е в транзакцията на request store-а.
       sendJsonResponse(res, 409, { ok: false, code: 'PROFILE_BANNED', message: 'Профилът има активен бан. Заявка за изтриване може да се подаде след изтичането или премахването му.' })
@@ -23697,6 +23728,22 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       }
 
       activityCounters.incrementWsInbound(message.type)
+
+      // Етап 4K — race след приемане на заявка за изтриване: сесиите са отнети
+      // и socket.close() е извикан, но вече буферирано съобщение за влизане в
+      // игра/маса/търсене пристига след това (или идва от връзка в друг
+      // процес преди poll-а). Персистираната заявка е източникът на истината.
+      if (SVARA_OTHER_GAME_ADMISSION_TYPES.has(message.type) &&
+          !(message.type === 'respond_private_room_invite' && !message.accept)) {
+        const admissionProfileId = getConnectionById(serverState, connection.id)?.profileId
+        if (admissionProfileId && profileDeletionRequestStore.getPendingRequest(admissionProfileId) !== null) {
+          safeSendToConnection(connection.id, {
+            type: 'error', code: 'profile_deletion_pending',
+            message: 'Профилът ви е подаден за изтриване. Не можете да влезете в игра, докато заявката е активна.',
+          })
+          return
+        }
+      }
 
       if (SVARA_LOBBY_MESSAGE_TYPES.has(message.type)) {
         svaraLobby.handle(connection.id, message as SvaraLobbyClientMessage, isServerShuttingDown)

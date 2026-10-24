@@ -521,7 +521,7 @@ try {
     try {
       assertEqual(copyStore.hasActiveGameSnapshot(user.profileId), true, 'без таблицата — "има активна игра" (fail-closed)')
       const refused = copyStore.createRequest({ profileId: user.profileId, accountId: user.accountId })
-      assert(!refused.ok && refused.code === 'active_participation', `очакван отказ active_participation, получено ${JSON.stringify(refused)}`)
+      assert(!refused.ok && refused.code === 'active_game', `очакван отказ active_game, получено ${JSON.stringify(refused)}`)
       assertEqual((copy.prepare('SELECT COUNT(*) AS cnt FROM profile_deletion_requests WHERE profile_id = ?;').get(user.profileId) as { cnt: number }).cnt, 0, 'не е създадена заявка')
       // Неуспешната подготовка не се кешира: таблицата се появява отново.
       for (const entry of schema) copy.exec(entry.sql)

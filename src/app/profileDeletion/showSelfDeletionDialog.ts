@@ -39,8 +39,22 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;')
 }
 
+// Етап 4K — отказ заради незавършен ангажимент: конкретната причина, какво
+// да направи потребителят и че нищо не е променено.
+const PARTICIPATION_REFUSAL_SUFFIX = ' Профилът не е изтрит и заявка за изтриване не е приета.'
+const PARTICIPATION_REFUSAL_MESSAGES: Record<string, string> = {
+  ACTIVE_GAME: 'Не можете да подадете заявка за изтриване, докато участвате в активна игра. Изчакайте играта да приключи и опитайте отново.',
+  BELOT_PRIVATE_TABLE: 'Имате заето място на частна маса в Белот. Напуснете масата, преди да подадете заявка за изтриване на профила.',
+  LUDO_PRIVATE_TABLE: 'Имате заето място на частна маса в „Не се сърди човече“. Напуснете масата, преди да подадете заявка за изтриване на профила.',
+  BELOT_MATCHMAKING: 'В момента търсите игра в Белот. Спрете търсенето, преди да подадете заявка за изтриване на профила.',
+  TOURNAMENT_REGISTRATION: 'Не можете да подадете заявка за изтриване на профила, защото сте записан за участие в турнир. Напуснете турнира или изчакайте той да приключи, след което опитайте отново.',
+}
+
 /** Разбираемо съобщение по кода на сървъра (иначе — съобщението на сървъра). */
 export function describeSelfDeletionError(code: string | null, message: string | null): string {
+  if (code !== null && Object.prototype.hasOwnProperty.call(PARTICIPATION_REFUSAL_MESSAGES, code)) {
+    return PARTICIPATION_REFUSAL_MESSAGES[code] + PARTICIPATION_REFUSAL_SUFFIX
+  }
   switch (code) {
     case 'INVALID_PASSWORD':
       return 'Паролата не е вярна. Опитай отново.'
@@ -48,8 +62,6 @@ export function describeSelfDeletionError(code: string | null, message: string |
       return 'Профилът има активен бан. Заявка за изтриване може да бъде подадена едва след като банът изтече или бъде премахнат.'
     case 'ALREADY_PENDING':
       return 'Вече има подадена заявка за изтриване на този профил.'
-    case 'ACTIVE_GAME_OR_TOURNAMENT':
-      return message ?? 'В момента участваш в игра или турнир. Заявка може да бъде подадена след като участието приключи.'
     case 'RATE_LIMITED':
       return 'Направени са твърде много опити. Опитай отново по-късно.'
     case 'PROFILE_SELF_DELETION_DISABLED':
