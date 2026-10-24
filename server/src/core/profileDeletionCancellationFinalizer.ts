@@ -20,6 +20,7 @@
 
 import {
   appendProfileDeletionLedgerEntry,
+  withProfileDeletionLedgerLock,
   isProfileDeletionLedgerRecordConfirmedOffsite,
   profileDeletionCancellationLedgerKey,
   profileDeletionLedgerRecordKey,
@@ -59,6 +60,11 @@ export function createProfileDeletionCancellationFinalizer(deps: ProfileDeletion
   const log = deps.log ?? (() => {})
 
   function writeLedger(row: ProfileDeletionCancellationRow): void {
+    // Етап 4J1A — проверката и записът са под междупроцесното заключване на регистъра.
+    withProfileDeletionLedgerLock(deps.ledgerPath, () => writeLedgerUnderLock(row))
+  }
+
+  function writeLedgerUnderLock(row: ProfileDeletionCancellationRow): void {
     const ledger = readProfileDeletionLedger(deps.ledgerPath)
     if (ledger.invalidLineCount > 0 || ledger.conflictingDuplicateCount > 0) throw new Error('profile_deletion_ledger_corrupt')
     const cancelKey = profileDeletionCancellationLedgerKey(row.requestId)

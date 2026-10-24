@@ -26,6 +26,7 @@ import {
   readProfileDeletionLedgerOffsiteAck,
   serializeProfileDeletionLedgerEntry,
   sha256Hex,
+  withProfileDeletionLedgerLock,
   writeFileAtomicallySync,
   writeProfileDeletionLedgerOffsiteAck,
   type ProfileDeletionLedgerRecord,
@@ -322,5 +323,7 @@ export function mergeLedgerSnapshots(input: {
 }
 
 export function writeMergedLedger(outPath: string, entries: readonly ProfileDeletionLedgerRecord[]): void {
-  writeFileAtomicallySync(outPath, entries.map(serializeProfileDeletionLedgerEntry).join(''), 0o600)
+  // Етап 4J1A — под заключването на регистъра: ако out е живият регистър,
+  // append от работещ процес не може да бъде изгубен от подмяната на файла.
+  withProfileDeletionLedgerLock(outPath, () => writeFileAtomicallySync(outPath, entries.map(serializeProfileDeletionLedgerEntry).join(''), 0o600))
 }

@@ -12,9 +12,11 @@
 // Етап 4J1: преди записа на намерението worker-ът проверява регистъра за
 // отмяна на заявката ("request_cancelled", напр. база, възстановена отпреди
 // отмяната) — ако има, НЕ изтрива, а възстановява трайната защита в базата.
-// След COMMIT на изтриването записва доказателството "request_db_deleted"
-// (защита в дълбочина: по-късна отмяна е недопустима, а reconcile дава
-// предимство на изтриването).
+// Етап 4J1A: доказателството "request_db_deleted" се записва в регистъра
+// ВЪТРЕ в транзакцията на изтриването, непосредствено преди COMMIT (срив
+// между двете не може да остави изтриване без доказателство; неуспешен запис
+// = ROLLBACK). По-късна отмяна е недопустима, а reconcile дава предимство на
+// изтриването.
 //
 // Логовете съдържат само request_id и технически кодове — без имена, имейли,
 // пътища до файлове или токени.
@@ -55,7 +57,12 @@ export type ProfileDeletionWorkerDeps = {
    * обработва отмените преди worker-а).
    */
   findLedgerCancellation?: (requestId: string) => ProfileDeletionRequestCancelledRecord | null
-  /** Етап 4J1: идемпотентен запис "request_db_deleted" след COMMIT на изтриването (грешка не спира файловата фаза). */
+  /**
+   * Етап 4J1/4J1A: идемпотентен запис "request_db_deleted" — задължително
+   * преди COMMIT на изтриването (грешка -> ROLLBACK); за заявка, изтрита в
+   * базата от по-стара версия — допълване при продължаване (без да спира
+   * файловата фаза).
+   */
   recordDbDeletion?: (record: ProfileDeletionRequestDbDeletedRecord) => void
   /** Игра/маса/опашка в паметта на ТОЗИ процес (hasProfileActiveGameCommitment). */
   isProfileInActiveGameLocally?: (profileId: string) => boolean
@@ -204,7 +211,11 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
           return
         }
       }
-      const result = deps.executor.runDatabasePhase(request, deps.workerId)
+      const result = deps.executor.runDatabasePhase(request, deps.workerId, deps.recordDbDeletion === undefined ? {} : {
+        beforeCommit: (dbDeletedAt) => deps.recordDbDeletion!({
+          v: 1, kind: 'request_db_deleted', requestId: request.requestId, profileId: request.profileId, dbDeletedAt, recordedAt: new Date().toISOString(),
+        }),
+      })
       if (result.kind === 'blocked') {
         summary.blocked += 1
         log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=${result.code}`)
@@ -216,8 +227,8 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
         return
       }
       if (result.kind === 'lease_lost') return
-      if (result.kind === 'db_deleted') recordDbDeletion(request, result.dbDeletedAt)
     } else {
+      // Изтрита в базата преди този опит (напр. от версия отпреди 4J1A) — допълване.
       recordDbDeletion(request, request.dbDeletedAt)
     }
 

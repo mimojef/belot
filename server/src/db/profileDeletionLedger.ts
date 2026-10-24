@@ -27,27 +27,45 @@
 // виж ProfileDeletionRequestLifecycleLedgerRecord):
 //   * request_cancelled — отмяна; reconcile/worker я спазват, ако е СЛЕД
 //     намерението за изтриване (или намерение няма);
-//   * request_db_deleted — изтриването в базата е COMMIT-нато (доказателство;
-//     има предимство пред по-късна отмяна).
+//   * request_db_deleted — необратимото изтриване е започнало: записва се
+//     (fsync) ВЪТРЕ в транзакцията на изтриването, непосредствено преди
+//     COMMIT (Етап 4J1A). Срив между записа и COMMIT -> повторният опит
+//     довършва изтриването. Има предимство пред по-късна отмяна.
 // Редът на редовете е значим: файлът е append-only, архивите са байтови
 // префикси един на друг, а parse/merge пазят реда на първото срещане.
 //
 // Формат на файла: всеки ред завършва с '\n'. Непълна "опашка" без '\n'
 // (срив по средата на запис) не е записан ред — игнорира се при четене и се
 // отрязва преди следващия запис. Невалиден ПЪЛЕН ред е повреда.
+//
+// Етап 4J1A — междупроцесно заключване (withProfileDeletionLedgerLock):
+// всяка промяна на края на файла (отрязване на недовършена опашка + append,
+// вкл. проверката "вече има ли такъв запис" в ensure*) става под изключително
+// заключване на отделен файл <регистър>.lock (SQLite BEGIN IMMEDIATE ->
+// fcntl / LockFileEx). Операционната система го освобождава при смърт на
+// процеса — "заседнал" lock няма. Под заключването никой друг не пише, затова
+// недовършена опашка е САМО остатък от срив и отрязването никога не засяга
+// завършен ред (нито offsite-потвърден префикс — snapshot/ack покриват само
+// завършени редове). Читателите (snapshot, confirm, offsite проверки) не
+// заключват — те ползват само завършените редове. Ред на заключванията:
+// основната база -> регистъра, никога обратното (без deadlock).
 
 import { createHash } from 'node:crypto'
 import {
+  chownSync,
   closeSync,
+  existsSync,
   fsyncSync,
   ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   writeSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { isCanonicalUtcIsoTimestamp } from './profileDeletionSchedule.js'
 
 export type ProfileDeletionLedgerEntry = {
@@ -280,8 +298,11 @@ export function isValidProfileDeletionLedgerRecord(value: unknown): value is Pro
 export function isSameProfileDeletionLedgerRecord(a: ProfileDeletionLedgerRecord, b: ProfileDeletionLedgerRecord): boolean {
   if (isProfileDeletionLedgerIntentEntry(a) !== isProfileDeletionLedgerIntentEntry(b)) return false
   if (isProfileDeletionLedgerIntentEntry(a)) return isSameProfileDeletionIdentity(a, b as ProfileDeletionLedgerEntry)
+  // Етап 4J1A — "request_db_deleted" се записва преди COMMIT; повторен опит
+  // след срив носи нов dbDeletedAt, но е същият факт (заявка + профил).
+  const ignored = new Set(isRequestLifecycleLedgerRecord(a) && a.kind === 'request_db_deleted' ? ['recordedAt', 'dbDeletedAt'] : ['recordedAt'])
   const canonical = (record: ProfileDeletionLedgerRecord) => JSON.stringify(
-    Object.entries(record).filter(([key]) => key !== 'recordedAt').sort(([x], [y]) => x.localeCompare(y)),
+    Object.entries(record).filter(([key]) => !ignored.has(key)).sort(([x], [y]) => x.localeCompare(y)),
   )
   return canonical(a) === canonical(b)
 }
@@ -364,11 +385,68 @@ export function serializeProfileDeletionLedgerEntry(entry: ProfileDeletionLedger
   return `${JSON.stringify(entry)}\n`
 }
 
-/** Синхронен append + fsync — връща се едва когато редът е на диска. */
+// ─── Етап 4J1A: междупроцесно заключване ──────────────────────────────────
+/** Колко дълго се чака заключването (държи се само за кратък локален append + fsync). */
+export const PROFILE_DELETION_LEDGER_LOCK_TIMEOUT_MS = 15_000
+
+export function getProfileDeletionLedgerLockPath(ledgerPath: string): string {
+  return `${ledgerPath}.lock`
+}
+
+const heldLedgerLocks = new Map<string, number>()
+
+/**
+ * fn се изпълнява под изключителното заключване на регистъра (между всички
+ * процеси). Реентрантно в рамките на процеса (синхронен код). При изтекло
+ * чакане хвърля — извикващите го третират като неуспешен запис (fail-closed).
+ * fn не трябва да чака основната база (виж реда на заключванията горе).
+ */
+export function withProfileDeletionLedgerLock<T>(ledgerPath: string, fn: () => T): T {
+  const lockPath = getProfileDeletionLedgerLockPath(ledgerPath)
+  const depth = heldLedgerLocks.get(lockPath) ?? 0
+  if (depth > 0) {
+    heldLedgerLocks.set(lockPath, depth + 1)
+    try {
+      return fn()
+    } finally {
+      heldLedgerLocks.set(lockPath, depth)
+    }
+  }
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 })
+  if (!existsSync(lockPath)) {
+    closeSync(openSync(lockPath, 'a', 0o600))
+    // Създаден от root (ops CLI) -> същият собственик като регистъра, иначе
+    // процесът на сървъра не би могъл да заключва (а би отказвал записи).
+    if (typeof process.getuid === 'function' && process.getuid() === 0 && existsSync(ledgerPath)) {
+      const owner = statSync(ledgerPath)
+      chownSync(lockPath, owner.uid, owner.gid)
+    }
+  }
+  const lock = new DatabaseSync(lockPath)
+  try {
+    lock.exec(`PRAGMA busy_timeout = ${PROFILE_DELETION_LEDGER_LOCK_TIMEOUT_MS};`)
+    lock.exec('BEGIN IMMEDIATE;')
+    heldLedgerLocks.set(lockPath, 1)
+    try {
+      return fn()
+    } finally {
+      heldLedgerLocks.delete(lockPath)
+      try { lock.exec('ROLLBACK;') } catch { /* close освобождава заключването */ }
+    }
+  } finally {
+    lock.close()
+  }
+}
+
+/** Синхронен append + fsync — връща се едва когато редът е на диска. Под междупроцесното заключване. */
 export function appendProfileDeletionLedgerEntry(ledgerPath: string, entry: ProfileDeletionLedgerRecord): void {
   if (!isValidProfileDeletionLedgerRecord(entry)) {
     throw new Error('profile_deletion_ledger_invalid_entry')
   }
+  withProfileDeletionLedgerLock(ledgerPath, () => appendUnderLock(ledgerPath, entry))
+}
+
+function appendUnderLock(ledgerPath: string, entry: ProfileDeletionLedgerRecord): void {
   mkdirSync(dirname(ledgerPath), { recursive: true, mode: 0o700 })
   // Непълна опашка от прекъснат запис се отрязва, за да не се "залепи"
   // новият ред към нея (би станал невалиден пълен ред). Отделен r+
@@ -388,7 +466,9 @@ export function appendProfileDeletionLedgerEntry(ledgerPath: string, entry: Prof
   }
   const fd = openSync(ledgerPath, 'a', 0o600)
   try {
-    writeSync(fd, serializeProfileDeletionLedgerEntry(entry))
+    const bytes = Buffer.from(serializeProfileDeletionLedgerEntry(entry), 'utf8')
+    let written = 0
+    while (written < bytes.length) written += writeSync(fd, bytes, written, bytes.length - written)
     fsyncSync(fd)
   } finally {
     closeSync(fd)
@@ -404,8 +484,12 @@ export function ensureProfileDeletionLedgerEntry(ledgerPath: string, entry: Prof
   return ensureProfileDeletionLedgerRecord(ledgerPath, entry)
 }
 
-/** Същото за всеки вид запис (Етап 4F1) — един ред на ключ. */
+/** Същото за всеки вид запис (Етап 4F1) — един ред на ключ; проверката и записът са под едно заключване. */
 export function ensureProfileDeletionLedgerRecord(ledgerPath: string, record: ProfileDeletionLedgerRecord): 'appended' | 'exists' {
+  return withProfileDeletionLedgerLock(ledgerPath, () => ensureUnderLock(ledgerPath, record))
+}
+
+function ensureUnderLock(ledgerPath: string, record: ProfileDeletionLedgerRecord): 'appended' | 'exists' {
   const ledger = readProfileDeletionLedger(ledgerPath)
   if (ledger.invalidLineCount > 0 || ledger.conflictingDuplicateCount > 0) {
     throw new Error('profile_deletion_ledger_corrupt')
