@@ -25,6 +25,7 @@ import { getSofiaDayBoundsUtc } from './sofiaDayBounds.js'
 // коментара) — belot_match_completion_ledger's PRIMARY KEY компонент.
 import { getRoomStakeLedgerScope } from './matchEconomyStore.js'
 import { createProfileDeletionVisibilityReader, sqlProfileVisibleForDeletion } from './profileDeletionVisibility.js'
+import { buildProfileGalleryImageApiUrl } from '../uploads/profileGalleryImageAccess.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -127,6 +128,8 @@ export type PlayerProgressStore = {
    * потребител ползвай getVisiblePublicProfile.
    */
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
+  /** Записаният URL на файла (thumbnail_url, иначе image_url) на снимка от галерията на ТОЗИ профил; null = няма такава. */
+  getProfileGalleryImageStoredUrl: (profileId: ProfileId, imageId: string) => string | null
   /**
    * ПУБЛИЧНА видимост — null и за несъществуващ профил, и за профил с
    * активна заявка за изтриване (неразличимо отвън). Самоизтриване, Етап 2.
@@ -321,9 +324,12 @@ function toPublicProfileSnapshot(row: {
     yellowCoinsBalance: row.yellow_coins_balance,
     gender,
     isBot: row.profile_kind === 'bot',
+    // Снимките от галерията се отдават само през удостоверения Node маршрут
+    // (виж uploads/profileGalleryImageAccess.ts) — записаният /uploads/... URL
+    // остава в базата (за изтриването на файла), но не стига до клиента.
     galleryImages: galleryImages.map((image) => ({
       imageId: image.image_id,
-      imageUrl: image.thumbnail_url || image.image_url,
+      imageUrl: buildProfileGalleryImageApiUrl(row.profile_id, image.image_id),
       sortOrder: image.sort_order,
     })),
     likesCount: null,
@@ -493,6 +499,13 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.profile_id = ?
+    LIMIT 1;
+  `)
+
+  const selectProfileGalleryImageStoredUrlStatement = database.prepare(`
+    SELECT image_url, thumbnail_url
+    FROM profile_gallery_images
+    WHERE profile_id = ? AND image_id = ?
     LIMIT 1;
   `)
 
@@ -2408,6 +2421,12 @@ export async function createPlayerProgressStore(
     isTemporaryProfile,
     profileExists,
     getPublicProfile,
+    getProfileGalleryImageStoredUrl: (profileId, imageId) => {
+      const row = selectProfileGalleryImageStoredUrlStatement.get(profileId, imageId) as
+        | { image_url: string; thumbnail_url: string | null }
+        | undefined
+      return row === undefined ? null : (row.thumbnail_url || row.image_url)
+    },
     getVisiblePublicProfile,
     isProfileHiddenForDeletion: profileDeletionVisibility.isProfileHidden,
     listProfileIdsHiddenForDeletion: profileDeletionVisibility.listHiddenProfileIds,

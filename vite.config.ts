@@ -63,6 +63,9 @@ export default defineConfig({
   server: {
     proxy: {
       '/uploads': 'http://localhost:3001',
+      // Снимките от профилната галерия идват само от удостоверения маршрут
+      // (относителен /api/... URL в galleryImages[].imageUrl).
+      '^/api/profiles/[^/]+/gallery/': 'http://localhost:3001',
     },
   },
   plugins: [

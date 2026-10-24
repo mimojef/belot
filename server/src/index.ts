@@ -39,6 +39,7 @@ import {
   resolveRealPublicUploadFilePath,
   type PublicUploadPathResolution,
 } from './uploads/publicUploadPath.js'
+import { parseProfileGalleryImageApiPath, resolveProfileGalleryImageFile } from './uploads/profileGalleryImageAccess.js'
 import { createProfileUploadReferenceReader } from './db/profileUploadReferenceReader.js'
 import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
 import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
@@ -8920,6 +8921,14 @@ async function createChatAttachmentWebp(
 // implementation), GET /uploads/chat-attachments/<uuid>.webp би заобиколил
 // изцяло auth guard-а на защитения endpoint. Explicit whitelist на root
 // поддиректорията (не само anti-traversal resolve-check) затваря тази дупка.
+//
+// Профилната галерия: файловете й се управляват (качване/изтриване по
+// записания /uploads/... URL — PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS), но НЕ се
+// сервират публично — само през GET /api/profiles/:id/gallery/:imageId
+// (handleProfileGalleryImageRequest) с правилата за видимост на профила.
+// Production nginx отказва /uploads/profile-gallery/ с 403 (аварийната
+// защита); Node също не я отдава, за да остане затворена и ако /uploads/
+// някога бъде проксиран към Node.
 const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
   resolve(AVATAR_UPLOADS_PATH),
   resolve(GALLERY_UPLOADS_PATH),
@@ -8927,6 +8936,9 @@ const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
   resolve(GIFT_ITEM_UPLOADS_PATH),
   resolve(CAMPAIGN_THEME_UPLOADS_PATH),
 ]
+const SERVED_PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS.filter(
+  (root) => root !== resolve(GALLERY_UPLOADS_PATH),
+)
 
 // Платформено коректно (path.relative) — предишната проверка долепяше
 // Windows разделител и под Linux никога не съвпадаше. Изисква каноничен URL
@@ -8936,7 +8948,7 @@ const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
 function resolveUploadRequestPath(pathname: string): PublicUploadPathResolution | null {
   return resolvePublicUploadRequestPath(pathname, {
     uploadsRoot: UPLOADS_ROOT_PATH,
-    publicRoots: PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS,
+    publicRoots: SERVED_PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS,
   })
 }
 
@@ -11818,6 +11830,83 @@ async function handleProfileByIdRequest(
     profile: enriched,
   })
   return true
+}
+
+// Снимка от профилната галерия — ЕДИНСТВЕНИЯТ път, по който клиентът я
+// получава (galleryImages[].imageUrl сочи тук). Правилата за видимост са
+// СЪЩИТЕ като на самия профил (handleProfileByIdRequest): профил с активна
+// заявка за изтриване е невидим (освен за admin/subadmin), блокиране в
+// която и да е посока -> отказ, изтрит профил/снимка -> 404. Пътят към файла
+// идва само от записания ред в базата (никога от заявката) — виж
+// uploads/profileGalleryImageAccess.ts. Кеш: private + ETag (imageId е
+// неизменим), така че всеки показ минава през проверката за видимост, без
+// публично/immutable кеширане от междинни слоеве.
+async function handleProfileGalleryImageRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (!pathname.startsWith('/api/profiles/') || !pathname.includes('/gallery/')) return false
+  const parsed = parseProfileGalleryImageApiPath(pathname)
+  if (parsed === null) {
+    if (/^\/api\/profiles\/[^/]+\/gallery\/[^/]+$/.test(pathname)) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Снимката не беше намерена.' })
+      return true
+    }
+    return false
+  }
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const notFound = () => {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end('Not found')
+    return true
+  }
+
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  const viewerProfileId = session?.profile.profileId ?? null
+  if (getProfileForViewerSession(session, parsed.profileId) === null) return notFound()
+  if (getProfileAccessDenial(viewerProfileId, parsed.profileId) !== null) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end('Forbidden')
+    return true
+  }
+
+  const storedUrl = playerProgressStore.getProfileGalleryImageStoredUrl(parsed.profileId, parsed.imageId)
+  if (storedUrl === null) return notFound()
+  const filePath = await trackHttpWait('io', resolveProfileGalleryImageFile({
+    storedImageUrl: storedUrl,
+    profileId: parsed.profileId,
+    uploadsRoot: UPLOADS_ROOT_PATH,
+    galleryRoot: GALLERY_UPLOADS_PATH,
+  }))
+  if (filePath === null) return notFound()
+
+  const etag = `"gallery-${parsed.imageId}"`
+  const cacheHeaders = { 'Cache-Control': 'private, no-cache', ETag: etag, Vary: 'Cookie' }
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, cacheHeaders)
+    res.end()
+    return true
+  }
+  try {
+    const fileStats = await trackHttpWait('io', stat(filePath))
+    if (!fileStats.isFile()) return notFound()
+    const fileBuffer = await trackHttpWait('io', readFile(filePath))
+    res.writeHead(200, {
+      'Content-Type': 'image/webp',
+      'Content-Length': String(fileBuffer.length),
+      'X-Content-Type-Options': 'nosniff',
+      ...cacheHeaders,
+    })
+    res.end(fileBuffer)
+    return true
+  } catch {
+    return notFound()
+  }
 }
 
 // Фаза 8 (профилен popup "Кампании") — read-only summary за ПРОИЗВОЛЕН
@@ -22583,6 +22672,10 @@ async function handleHttpRequest(
   // /api/topics/:topicId regex-ът е широк (само 1 path segment) и би могъл
   // да засенчи по-специфични бъдещи routes, ако бъде поставен по-рано.
   if (await handleTopicDeleteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleProfileGalleryImageRequest(req, res, requestUrl.pathname)) {
     return
   }
 

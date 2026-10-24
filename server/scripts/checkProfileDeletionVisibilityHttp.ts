@@ -216,6 +216,14 @@ try {
   const avatarUrl = `/uploads/avatars/${avatarName}`
   const galleryUrl = `/uploads/profile-gallery/${hidden.profileId}/${galleryName}`
   const bobGalleryUrl = `/uploads/profile-gallery/${bob.profileId}/${bobGalleryName}`
+  // Галерията се отдава само през удостоверения маршрут (/api/profiles/:id/gallery/:imageId);
+  // директният /uploads/profile-gallery/ URL не се сервира никога.
+  const galleryImageId = randomUUID()
+  const bobGalleryImageId = randomUUID()
+  db.prepare('INSERT INTO profile_gallery_images (image_id, profile_id, image_url, thumbnail_url, sort_order) VALUES (?, ?, ?, ?, 0);').run(galleryImageId, hidden.profileId, galleryUrl, galleryUrl)
+  db.prepare('INSERT INTO profile_gallery_images (image_id, profile_id, image_url, thumbnail_url, sort_order) VALUES (?, ?, ?, ?, 0);').run(bobGalleryImageId, bob.profileId, bobGalleryUrl, bobGalleryUrl)
+  const galleryApiUrl = `/api/profiles/${hidden.profileId}/gallery/${galleryImageId}`
+  const bobGalleryApiUrl = `/api/profiles/${bob.profileId}/gallery/${bobGalleryImageId}`
   db.prepare('UPDATE profiles SET avatar_url = ? WHERE profile_id = ?;').run(avatarUrl, hidden.profileId)
 
   // Публикация на скрития в Лафче + отговор от Alice под нея.
@@ -244,13 +252,14 @@ try {
     const messages = await api(`/api/chat/${friendshipId}/messages`, { cookie: viewer.cookie })
     const attachment = await fetch(`${base}/api/chat/${friendshipId}/attachments/${chatFilename}`, { headers: { Cookie: viewer.cookie } })
     const avatar = await fetch(`${base}${avatarUrl}`)
-    const gallery = await fetch(`${base}${galleryUrl}`)
+    const gallery = await fetch(`${base}${galleryApiUrl}`, { headers: { Cookie: viewer.cookie } })
+    const galleryDirect = await fetch(`${base}${galleryUrl}`)
     // P2: неканонична форма към СЪЩИЯ файл в галерията (през avatars/) —
     // никога не се сервира (иначе би заобиколила скриването по URL).
     const galleryBypass = await fetch(`${base}/uploads/avatars/..%2Fprofile-gallery%2F${hidden.profileId}%2F${galleryName}`)
     const lafche = await api('/api/topics/topic-lafche/messages', { cookie: viewer.cookie })
     const replies = await api(`/api/topics/topic-lafche/messages/${lafcheRootId}/replies`, { cookie: viewer.cookie })
-    return { profile, search, friends, conversations, messages, attachmentStatus: attachment.status, avatarStatus: avatar.status, galleryStatus: gallery.status, galleryBypassStatus: galleryBypass.status, lafche, replies }
+    return { profile, search, friends, conversations, messages, attachmentStatus: attachment.status, avatarStatus: avatar.status, galleryStatus: gallery.status, galleryDirectStatus: galleryDirect.status, galleryBypassStatus: galleryBypass.status, lafche, replies }
   }
 
   const containsId = (value: unknown, id: string) => JSON.stringify(value).includes(id)
@@ -266,6 +275,7 @@ try {
     assert(before.messages.status === 200, `съобщения ${before.messages.status}`)
     assert(before.attachmentStatus === 200, `прикачен файл ${before.attachmentStatus}`)
     assert(before.avatarStatus === 200 && before.galleryStatus === 200, `аватар ${before.avatarStatus} / галерия ${before.galleryStatus}`)
+    assert(before.galleryDirectStatus === 404, `директен /uploads/profile-gallery/: ${before.galleryDirectStatus}`)
     assert(before.galleryBypassStatus === 404, `неканоничен URL: ${before.galleryBypassStatus}`)
     assert(containsId(before.lafche.json, lafcheRootId), 'Лафче')
     assert(before.replies.status === 200, `отговори ${before.replies.status}`)
@@ -310,12 +320,14 @@ try {
 
   // Етап 3: аватарът се сервира (изключенията турнири/частни маси го
   // показват); галерията — не.
-  await check('[H4] Галерия по директен URL: 404; аватарът (изключения) и галерията на Bob: 200', async () => {
+  await check('[H4] Галерия на скрития: 404 и през удостоверения маршрут, и по директен URL; аватарът (изключения) и галерията на Bob (през маршрута): 200', async () => {
     assert(after.avatarStatus === 200, `аватар: ${after.avatarStatus}`)
     assert(after.galleryStatus === 404, `галерия: ${after.galleryStatus}`)
+    assert(after.galleryDirectStatus === 404, `директен URL: ${after.galleryDirectStatus}`)
     assert(after.galleryBypassStatus === 404, `галерия през avatars/..%2F: ${after.galleryBypassStatus}`)
-    const bobGallery = await fetch(`${base}${bobGalleryUrl}`)
+    const bobGallery = await fetch(`${base}${bobGalleryApiUrl}`, { headers: { Cookie: alice.cookie } })
     assert(bobGallery.status === 200, `галерия на Bob: ${bobGallery.status}`)
+    assert((await fetch(`${base}${bobGalleryUrl}`)).status === 404, 'директен URL на Bob')
   })
 
   await check('[H5] Лафче: публикацията на скрития липсва, отговорите под нея са недостъпни', () => {
