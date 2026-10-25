@@ -17,7 +17,7 @@ export type AdminProfileDeletionRow = {
   operationId: string
   category: string
   status: string
-  profile: { profileId: string; displayName: string } | null
+  profile: { profileId: string; displayName: string; email: string | null } | null
   requestedAt: string | null
   scheduledFor: string | null
   gracePeriodDays: number | null
@@ -136,7 +136,14 @@ const BTN_DANGER = 'min-height:40px;padding:0 14px;border:1px solid rgba(248,113
 const SELECT_STYLE = 'min-height:40px;padding:0 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.22);background:#1a1a1a;color:#f8fafc;font-size:14px;font-family:inherit;max-width:100%;'
 
 function profileLabel(row: AdminProfileDeletionRow): string {
-  if (row.profile !== null) return escapeHtml(row.profile.displayName)
+  if (row.profile !== null) {
+    // Имейлът идва само докато профилът съществува (сървърът не го пази другаде).
+    const emailValue = row.profile.email
+    const email = typeof emailValue === 'string' && emailValue !== ''
+      ? ` <span data-admin-deletion-email="1" style="color:rgba(226,232,240,0.72);font-weight:600;">(${escapeHtml(emailValue)})</span>`
+      : ''
+    return `${escapeHtml(row.profile.displayName)}${email}`
+  }
   return `<span style="color:rgba(226,232,240,0.6);">Изтрит или недостъпен профил</span>`
 }
 

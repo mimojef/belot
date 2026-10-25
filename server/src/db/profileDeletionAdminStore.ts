@@ -75,7 +75,8 @@ export type ProfileDeletionAdminRow = {
   operationId: string
   category: ProfileDeletionAdminCategory
   status: string
-  profile: { profileId: string; displayName: string } | null
+  /** Само докато профилът съществува (живите profiles/accounts); след изтриване — null. */
+  profile: { profileId: string; displayName: string; email: string | null } | null
   requestedAt: string | null
   scheduledFor: string | null
   gracePeriodDays: number | null
@@ -238,6 +239,7 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         r.status AS status,
         p.profile_id AS live_profile_id,
         p.display_name AS live_display_name,
+        (SELECT la.email FROM accounts la WHERE la.account_id = p.account_id) AS live_email,
         r.requested_at AS requested_at,
         r.scheduled_for AS scheduled_for,
         r.grace_period_days AS grace_period_days,
@@ -280,6 +282,7 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         'scheduled' AS status,
         p.profile_id AS live_profile_id,
         p.display_name AS live_display_name,
+        (SELECT la.email FROM accounts la WHERE la.account_id = p.account_id) AS live_email,
         strftime('%Y-%m-%dT%H:%M:%fZ', m.requested_at) AS requested_at,
         NULL AS scheduled_for,
         NULL AS grace_period_days,
@@ -316,6 +319,7 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         'completed' AS status,
         NULL AS live_profile_id,
         NULL AS live_display_name,
+        NULL AS live_email,
         NULL AS requested_at,
         NULL AS scheduled_for,
         NULL AS grace_period_days,
@@ -383,6 +387,7 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
     status: string
     live_profile_id: string | null
     live_display_name: string | null
+    live_email: string | null
     requested_at: string | null
     scheduled_for: string | null
     grace_period_days: number | null
@@ -430,7 +435,7 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         category: row.category,
         status: row.status,
         profile: row.live_profile_id !== null && row.live_display_name !== null
-          ? { profileId: row.live_profile_id, displayName: row.live_display_name }
+          ? { profileId: row.live_profile_id, displayName: row.live_display_name, email: row.live_email }
           : null,
         requestedAt: row.requested_at,
         scheduledFor: row.scheduled_for,

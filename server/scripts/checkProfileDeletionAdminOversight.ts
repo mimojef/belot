@@ -499,10 +499,11 @@ try {
     for (const secret of [uDone.displayName, uDone.email, uDone.username, uFiles.displayName, uFiles.email, 'adm4j-deleted-username-secret', 'adm4j-secret-avatar', '/uploads/', 'visitor', 'password', 'token', 'ip_address', uDone.accountId]) {
       assert(!json.includes(secret), `изтича: ${secret}`)
     }
-    // Жив профил се показва (само ID + текущо име).
+    // Етап 4N1 — жив профил: ID, текущо име и текущият имейл (от живия акаунт).
     const live = rowFor(windowId)!.profile
     assert(live !== null && live.profileId === uWindow.profileId && live.displayName === uWindow.displayName, 'жив профил')
-    assert(!json.includes(uWindow.email), 'имейл на жив профил')
+    assertEqual(live?.email ?? null, uWindow.email, 'имейл на жив профил')
+    // Имейлът е само в profile (не отделно поле на реда), т.е. изчезва заедно с профила.
     assertEqual(Object.keys(rowFor(windowId)!).includes('email'), false, 'поле email')
   })
 
@@ -1012,13 +1013,16 @@ async function runHttpPhase(): Promise<void> {
       assertEqual(statusOf(targetRequestId), 'pending', 'статус')
     })
 
-    await check('[H2] Admin: прегледът — 200, no-store, лимит 300, най-новите първи, филтри; невалиден филтър -> 400; без имейли и файлови пътища', async () => {
+    await check('[H2] Admin: прегледът — 200, no-store, лимит 300, най-новите първи, филтри; невалиден филтър -> 400; имейл само на жив профил (в profile); без файлови пътища', async () => {
       const res = await api('/api/admin/profile-deletions', { cookie: adminUser.cookie })
       assert(res.status === 200 && res.json.ok === true && res.json.limit === 300, `${res.status} ${res.text.slice(0, 200)}`)
       assert(/no-store/.test(res.cacheControl), `Cache-Control: ${res.cacheControl}`)
       const row = (res.json.rows as ProfileDeletionAdminRow[]).find((r) => r.operationId === targetRequestId)
       assert(row !== undefined && row.category === 'pending_cancellable' && row.canCancel === true && row.profile?.displayName === target.displayName, JSON.stringify(row))
-      assert(!res.text.includes(target.email) && !res.text.includes('/uploads/'), 'имейл/път')
+      // Етап 4N1 — имейлът на ЖИВИЯ профил е видим за администратора (само вътре в profile).
+      assert(row.profile?.email === target.email, `имейл на жив профил: ${JSON.stringify(row.profile)}`)
+      assert(res.text.split(target.email).length - 1 === 1, 'имейлът се среща само веднъж (в profile)')
+      assert(!res.text.includes('/uploads/'), 'файлов път')
       const filtered = await api('/api/admin/profile-deletions?kind=admin', { cookie: adminUser.cookie })
       assert(filtered.status === 200 && (filtered.json.rows as ProfileDeletionAdminRow[]).every((r) => r.kind === 'admin'), 'филтър kind')
       const byCategory = await api('/api/admin/profile-deletions?category=pending_cancellable', { cookie: adminUser.cookie })

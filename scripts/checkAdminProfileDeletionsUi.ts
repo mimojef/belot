@@ -115,6 +115,8 @@ try {
     assert(/Блокирана — активен бан/.test((await row(page, 'req-ban').textContent()) ?? '') && /Активен бан/.test((await row(page, 'req-ban').textContent()) ?? ''), 'бан: статус и причина')
     assert(/45 дни/.test((await row(page, 'req-legacy').textContent()) ?? ''), '45-дневен срок')
     assert(/30 дни/.test((await row(page, 'req-window').textContent()) ?? ''), '30-дневен срок')
+    // Етап 4N1 — жив профил: име и имейл.
+    assert(/Иван Тестов \(ivan@example\.test\)/.test((await row(page, 'req-window').textContent()) ?? ''), 'име и имейл на жив профил')
     assert(/Чака копие извън сървъра/.test((await row(page, 'adm-pending').textContent()) ?? ''), 'административно чака offsite')
     assert(/2 неизтрити, 1 с грешка/.test((await row(page, 'req-files').textContent()) ?? ''), 'файлове')
     assertNoPageErrors(page, '[1]')
@@ -123,6 +125,9 @@ try {
   await check('[2] Изтрит профил: "Изтрит или недостъпен профил", само технически данни; одит на административна отмяна с причина и администратор', async () => {
     assert(/Изтрит или недостъпен профил/.test((await row(page, 'req-done').textContent()) ?? ''), 'приключена')
     assert(/Изтрит или недостъпен профил/.test((await row(page, 'adm-done').textContent()) ?? ''), 'административно приключена')
+    for (const id of ['req-done', 'req-files', 'adm-done']) {
+      assert((await row(page, id).locator('[data-admin-deletion-email]').count()) === 0 && !/@/.test((await row(page, id).textContent()) ?? ''), `имейл при изтрит профил (${id})`)
+    }
     const audit = row(page, 'req-cancelled').locator('[data-admin-deletion-cancel-audit="1"]')
     assert(/Главен Админ/.test((await audit.textContent()) ?? '') && /Потвърди по телефона/.test((await audit.textContent()) ?? ''), 'одит')
   })

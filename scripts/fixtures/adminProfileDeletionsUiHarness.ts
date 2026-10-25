@@ -47,7 +47,7 @@ function base(overrides: Partial<AdminProfileDeletionRow>): AdminProfileDeletion
 
 function sampleRows(): AdminProfileDeletionRow[] {
   return [
-    base({ operationId: 'req-window', profile: { profileId: 'p1', displayName: 'Иван Тестов' }, canCancel: true }),
+    base({ operationId: 'req-window', profile: { profileId: 'p1', displayName: 'Иван Тестов', email: 'ivan@example.test' }, canCancel: true }),
     base({ operationId: 'req-legacy', profile: { profileId: 'p2', displayName: 'Стар Профил' }, gracePeriodDays: 45, scheduledFor: '2026-12-01T10:00:00.000Z', canCancel: true }),
     base({ operationId: 'req-overdue', category: 'pending_overdue', profile: { profileId: 'p3', displayName: 'Просрочен' }, canCancel: true }),
     base({ operationId: 'req-ban', category: 'blocked_ban', status: 'blocked', lastErrorCode: 'active_ban', attemptCount: 2, nextAttemptAt: '2026-10-25T10:00:00.000Z', profile: { profileId: 'p4', displayName: 'Баннат' }, canCancel: true }),
@@ -61,7 +61,7 @@ function sampleRows(): AdminProfileDeletionRow[] {
     base({ operationId: 'req-cancelled', category: 'cancelled', status: 'cancelled', cancelledAt: '2026-10-21T12:00:00.000Z', cancelledBy: 'admin', profile: { profileId: 'p8', displayName: 'Запазен' }, adminCancellation: { reason: 'Потвърди по телефона', createdAt: '2026-10-21T12:00:00.000Z', actorDisplayName: 'Главен Админ' }, cancelBlocker: 'status_not_cancellable' }),
     base({ operationId: 'adm-pending', kind: 'admin', category: 'admin_scheduled', status: 'scheduled', scheduledFor: null, gracePeriodDays: null, attemptCount: null, profile: { profileId: 'p9', displayName: 'Административна Цел' }, awaitingOffsite: true, cancelBlocker: 'not_voluntary' }),
     base({ operationId: 'adm-done', kind: 'admin', category: 'completed', status: 'completed', requestedAt: null, scheduledFor: null, gracePeriodDays: null, attemptCount: null, completedAt: '2026-10-19T10:00:00.000Z', dbDeletedAt: '2026-10-19T10:00:00.000Z', fileCleanupStatus: 'done', cancelBlocker: 'not_voluntary' }),
-    base({ operationId: 'req-xss', profile: { profileId: 'p10', displayName: '<img src=x onerror="window.__xss=1">' }, canCancel: true }),
+    base({ operationId: 'req-xss', profile: { profileId: 'p10', displayName: '<img src=x onerror="window.__xss=1">', email: '<img src=x onerror="window.__xss=2">@example.test' }, canCancel: true }),
   ]
 }
 
