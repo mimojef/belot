@@ -391,6 +391,63 @@ try {
     assert((await secondPage.locator('#profile-deletion-auto-cancel-notice').count()) === 0, 'уведомление при повторен вход')
   })
 
+  await check('[E8] Етап 4M1 — "Общи условия, раздел 28": пряко отваряне на /terms#voluntary-profile-deletion (компютър и телефон) и връзката от прозореца водят директно до раздела', async () => {
+    const expectAnchorInView = async (target: Page, label: string) => {
+      const anchor = target.locator('#voluntary-profile-deletion')
+      await anchor.waitFor({ state: 'visible', timeout: 30_000 })
+      assert(((await anchor.textContent()) ?? '').trim() === '28. Доброволно изтриване на профил', `${label}: заглавие`)
+      await target.waitForFunction(() => {
+        const rect = document.getElementById('voluntary-profile-deletion')?.getBoundingClientRect()
+        return rect !== undefined && rect.top >= 0 && rect.top < window.innerHeight * 0.6
+      }, undefined, { timeout: 10_000 }).catch(async () => {
+        const top = await target.evaluate(() => document.getElementById('voluntary-profile-deletion')?.getBoundingClientRect().top)
+        throw new Error(`${label}: разделът не е превъртян до видимата част (top=${top})`)
+      })
+      const overflow = await target.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+      assert(overflow <= 1, `${label}: хоризонтален скрол ${overflow}px`)
+    }
+    const { page: desktopTerms } = await openApp(null, '/terms#voluntary-profile-deletion')
+    await expectAnchorInView(desktopTerms, 'компютър')
+    assert(new URL(desktopTerms.url()).hash === '#voluntary-profile-deletion', `hash: ${desktopTerms.url()}`)
+    const { page: mobileTerms } = await openApp(null, '/terms#voluntary-profile-deletion', { width: 390, height: 844 })
+    await expectAnchorInView(mobileTerms, 'телефон')
+    // Навигация вътре в приложението (Назад/Напред): браузърът не превърта сам —
+    // превъртането след рендера е задължително тук.
+    const { page: inAppTerms } = await openApp(null, '/rules')
+    await inAppTerms.waitForLoadState('load')
+    await inAppTerms.evaluate(() => {
+      history.pushState(null, '', '/terms#voluntary-profile-deletion')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    await expectAnchorInView(inAppTerms, 'навигация в приложението')
+    // Останалите раздели и Политиката се показват както преди.
+    const termsText = (await desktopTerms.locator('article').textContent()) ?? ''
+    assert(termsText.includes('27. Прекратяване и ограничаване на достъпа') && termsText.includes('31. Заключителни разпоредби'), 'Общи условия')
+    const { page: privacyPage } = await openApp(null, '/privacy')
+    await privacyPage.locator('article').waitFor({ state: 'visible', timeout: 30_000 })
+    const privacyText = (await privacyPage.locator('article').textContent()) ?? ''
+    assert(privacyText.includes('belot.pika.bg [at] gmail.com') && privacyText.includes('раздела „Поддръжка“') && privacyText.includes('Регистър на изтриванията'), 'Политика за поверителност')
+
+    // Връзката от прозореца за изтриване (отваря се в нов раздел, прозорецът остава).
+    backend!.db.prepare('DELETE FROM registration_rate_limit_events;').run()
+    const linkUser = await register(backendPort, 'termslink')
+    const { page: dialogPage, context } = await openApp(linkUser.cookie)
+    const profileButton = dialogPage.locator('[data-lobby-profile-button="1"]:visible').first()
+    await profileButton.waitFor({ state: 'visible', timeout: 30_000 })
+    await profileButton.click()
+    await dialogPage.locator('[data-player-profile-self-delete="1"]').click({ timeout: 15_000 })
+    await dialogPage.locator('#self-deletion-dialog [role="dialog"]').waitFor({ state: 'visible' })
+    const [popup] = await Promise.all([
+      context.waitForEvent('page'),
+      dialogPage.locator('[data-self-deletion-terms-link="1"]').click(),
+    ])
+    await popup.waitForLoadState('domcontentloaded')
+    assert(new URL(popup.url()).pathname === '/terms' && new URL(popup.url()).hash === '#voluntary-profile-deletion', `адрес: ${popup.url()}`)
+    await expectAnchorInView(popup, 'от прозореца')
+    assert(await dialogPage.locator('#self-deletion-dialog [role="dialog"]').isVisible(), 'прозорецът за изтриване се затвори')
+    assert((backend!.db.prepare('SELECT COUNT(*) AS c FROM profile_deletion_requests WHERE profile_id = ?;').get(linkUser.profileId) as { c: number }).c === 0, 'връзката подаде заявка')
+  })
+
   await check('[E5] Изключен флаг: бутонът не се показва; директна заявка към API се отказва', async () => {
     backendOff = await startBackend(false)
     currentBackendPort = backendOff.port

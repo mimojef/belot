@@ -2526,7 +2526,8 @@ function formatPackagePrice(priceCents: number, currency: string): string {
 // Реалните EUR price_cents/Stripe/currency в DB НЕ са засегнати — това е
 // изцяло presentation-only промяна.
 
-function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false): string {
+// withAnchors — само в пълната страница (/terms#…); прегледът при покупка е без id.
+function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false, withAnchors = false): string {
   const page = PUBLIC_LEGAL_PAGES[pageKey]
   const blocks = page.body
     .split(/\n{2,}/)
@@ -2542,7 +2543,10 @@ function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false
         ? `margin:${isMobile ? '22px' : '28px'} 0 8px;color:#d4a520;font-size:${isMobile ? '15px' : '17px'};line-height:1.35;font-weight:900;`
         : `margin:0 0 12px;color:rgba(255,255,255,0.72);font-size:${isMobile ? '13px' : '15px'};line-height:${isMobile ? '1.58' : '1.68'};font-weight:600;`
 
-    return `<p style="${style}">${escapeHtml(block).replace(/\n/g, '<br>')}</p>`
+    const anchorId = withAnchors && isSectionTitle ? page.sectionAnchors?.[block] : undefined
+    const anchorAttr = anchorId !== undefined ? ` id="${escapeHtml(anchorId)}"` : ''
+    const anchorStyle = anchorId !== undefined ? 'scroll-margin-top:96px;' : ''
+    return `<p${anchorAttr} style="${style}${anchorStyle}">${escapeHtml(block).replace(/\n/g, '<br>')}</p>`
   }).join('')
 }
 
@@ -6545,7 +6549,7 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
 
 function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false): string {
   const page = PUBLIC_LEGAL_PAGES[pageKey]
-  const contentHtml = renderPublicLegalBodyHtml(pageKey, isMobile)
+  const contentHtml = renderPublicLegalBodyHtml(pageKey, isMobile, true)
   const contactActionHtml = pageKey === 'contact'
     ? `
       <button type="button" data-public-contact-mail="1" style="

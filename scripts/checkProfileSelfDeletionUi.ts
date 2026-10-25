@@ -60,6 +60,64 @@ const callNames = async (page: Page) => (await h<Array<{ name: string }>>(page, 
 
 console.log('\ncheckProfileSelfDeletionUi')
 
+// ─── Етап 4M1 — правните текстове (без браузър) ─────────────────────────
+console.log('\n[L] Общи условия и Политика за поверителност')
+{
+  const { PUBLIC_LEGAL_PAGES, VOLUNTARY_PROFILE_DELETION_TERMS_ANCHOR } = await import('../src/app/lobby/publicLegalPages')
+  const blocksOf = (body: string) => body.split(/\n{2,}/).map((block) => block.trim()).filter((block) => block.length > 0)
+  const sectionNumbers = (blocks: string[]) => blocks.map((block) => /^(\d+)\.\s/.exec(block)?.[1]).filter((n): n is string => n !== undefined).map(Number)
+  const assertSections = (label: string, blocks: string[], count: number) => {
+    const numbers = sectionNumbers(blocks)
+    assert(JSON.stringify(numbers) === JSON.stringify(Array.from({ length: count }, (_, i) => i + 1)), `${label}: номерация ${JSON.stringify(numbers)}`)
+    blocks.forEach((block, index) => {
+      if (/^\d+\.\s/.test(block)) assert(blocks[index + 1] !== undefined && !/^\d+\.\s/.test(blocks[index + 1]!), `${label}: празен раздел "${block}"`)
+    })
+  }
+  const terms = PUBLIC_LEGAL_PAGES.terms
+  const privacy = PUBLIC_LEGAL_PAGES.privacy
+  const termsBlocks = blocksOf(terms.body)
+  const privacyBlocks = blocksOf(privacy.body)
+
+  await check('[L1] Общи условия: разделите са 1–31 последователно, без празен раздел; раздел 28 има директна връзка; т. 27 препраща към него', () => {
+    assertSections('Общи условия', termsBlocks, 31)
+    assert(termsBlocks.includes('28. Доброволно изтриване на профил'), 'раздел 28')
+    assert(terms.sectionAnchors?.['28. Доброволно изтриване на профил'] === VOLUNTARY_PROFILE_DELETION_TERMS_ANCHOR && VOLUNTARY_PROFILE_DELETION_TERMS_ANCHOR === 'voluntary-profile-deletion', 'anchor')
+    for (const heading of ['27. Прекратяване и ограничаване на достъпа', '29. Промяна на Общите условия', '30. Приложимо право и спорове', '31. Заключителни разпоредби']) {
+      assert(termsBlocks.includes(heading), `липсва "${heading}"`)
+    }
+    assert(terms.body.includes('да поиска изтриване на профила си съгласно раздел 28'), 'т. 27 -> 28')
+  })
+
+  await check('[L2] Раздел 28 описва реалните правила (бутон, парола, откази, 30 дни, отмяна, разговорите и за двамата, жълтици/VIP, запазени записи)', () => {
+    const start = termsBlocks.indexOf('28. Доброволно изтриване на профил')
+    const section = termsBlocks.slice(start, termsBlocks.indexOf('29. Промяна на Общите условия')).join('\n')
+    for (const fragment of ['бутона „Изтрий“', 'текущата парола', 'Не се изпраща допълнителен код по имейл', 'активна игра', 'маса в Белот', 'маса в „Не се сърди човече“', 'търси игра', 'организира турнир', 'активен бан', 'не напуска вместо потребителя', 'срок от 30 дни', '„Запази профила ми“', 'възстановяването на паролата', 'може да отнеме известно време', 'отмени заявката автоматично', 'може да бъде отложено', 'не може да бъде възстановен', 'и за двамата участници, включително прикачените файлове', 'VIP статуса се губят', 'освен ако приложимото законодателство изисква друго', 'без името на потребителя', 'не ограничава другите права']) {
+      assert(section.includes(fragment), `раздел 28: липсва "${fragment}"`)
+    }
+    assert(!/Лудо/i.test(section), '"Лудо" в потребителския текст')
+  })
+
+  await check('[L3] Политика за поверителност: разделите са 1–15; изтрити / без идентификатор / псевдонимизирани записи; права и канали за контакт са запазени; без placeholder-и и номера на членове', () => {
+    assertSections('Политика', privacyBlocks, 15)
+    const body = privacy.body
+    for (const fragment of [
+      'право на достъп до личните си данни, корекция на неточни данни, изтриване', // съществуващите права
+      'belot.pika.bg [at] gmail.com', // съществуващият официален канал
+      'раздела „Поддръжка“', 'достъпен и без вход в профил',
+      'Изтриват се:', 'личните разговори и прикачените към тях файлове — за двамата участници',
+      'Запазват се без идентификатор на потребителя:', 'Запазват се с вътрешен идентификатор вместо име (псевдонимизирани):',
+      'Тези записи не са анонимни', 'Регистър на изтриванията:', 'Резервни копия:',
+      'не ограничава правото на потребителя да поиска изтриване', 'не е срокът за отговор на искания',
+      'ще проверим, че искането идва от собственика на профила',
+    ]) {
+      assert(body.includes(fragment), `Политика: липсва "${fragment}"`)
+    }
+    for (const forbidden of [/\[да се уточни/i, /\bчл\.\s*\d/, /Регламент/, /GDPR/]) {
+      assert(!forbidden.test(body) && !forbidden.test(terms.body), `недопустим текст: ${forbidden}`)
+    }
+  })
+}
+
 let vite: ViteDevServer | null = null
 let browser: Browser | null = null
 
@@ -151,9 +209,28 @@ try {
     await h(page, 'openDialog')
     assert(await dialog.isVisible(), 'прозорецът')
     const text = (await dialog.textContent()) ?? ''
-    for (const fragment of ['Изтриване на профила', 'Ще имаш 30 дни', 'окончателно изтрит съгласно правилата на сайта', 'лични разговори', 'анонимен вид', 'Въведи настоящата си парола', 'Разбирам, че профилът ми ще бъде скрит', 'Потвърди изтриването', 'Отказ']) {
-      assert(text.includes(fragment), `липсва: ${fragment}`)
+    // Етап 4M1 — одобреният окончателен текст (точно), на "Вие".
+    const paragraphs = await page.locator('#self-deletion-description p').allTextContents()
+    const expectedParagraphs = [
+      'След потвърждението профилът Ви ще бъде скрит, а всички активни сесии ще бъдат прекратени.',
+      'Разполагате с 30 дни, за да отмените заявката.',
+      'За да отмените заявката за изтриване, трябва да влезете със своя имейл и парола и да изберете „Запази профила ми“.',
+      'След изтичането на 30-дневния срок профилът подлежи на окончателно изтриване и няма да може да бъде възстановен.',
+      'Подробна информация: Общи условия, раздел 28.',
+    ]
+    assert(JSON.stringify(paragraphs.map((p) => p.trim())) === JSON.stringify(expectedParagraphs), `текст: ${JSON.stringify(paragraphs)}`)
+    assert((await page.locator('#self-deletion-dialog h2').textContent())?.trim() === 'Изтриване на профила', 'заглавие')
+    assert((await page.locator('label[for="self-deletion-password"]').textContent())?.trim() === 'Въведете текущата си парола.', 'етикет на паролата')
+    assert((await page.locator('[data-self-deletion-confirm="1"] + span').textContent())?.trim() === 'Разбирам, че след изтичането на 30-дневния срок няма да мога самостоятелно да отменя заявката.', 'текст на отметката')
+    assert((await page.locator('[data-self-deletion-submit="1"]').textContent())?.trim() === 'Потвърди изтриването' && (await page.locator('[data-self-deletion-cancel="1"]').textContent())?.trim() === 'Отказ', 'бутони')
+    // Без подробен списък в прозореца (той е в Общите условия).
+    for (const forbidden of ['снимк', 'разговор', 'жълтиц', 'VIP', 'анонимен', 'съгласно правилата на сайта', ' ти ', 'Въведи']) {
+      assert(!text.includes(forbidden), `прозорецът съдържа "${forbidden}"`)
     }
+    const termsLink = page.locator('[data-self-deletion-terms-link="1"]')
+    assert((await termsLink.getAttribute('href')) === '/terms#voluntary-profile-deletion', `href=${await termsLink.getAttribute('href')}`)
+    assert((await termsLink.getAttribute('target')) === '_blank' && (await termsLink.getAttribute('rel')) === 'noopener', 'връзката се отваря в нов раздел')
+    assert((await termsLink.textContent())?.trim() === 'Общи условия, раздел 28', 'текст на връзката')
     assert((await password.getAttribute('type')) === 'password' && (await password.getAttribute('autocomplete')) === 'current-password', 'поле за парола')
     await page.waitForFunction(() => document.activeElement?.getAttribute('data-self-deletion-password') === '1', undefined, { timeout: 3_000 })
       .catch(() => { throw new Error('фокус в полето за парола') })
@@ -344,7 +421,7 @@ try {
       const card = p.locator('#self-deletion-dialog [role="dialog"]')
       const cardBox = await card.boundingBox()
       assert(cardBox !== null && cardBox.x >= 0 && cardBox.x + cardBox.width <= viewport.width, `прозорецът е по-широк от екрана: ${JSON.stringify(cardBox)}`)
-      for (const selector of ['[data-self-deletion-password="1"]', '[data-self-deletion-confirm="1"]', '[data-self-deletion-submit="1"]', '[data-self-deletion-cancel="1"]']) {
+      for (const selector of ['[data-self-deletion-terms-link="1"]', '[data-self-deletion-password="1"]', '[data-self-deletion-confirm="1"]', '[data-self-deletion-submit="1"]', '[data-self-deletion-cancel="1"]']) {
         const element = p.locator(selector)
         await element.scrollIntoViewIfNeeded()
         const elementBox = await element.boundingBox()

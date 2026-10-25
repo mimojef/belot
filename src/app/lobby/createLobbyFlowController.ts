@@ -19276,6 +19276,29 @@ export function createLobbyFlowController(
     render()
   }
 
+  // Директна връзка към раздел от правна страница (напр. /terms#voluntary-profile-deletion):
+  // страницата се рендерира от приложението, затова браузърът не може да
+  // превърти сам — превърта се веднъж след рендера за всеки нов hash.
+  let lastLegalAnchorScrollKey: string | null = null
+  function scheduleLegalAnchorScroll(): void {
+    const hash = window.location.hash
+    const isLegalScreen = state.currentScreen === 'terms' || state.currentScreen === 'privacy'
+    if (!isLegalScreen || hash.length < 2) {
+      lastLegalAnchorScrollKey = null
+      return
+    }
+    const key = `${state.currentScreen}${hash}`
+    if (key === lastLegalAnchorScrollKey) return
+    requestAnimationFrame(() => {
+      let anchorId = hash.slice(1)
+      try { anchorId = decodeURIComponent(anchorId) } catch { /* невалиден hash — търси се както е */ }
+      const target = document.getElementById(anchorId)
+      if (target === null) return
+      lastLegalAnchorScrollKey = key
+      target.scrollIntoView({ block: 'start' })
+    })
+  }
+
   function render(): void {
     if (_renderTimerId !== null) {
       clearTimeout(_renderTimerId)
@@ -19284,6 +19307,7 @@ export function createLobbyFlowController(
     if (shouldSuppressLobbyRender()) {
       return
     }
+    scheduleLegalAnchorScroll()
     reconcileLobbyChatSubscription()
     reconcileTournamentMatchesSubscription()
     // Teardown-only reconcile за Topics realtime subscription — setup
