@@ -112,6 +112,10 @@ classify_path() {
       # НЕ build-ва/мигрира/рестартира нищо, НЕ инсталира systemd units, НЕ
       # пипа backup schedule-а. Инсталирането на VPS е отделна, ръчна стъпка.
       echo "non-runtime" ;;
+    ops/pikabg-backup/scripts/pikabg-ledger-backup|ops/pikabg-backup/scripts/pikabg-ledger-restore|ops/pikabg-backup/systemd/pikabg-ledger-backup.service|ops/pikabg-backup/systemd/pikabg-ledger-backup.timer)
+      # Deletion ledger backup/restore tooling + systemd unit-и (DELETION_LEDGER.md) —
+      # същото правило: инсталират се РЪЧНО на VPS, никога от deploy-а.
+      echo "non-runtime" ;;
     *)
       echo "unclassified" ;;
   esac

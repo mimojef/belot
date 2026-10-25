@@ -14,7 +14,8 @@ const VOLUNTARY_PROFILE_DELETION_TERMS_HEADING = '28. Доброволно из�
 
 const TERMS_BODY = `Общи условия за използване на Pika.bg — Белот Онлайн
 
-Дата на влизане в сила: 17.08.2026Уебсайт: https://pika.bg
+Дата на влизане в сила: 17.08.2026
+Уебсайт: https://pika.bg
 
 1. Общи положения
 

@@ -19,6 +19,12 @@
  *   [3] Нов/непознат файл под ops/ (вкл. под ops/pikabg-backup/scripts/ с
  *       различно име) продължава да пада в "unclassified" — доказва, че
  *       поправката е точен enumerated allow-list, НЕ "ops/*" wildcard.
+ *   [5] Deletion ledger tooling (2 скрипта + systemd service/timer) е
+ *       "non-runtime"; реалната delta от production frontend marker-а
+ *       (38770ac) няма unclassified path, а тази от backend marker-а
+ *       (c0311e6) няма backend/migration path -> FRONTEND ONLY.
+ *
+ * [1]/[2] са закрепени към delta-та на оригиналната поправка (9e8761f..bb971a4).
  */
 
 import { execFileSync } from 'node:child_process'
@@ -76,9 +82,10 @@ function gitDiffNameOnly(fromRef: string, toRef: string): string[] {
 }
 
 const PRODUCTION_REF = '9e8761f'
-const realDelta = gitDiffNameOnly(PRODUCTION_REF, 'HEAD')
+const ORIGINAL_FIX_REF = 'bb971a4'
+const realDelta = gitDiffNameOnly(PRODUCTION_REF, ORIGINAL_FIX_REF)
 
-check('[1] Реалната 9e8761f..HEAD delta не съдържа нито един "unclassified" path', () => {
+check('[1] Реалната 9e8761f..bb971a4 delta не съдържа нито един "unclassified" path', () => {
   assert(realDelta.length > 0, 'delta-та е празна — нищо за тестване, нещо е грешно в тестовото обкръжение')
   const classified = classifyPaths(realDelta)
   const unclassified = realDelta.filter((p) => classified.get(p) === 'unclassified')
@@ -140,6 +147,9 @@ check('[3] Непознат файл под ops/ (НЕ едно от 4-те enum
     'ops/pikabg-backup/README2.txt',
     'ops/something-else/file.txt',
     'ops/pikabg-backup/scripts/pikabg-restore.bak',
+    'ops/pikabg-backup/scripts/pikabg-ledger-backup.old',
+    'ops/pikabg-backup/systemd/pikabg-ledger-backup.service.d/override.conf',
+    'ops/pikabg-backup/systemd/other.timer',
   ]
   const classified = classifyPaths(unknownPaths)
   for (const p of unknownPaths) {
@@ -152,6 +162,38 @@ check('[3] Непознат файл под ops/ (НЕ едно от 4-те enum
 
 check('[4] bash -n синтактична проверка на scripts/deploy-production.sh', () => {
   execFileSync('bash', ['-n', deployScriptPath], { cwd: repoRoot, encoding: 'utf8' })
+})
+
+const LEDGER_TOOLING = [
+  'ops/pikabg-backup/scripts/pikabg-ledger-backup',
+  'ops/pikabg-backup/scripts/pikabg-ledger-restore',
+  'ops/pikabg-backup/systemd/pikabg-ledger-backup.service',
+  'ops/pikabg-backup/systemd/pikabg-ledger-backup.timer',
+]
+const FRONTEND_MARKER_REF = '38770ac'
+const BACKEND_MARKER_REF = 'c0311e6'
+
+check('[5a] Deletion ledger tooling (2 скрипта + service/timer) класифицира като "non-runtime"', () => {
+  const classified = classifyPaths(LEDGER_TOOLING)
+  for (const p of LEDGER_TOOLING) {
+    assert(classified.get(p) === 'non-runtime', `${p} -> ${classified.get(p)}, очаквах "non-runtime"`)
+  }
+})
+
+check('[5b] Delta-та от production frontend marker-а (38770ac..HEAD) няма "unclassified" path и съдържа ledger tooling-а', () => {
+  const delta = gitDiffNameOnly(FRONTEND_MARKER_REF, 'HEAD')
+  const classified = classifyPaths(delta)
+  const unclassified = delta.filter((p) => classified.get(p) === 'unclassified')
+  assert(unclassified.length === 0, `${unclassified.length} unclassified path(и): ${unclassified.join(', ')}`)
+  for (const p of LEDGER_TOOLING) assert(delta.includes(p), `${p} липсва в delta-та`)
+  assert(delta.some((p) => classified.get(p) === 'frontend'), 'очаквах frontend промени')
+})
+
+check('[5c] Delta-та от production backend marker-а (c0311e6..HEAD) няма backend/migration path -> решение FRONTEND ONLY', () => {
+  const delta = gitDiffNameOnly(BACKEND_MARKER_REF, 'HEAD')
+  const classified = classifyPaths(delta)
+  const backendImpact = delta.filter((p) => classified.get(p) === 'backend' || classified.get(p) === 'migration' || classified.get(p) === 'unclassified')
+  assert(backendImpact.length === 0, `backend-impact path(и): ${backendImpact.join(', ')}`)
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)
