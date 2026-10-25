@@ -59,6 +59,7 @@ const MESSAGES = {
   LUDO_PRIVATE_TABLE: 'Имате заето място на частна маса в „Не се сърди човече“. Напуснете масата, преди да подадете заявка за изтриване на профила.',
   BELOT_MATCHMAKING: 'В момента търсите игра в Белот. Спрете търсенето, преди да подадете заявка за изтриване на профила.',
   TOURNAMENT_REGISTRATION: 'Не можете да подадете заявка за изтриване на профила, защото сте записан за участие в турнир. Напуснете турнира или изчакайте той да приключи, след което опитайте отново.',
+  TOURNAMENT_ORGANIZER: 'Не можете да подадете заявка за изтриване на профила, защото сте организатор на турнир, който още не е приключил. Изчакайте турнирът да приключи или го отменете, ако това все още е възможно, след което опитайте отново.',
 } as const
 type BlockerCode = keyof typeof MESSAGES
 
@@ -306,10 +307,22 @@ try {
     }
   })
 
-  await check('[T3] Създател на незавършен турнир (без собствено участие) -> TOURNAMENT_REGISTRATION', async () => {
-    const user = await register('TOwner')
-    insertTournament('open', user.profileId)
-    await expectRefused(user, 'TOURNAMENT_REGISTRATION')
+  await check('[T3] Организатор без собствено участие -> TOURNAMENT_ORGANIZER (не "сте записан"); организатор И участник -> TOURNAMENT_REGISTRATION; след отмяна на турнира -> приета', async () => {
+    const owner = await register('TOwner')
+    const ownTournamentId = insertTournament('open', owner.profileId)
+    await expectRefused(owner, 'TOURNAMENT_ORGANIZER')
+    const ownerAndPlayer = await register('TOwnPlay')
+    insertEntry(insertTournament('open', ownerAndPlayer.profileId), ownerAndPlayer.profileId, 'confirmed')
+    await expectRefused(ownerAndPlayer, 'TOURNAMENT_REGISTRATION')
+    for (const status of ['starting', 'semifinal_in_progress', 'final_in_progress']) {
+      const runningOwner = await register(`TOwn${status.slice(0, 4)}`)
+      insertTournament(status, runningOwner.profileId)
+      await expectRefused(runningOwner, 'TOURNAMENT_ORGANIZER').catch((e) => { throw new Error(`${status}: ${e.message}`) })
+    }
+    // Отмяна на турнира от организатора (истинският API) -> подаването минава.
+    const cancelled = await api(`/api/tournaments/${ownTournamentId}/cancel`, { method: 'POST', cookie: owner.cookie, body: {} })
+    assert(cancelled.status === 200, `отмяна: ${cancelled.status} ${JSON.stringify(cancelled.json)}`)
+    await expectAccepted(owner)
   })
 
   await check('[T4] Чакащо потвърждение на партньор: инициаторът (потвърден запис) е блокиран; поканеният без отговор — не (правило 4E)', async () => {

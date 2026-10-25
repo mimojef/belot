@@ -23,6 +23,8 @@ export type ProfileDeletionParticipationChecks = {
   hasPersistedActiveGame: (profileId: string) => boolean
   /** Създател на незавършен турнир или активно участие в такъв. */
   hasActiveTournamentDependency: (profileId: string) => boolean
+  /** Етап 4K1 — основанието: участник (потвърден/финалист) има предимство пред организатор. */
+  findActiveTournamentDependency: (profileId: string) => 'participant' | 'organizer' | null
   /** Чакаща покана за турнирен партньор от/към профила (независимо от изтичането — системата я затваря). */
   hasPendingTournamentInvite: (profileId: string) => boolean
 }
@@ -158,6 +160,11 @@ export function createProfileDeletionParticipationChecks(database: SqliteDatabas
     hasPersistedActiveGame: (profileId) => hasBelotGame(profileId) || hasLudoGame(profileId) || hasSvaraGame(profileId),
     hasActiveTournamentDependency: (profileId) =>
       selectActiveCreatorStatement.get(profileId) !== undefined || selectActiveEntryStatement.get(profileId) !== undefined,
+    findActiveTournamentDependency: (profileId) => {
+      if (selectActiveEntryStatement.get(profileId) !== undefined) return 'participant'
+      if (selectActiveCreatorStatement.get(profileId) !== undefined) return 'organizer'
+      return null
+    },
     hasPendingTournamentInvite: (profileId) => selectPendingInviteStatement.get(profileId, profileId) !== undefined,
   }
 }

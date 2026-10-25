@@ -11682,6 +11682,7 @@ type ProfileDeletionParticipationBlocker =
   | 'LUDO_PRIVATE_TABLE'
   | 'BELOT_MATCHMAKING'
   | 'TOURNAMENT_REGISTRATION'
+  | 'TOURNAMENT_ORGANIZER'
 
 const PROFILE_DELETION_PARTICIPATION_MESSAGES: Record<ProfileDeletionParticipationBlocker, string> = {
   ACTIVE_GAME: 'Не можете да подадете заявка за изтриване, докато участвате в активна игра. Изчакайте играта да приключи и опитайте отново.',
@@ -11689,6 +11690,7 @@ const PROFILE_DELETION_PARTICIPATION_MESSAGES: Record<ProfileDeletionParticipati
   LUDO_PRIVATE_TABLE: 'Имате заето място на частна маса в „Не се сърди човече“. Напуснете масата, преди да подадете заявка за изтриване на профила.',
   BELOT_MATCHMAKING: 'В момента търсите игра в Белот. Спрете търсенето, преди да подадете заявка за изтриване на профила.',
   TOURNAMENT_REGISTRATION: 'Не можете да подадете заявка за изтриване на профила, защото сте записан за участие в турнир. Напуснете турнира или изчакайте той да приключи, след което опитайте отново.',
+  TOURNAMENT_ORGANIZER: 'Не можете да подадете заявка за изтриване на профила, защото сте организатор на турнир, който още не е приключил. Изчакайте турнирът да приключи или го отменете, ако това все още е възможно, след което опитайте отново.',
 }
 const PROFILE_DELETION_INVALID_TOKEN_MESSAGE =
   'Връзката за възстановяване е невалидна или изтекла. Влезте отново с имейла и паролата си.'
@@ -11718,8 +11720,8 @@ function canSessionOfferProfileSelfDeletion(session: { profile: { profileId: str
 //     (създателят се отчита, докато заема слот; мястото се освобождава САМО
 //     от сървъра при напускане/изтичане — не от затворен прозорец);
 //   BELOT_MATCHMAKING — търсене на игра;
-//   TOURNAMENT_REGISTRATION — създател на незавършен турнир или потвърдено/
-//     финалистко участие в такъв.
+//   TOURNAMENT_REGISTRATION — потвърдено/финалистко участие в незавършен
+//     турнир; TOURNAMENT_ORGANIZER — създател на такъв без собствено участие.
 // Персистираните проверки се повтарят ВЪТРЕ в транзакцията на createRequest;
 // паметта на другите процеси — при realtime reconcile (системна отмяна).
 function findProfileDeletionParticipationBlocker(profileId: string): ProfileDeletionParticipationBlocker | null {
@@ -11733,7 +11735,8 @@ function findProfileDeletionParticipationBlocker(profileId: string): ProfileDele
   if (privateRoomsStore.getRoomByProfileId(profileId) !== null) return 'BELOT_PRIVATE_TABLE'
   if (ludoRoomsStore.getRoomByProfileId(profileId) !== null) return 'LUDO_PRIVATE_TABLE'
   if (matchmakingState.queueEntries.some((entry) => entry.profileId === profileId)) return 'BELOT_MATCHMAKING'
-  if (profileHardDeleteService.hasActiveTournamentDependency(profileId)) return 'TOURNAMENT_REGISTRATION'
+  const tournamentDependency = profileDeletionRequestStore.findActiveTournamentDependency(profileId)
+  if (tournamentDependency !== null) return tournamentDependency === 'organizer' ? 'TOURNAMENT_ORGANIZER' : 'TOURNAMENT_REGISTRATION'
   return null
 }
 
@@ -11854,9 +11857,11 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
   if (!result.ok) {
     if (result.code === 'already_pending') {
       sendJsonResponse(res, 409, { ok: false, code: 'ALREADY_PENDING', message: 'Вече има подадена заявка за изтриване на този профил.' })
-    } else if (result.code === 'active_tournament' || result.code === 'active_game') {
+    } else if (result.code === 'active_tournament' || result.code === 'active_tournament_organizer' || result.code === 'active_game') {
       // Повторната проверка ВЪТРЕ в транзакцията (видима за всички процеси).
-      const blocker: ProfileDeletionParticipationBlocker = result.code === 'active_tournament' ? 'TOURNAMENT_REGISTRATION' : 'ACTIVE_GAME'
+      const blocker: ProfileDeletionParticipationBlocker = result.code === 'active_tournament'
+        ? 'TOURNAMENT_REGISTRATION'
+        : result.code === 'active_tournament_organizer' ? 'TOURNAMENT_ORGANIZER' : 'ACTIVE_GAME'
       sendJsonResponse(res, 409, { ok: false, code: blocker, message: PROFILE_DELETION_PARTICIPATION_MESSAGES[blocker] })
     } else if (result.code === 'active_ban') {
       // Етап 4E6B — проверката е в транзакцията на request store-а.

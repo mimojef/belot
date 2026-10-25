@@ -298,6 +298,7 @@
     "check:profile-deletion-ledger-concurrency": "tsx scripts/checkProfileDeletionLedgerConcurrency.ts --server-root=.",
     "check:profile-deletion-disaster-recovery": "tsx scripts/checkProfileDeletionDisasterRecovery.ts --server-root=.",
     "check:profile-deletion-commitment-guard": "tsx scripts/checkProfileDeletionCommitmentGuard.ts --server-root=.",
+    "check:profile-deletion-cross-process-commitments": "tsx scripts/checkProfileDeletionCrossProcessCommitments.ts --server-root=.",
     "check:profile-deletion-name-history": "tsx scripts/checkProfileDeletionNameHistory.ts --server-root=.",
     "check:profile-deletion-partner-ratings": "tsx scripts/checkProfileDeletionPartnerRatings.ts --server-root=.",
     "check:profile-deletion-support": "tsx scripts/checkProfileDeletionSupport.ts --server-root=.",

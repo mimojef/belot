@@ -39,7 +39,7 @@ export type ProfileDeletionPendingRequest = {
 
 export type CreateProfileDeletionRequestResult =
   | { ok: true; request: ProfileDeletionPendingRequest; eventSeq: number }
-  | { ok: false; code: 'already_pending' | 'profile_not_eligible' | 'active_tournament' | 'active_game' | 'active_ban' }
+  | { ok: false; code: 'already_pending' | 'profile_not_eligible' | 'active_tournament' | 'active_tournament_organizer' | 'active_game' | 'active_ban' }
 
 export type IssueProfileDeletionRestoreTokenResult =
   | { ok: true; restoreToken: string; expiresAt: string; request: ProfileDeletionPendingRequest }
@@ -89,6 +89,7 @@ export type ProfileDeletionRequestStore = {
   isRateLimited: (input: { scope: string; subject: string; windowSeconds: number; maxEvents: number }) => boolean
   /** true, ако в персистираните snapshot-и има активен Белот/Не се сърди човече/Свара с този профил (или snapshot-ът е нечетим — fail-closed). */
   hasActiveGameSnapshot: (profileId: string) => boolean
+  findActiveTournamentDependency: (profileId: string) => 'participant' | 'organizer' | null
   listVisibilityEventsAfter: (afterEventSeq: number, limit: number) => ProfileDeletionVisibilityEvent[]
   getMaxEventSeq: () => number
   /** Профилите, с които има ред в profile_friendships (всякакъв статус/вид) — за realtime известия. */
@@ -278,9 +279,10 @@ export async function createProfileDeletionRequestStore(
         database.exec('ROLLBACK;')
         return { ok: false, code: 'active_game' }
       }
-      if (participationChecks.hasActiveTournamentDependency(profile.profile_id)) {
+      const tournamentDependency = participationChecks.findActiveTournamentDependency(profile.profile_id)
+      if (tournamentDependency !== null) {
         database.exec('ROLLBACK;')
-        return { ok: false, code: 'active_tournament' }
+        return { ok: false, code: tournamentDependency === 'organizer' ? 'active_tournament_organizer' : 'active_tournament' }
       }
       // Етап 4G — срокът тече от часовника на базата в момента на приемане
       // (клиентският часовник не участва); повторна заявка при вече активна
@@ -478,6 +480,7 @@ export async function createProfileDeletionRequestStore(
     cancelForActiveParticipation,
     isRateLimited,
     hasActiveGameSnapshot,
+    findActiveTournamentDependency: (profileId) => participationChecks.findActiveTournamentDependency(profileId),
     listVisibilityEventsAfter,
     getMaxEventSeq,
     listRelationshipCounterpartIds,
