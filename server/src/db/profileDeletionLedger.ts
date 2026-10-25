@@ -716,6 +716,34 @@ export function summarizeAdminLedgerOperations(records: readonly ProfileDeletion
   return result
 }
 
+function parseUtcDateTimeMs(value: string): number | null {
+  const match = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d{1,3})?Z?$/.exec(value.trim())
+  if (match === null) return null
+  const parsed = Date.parse(`${match[1]}T${match[2]}${match[3] ?? ''}Z`)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
+ * Профилът със същия profile_id е създаден НАНОВО след доказано завършеното
+ * административно изтриване (напр. официалният профил с фиксиран UUID) — нов
+ * профил, а не „възкресеният“ стар. Изисква се всичко: завършена операция с
+ * известни момент на изтриване и акаунт; текущият профил е на ДРУГ акаунт и
+ * е създаден СЛЕД изтриването (и не е профилът от snapshot-а на намерението).
+ * Restore на стар backup връща стария профил (същия акаунт, по-ранна дата) —
+ * той НЕ попада тук и остава недовършено изтриване.
+ */
+export function isAdminDeletedProfileProvenRecreated(
+  operation: Pick<AdminLedgerOperation, 'state' | 'deletedAt' | 'accountIdSnapshot' | 'profileCreatedAtSnapshot'>,
+  profile: { account_id: string | null; created_at: string },
+): boolean {
+  if (operation.state !== 'completed' || operation.deletedAt === null || operation.accountIdSnapshot === null) return false
+  if (profile.account_id === null || profile.account_id === operation.accountIdSnapshot) return false
+  if (operation.profileCreatedAtSnapshot !== null && profile.created_at === operation.profileCreatedAtSnapshot) return false
+  const deletedAtMs = parseUtcDateTimeMs(operation.deletedAt)
+  const createdAtMs = parseUtcDateTimeMs(profile.created_at)
+  return deletedAtMs !== null && createdAtMs !== null && createdAtMs > deletedAtMs
+}
+
 function fsyncDirectory(directoryPath: string): void {
   // Windows не позволява fsync на директория — там rename/append са
   // достатъчни за тестовете; production (Linux) получава истински fsync.

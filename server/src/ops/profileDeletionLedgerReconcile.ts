@@ -36,6 +36,10 @@
 //     log_id = operationId и оригиналния момент). Активен бан в стария
 //     backup НЕ пречи — административното изтриване не зависи от бана.
 //     Изпълнява се ПРЕДИ самоизтриванията;
+//   * профил със същия UUID, доказано създаден НАНОВО след изтриването (друг
+//     акаунт, по-късна дата на създаване — isAdminDeletedProfileProvenRecreated)
+//     -> admin_recreated: изтриването вече е приложено, новият профил НЕ се
+//     пипа; всяко друго несъответствие остава admin_identity_mismatch;
 //   * само намерение (admin_delete_intent без краен запис) и профилът е в
 //     базата -> admin_unresolved: регистрираното намерение НЕ доказва
 //     изтриване, затова нищо не се трие автоматично — fail-closed;
@@ -68,6 +72,7 @@ import { createProfileHardDeleteService } from '../db/profileHardDeleteService.j
 import { createProfileDeletionCancellationStore } from '../db/profileDeletionCancellationStore.js'
 import { canonicalIsoToSqliteDateTime } from '../core/adminProfileDeletionCoordinator.js'
 import {
+  isAdminDeletedProfileProvenRecreated,
   readProfileDeletionLedger,
   summarizeAdminLedgerOperations,
   summarizeLedgerControl,
@@ -94,6 +99,7 @@ type AdminCategory =
   | 'admin_absent'
   | 'admin_missing'
   | 'admin_identity_mismatch'
+  | 'admin_recreated'
   | 'admin_unresolved'
   | 'admin_via_self'
   | 'admin_ignored'
@@ -261,6 +267,7 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
         else if (profile === undefined) category = 'admin_absent'
         else if (operation.state === 'intent_only') category = 'admin_unresolved'
         else if (operation.state === 'resolved_by_self') category = 'admin_via_self'
+        else if (isAdminDeletedProfileProvenRecreated(operation, profile)) category = 'admin_recreated'
         else if (
           (operation.accountIdSnapshot !== null && profile.account_id !== operation.accountIdSnapshot) ||
           (operation.profileCreatedAtSnapshot !== null && profile.created_at !== operation.profileCreatedAtSnapshot)
@@ -314,7 +321,7 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
     journalPending === 0 &&
     snapshot.classified.every((item) => item.category === 'absent') &&
     snapshot.cancelClassified.every((item) => item.category === 'cancelled') &&
-    snapshot.adminClassified.every((item) => item.category === 'admin_absent' || item.category === 'admin_ignored')
+    snapshot.adminClassified.every((item) => item.category === 'admin_absent' || item.category === 'admin_ignored' || item.category === 'admin_recreated')
 
   if (!apply && !verifyOnly) {
     io.log('[reconcile] Нищо не е променено (report-only).')

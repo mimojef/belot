@@ -13,13 +13,18 @@
 //   * идемпотентно — операция, която вече е в регистъра, се пропуска;
 //   * идентификация САМО по UUID — никога по име (username_snapshot не се
 //     ползва); ред с невалиден идентификатор/дата или профил, който още
-//     съществува, НЕ се добавя и се докладва (exit 1).
+//     съществува, НЕ се добавя и се докладва (exit 1);
+//   * изключение: профил със същия UUID, доказано създаден НАНОВО след
+//     изтриването (друг акаунт, по-късна дата на създаване — напр.
+//     официалният профил с фиксиран ID) -> записва се (recreated); записът е
+//     реалното изтриване със стария акаунт, новият профил не се засяга.
 // Изход: само operationId/profileId и кодове.
 
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   ensureProfileDeletionLedgerRecord,
+  isAdminDeletedProfileProvenRecreated,
   isValidAdminProfileDeletionLedgerRecord,
   readProfileDeletionLedger,
   summarizeAdminLedgerOperations,
@@ -65,22 +70,26 @@ export async function runProfileDeletionAdminBackfill(
   const { DatabaseSync } = await import('node:sqlite')
   const db = new DatabaseSync(dbPath, { readOnly: true })
   type Row = { log_id: string; deleted_profile_id: string; deleted_account_id: string | null; deleted_by_profile_id: string | null; deleted_at: string }
+  type ProfileIdentity = { account_id: string | null; created_at: string }
   let rows: Row[]
-  let profileExists: (profileId: string) => boolean
+  let presentProfiles: Map<string, ProfileIdentity>
   try {
     rows = db.prepare(`
       SELECT log_id, deleted_profile_id, deleted_account_id, deleted_by_profile_id, deleted_at
       FROM admin_profile_deletions
       ORDER BY deleted_at, log_id;
     `).all() as Row[]
-    const selectProfile = db.prepare('SELECT 1 FROM profiles WHERE profile_id = ? LIMIT 1;')
-    const present = new Set(rows.filter((row) => selectProfile.get(row.deleted_profile_id) !== undefined).map((row) => row.log_id))
-    profileExists = (logId) => present.has(logId)
+    const selectProfile = db.prepare('SELECT account_id, created_at FROM profiles WHERE profile_id = ? LIMIT 1;')
+    presentProfiles = new Map()
+    for (const row of rows) {
+      const profile = selectProfile.get(row.deleted_profile_id) as ProfileIdentity | undefined
+      if (profile !== undefined) presentProfiles.set(row.log_id, profile)
+    }
   } finally {
     db.close()
   }
 
-  const counts = { total: rows.length, alreadyInLedger: 0, eligible: 0, appended: 0, insufficient: 0, profilePresent: 0 }
+  const counts = { total: rows.length, alreadyInLedger: 0, eligible: 0, appended: 0, insufficient: 0, profilePresent: 0, recreated: 0 }
   const eligible: AdminProfileDeletionLedgerRecord[] = []
   for (const row of rows) {
     if (known.has(row.log_id)) {
@@ -103,10 +112,19 @@ export async function runProfileDeletionAdminBackfill(
       io.log(`[admin-backfill] insufficient operationId=${String(row.log_id).slice(0, 128)} (невалиден идентификатор или дата — не се добавя)`)
       continue
     }
-    if (profileExists(row.log_id)) {
-      counts.profilePresent += 1
-      io.log(`[admin-backfill] profile_present operationId=${row.log_id} profileId=${row.deleted_profile_id} (профилът съществува — не се добавя)`)
-      continue
+    const present = presentProfiles.get(row.log_id)
+    if (present !== undefined) {
+      const recreated = isAdminDeletedProfileProvenRecreated(
+        { state: 'completed', deletedAt: record.deletedAt, accountIdSnapshot: record.accountIdSnapshot, profileCreatedAtSnapshot: null },
+        present,
+      )
+      if (!recreated) {
+        counts.profilePresent += 1
+        io.log(`[admin-backfill] profile_present operationId=${row.log_id} profileId=${row.deleted_profile_id} (профилът съществува — не се добавя)`)
+        continue
+      }
+      counts.recreated += 1
+      io.log(`[admin-backfill] recreated operationId=${row.log_id} profileId=${row.deleted_profile_id} (профилът е създаден наново с друг акаунт след изтриването — изтриването се записва, новият профил не се засяга)`)
     }
     counts.eligible += 1
     eligible.push(record)

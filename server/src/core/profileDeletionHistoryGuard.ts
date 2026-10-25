@@ -15,7 +15,9 @@
 //   unreconciled_deletion      — регистърът доказва изтриване (решение/COMMIT
 //                                или административно завършване), а профилът е
 //                                във възстановената база и няма активна заявка,
-//                                която worker-ът да довърши -> reconcile;
+//                                която worker-ът да довърши -> reconcile
+//                                (НЕ и доказано създаден наново профил със
+//                                същия ID — isAdminDeletedProfileProvenRecreated);
 //   ledger_cancel_conflict     — отмяна преди намерението.
 //
 // restoreHold — регистърът е възстановен без живото копие (маркер от `merge`
@@ -33,6 +35,7 @@ import { readFileSync } from 'node:fs'
 import {
   ensureProfileDeletionLedgerRecord,
   getProfileDeletionLedgerOffsiteAckPath,
+  isAdminDeletedProfileProvenRecreated,
   isAdminProfileDeletionLedgerRecord,
   isRequestLifecycleLedgerRecord,
   readProfileDeletionLedger,
@@ -82,6 +85,7 @@ export async function createProfileDeletionHistoryGuard(input: {
   const selectPendingAdminOps = database.prepare(`SELECT ledger_operation_id, target_profile_id FROM pending_profile_moderation WHERE action = 'delete';`)
   const selectRequest = database.prepare('SELECT request_id, status FROM profile_deletion_requests WHERE request_id = ? LIMIT 1;')
   const selectProfile = database.prepare('SELECT 1 FROM profiles WHERE profile_id = ? LIMIT 1;')
+  const selectProfileIdentity = database.prepare('SELECT account_id, created_at FROM profiles WHERE profile_id = ? LIMIT 1;')
   const selectHistoryExists = database.prepare(`
     SELECT
       EXISTS (SELECT 1 FROM profile_deletion_requests WHERE attempt_count > 0 OR db_deleted_at IS NOT NULL) OR
@@ -215,8 +219,11 @@ export async function createProfileDeletionHistoryGuard(input: {
     const pendingTargets = new Set(pendingOps.map((pending) => pending.target_profile_id))
     for (const operation of adminOperations.values()) {
       if (operation.state !== 'completed' && operation.state !== 'intent_only') continue
-      if (selectProfile.get(operation.profileId) === undefined) continue
+      const profile = selectProfileIdentity.get(operation.profileId) as { account_id: string | null; created_at: string } | undefined
+      if (profile === undefined) continue
       if (operation.state === 'completed') {
+        // Нов профил със същия фиксиран ID (друг акаунт, създаден след изтриването).
+        if (isAdminDeletedProfileProvenRecreated(operation, profile)) continue
         reasons.push(`unreconciled_admin_deletion:${operation.operationId}`)
         blocked.add(operation.profileId)
       } else if (control.unreleasedRestoreIds.length > 0 && !pendingTargets.has(operation.profileId)) {
