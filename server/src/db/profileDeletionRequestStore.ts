@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { generateRawResetToken, hashResetToken, hmacRateLimitSubject, validateRateLimitSecret } from './authHelpers.js'
-import { createProfileDeletionParticipationChecks } from './profileDeletionParticipationChecks.js'
+import { createProfileDeletionParticipationChecks, type PersistedActiveGameEvidence } from './profileDeletionParticipationChecks.js'
 import {
   computeProfileDeletionSchedule,
   PROFILE_DELETION_ACTIVE_REQUEST_STATUSES,
@@ -79,8 +79,23 @@ export type ProfileDeletionRequestStore = {
    * в игра в собствената му памет МЕЖДУ проверката и записа на заявката
    * (race между процесите). Само pending и само преди scheduled_for.
    * Етап 4J1 — също двуфазна (приета -> окончателна).
+   * Етап 4K2 — също при възстановена игра след рестарт; в СЪЩАТА транзакция
+   * се записва и еднократното уведомление. isDeletionProven се проверява
+   * вътре в транзакцията (регистърът доказва необратимо решение -> отказ).
    */
-  cancelForActiveParticipation: (requestId: string) => { ok: true; cancellationId: string } | { ok: false }
+  cancelForActiveParticipation: (
+    requestId: string,
+    options?: { isDeletionProven?: (requestId: string) => boolean },
+  ) => { ok: true; cancellationId: string } | { ok: false; code: 'not_allowed' | 'deletion_proven' }
+  /** Етап 4K2 — активни (pending, преди срока, без lease) заявки без приета отмяна. */
+  listPendingRequestsWithoutCancellation: (limit: number) => Array<{ requestId: string; profileId: string }>
+  /** Етап 4K2 — дали приетата отмяна е автоматична (има уведомление за нея). */
+  hasAutoCancellationNotice: (cancellationId: string) => boolean
+  /**
+   * Етап 4K2 — маркира като показани уведомленията за ОКОНЧАТЕЛНИ автоматични
+   * отмени на профила; true, ако е имало поне едно непоказано (еднократно).
+   */
+  takeAutoCancellationNotice: (profileId: string) => boolean
   /**
    * Споделен между процесите rate limit (registration_rate_limit_events,
    * HMAC субект). true = ограничено (не се записва нов опит). Без валиден
@@ -89,6 +104,8 @@ export type ProfileDeletionRequestStore = {
   isRateLimited: (input: { scope: string; subject: string; windowSeconds: number; maxEvents: number }) => boolean
   /** true, ако в персистираните snapshot-и има активен Белот/Не се сърди човече/Свара с този профил (или snapshot-ът е нечетим — fail-closed). */
   hasActiveGameSnapshot: (profileId: string) => boolean
+  /** Етап 4K2 — тристепенно: само 'present' е положително доказателство. */
+  assessPersistedActiveGame: (profileId: string) => PersistedActiveGameEvidence
   findActiveTournamentDependency: (profileId: string) => 'participant' | 'organizer' | null
   listVisibilityEventsAfter: (afterEventSeq: number, limit: number) => ProfileDeletionVisibilityEvent[]
   getMaxEventSeq: () => number
@@ -191,6 +208,36 @@ export async function createProfileDeletionRequestStore(
 
   const selectCancellationForRequestStatement = database.prepare(`
     SELECT cancellation_id FROM profile_deletion_cancellations WHERE request_id = ? LIMIT 1;
+  `)
+
+  const insertAutoCancellationNoticeStatement = database.prepare(`
+    INSERT INTO profile_deletion_auto_cancellation_notices (cancellation_id) VALUES (?);
+  `)
+
+  const selectAutoCancellationNoticeStatement = database.prepare(`
+    SELECT 1 FROM profile_deletion_auto_cancellation_notices WHERE cancellation_id = ? LIMIT 1;
+  `)
+
+  const deliverAutoCancellationNoticesStatement = database.prepare(`
+    UPDATE profile_deletion_auto_cancellation_notices
+    SET delivered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE delivered_at IS NULL
+      AND cancellation_id IN (
+        SELECT c.cancellation_id FROM profile_deletion_cancellations c
+        WHERE c.profile_id = ? AND c.finalized_at IS NOT NULL
+      );
+  `)
+
+  const selectPendingWithoutCancellationStatement = database.prepare(`
+    SELECT r.request_id, r.profile_id
+    FROM profile_deletion_requests r
+    WHERE r.status = 'pending'
+      AND r.lease_owner IS NULL
+      AND r.db_deleted_at IS NULL
+      AND r.scheduled_for > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      AND NOT EXISTS (SELECT 1 FROM profile_deletion_cancellations c WHERE c.request_id = r.request_id)
+    ORDER BY r.requested_at, r.request_id
+    LIMIT ?;
   `)
 
   const countRateLimitEventsStatement = database.prepare(`
@@ -424,25 +471,45 @@ export async function createProfileDeletionRequestStore(
     }
   }
 
-  function cancelForActiveParticipation(requestId: string): { ok: true; cancellationId: string } | { ok: false } {
+  function cancelForActiveParticipation(
+    requestId: string,
+    options: { isDeletionProven?: (requestId: string) => boolean } = {},
+  ): { ok: true; cancellationId: string } | { ok: false; code: 'not_allowed' | 'deletion_proven' } {
     database.exec('BEGIN IMMEDIATE;')
     try {
       const row = selectRequestByIdStatement.get(requestId) as { request_id: string; profile_id: string; status: string } | undefined
       if (row === undefined || row.status !== 'pending' || selectCancellationForRequestStatement.get(requestId) !== undefined) {
         database.exec('ROLLBACK;')
-        return { ok: false }
+        return { ok: false, code: 'not_allowed' }
+      }
+      // Етап 4K2 — вътре в writer lock-а: решението на worker-а се записва в
+      // регистъра ПРЕДИ освобождаването на lease-а, затова тук то вече е видимо.
+      if (options.isDeletionProven?.(requestId) === true) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'deletion_proven' }
       }
       const cancellationId = randomUUID()
       insertCancellationStatement.run(cancellationId, requestId, row.profile_id, 'system')
+      insertAutoCancellationNoticeStatement.run(cancellationId)
       database.exec('COMMIT;')
       return { ok: true, cancellationId }
     } catch (error) {
       rollbackQuietly()
       if (error instanceof Error && (error.message.includes('profile_deletion_cancel_window_closed') || error.message.includes('profile_deletion_cancellation_not_allowed'))) {
-        return { ok: false }
+        return { ok: false, code: 'not_allowed' }
       }
       throw error
     }
+  }
+
+  function listPendingRequestsWithoutCancellation(limit: number): Array<{ requestId: string; profileId: string }> {
+    return (selectPendingWithoutCancellationStatement.all(Math.max(1, Math.min(1000, limit))) as Array<{ request_id: string; profile_id: string }>)
+      .map((row) => ({ requestId: row.request_id, profileId: row.profile_id }))
+  }
+
+  function takeAutoCancellationNotice(profileId: string): boolean {
+    const result = deliverAutoCancellationNoticesStatement.run(profileId) as { changes: number }
+    return Number(result.changes) > 0
   }
 
   function isRateLimited(input: { scope: string; subject: string; windowSeconds: number; maxEvents: number }): boolean {
@@ -478,8 +545,12 @@ export async function createProfileDeletionRequestStore(
     cancelWithToken,
     keepWithToken,
     cancelForActiveParticipation,
+    listPendingRequestsWithoutCancellation,
+    hasAutoCancellationNotice: (cancellationId) => selectAutoCancellationNoticeStatement.get(cancellationId) !== undefined,
+    takeAutoCancellationNotice,
     isRateLimited,
     hasActiveGameSnapshot,
+    assessPersistedActiveGame: (profileId) => participationChecks.assessPersistedActiveGame(profileId),
     findActiveTournamentDependency: (profileId) => participationChecks.findActiveTournamentDependency(profileId),
     listVisibilityEventsAfter,
     getMaxEventSeq,

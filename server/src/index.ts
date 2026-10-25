@@ -24,6 +24,7 @@ import { logLudoDiagnosticEvent } from './diagnostics/ludoDiagnosticsLog.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
 import { createProfileDeletionRequestStore, type ProfileDeletionVisibilityEvent } from './db/profileDeletionRequestStore.js'
+import type { PersistedActiveGameEvidence } from './db/profileDeletionParticipationChecks.js'
 import { isProfileSelfDeletionFeatureEnabled, isProfileSelfDeletionWorkerEnabled } from './core/profileSelfDeletionFeatureFlag.js'
 import { createProfileDeletionExecutor } from './db/profileDeletionExecutor.js'
 import {
@@ -1592,9 +1593,12 @@ function applyProfileDeletionVisibilityEvent(event: ProfileDeletionVisibilityEve
   // процес (персистираните snapshot-и и турнирите вече са проверени в
   // транзакцията на подаването). Правилото "без заявка при активна игра" се
   // възстановява чрез системна отмяна; връзките НЕ се затварят. Синхронно —
-  // без interleave с WS съобщения в този процес.
-  if (origin === 'poll' && event.eventType === 'requested' && hasProfileActiveGameCommitment(event.profileId)) {
-    const cancelled = profileDeletionRequestStore.cancelForActiveParticipation(event.requestId)
+  // без interleave с WS съобщения в този процес. Етап 4K2 — само при
+  // положително доказателство (недостъпно хранилище на Свара НЕ отменя).
+  if (origin === 'poll' && event.eventType === 'requested' && assessProfileDeletionGameCommitment(event.profileId) === 'present') {
+    const cancelled = profileDeletionRequestStore.cancelForActiveParticipation(event.requestId, {
+      isDeletionProven: isProfileDeletionIrreversibleOrUnverifiable,
+    })
     if (cancelled.ok) {
       // Етап 4J1 — приета (worker-ът вече не може да изтрие профила);
       // окончателна след записа в регистъра и offsite потвърждението.
@@ -1733,6 +1737,85 @@ let profileDeletionCancellationFinalizerInterval: ReturnType<typeof setInterval>
   runProfileDeletionCancellationFinalizer,
   PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS,
 )
+
+/**
+ * Етап 4K2 — за системната отмяна: необратимо решение/изтриване в регистъра
+ * ИЛИ нечетим регистър -> true (fail-closed: без отмяна; опитва се отново).
+ */
+function isProfileDeletionIrreversibleOrUnverifiable(requestId: string): boolean {
+  try {
+    return isRequestDeletionIrreversibleInLedger(readProfileDeletionLedger(PROFILE_DELETION_LEDGER_PATH).records, requestId)
+  } catch {
+    return true
+  }
+}
+
+// ─── Етап 4K2 — възстановени игрови ангажименти срещу активни заявки ───────
+// Race: заявката е приета в процес A, докато процес B държи профила на маса/в
+// игра; B спира преди poll-а (рестарт/срив). Игрите с постоянен snapshot
+// (Белот, Не се сърди човече, Свара) се възстановяват след рестарта, но
+// събитието 'requested' вече е зад курсора — без тази проверка заявката би
+// останала активна и би била изпълнена след края на играта. Всеки процес
+// проверява активните заявки при старт (след възстановяването на игрите) и
+// периодично: доказан ангажимент (паметта на процеса или snapshot) ->
+// системна отмяна през durable протокола от 4J1 (ред -> request_cancelled ->
+// offsite ack -> cancelled). Само положително доказателство: нечетим
+// snapshot/хранилище НЕ отменя (опитва се отново). Административните
+// изтривания не се засягат; след необратимо решение — отказ + сигнал.
+const PROFILE_DELETION_COMMITMENT_RECONCILE_INTERVAL_MS = parsePositiveIntegerEnv(
+  'PROFILE_DELETION_COMMITMENT_RECONCILE_INTERVAL_MS',
+  process.env.PROFILE_DELETION_COMMITMENT_RECONCILE_INTERVAL_MS,
+  30 * 1000,
+)
+const PROFILE_DELETION_COMMITMENT_RECONCILE_BATCH_SIZE = 200
+let profileDeletionCommitmentReconcileInterval: ReturnType<typeof setInterval> | null = null
+const reportedProfileDeletionCommitmentConflicts = new Set<string>()
+
+function assessProfileDeletionGameCommitment(profileId: string): PersistedActiveGameEvidence {
+  if (
+    isProfileInActiveGame(profileId) ||
+    findProfileInGameSession(profileId) !== null ||
+    findActiveBelotCommitment(profileId) !== null ||
+    findActiveLudoCommitment(profileId) !== null
+  ) return 'present'
+  const svaraCommitment = svaraLobby.findCommitment(profileId) as { matchId?: unknown } | null
+  // { matchId: '' } е fail-closed маркерът на Свара при недостъпно хранилище.
+  const svaraUnknown = svaraCommitment !== null && svaraCommitment.matchId === ''
+  if (svaraCommitment !== null && !svaraUnknown) return 'present'
+  const persisted = profileDeletionRequestStore.assessPersistedActiveGame(profileId)
+  if (persisted === 'present') return 'present'
+  return svaraUnknown || persisted === 'unknown' ? 'unknown' : 'absent'
+}
+
+function reconcileProfileDeletionRequestsWithGameCommitments(origin: 'startup' | 'periodic'): void {
+  if (isServerShuttingDown) return
+  let candidates: Array<{ requestId: string; profileId: string }>
+  try {
+    candidates = profileDeletionRequestStore.listPendingRequestsWithoutCancellation(PROFILE_DELETION_COMMITMENT_RECONCILE_BATCH_SIZE)
+  } catch (error) {
+    console.error('[profile-deletion] commitment reconcile failed:', error instanceof Error ? error.message : String(error))
+    return
+  }
+  for (const candidate of candidates) {
+    try {
+      if (assessProfileDeletionGameCommitment(candidate.profileId) !== 'present') continue
+      const cancelled = profileDeletionRequestStore.cancelForActiveParticipation(candidate.requestId, {
+        isDeletionProven: isProfileDeletionIrreversibleOrUnverifiable,
+      })
+      if (cancelled.ok) {
+        console.log(`[profile-deletion] mode=auto_cancel_accepted_recovered_commitment origin=${origin} requestId=${candidate.requestId}`)
+        applyProfileDeletionCancellationOutcome(processProfileDeletionCancellation(cancelled.cancellationId))
+      } else if (cancelled.code === 'deletion_proven' && !reportedProfileDeletionCommitmentConflicts.has(candidate.requestId)) {
+        // Необратимо решение (или нечетим регистър) срещу доказана игра: нищо не
+        // се отменя; worker-ът не трие по време на игра (findBlocker: active_game).
+        reportedProfileDeletionCommitmentConflicts.add(candidate.requestId)
+        console.error(`[profile-deletion] mode=commitment_conflict_irreversible requestId=${candidate.requestId} action=admin_review`)
+      }
+    } catch (error) {
+      console.error('[profile-deletion] commitment reconcile failed:', error instanceof Error ? error.message : String(error))
+    }
+  }
+}
 
 // ─── Етап 4J1B — шлюз на историята след restore ────────────────────────────
 // Необратимите операции (решения/изтриване от worker-а, административно
@@ -9986,14 +10069,18 @@ async function handleAuthRequest(
       if ('code' in result && result.code === 'PROFILE_PENDING_DELETION') {
         // Етап 4J1 — отмяната вече е приета и се потвърждава: без токен и без
         // сесия; профилът няма да бъде изтрит.
-        if (profileDeletionCancellationStore.getPendingForProfile(result.profileId) !== null) {
+        const pendingCancellation = profileDeletionCancellationStore.getPendingForProfile(result.profileId)
+        if (pendingCancellation !== null) {
           sendJsonResponse(res, 403, {
             ok: false,
             code: 'PROFILE_PENDING_DELETION',
             message: result.message,
             restoreAvailable: false,
             cancellationPending: true,
-            cancellationMessage: PROFILE_DELETION_CANCELLATION_PENDING_MESSAGE,
+            // Етап 4K2 — системната отмяна (игрови ангажимент) има собствен текст.
+            cancellationMessage: pendingCancellation.source === 'system'
+              ? PROFILE_DELETION_AUTO_CANCELLATION_PENDING_MESSAGE
+              : PROFILE_DELETION_CANCELLATION_PENDING_MESSAGE,
             isBanned: result.isBanned,
           })
           return true
@@ -10038,12 +10125,16 @@ async function handleAuthRequest(
       return true
     }
 
+    // Етап 4K2 — еднократно: уведомлението се маркира като показано още тук.
+    const loginProfileId = result.session.profile.profileId
+    const autoCancellationNotice = loginProfileId !== null && profileDeletionRequestStore.takeAutoCancellationNotice(loginProfileId)
     sendJsonResponse(
       res,
       200,
       {
         ok: true,
         session: withPikaTeamGiftBypassFlag(result.session),
+        ...(autoCancellationNotice ? { profileDeletionAutoCancellationNotice: PROFILE_DELETION_AUTO_CANCELLATION_NOTICE } : {}),
       },
       { 'Set-Cookie': createSessionCookieHeader(result.sessionToken, rememberMe) },
     )
@@ -11229,6 +11320,11 @@ const ADMIN_PROFILE_DELETION_CANCEL_ERRORS: Record<string, { status: number; mes
 
 const PROFILE_DELETION_CANCELLATION_PENDING_MESSAGE =
   'Отмяната е приета и профилът няма да бъде изтрит. Потвърждаваме я в защитения регистър — след няколко минути ще можете да влезете нормално.'
+// Етап 4K2 — автоматична (системна) отмяна заради игрови ангажимент.
+const PROFILE_DELETION_AUTO_CANCELLATION_PENDING_MESSAGE =
+  'Установено е участие в игра или заето място на маса. Отмяната на заявката за изтриване е приета и очаква потвърждение. Докато процесът приключи, профилът остава временно скрит.'
+const PROFILE_DELETION_AUTO_CANCELLATION_NOTICE =
+  'Заявката Ви за изтриване беше отменена автоматично. Установено е, че имате заето място на маса или участвате в игра. Профилът Ви е запазен. След като напуснете масата или играта приключи, можете да подадете нова заявка за изтриване.'
 
 /**
  * Етап 4J — "Заявки за изтриване" (само пълен admin; ролята се проверява и
@@ -28544,6 +28640,10 @@ function clearMutationTimersForShutdown(): void {
     clearInterval(profileDeletionCancellationFinalizerInterval)
     profileDeletionCancellationFinalizerInterval = null
   }
+  if (profileDeletionCommitmentReconcileInterval !== null) {
+    clearInterval(profileDeletionCommitmentReconcileInterval)
+    profileDeletionCommitmentReconcileInterval = null
+  }
   if (profileDeletionVisibilityPollInterval !== null) {
     clearInterval(profileDeletionVisibilityPollInterval)
     profileDeletionVisibilityPollInterval = null
@@ -28929,6 +29029,13 @@ process.once('SIGTERM', () => {
 console.log(`[svara-recovery] status=${startupTimeline.measure('svaraLobby.initializeRecovery', () => svaraLobby.initializeRecovery())}`)
 startupTimeline.measure('httpServer.listen', () => httpServer.listen(PORT, HOST, () => {
   console.log(`[http] Belot V2 server is running at http://${HOST}:${PORT}`)
+  // Етап 4K2 — след възстановяването на Белот/Не се сърди човече/Свара (по-горе).
+  reconcileProfileDeletionRequestsWithGameCommitments('startup')
+  profileDeletionCommitmentReconcileInterval = timedSetInterval(
+    'profileDeletionCommitmentReconcile',
+    () => reconcileProfileDeletionRequestsWithGameCommitments('periodic'),
+    PROFILE_DELETION_COMMITMENT_RECONCILE_INTERVAL_MS,
+  )
   console.log(`[ws] WebSocket endpoint is ws://localhost:${PORT}/ws`)
   console.log('[http] Health check: /health')
   console.log(

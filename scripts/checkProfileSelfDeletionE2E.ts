@@ -340,6 +340,57 @@ try {
     assert((await subPage.locator('[data-lobby-nav-admin-profile-deletions="1"]').count()) === 0, 'пунктът е видим за subadmin')
   })
 
+  await check('[E7] Етап 4K2 — автоматична (системна) отмяна: при вход през UI уведомлението се показва веднъж; повторен вход -> без уведомление', async () => {
+    backend!.db.prepare('DELETE FROM registration_rate_limit_events;').run()
+    const autoUser = await register(backendPort, 'autocancel')
+    const submitted = await fetch(`http://127.0.0.1:${backendPort}/api/account/deletion-request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `belot_session=${autoUser.cookie}` },
+      body: JSON.stringify({ password: PASSWORD, confirm: true }),
+    })
+    assert(submitted.status === 200, `подаване: ${submitted.status}`)
+    const requestId = (backend!.db.prepare('SELECT request_id FROM profile_deletion_requests WHERE profile_id = ?;').get(autoUser.profileId) as { request_id: string }).request_id
+    // Системната отмяна — същите два реда, които записва cancelForActiveParticipation (една транзакция).
+    const cancellationId = randomUUID()
+    backend!.db.exec('BEGIN IMMEDIATE;')
+    backend!.db.prepare(`INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status) VALUES (?, ?, ?, 'system', 'pending');`).run(cancellationId, requestId, autoUser.profileId)
+    backend!.db.prepare('INSERT INTO profile_deletion_auto_cancellation_notices (cancellation_id) VALUES (?);').run(cancellationId)
+    backend!.db.exec('COMMIT;')
+    await waitFor(async () => (backend!.db.prepare('SELECT ledger_recorded_at FROM profile_deletion_cancellations WHERE cancellation_id = ?;').get(cancellationId) as { ledger_recorded_at: string | null }).ledger_recorded_at !== null, 'запис в регистъра', 15_000)
+    writeTestLedgerAck(backend!.ledgerPath)
+    await waitFor(async () => (backend!.db.prepare('SELECT status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { status: string }).status === 'cancelled', 'финализиране', 15_000)
+
+    async function loginThroughUi(): Promise<Page> {
+      const { page: loginPage } = await openApp(null)
+      const form = loginPage.locator('form[data-lobby-auth-form="login"]')
+      await loginPage.locator('[data-lobby-auth-login="1"]:visible, [data-lobby-auth-login-button="1"]:visible').first().click({ timeout: 30_000 })
+      if (!(await form.isVisible().catch(() => false))) {
+        await loginPage.locator('[data-lobby-auth-login-button="1"]:visible, [data-lobby-auth-mode="login"]:visible').first().click({ timeout: 15_000 })
+      }
+      await form.waitFor({ state: 'visible', timeout: 20_000 })
+      await form.locator('input[type="email"]').fill(autoUser.email)
+      await form.locator('input[type="password"]').fill(PASSWORD)
+      await form.locator('input[type="password"]').press('Enter')
+      await loginPage.locator('[data-lobby-profile-button="1"]:visible').first().waitFor({ state: 'visible', timeout: 30_000 })
+      return loginPage
+    }
+
+    const firstPage = await loginThroughUi()
+    const notice = firstPage.locator('#profile-deletion-auto-cancel-notice')
+    await notice.waitFor({ state: 'visible', timeout: 15_000 })
+    const noticeText = (await firstPage.locator('[data-profile-deletion-auto-cancel-text="1"]').textContent()) ?? ''
+    assert(noticeText === 'Заявката Ви за изтриване беше отменена автоматично. Установено е, че имате заето място на маса или участвате в игра. Профилът Ви е запазен. След като напуснете масата или играта приключи, можете да подадете нова заявка за изтриване.', noticeText)
+    await firstPage.locator('[data-profile-deletion-auto-cancel-ok="1"]').click()
+    assert((await notice.count()) === 0, 'уведомлението не се затвори')
+    await firstPage.reload()
+    await firstPage.locator('[data-lobby-profile-button="1"]:visible').first().waitFor({ state: 'visible', timeout: 30_000 })
+    await new Promise((r) => setTimeout(r, 1000))
+    assert((await firstPage.locator('#profile-deletion-auto-cancel-notice').count()) === 0, 'уведомление след презареждане')
+    const secondPage = await loginThroughUi()
+    await new Promise((r) => setTimeout(r, 1000))
+    assert((await secondPage.locator('#profile-deletion-auto-cancel-notice').count()) === 0, 'уведомление при повторен вход')
+  })
+
   await check('[E5] Изключен флаг: бутонът не се показва; директна заявка към API се отказва', async () => {
     backendOff = await startBackend(false)
     currentBackendPort = backendOff.port

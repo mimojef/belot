@@ -296,6 +296,27 @@ try {
     await h(page, 'removeOverlays')
   })
 
+  await check('[17d] Етап 4K2 — чакаща автоматична отмяна: текстът от сървъра, без "Профилът Ви е запазен" и без бутони', async () => {
+    await h(page, 'openPendingPrompt', { restoreAvailable: false, cancellationPending: true, cancellationMessage: 'Установено е участие в игра или заето място на маса. Отмяната на заявката за изтриване е приета и очаква потвърждение. Докато процесът приключи, профилът остава временно скрит.', isBanned: false })
+    const text = (await page.locator('[data-pending-deletion-cancellation-pending="1"]').textContent()) ?? ''
+    assert(text === 'Установено е участие в игра или заето място на маса. Отмяната на заявката за изтриване е приета и очаква потвърждение. Докато процесът приключи, профилът остава временно скрит.', text)
+    assert(!((await page.locator('#pending-deletion-prompt').textContent()) ?? '').includes('Профилът Ви е запазен'), 'преждевременно "запазен"')
+    assert((await page.locator('[data-pending-deletion-cancel="1"], [data-pending-deletion-keep="1"]').count()) === 0, 'бутони')
+    await h(page, 'removeOverlays')
+  })
+
+  await check('[17e] Етап 4K2 — уведомление след вход: точният текст, "Разбрах" го затваря; без локално съхранение', async () => {
+    const storageBefore = await h<string>(page, 'storageSnapshot')
+    await h(page, 'openAutoCancelNotice', 'Заявката Ви за изтриване беше отменена автоматично. Установено е, че имате заето място на маса или участвате в игра. Профилът Ви е запазен. След като напуснете масата или играта приключи, можете да подадете нова заявка за изтриване.')
+    const notice = page.locator('#profile-deletion-auto-cancel-notice')
+    assert((await page.locator('[data-profile-deletion-auto-cancel-text="1"]').textContent()) === 'Заявката Ви за изтриване беше отменена автоматично. Установено е, че имате заето място на маса или участвате в игра. Профилът Ви е запазен. След като напуснете масата или играта приключи, можете да подадете нова заявка за изтриване.', 'текст')
+    assert((await notice.locator('[role="alertdialog"]').count()) === 1, 'role')
+    await page.locator('[data-profile-deletion-auto-cancel-ok="1"]').click()
+    assert((await notice.count()) === 0, 'не се затвори')
+    assert((await h<string>(page, 'storageSnapshot')) === storageBefore, 'локално съхранение')
+    assertNoPageErrors(page, '[17e]')
+  })
+
   await check('[18] Изтекъл срок: няма активен бутон за отмяна', async () => {
     await h(page, 'openPendingPrompt', { restoreAvailable: false, isBanned: false })
     assert((await page.locator('[data-pending-deletion-cancel="1"]').count()) === 0, 'бутон за отмяна')

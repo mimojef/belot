@@ -135,6 +135,7 @@ import {
   showPendingDeletionPrompt,
   type PendingDeletionActionResult,
 } from './app/profileDeletion/showPendingDeletionPrompt'
+import { showAutoCancelledDeletionNotice } from './app/profileDeletion/showAutoCancelledDeletionNotice'
 import {
   showSelfDeletionDialog,
   type SelfDeletionSubmitResult,
@@ -553,6 +554,8 @@ type AuthResponse = {
   scheduledFor?: string
   gracePeriodDays?: number
   isBanned?: boolean
+  /** Етап 4K2 — еднократно уведомление за автоматично отменена заявка за изтриване (само в отговора на входа). */
+  profileDeletionAutoCancellationNotice?: string
 }
 
 type AdminProfileResponse = {
@@ -981,6 +984,9 @@ async function submitLoginRequest(
     }
 
     await applyNewAuthSession(data.session, false)
+    if (typeof data.profileDeletionAutoCancellationNotice === 'string') {
+      showAutoCancelledDeletionNotice(data.profileDeletionAutoCancellationNotice)
+    }
     return { errorText: null }
   } catch {
     return { errorText: 'Няма връзка със сървъра за профили.' }

@@ -7,6 +7,7 @@ import { syncProfilePopup, type ProfilePopupCallbacks } from '/src/app/lobby/ren
 import type { PlayerPublicProfileSnapshot } from '/src/app/network/createGameServerClient.ts'
 import { showSelfDeletionDialog, type SelfDeletionSubmitResult } from '/src/app/profileDeletion/showSelfDeletionDialog.ts'
 import { showPendingDeletionPrompt, type PendingDeletionActionResult } from '/src/app/profileDeletion/showPendingDeletionPrompt.ts'
+import { showAutoCancelledDeletionNotice } from '/src/app/profileDeletion/showAutoCancelledDeletionNotice.ts'
 
 const calls: Array<{ name: string; args: unknown[] }> = []
 const record = (name: string) => (...args: unknown[]) => { calls.push({ name, args }) }
@@ -107,6 +108,7 @@ function openPendingPrompt(response: Parameters<typeof showPendingDeletionPrompt
   openDialog,
   resolveSubmit,
   openPendingPrompt,
+  openAutoCancelNotice: (message: string) => showAutoCancelledDeletionNotice(message),
   setPendingActionResult: (result: PendingDeletionActionResult) => { pendingActionResult = result },
   getCalls: () => calls.map((entry) => ({ name: entry.name, args: entry.args })),
   clearCalls: () => { calls.length = 0 },
@@ -115,6 +117,7 @@ function openPendingPrompt(response: Parameters<typeof showPendingDeletionPrompt
   removeOverlays: () => {
     document.getElementById('self-deletion-dialog')?.remove()
     document.getElementById('pending-deletion-prompt')?.remove()
+    document.getElementById('profile-deletion-auto-cancel-notice')?.remove()
     pendingResolvers = []
   },
 }

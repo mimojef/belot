@@ -18,9 +18,17 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 const ACTIVE_TOURNAMENT_STATUS_SQL = `'open', 'starting', 'semifinal_in_progress', 'final_in_progress'`
 const ACTIVE_ENTRY_STATUS_SQL = `'confirmed', 'finalist'`
 
+/**
+ * Етап 4K2 — тристепенна оценка на персистирана игра: 'unknown' = данните не
+ * могат да бъдат прочетени/разпознати. Отказите (подаване, worker) я третират
+ * като "има игра" (fail-closed); автоматичната отмяна действа само при 'present'.
+ */
+export type PersistedActiveGameEvidence = 'present' | 'absent' | 'unknown'
+
 export type ProfileDeletionParticipationChecks = {
   /** Белот (active_room_snapshots), Не се сърди човече (active_ludo_match_snapshots), Свара (svara_match_snapshots). */
   hasPersistedActiveGame: (profileId: string) => boolean
+  assessPersistedActiveGame: (profileId: string) => PersistedActiveGameEvidence
   /** Създател на незавършен турнир или активно участие в такъв. */
   hasActiveTournamentDependency: (profileId: string) => boolean
   /** Етап 4K1 — основанието: участник (потвърден/финалист) има предимство пред организатор. */
@@ -99,7 +107,8 @@ export function createProfileDeletionParticipationChecks(database: SqliteDatabas
     LIMIT 1;
   `)
 
-  function hasBelotGame(profileId: string): boolean {
+  function assessBelotGame(profileId: string): PersistedActiveGameEvidence {
+    let evidence: PersistedActiveGameEvidence = 'absent'
     for (const { snapshot_json } of selectBelotCandidatesStatement.all(profileId) as Array<{ snapshot_json: string }>) {
       try {
         const room = JSON.parse(snapshot_json) as BelotSnapshotRoom
@@ -108,56 +117,66 @@ export function createProfileDeletionParticipationChecks(database: SqliteDatabas
           const participant = seat?.participant
           const participantProfileId = participant?.identity?.profileId ?? participant?.publicProfile?.profileId ?? null
           if (participant?.kind === 'human' && participantProfileId === profileId && participant.permanentlyLeftAt == null) {
-            return true
+            return 'present'
           }
         }
       } catch {
-        return true
+        evidence = 'unknown'
       }
     }
-    return false
+    return evidence
   }
 
-  function hasLudoGame(profileId: string): boolean {
+  function assessLudoGame(profileId: string): PersistedActiveGameEvidence {
+    let evidence: PersistedActiveGameEvidence = 'absent'
     for (const { snapshot_json } of selectLudoCandidatesStatement.all(profileId) as Array<{ snapshot_json: string }>) {
       try {
         const match = JSON.parse(snapshot_json) as { players?: Array<{ profileId?: string }> }
-        if (!Array.isArray(match.players) || match.players.some((player) => player?.profileId === profileId)) return true
+        if (!Array.isArray(match.players)) evidence = 'unknown'
+        else if (match.players.some((player) => player?.profileId === profileId)) return 'present'
       } catch {
-        return true
+        evidence = 'unknown'
       }
     }
-    return false
+    return evidence
   }
 
-  function hasSvaraGame(profileId: string): boolean {
+  function assessSvaraGame(profileId: string): PersistedActiveGameEvidence {
     // Без проверима схема на Свара не може да се докаже липса на активна
-    // игра — fail-closed ("има активна игра"): подаването се отказва, а
-    // worker-ът блокира и опитва отново.
+    // игра — 'unknown' (за подаването и worker-а: fail-closed, "има активна
+    // игра"; подаването се отказва, а worker-ът блокира и опитва отново).
     const statement = getSvaraCandidatesStatement()
-    if (statement === null) return true
+    if (statement === null) return 'unknown'
     let rows: Array<{ match_status: string; snapshot_json: string }>
     try {
       rows = statement.all(profileId) as Array<{ match_status: string; snapshot_json: string }>
     } catch {
-      return true
+      return 'unknown'
     }
+    let evidence: PersistedActiveGameEvidence = 'absent'
     for (const { snapshot_json } of rows) {
       try {
         const snapshot = JSON.parse(snapshot_json) as { state?: { seats?: unknown; status?: Record<string, unknown> } }
         const seats = snapshot.state?.seats
         const status = snapshot.state?.status
-        if (!Array.isArray(seats) || status === undefined || status === null || typeof status !== 'object') return true
-        if (seats.includes(profileId) && (status[profileId] === 'active' || status[profileId] === 'absent')) return true
+        if (!Array.isArray(seats) || status === undefined || status === null || typeof status !== 'object') { evidence = 'unknown'; continue }
+        if (seats.includes(profileId) && (status[profileId] === 'active' || status[profileId] === 'absent')) return 'present'
       } catch {
-        return true
+        evidence = 'unknown'
       }
     }
-    return false
+    return evidence
+  }
+
+  function assessPersistedActiveGame(profileId: string): PersistedActiveGameEvidence {
+    const all = [assessBelotGame(profileId), assessLudoGame(profileId), assessSvaraGame(profileId)]
+    if (all.includes('present')) return 'present'
+    return all.includes('unknown') ? 'unknown' : 'absent'
   }
 
   return {
-    hasPersistedActiveGame: (profileId) => hasBelotGame(profileId) || hasLudoGame(profileId) || hasSvaraGame(profileId),
+    hasPersistedActiveGame: (profileId) => assessPersistedActiveGame(profileId) !== 'absent',
+    assessPersistedActiveGame,
     hasActiveTournamentDependency: (profileId) =>
       selectActiveCreatorStatement.get(profileId) !== undefined || selectActiveEntryStatement.get(profileId) !== undefined,
     findActiveTournamentDependency: (profileId) => {
