@@ -80,6 +80,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createAuthStore } from '../src/db/authStore.js'
 import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
+import { TEST_REGISTRATION_SECRET, prepareDirectRegistration, configureDirectRegistrationForTest } from './fixtures/directRegistrationTestEnv.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
@@ -192,7 +193,8 @@ console.log('\n--- [A]+[C] Server-side: admin renames the TARGET, actor untouche
   try {
     await applyMigrations(dbPath)
     progressStore = await createPlayerProgressStore(dbPath)
-    authStore = await createAuthStore(dbPath, progressStore)
+    authStore = await createAuthStore(dbPath, progressStore, { registrationVerificationCodeSecret: TEST_REGISTRATION_SECRET, getRegistrationVerificationMode: () => 'direct' })
+    configureDirectRegistrationForTest(dbPath)
     db = new DatabaseSync(dbPath, { open: true })
 
     const readNames = (profileId: string) => {
@@ -208,15 +210,15 @@ console.log('\n--- [A]+[C] Server-side: admin renames the TARGET, actor untouche
 
     // Regression case [C]: admin "Mimojef", target profile "TargetPlayer",
     // bystander "Bystander" (a 3rd profile that must remain fully untouched).
-    const adminReg = authStore!.register({ email: 'mimojef@example.test', password: 'secret1', displayName: 'Mimojef', gender: 'male' })
+    const adminReg = authStore!.register({ email: 'mimojef@example.test', password: 'secret1', displayName: 'Mimojef', gender: 'male', ...prepareDirectRegistration() })
     assert(adminReg.ok === true, 'admin registration failed')
     const adminProfileId = adminReg.ok ? adminReg.session.profile.profileId : ''
 
-    const targetReg = authStore!.register({ email: 'targetplayer@example.test', password: 'secret1', displayName: 'TargetPlayer', gender: 'male' })
+    const targetReg = authStore!.register({ email: 'targetplayer@example.test', password: 'secret1', displayName: 'TargetPlayer', gender: 'male', ...prepareDirectRegistration() })
     assert(targetReg.ok === true, 'target registration failed')
     const targetProfileId = targetReg.ok ? targetReg.session.profile.profileId : ''
 
-    const bystanderReg = authStore!.register({ email: 'bystander@example.test', password: 'secret1', displayName: 'Bystander', gender: 'female' })
+    const bystanderReg = authStore!.register({ email: 'bystander@example.test', password: 'secret1', displayName: 'Bystander', gender: 'female', ...prepareDirectRegistration() })
     assert(bystanderReg.ok === true, 'bystander registration failed')
     const bystanderProfileId = bystanderReg.ok ? bystanderReg.session.profile.profileId : ''
 
@@ -241,7 +243,7 @@ console.log('\n--- [A]+[C] Server-side: admin renames the TARGET, actor untouche
     await check('[C4] the old target name "TargetPlayer" is freed by the rename — a THIRD profile can now register it', () => {
       const available = progressStore!.isDisplayNameAvailable('TargetPlayer')
       assert(available === true, 'old target name "TargetPlayer" still reserved after being vacated by rename')
-      const thirdReg = authStore!.register({ email: 'thirdparty@example.test', password: 'secret1', displayName: 'TargetPlayer', gender: 'male' })
+      const thirdReg = authStore!.register({ email: 'thirdparty@example.test', password: 'secret1', displayName: 'TargetPlayer', gender: 'male', ...prepareDirectRegistration() })
       assert(thirdReg.ok === true, `a fresh profile could not claim the freed name: ${thirdReg.ok ? '' : thirdReg.message}`)
     })
 
@@ -277,7 +279,8 @@ console.log('\n--- [B] Old name release and re-use ---')
   try {
     await applyMigrations(dbPath)
     progressStore = await createPlayerProgressStore(dbPath)
-    authStore = await createAuthStore(dbPath, progressStore)
+    authStore = await createAuthStore(dbPath, progressStore, { registrationVerificationCodeSecret: TEST_REGISTRATION_SECRET, getRegistrationVerificationMode: () => 'direct' })
+    configureDirectRegistrationForTest(dbPath)
     db = new DatabaseSync(dbPath, { open: true })
 
     const setBalance = (profileId: string, amount: number): void => {
@@ -294,7 +297,7 @@ console.log('\n--- [B] Old name release and re-use ---')
       return row!
     }
 
-    const bReg = authStore!.register({ email: 'b-player@example.test', password: 'secret1', displayName: 'Alpha', gender: 'male' })
+    const bReg = authStore!.register({ email: 'b-player@example.test', password: 'secret1', displayName: 'Alpha', gender: 'male', ...prepareDirectRegistration() })
     assert(bReg.ok === true, 'B registration failed')
     const bProfileId = bReg.ok ? bReg.session.profile.profileId : ''
     setBalance(bProfileId, 10_000)
@@ -316,7 +319,7 @@ console.log('\n--- [B] Old name release and re-use ---')
       assert(betaTaken === false, 'Beta (B\'s current name) incorrectly reported available')
     })
 
-    const cReg = authStore!.register({ email: 'c-player@example.test', password: 'secret1', displayName: 'Gamma', gender: 'female' })
+    const cReg = authStore!.register({ email: 'c-player@example.test', password: 'secret1', displayName: 'Gamma', gender: 'female', ...prepareDirectRegistration() })
     assert(cReg.ok === true, 'C registration failed')
     const cProfileId = cReg.ok ? cReg.session.profile.profileId : ''
     setBalance(cProfileId, 10_000)
@@ -373,15 +376,15 @@ console.log('\n--- [B] Old name release and re-use ---')
       // the constraint itself, exercised identically to a real race:
       // the second writer must be rejected by the DB, not just a client-side
       // pre-check that both callers could pass simultaneously).
-      const seedReg = authStore!.register({ email: 'seed-race@example.test', password: 'secret1', displayName: 'RaceSeed', gender: 'male' })
+      const seedReg = authStore!.register({ email: 'seed-race@example.test', password: 'secret1', displayName: 'RaceSeed', gender: 'male', ...prepareDirectRegistration() })
       assert(seedReg.ok === true, 'seed registration failed')
       const seedId = seedReg.ok ? seedReg.session.profile.profileId : ''
       setBalance(seedId, 10_000)
       const freeIt = progressStore!.changeProfileDisplayName(seedId, 'RaceSeedRenamed', 100)
       assert(freeIt.ok === true, 'could not free RaceSeed')
 
-      const racerAReg = authStore!.register({ email: 'racer-a@example.test', password: 'secret1', displayName: 'RacerA', gender: 'male' })
-      const racerBReg = authStore!.register({ email: 'racer-b@example.test', password: 'secret1', displayName: 'RacerB', gender: 'female' })
+      const racerAReg = authStore!.register({ email: 'racer-a@example.test', password: 'secret1', displayName: 'RacerA', gender: 'male', ...prepareDirectRegistration() })
+      const racerBReg = authStore!.register({ email: 'racer-b@example.test', password: 'secret1', displayName: 'RacerB', gender: 'female', ...prepareDirectRegistration() })
       assert(racerAReg.ok === true && racerBReg.ok === true, 'racer registrations failed')
       const racerAId = racerAReg.ok ? racerAReg.session.profile.profileId : ''
       const racerBId = racerBReg.ok ? racerBReg.session.profile.profileId : ''

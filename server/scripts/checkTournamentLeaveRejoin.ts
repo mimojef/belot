@@ -9,6 +9,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const PASSWORD = 'TournamentLeaveRejoin1!'
 const SESSION_COOKIE_NAME = 'belot_session'
@@ -120,6 +121,7 @@ function startServer(serverDir: string, port: number): RunningServer {
       cwd: serverDir,
       env: {
         ...process.env,
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
@@ -162,7 +164,7 @@ async function registerAndGetCookie(port: number, runId: string, suffix: string)
       email: smokeEmail(runId, suffix),
       password: PASSWORD,
       displayName: `Leave Rejoin ${suffix}`,
-      gender: 'male',
+      gender: 'male', ...prepareDirectRegistration(),
     }),
   })
   assert(response.status === 200, `register ${suffix} status=${response.status}`)
@@ -271,6 +273,7 @@ try {
     }
   })
 
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
   const runId = randomUUID().slice(0, 8)
   const creatorCookie = await registerAndGetCookie(port, runId, 'creator')
   const playerCookie = await registerAndGetCookie(port, runId, 'player')

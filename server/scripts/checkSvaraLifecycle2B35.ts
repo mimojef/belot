@@ -545,7 +545,7 @@ try {
     assert.equal(t.submit('b', { type: 'request-return' }).code, 'feature_disabled'); process.env.SVARA_TEST_ENABLED = '1'
     for (const type of ['turn-timeout', 'activate-returns', 'close-svara-joining', 'finish-presence-wait', 'set-absent']) assert.equal(parseClientMessage(JSON.stringify(t.payload({ type, playerId: 'a', winnerId: 'b' }))), null)
     assert(t.lobby.findCommitment('b')); t.lobby.disconnect('b'); assert(t.lobby.findCommitment('b'))
-    t.send('a', { type: 'create_svara_table', capacity: 2, entryFee: 100, startMode: 'auto', requestId: id() })
+    t.send('a', { type: 'create_svara_table', capacity: 2, entryFee: 5000, startMode: 'auto', requestId: id() }) // позволените такси — SVARA_TEST_ENTRY_FEES (202cf00)
     assert.equal(t.frames.get('a')!.at(-1).code, 'svara_commitment')
   })
   check('plain deadlines and independent matches; shutdown cancels all work without leaked handles', () => {

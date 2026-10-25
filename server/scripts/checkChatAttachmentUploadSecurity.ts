@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import sharp from 'sharp'
 import WebSocket from 'ws'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
@@ -167,7 +168,7 @@ function startSrv(serverDir: string, port: number): { child: ChildProcessWithout
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
     {
       cwd: serverDir,
-      env: { ...process.env, PORT: String(port), BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
+      env: { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET, BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
@@ -230,7 +231,7 @@ async function registerProfile(port: number, label: string, runId: string): Prom
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: PASSWORD, displayName: `ChatAttach${label}`, gender: 'male' }),
+    body: JSON.stringify({ email, password: PASSWORD, displayName: `ChatAttach${label}`, gender: 'male', ...prepareDirectRegistration() }),
   })
   if (res.status !== 200) throw new Error(`Register ${label} failed: ${res.status}`)
   const headers = res.headers as Headers & { getSetCookie?: () => string[] }
@@ -265,6 +266,7 @@ try {
       return r.status === 200 && h.ok === true && h.gameWorkerPool?.state === 'ready'
     } catch { return false }
   }, SERVER_READY_TIMEOUT_MS)
+  configureDirectRegistrationForTest(join(iso.serverDir, 'database', 'data', 'belot-v2.sqlite'))
   console.log('  Сървърът е готов.\n')
 
   const runId = `${Date.now()}-${process.pid}`

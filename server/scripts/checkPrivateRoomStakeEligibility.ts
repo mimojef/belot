@@ -59,6 +59,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import WebSocket from 'ws'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 let passed = 0
 let failed = 0
@@ -175,7 +176,7 @@ function startServer(serverDir: string, port: number): RunningServer {
   const child = spawn(
     process.execPath,
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
-    { cwd: serverDir, env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: serverDir, env: { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET }, stdio: ['ignore', 'pipe', 'pipe'] },
   )
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
@@ -208,7 +209,7 @@ async function registerAndLogin(port: number, tag: string, runId: string): Promi
     email,
     password: 'PrivateRoomStakeDiag1!',
     displayName: `PRS ${tag}`,
-    gender: 'male',
+    gender: 'male', ...prepareDirectRegistration(),
   })
   if (reg.status !== 200) throw new Error(`Registration failed for ${tag}: ${JSON.stringify(reg.body)}`)
   const cookie = reg.setCookie as string
@@ -327,6 +328,7 @@ try {
     throw err
   }
   console.log('Server ready.\n')
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
 
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -336,7 +338,7 @@ try {
     email: adminEmail,
     password: 'PrivateRoomStakeAdmin1!',
     displayName: 'PRS Admin',
-    gender: 'male',
+    gender: 'male', ...prepareDirectRegistration(),
   })
   if (adminReg.status !== 200) throw new Error(`Admin registration failed: ${JSON.stringify(adminReg.body)}`)
 

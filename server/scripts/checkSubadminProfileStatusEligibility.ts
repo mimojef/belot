@@ -26,6 +26,7 @@ import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const PASSWORD = 'StatusEligibilitySmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -136,7 +137,7 @@ function startServer(serverDir: string, port: number): RunningServer {
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
     {
       cwd: serverDir,
-      env: { ...process.env, PORT: String(port), BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
+      env: { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET, BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
@@ -170,7 +171,7 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: PASSWORD, displayName: `Smoke ${suffix}`, gender: 'male' }),
+    body: JSON.stringify({ email, password: PASSWORD, displayName: `Smoke ${suffix}`, gender: 'male', ...prepareDirectRegistration() }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията (${suffix}) върна status ${res.status}.`)
   const payload = await res.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }
@@ -252,6 +253,7 @@ try {
       return r.status === 200 && h.ok === true && h.gameWorkerPool?.state === 'ready'
     } catch { return false }
   }, SERVER_READY_TIMEOUT_MS)
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
   console.log('  Сървърът е готов.')
 
   const runId = `${Date.now()}-${process.pid}`

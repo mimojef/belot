@@ -54,6 +54,7 @@ import { join, resolve, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import WebSocket from 'ws'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
@@ -220,7 +221,7 @@ function startSrv(serverDir: string, port: number): { child: ChildProcessWithout
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
     {
       cwd: serverDir,
-      env: { ...process.env, PORT: String(port), BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
+      env: { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET, BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
@@ -323,6 +324,7 @@ try {
       return r.status === 200 && h.ok === true && h.gameWorkerPool?.state === 'ready'
     } catch { return false }
   }, SERVER_READY_TIMEOUT_MS)
+  configureDirectRegistrationForTest(join(iso.serverDir, 'database', 'data', 'belot-v2.sqlite'))
   console.log('  Сървърът е готов.\n')
 
   // Seed: 700 постоянни допустими профила (350 human + 350 bot) — над 500,
@@ -349,7 +351,7 @@ try {
   const regRes = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: userEmail, password: PASSWORD, displayName: 'PagerUser', gender: 'male' }),
+    body: JSON.stringify({ email: userEmail, password: PASSWORD, displayName: 'PagerUser', gender: 'male', ...prepareDirectRegistration() }),
   })
   if (regRes.status !== 200) throw new Error(`Register (user) ${regRes.status}`)
 
@@ -375,7 +377,7 @@ try {
   const adminRegRes = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: adminEmail, password: PASSWORD, displayName: 'PagerAdmin', gender: 'male' }),
+    body: JSON.stringify({ email: adminEmail, password: PASSWORD, displayName: 'PagerAdmin', gender: 'male', ...prepareDirectRegistration() }),
   })
   if (adminRegRes.status !== 200) throw new Error(`Register (admin) ${adminRegRes.status}`)
 
@@ -462,7 +464,7 @@ try {
   const subadminRegRes = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: subadminEmail, password: PASSWORD, displayName: 'PagerSubadmin', gender: 'male' }),
+    body: JSON.stringify({ email: subadminEmail, password: PASSWORD, displayName: 'PagerSubadmin', gender: 'male', ...prepareDirectRegistration() }),
   })
   if (subadminRegRes.status !== 200) throw new Error(`Register (subadmin) ${subadminRegRes.status}`)
 

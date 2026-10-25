@@ -39,6 +39,7 @@ import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const PASSWORD = 'SubadminSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -174,6 +175,7 @@ function startServer(serverDir: string, port: number): RunningServer {
       cwd: serverDir,
       env: {
         ...process.env,
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
@@ -211,7 +213,7 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: PASSWORD, displayName: `Smoke ${suffix}`, gender: 'male' }),
+    body: JSON.stringify({ email, password: PASSWORD, displayName: `Smoke ${suffix}`, gender: 'male', ...prepareDirectRegistration() }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията (${suffix}) върна status ${res.status}.`)
   const payload = await res.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }
@@ -265,6 +267,7 @@ try {
     } catch { return false }
   }, SERVER_READY_TIMEOUT_MS)
   console.log('  Сървърът е готов.')
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
 
   const runId = `${Date.now()}-${process.pid}`
 

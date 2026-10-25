@@ -10,6 +10,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const PASSWORD = 'TournamentPartnerAccept1!'
 const TOURNAMENT_LOCK_PASSWORD = 'VaultKey42!'
@@ -121,6 +122,7 @@ function startServer(serverDir: string, port: number): RunningServer {
       cwd: serverDir,
       env: {
         ...process.env,
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
@@ -168,7 +170,7 @@ async function registerAndGetCookie(
       email: smokeEmail(runId, suffix),
       password: PASSWORD,
       displayName,
-      gender: 'male',
+      gender: 'male', ...prepareDirectRegistration(),
     }),
   })
   assert(response.status === 200, `register ${suffix} status=${response.status}`)
@@ -258,7 +260,8 @@ async function checkFrontendWiring(projectRoot: string): Promise<void> {
     join(projectRoot, 'src', 'app', 'lobby', 'renderTournamentsScreen.ts'),
     'utf8',
   )
-  assert(renderSource.includes('renderTournamentTeamsList(t)'), 'teams section does not render t.teams')
+  // Сигнатурата е (t, viewerProfileId) от commit 85abe28 (бутонът за самоотстраняване).
+  assert(renderSource.includes('renderTournamentTeamsList(t, state.profile.profileId)'), 'teams section does not render t.teams')
   assert(renderSource.includes("t.teams.length === 0"), 'teams empty-state branch missing')
   assert(renderSource.includes('hasCompleteTeam'), 'personal status does not check complete team membership')
   assert(renderSource.includes("'Отборът ти е готов'"), 'complete-team personal status text missing')
@@ -399,6 +402,7 @@ try {
     }
   })
 
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
   const runId = randomUUID().slice(0, 8)
   const a = await registerAndGetCookie(port, runId, 'a')
   const b = await registerAndGetCookie(port, runId, 'b')
@@ -418,7 +422,16 @@ try {
   assert(detailBeforeInvite.confirmedEntriesCount === 1, `confirmedEntriesCount=${detailBeforeInvite.confirmedEntriesCount}`)
   assert(detailBeforeInvite.completedTeamsCount === 0, `completedTeamsCount=${detailBeforeInvite.completedTeamsCount}`)
   assert(detailBeforeInvite.viewer.isParticipant === true, 'A should be participant before invite')
-  assert(detailBeforeInvite.myTeam === null, 'A myTeam should be null before invite')
+  // От 40b9ca7 (auto-pair solo) самостоятелното записване създава forming
+  // отбор само с A; поканата за партньор реюзва този отбор (виж
+  // checkTournamentAutoPairSolo.ts [13]).
+  assert(
+    detailBeforeInvite.myTeam?.status === 'forming' &&
+      detailBeforeInvite.myTeam.members.length === 1 &&
+      detailBeforeInvite.myTeam.members[0]?.profileId === a.profileId &&
+      detailBeforeInvite.myTeam.members[0]?.joinedAs === 'solo',
+    `A should be alone in a forming team before invite: ${JSON.stringify(detailBeforeInvite.myTeam)}`,
+  )
   pass('A solo participant, 1 confirmed entry, 0 complete teams')
 
   const invite = await httpRequest(port, `/api/tournaments/${tournamentId}/partner-invites`, 'POST', a.cookie, {

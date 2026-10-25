@@ -41,6 +41,7 @@ import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const PASSWORD = 'TournamentSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -220,6 +221,7 @@ function startServer(serverDir: string, port: number): RunningServer {
       cwd: serverDir,
       env: {
         ...process.env,
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
@@ -264,7 +266,7 @@ async function registerAndGetCookie(port: number, runId: string, suffix: string)
       email: `tournament-smoke-${runId}-${suffix}@example.test`,
       password: PASSWORD,
       displayName: `Smoke ${suffix}`,
-      gender: 'male',
+      gender: 'male', ...prepareDirectRegistration(),
     }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията върна status ${res.status}.`)
@@ -334,6 +336,7 @@ try {
     SERVER_READY_TIMEOUT_MS,
   )
   console.log('  Сървърът е готов.')
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
 
   const runId = `${Date.now()}-${process.pid}`
   console.log('\n[auth] Регистрация на потребители...')
@@ -559,6 +562,8 @@ try {
       'occupiedPlacesCount', 'completedTeamsCount', 'formingTeamsCount', 'startMode',
       'scheduledStartAt', 'fillExpiresAt', 'createdAt', 'prizePreview', 'isMine', 'availablePlaces', 'isFull',
       'championTeamId', 'runnerUpTeamId', 'settlementState', 'settledAt',
+      // e4551d8 (разбъркани отбори) — флагът и моментът на разбъркването.
+      'shuffleEnabled', 'teamsShuffledAt',
       'viewer',
     ])
     for (const t of b.tournaments) {

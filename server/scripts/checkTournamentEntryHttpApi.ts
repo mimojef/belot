@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import WebSocket from 'ws'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const PASSWORD = 'TournamentEntrySmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -256,6 +257,7 @@ function startServer(serverDir: string, port: number): RunningServer {
       cwd: serverDir,
       env: {
         ...process.env,
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
@@ -300,7 +302,7 @@ async function registerAndGetCookie(port: number, runId: string, suffix: string)
       email: smokeEmail(runId, suffix),
       password: PASSWORD,
       displayName: `Smoke ${suffix}`,
-      gender: 'male',
+      gender: 'male', ...prepareDirectRegistration(),
     }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията върна status ${res.status}.`)
@@ -321,7 +323,7 @@ async function registerAndGetProfile(port: number, runId: string, suffix: string
       email: smokeEmail(runId, suffix),
       password: PASSWORD,
       displayName: `Smoke ${suffix}`,
-      gender: 'male',
+      gender: 'male', ...prepareDirectRegistration(),
     }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията върна status ${res.status}.`)
@@ -496,6 +498,7 @@ try {
     SERVER_READY_TIMEOUT_MS,
   )
   console.log('  Сървърът е готов.')
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
 
   const runId = `${Date.now()}-${process.pid}`
   console.log('\n[auth] Регистрация на потребители...')

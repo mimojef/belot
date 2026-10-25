@@ -33,6 +33,7 @@ import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import sharp from 'sharp'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
@@ -171,7 +172,7 @@ function startSrv(serverDir: string, port: number): { child: ChildProcessWithout
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
     {
       cwd: serverDir,
-      env: { ...process.env, PORT: String(port), BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
+      env: { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET, BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
@@ -229,6 +230,7 @@ try {
       return r.status === 200 && h.ok === true && h.gameWorkerPool?.state === 'ready'
     } catch { return false }
   }, SERVER_READY_TIMEOUT_MS)
+  configureDirectRegistrationForTest(join(iso.serverDir, 'database', 'data', 'belot-v2.sqlite'))
   console.log('  Сървърът е готов.\n')
 
   const runId = `${Date.now()}-${process.pid}`
@@ -237,7 +239,7 @@ try {
   const regRes = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: userEmail, password: PASSWORD, displayName: 'AvatarCheck', gender: 'male' }),
+    body: JSON.stringify({ email: userEmail, password: PASSWORD, displayName: 'AvatarCheck', gender: 'male', ...prepareDirectRegistration() }),
   })
   if (regRes.status !== 200) throw new Error(`Register ${regRes.status}`)
 
@@ -315,13 +317,23 @@ try {
 
   // ─── [8-9] Gallery endpoint ────────────────────────────────────────────────
 
+  // От 2de7dc6 (сигурен достъп до галерията) клиентът получава удостоверения
+  // маршрут /api/profiles/:id/gallery/:imageId вместо директен .webp файл.
+  // Конвертирането до WebP се проверява по отговора на самия маршрут.
+  async function assertGalleryImageIsWebp(imageUrl: string | undefined): Promise<void> {
+    assert(typeof imageUrl === 'string' && /^\/api\/profiles\/[^/]+\/gallery\/[^/]+$/.test(imageUrl), 'imageUrl трябва да е удостовереният маршрут, получено: ' + imageUrl)
+    const res = await fetch(`http://127.0.0.1:${port}${imageUrl}`, { headers: { Cookie: cookie } })
+    assert(res.status === 200, `GET ${imageUrl} -> ${res.status}`)
+    assert((res.headers.get('content-type') ?? '').includes('image/webp'), `content-type=${res.headers.get('content-type')}`)
+  }
+
   await check('[8] Валиден JPEG gallery upload → 200 + webp imageUrl', async () => {
     const r = await httpPostJson(port, '/api/profile/me/gallery', { imageDataUrl: toDataUrl('jpeg', jpegBuffer) }, cookie)
     assert(r.status === 200, `status=${r.status} body=${JSON.stringify(r.body)}`)
     const b = r.body as { ok: boolean; session: { profile: { galleryImages: { imageUrl: string }[] } } }
     assert(b.ok === true, 'ok трябва да е true')
     const last = b.session.profile.galleryImages.at(-1)
-    assert(!!last && last.imageUrl.endsWith('.webp'), `imageUrl трябва да завършва на .webp, получено: ${last?.imageUrl}`)
+    await assertGalleryImageIsWebp(last?.imageUrl)
   })
 
   await check('[8b] Валиден PNG gallery upload → 200 + webp imageUrl', async () => {
@@ -329,7 +341,7 @@ try {
     assert(r.status === 200, `status=${r.status} body=${JSON.stringify(r.body)}`)
     const b = r.body as { ok: boolean; session: { profile: { galleryImages: { imageUrl: string }[] } } }
     const last = b.session.profile.galleryImages.at(-1)
-    assert(!!last && last.imageUrl.endsWith('.webp'), `imageUrl трябва да завършва на .webp, получено: ${last?.imageUrl}`)
+    await assertGalleryImageIsWebp(last?.imageUrl)
   })
 
   await check('[8c] Валиден WebP gallery upload → 200 + webp imageUrl', async () => {
@@ -337,7 +349,7 @@ try {
     assert(r.status === 200, `status=${r.status} body=${JSON.stringify(r.body)}`)
     const b = r.body as { ok: boolean; session: { profile: { galleryImages: { imageUrl: string }[] } } }
     const last = b.session.profile.galleryImages.at(-1)
-    assert(!!last && last.imageUrl.endsWith('.webp'), `imageUrl трябва да завършва на .webp, получено: ${last?.imageUrl}`)
+    await assertGalleryImageIsWebp(last?.imageUrl)
   })
 
   await check('[9] GIF байтове с "image/png" MIME префикс в gallery → отхвърлено с 400', async () => {

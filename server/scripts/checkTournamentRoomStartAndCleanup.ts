@@ -57,6 +57,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import WebSocket from 'ws'
 import { renderTournamentDetailScreen } from '../../src/app/lobby/renderTournamentsScreen.js'
 import type { LobbyScreenState } from '../../src/app/lobby/renderLobbyScreen.js'
+import { TEST_REGISTRATION_SECRET, configureDirectRegistrationForTest, prepareDirectRegistration } from './fixtures/directRegistrationTestEnv.js'
 
 const SERVER_READY_TIMEOUT_MS = 30_000
 
@@ -169,7 +170,7 @@ async function registerAndGetProfile(
       email: smokeEmail(runId, suffix),
       password: 'TournamentRoomStart1!',
       displayName: `Room ${suffix}`,
-      gender: 'male',
+      gender: 'male', ...prepareDirectRegistration(),
     }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията върна status ${res.status} за ${suffix}.`)
@@ -372,7 +373,7 @@ function startServer(serverDir: string, port: number): RunningServer {
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
     {
       cwd: serverDir,
-      env: { ...process.env, PORT: String(port) },
+      env: { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
@@ -455,6 +456,7 @@ try {
     SERVER_READY_TIMEOUT_MS,
   )
   console.log('  Сървърът е готов.')
+  configureDirectRegistrationForTest(join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite'))
 
   const runId = `${Date.now()}-${process.pid}`
 
