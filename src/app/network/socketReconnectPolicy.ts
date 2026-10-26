@@ -15,6 +15,14 @@ export type SocketCloseDecision =
   | 'svara-reconnect'
   /** Spectator: reconnect без forced lobby reload; spectator session се пази. */
   | 'belot-spectator-reconnect'
+  /**
+   * Participant, socket-ът е изоставен от клиента като мъртъв (submit
+   * watchdog / liveness): тих reconnect + resume_room в същата стая, БЕЗ
+   * offline overlay и forced lobby reload — мрежата не е доказано паднала,
+   * само тази TCP връзка. Реален outage пак се хваща от network health
+   * монитора.
+   */
+  | 'active-room-silent-reconnect'
   /** Participant в активна стая: established reload-on-reconnect + resume. */
   | 'active-room-reconnect'
   /** Lobby: established reload-on-reconnect. */
@@ -24,8 +32,10 @@ export function decideSocketCloseAction(input: {
   isBelotSpectatorSessionActive: boolean
   hasActiveRoom: boolean
   hasActiveSvaraMatch?: boolean
+  isZombieBidReconnectInFlight?: boolean
 }): SocketCloseDecision {
   if (input.isBelotSpectatorSessionActive) return 'belot-spectator-reconnect'
+  if (input.hasActiveRoom && input.isZombieBidReconnectInFlight === true) return 'active-room-silent-reconnect'
   if (input.hasActiveRoom) return 'active-room-reconnect'
   if (input.hasActiveSvaraMatch) return 'svara-reconnect'
   return 'lobby-reconnect'

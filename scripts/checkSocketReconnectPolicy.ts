@@ -181,5 +181,30 @@ await check('[R8] main.ts scopes Svara recovery away from active Belot and Ludo'
   assert(context.includes('!activeRoom.hasActiveRoom()') && context.includes('!lobby.hasActiveLudoMatch()'), 'Svara recovery must preserve the other active-game paths')
 })
 
+await check('[R9] изоставен мъртъв socket в активна стая -> тих reconnect (без offline overlay/reload)', () => {
+  assert(decideSocketCloseAction({ isBelotSpectatorSessionActive: false, hasActiveRoom: true, isZombieBidReconnectInFlight: true }) === 'active-room-silent-reconnect', 'dead-socket recovery must be silent')
+  // Без флага / без активна стая / spectator — непроменено.
+  assert(decideSocketCloseAction({ isBelotSpectatorSessionActive: false, hasActiveRoom: true, isZombieBidReconnectInFlight: false }) === 'active-room-reconnect', 'ordinary active-room close changed')
+  assert(decideSocketCloseAction({ isBelotSpectatorSessionActive: false, hasActiveRoom: false, isZombieBidReconnectInFlight: true }) === 'lobby-reconnect', 'lobby close changed')
+  assert(decideSocketCloseAction({ isBelotSpectatorSessionActive: true, hasActiveRoom: true, isZombieBidReconnectInFlight: true }) === 'belot-spectator-reconnect', 'spectator close changed')
+
+  const onClose = stripComments(sliceBetween(mainSource, 'onClose: () => {', 'onMessage:'))
+  const silentAt = onClose.indexOf("closeDecision === 'active-room-silent-reconnect'")
+  const overlayAt = onClose.indexOf('showOfflineConnectionOverlay()')
+  assert(silentAt !== -1 && silentAt < overlayAt, 'silent branch must run before showOfflineConnectionOverlay()')
+  const silentBranch = onClose.slice(silentAt, onClose.indexOf('return', silentAt))
+  assert(silentBranch.includes('setConnectionState(false') && silentBranch.includes('scheduleServerReconnect()'), 'silent branch must release the hand and reconnect')
+  assert(!silentBranch.includes('forceOfflineLobbyReload'), 'silent branch must not reload')
+
+  // Мъртвата връзка се изоставя веднага — не client.disconnect() (closing
+  // handshake: Chromium чака 60 сек Close frame).
+  const recover = stripComments(sliceBetween(mainSource, 'function recoverFromUnresponsiveSocket(', '\n}'))
+  assert(recover.includes('client.abandonUnresponsiveSocket(') && !recover.includes('client.disconnect('), 'recovery must abandon the socket, not wait for close handshake')
+  const zombieCallback = stripComments(sliceBetween(mainSource, 'forceReconnectForZombieConnection: () => {', '},'))
+  assert(zombieCallback.includes('recoverFromUnresponsiveSocket('), 'submit watchdog fallback must use recoverFromUnresponsiveSocket')
+  const zombieOpen = stripComments(sliceBetween(mainSource, "openDecision === 'zombie-bid-resume'", 'return'))
+  assert(zombieOpen.includes('hideOfflineConnectionOverlay()'), 'zombie resume must not leave the offline overlay over the game')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

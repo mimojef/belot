@@ -103,6 +103,7 @@ import {
   decideSocketOpenAction,
   shouldOfflineRecoveryForceLobbyReload,
 } from './app/network/socketReconnectPolicy'
+import { createConnectionLivenessMonitor } from './app/network/createConnectionLivenessMonitor'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
@@ -7735,16 +7736,7 @@ const activeRoom = createActiveRoomFlowController({
     requestActiveRoomResume()
   },
   forceReconnectForZombieConnection: () => {
-    // client.disconnect() затваря socket-а; регистрираният 'close' listener
-    // (onClose по-долу) каскадно води до СЪЩЕСТВУВАЩия
-    // scheduleServerReconnect() -> onOpen -> requestActiveRoomResume flow —
-    // същият механизъм, който вече обработва реален connection loss.
-    // isZombieBidReconnectInFlight маркира ТОЗИ конкретен reconnect цикъл,
-    // за да не бъде пренасочен от onOpen() към forceOfflineLobbyReload()
-    // (виж флага при декларацията му) — само за explicit bid-recovery
-    // случая, не за нормален connection loss.
-    isZombieBidReconnectInFlight = true
-    client.disconnect('bid_watchdog')
+    recoverFromUnresponsiveSocket('submit_watchdog')
   },
   // Belot Spectator Mode ("Гледай", Phase 3B) — "Изход" докато гледаш.
   // Optimistic/immediate local cleanup (activeRoom.exitSpectatorView) +
@@ -7964,6 +7956,39 @@ function attemptTournamentRoundTransitionSilentAttach(assignment: TournamentMatc
   })
   client.resumeRoom(assignment.roomId, assignment.reconnectToken, true)
 }
+
+// Мъртва (полуотворена) връзка по време на активна стая — от submit
+// watchdog-а (изгубена карта/обява) или от liveness монитора (тишина + без
+// pong). client.disconnect() тук НЕ стига: при полуотворена TCP връзка
+// браузърът чака Close frame от сървъра (Chromium — 60 сек) преди 'close',
+// а дотогава ръката е заключена и snapshot-и не идват (играта "замръзва",
+// докато сървърът продължава). abandonUnresponsiveSocket() вика onClose()
+// веднага -> тих reconnect + resume_room в същата стая (виж
+// isZombieBidReconnectInFlight). Никога не изпраща ход повторно.
+function recoverFromUnresponsiveSocket(reason: string): void {
+  if (!activeRoom.hasActiveRoom()) return
+  console.warn('[game-server] unresponsive socket, reconnecting:', reason)
+  isZombieBidReconnectInFlight = true
+  if (!client.abandonUnresponsiveSocket(reason)) {
+    scheduleServerReconnect()
+  }
+}
+
+// Само докато сме participant в активна стая (има какво да resume-нем):
+// там тишината от сървъра означава замръзнала игра. Пинг се праща само при
+// тишина, затова при нормална игра натоварване няма.
+const activeRoomLivenessMonitor = createConnectionLivenessMonitor({
+  isEnabled: () => activeRoom.getResumeInfo() !== null,
+  getMsSinceLastServerMessage: () => client.getMsSinceLastServerMessage(),
+  sendPing: () => client.ping(),
+  onUnresponsive: () => recoverFromUnresponsiveSocket('liveness_timeout'),
+})
+activeRoomLivenessMonitor.start()
+// След заспиване/фон на мобилен браузър полуотворена връзка е най-вероятна —
+// проверка веднага при връщане, без да чакаме следващия (throttled) tick.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') activeRoomLivenessMonitor.check()
+})
 
 function requestActiveRoomResume(): boolean {
   const resumeInfo = activeRoom.getResumeInfo()
@@ -8437,6 +8462,9 @@ client = createGameServerClient({
 
     if (openDecision === 'zombie-bid-resume') {
       shouldReloadLobbyOnReconnect = false
+      // Ако междувременно network health мониторът е показал offline
+      // overlay-я, транспортът вече е обратно — иначе той остава над играта.
+      hideOfflineConnectionOverlay()
       activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
       requestActiveRoomResume()
       return
@@ -8519,7 +8547,19 @@ client = createGameServerClient({
       isBelotSpectatorSessionActive: isBelotSpectatorSessionActive(),
       hasActiveSvaraMatch: isSvaraReconnectContext(),
       hasActiveRoom: activeRoom.hasActiveRoom(),
+      isZombieBidReconnectInFlight,
     })
+
+    if (closeDecision === 'active-room-silent-reconnect') {
+      // Изоставен мъртъв socket (recoverFromUnresponsiveSocket): без
+      // целоекранния offline overlay — той вдига shouldReloadLobbyOnReconnect и
+      // никога не се скрива в zombie-bid-resume клона на onOpen. Играчът
+      // вижда in-room съобщението, ръката е отключена (setConnectionState).
+      pwaIsReconnectingActiveRoom = true
+      activeRoom.setConnectionState(false, SERVER_RESUME_WAIT_MESSAGE)
+      scheduleServerReconnect()
+      return
+    }
 
     if (closeDecision === 'svara-reconnect') {
       lobby.beginSvaraReconnect()

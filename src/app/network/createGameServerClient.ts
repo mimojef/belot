@@ -3523,6 +3523,18 @@ export type GameServerClient = {
    * reason string.
    */
   disconnect: (reason?: string) => void
+  /**
+   * Изоставя текущия socket като мъртъв и ВЕДНАГА вика onClose(), без да
+   * чака closing handshake-а. При полуотворена TCP връзка (мобилна мрежа,
+   * Wi-Fi/4G смяна, събуждане от sleep) readyState остава OPEN, send()
+   * "успява" без нищо да стигне до сървъра, а след close() браузърът чака
+   * Close frame от сървъра — Chromium до 60 сек — преди да изпрати 'close'.
+   * Късните събития на изоставения socket се игнорират (socket !== thisSocket).
+   * Връща false, ако няма текущ socket.
+   */
+  abandonUnresponsiveSocket: (reason: string) => boolean
+  /** Милисекунди от последното съобщение (или open) на текущия OPEN socket; null без такъв. */
+  getMsSinceLastServerMessage: () => number | null
   isConnected: () => boolean
   ping: () => void
   createRoom: (displayName?: string) => void
@@ -3649,6 +3661,9 @@ export function createGameServerClient(
 ): GameServerClient {
   const url = options.url ?? getDefaultServerUrl()
   let socket: WebSocket | null = null
+  // Последен признак на живот (open или съобщение) на ТЕКУЩИЯ socket — за
+  // liveness проверката (createConnectionLivenessMonitor).
+  let lastServerMessageAt = 0
 
   function send(message: ClientMessage): void {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -3686,6 +3701,7 @@ export function createGameServerClient(
 
     thisSocket.addEventListener('open', () => {
       if (socket !== thisSocket) return
+      lastServerMessageAt = Date.now()
       options.onOpen?.()
     })
 
@@ -3704,6 +3720,7 @@ export function createGameServerClient(
       if (socket !== thisSocket) return
 
       const receivedAt = Date.now()
+      lastServerMessageAt = receivedAt
       const message = safeParseServerMessage(String(event.data))
 
       if (!message) {
@@ -3780,6 +3797,32 @@ export function createGameServerClient(
     } else {
       socket.close(1000)
     }
+  }
+
+  function abandonUnresponsiveSocket(reason: string): boolean {
+    const deadSocket = socket
+    if (!deadSocket) {
+      return false
+    }
+
+    // Null-ваме synchronously (за разлика от disconnect()): close listener-ът
+    // на изоставения socket вече няма да мине guard-а, затова onClose() се
+    // вика ТУК — точно веднъж — и connect() може веднага да отвори нов socket.
+    socket = null
+    try {
+      deadSocket.close(4000, boundCloseReasonBytes(reason))
+    } catch {
+      // Best effort — socket-ът и без това е изоставен.
+    }
+    options.onClose?.()
+    return true
+  }
+
+  function getMsSinceLastServerMessage(): number | null {
+    if (socket?.readyState !== WebSocket.OPEN) {
+      return null
+    }
+    return Math.max(0, Date.now() - lastServerMessageAt)
   }
 
   function isConnected(): boolean {
@@ -4151,6 +4194,8 @@ export function createGameServerClient(
   return {
     connect,
     disconnect,
+    abandonUnresponsiveSocket,
+    getMsSinceLastServerMessage,
     isConnected,
     ping,
     createRoom,

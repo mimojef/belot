@@ -209,6 +209,11 @@ export function createActiveRoomFlowController(
   // room_snapshot branch of handleServerMessage below.
   let pendingTournamentSilentEntry: { roomId: string; seat: Seat; stake: MatchStake } | null = null
   let activeRoomState: ActiveRoomState | null = null
+  // След загубена връзка: true до първия room_snapshot на новата връзка
+  // (сървърът attach-ва connection-а едва при resume_room, затова той е
+  // авторитетното състояние СЛЕД прекъсването). Дотогава показаният ход е
+  // отпреди прекъсването — карта/обява не се изпращат, банерът остава.
+  let awaitingResumeSnapshot = false
   // In-game/private-room seat popup denial state — mount-натo self-contained
   // на document.body (виж renderProfileAccessBlockPopup.ts), тъй като active
   // room-ът няма lobby root DOM да вгради inline HTML в него. Общ path с
@@ -1229,6 +1234,7 @@ export function createActiveRoomFlowController(
 
   function removeLeaveButton(): void {
     closeActiveRoomSettingsPanel()
+    removeConnectionBanner()
     document.body.querySelector('[data-active-room-leave-button="1"]')?.remove()
     document.body.querySelector('[data-active-room-mobile-action-bar="1"]')?.remove()
     document.body.querySelector('[data-active-room-desktop-action-bar="1"]')?.remove()
@@ -2621,6 +2627,11 @@ export function createActiveRoomFlowController(
       return false
     }
 
+    if (awaitingResumeSnapshot) {
+      showPlayingInputNotice('Изчаква се актуалното състояние на играта. Картата не е изиграна.')
+      return false
+    }
+
     options.submitPlayCard(roomId, cardId, declarationKeys)
     cancelPlayWatchdog()
     playWatchdog.responseTimerId = window.setTimeout(
@@ -3159,9 +3170,11 @@ export function createActiveRoomFlowController(
       return
     }
 
-    if (!options.isConnected()) {
+    if (!options.isConnected() || awaitingResumeSnapshot) {
       clearPendingBidSubmission()
-      activeRoomState.errorText = 'Няма връзка със сървъра.'
+      activeRoomState.errorText = awaitingResumeSnapshot
+        ? 'Изчаква се актуалното състояние на играта.'
+        : 'Няма връзка със сървъра.'
       scheduleActiveRoomRender()
       return
     }
@@ -6408,6 +6421,13 @@ export function createActiveRoomFlowController(
     const wasPlayResyncAnswered = playWatchdog.resyncAnswered
     const wasPlayRejectedByServer = playWatchdog.rejectedByServer
 
+    // Изоставеният socket е игнориран в транспорта, затова snapshot при жива
+    // връзка идва от новата — след resume_room, т.е. авторитетен.
+    if (awaitingResumeSnapshot && options.isConnected()) {
+      awaitingResumeSnapshot = false
+      syncConnectionBanner()
+    }
+
     activeRoomState.roomStatus = message.roomStatus
     activeRoomState.reconnectToken = message.reconnectToken
     activeRoomState.seats = message.seats
@@ -6533,6 +6553,7 @@ export function createActiveRoomFlowController(
     closeProfileAccessBlockPopup()
     removeSeatPanels()
     removeLeaveButton()
+    awaitingResumeSnapshot = false
     activeRoomState = {
       roomId,
       seat,
@@ -6616,6 +6637,7 @@ export function createActiveRoomFlowController(
     removeBottomHandOverlay()
     removeBiddingPopupOverlay()
 
+    awaitingResumeSnapshot = false
     activeRoomState = {
       roomId,
       seat: 'bottom',
@@ -6776,6 +6798,7 @@ export function createActiveRoomFlowController(
     closeProfileAccessBlockPopup()
     removeSeatPanels()
     removeLeaveButton()
+    awaitingResumeSnapshot = false
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
@@ -7079,6 +7102,7 @@ export function createActiveRoomFlowController(
       if (playWatchdog.resyncRequested) playWatchdog.resyncAnswered = true
       activeRoomState.isConnected = true
       activeRoomState.errorText = null
+      syncConnectionBanner()
       scheduleActiveRoomRender()
       return true
     }
@@ -7271,11 +7295,13 @@ export function createActiveRoomFlowController(
       clearPendingCutSubmission()
       clearPendingBidSubmission()
       releasePendingPlayCard()
+      awaitingResumeSnapshot = true
       // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
       belotSpectatorViewersHydrated = false
     }
 
     activeRoomState.isConnected = value
+    syncConnectionBanner()
     scheduleActiveRoomRender()
   }
 
@@ -7294,6 +7320,46 @@ export function createActiveRoomFlowController(
     scheduleActiveRoomRender()
   }
 
+  // Видим индикатор при прекъсната връзка. errorText не се рисува в playing
+  // фазата, а seat таймерът е локална анимация и продължава — без банера
+  // играчът вижда "жива" маса, докато транспортът се възстановява.
+  function syncConnectionBanner(): void {
+    if (!activeRoomState || (activeRoomState.isConnected && !awaitingResumeSnapshot)) {
+      removeConnectionBanner()
+      return
+    }
+    let banner = document.body.querySelector<HTMLElement>('[data-active-room-connection-banner="1"]')
+    if (!banner) {
+      banner = document.createElement('div')
+      banner.setAttribute('data-active-room-connection-banner', '1')
+      banner.setAttribute('role', 'status')
+      banner.style.cssText = [
+        'position:fixed',
+        'left:50%',
+        'top:12px',
+        'transform:translateX(-50%)',
+        'z-index:10001',
+        'max-width:min(92vw,520px)',
+        'padding:10px 16px',
+        'border-radius:12px',
+        'background:rgba(15,23,42,0.94)',
+        'border:1px solid rgba(212,165,32,0.55)',
+        'color:#fde68a',
+        'font:700 14px/1.35 Inter, system-ui, sans-serif',
+        'text-align:center',
+        'pointer-events:none',
+      ].join(';')
+      document.body.appendChild(banner)
+    }
+    const text = activeRoomState.errorText ??
+      (activeRoomState.isConnected ? 'Възстановяване на играта...' : 'Връзката със сървъра се възстановява...')
+    if (banner.textContent !== text) banner.textContent = text
+  }
+
+  function removeConnectionBanner(): void {
+    document.body.querySelector('[data-active-room-connection-banner="1"]')?.remove()
+  }
+
   function setConnectionState(isConnected: boolean, message: string | null): void {
     if (!activeRoomState) {
       return
@@ -7308,11 +7374,13 @@ export function createActiveRoomFlowController(
     // само през setConnectionState). Ако картата е приложена преди close-а,
     // resume snapshot-ът я показва; втори tap би бил отхвърлен от сървъра.
     if (!isConnected) releasePendingPlayCard()
+    if (!isConnected) awaitingResumeSnapshot = true
     // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
     if (!isConnected) belotSpectatorViewersHydrated = false
 
     activeRoomState.isConnected = isConnected
     activeRoomState.errorText = message
+    syncConnectionBanner()
     scheduleActiveRoomRender()
   }
 
