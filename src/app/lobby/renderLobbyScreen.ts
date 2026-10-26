@@ -1628,6 +1628,18 @@ let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
 // всеки run в същия module instance).
 let lastRenderedRootElement: HTMLElement | null = null
 let lastRenderedRootHtml: string | null = null
+
+// Node-ове с data-lobby-live-text="1" имат текст, който се обновява на живо
+// директно в DOM-а (напр. турнирния брояч, startTournamentStartCountdownLoop
+// в контролера) и съответно е различен при всеки render(). Изрязваме го от
+// ключа за skip-if-unchanged сравнението — иначе ВСЕКИ render() на такъв
+// екран пресъздава целия root (и нулира скрола на отворени модали в него).
+// Самият DOM пак получава пълния HTML при реален rebuild.
+const LOBBY_LIVE_TEXT_PATTERN = /(<[^>]*\sdata-lobby-live-text="1"[^>]*>)[^<]*/g
+
+function toLobbyRootHtmlCacheKey(html: string): string {
+  return html.includes('data-lobby-live-text="1"') ? html.replace(LOBBY_LIVE_TEXT_PATTERN, '$1') : html
+}
 let mobileMenuOpen = false
 let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
 let stakesFirstCardIndex = -1
@@ -14095,10 +14107,11 @@ export function renderLobbyScreen(
   // rebuild, ако МЕЖДУВРЕМЕННО друг renderer (matchmaking-room/private-room-
   // waiting/active-room) е презаписал root-а с съвсем различен screen.
   const currentScreenRootEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
+  const nextRootHtmlCacheKey = toLobbyRootHtmlCacheKey(nextRootHtml)
   if (
     root === lastRenderedRootElement &&
     currentScreenRootEl !== null &&
-    nextRootHtml === lastRenderedRootHtml
+    nextRootHtmlCacheKey === lastRenderedRootHtml
   ) {
     return
   }
@@ -14122,9 +14135,35 @@ export function renderLobbyScreen(
   const adminRegisteredProfilesContentKeyBefore =
     adminRegisteredProfilesCardElBefore?.getAttribute('data-admin-registered-profiles-content-key') ?? null
 
+  // "Избери партньор" picker-ът (турнир) също живее inline в root.innerHTML.
+  // Несвързаните render()-и вече не стигат дотук (skip-if-unchanged по-горе,
+  // вкл. live брояча — виж toLobbyRootHtmlCacheKey), но легитимна промяна
+  // другаде на екрана (нов участник при турнирен refetch, "Теми" badge 0→1)
+  // все пак пресъздава subtree-а. Същият pattern като admin модала по-горе:
+  // scrollTop на списъка с приятели (и на самия panel при нисък viewport) се
+  // пренася САМО ако data-tournament-partner-friends-key е идентичен — при
+  // ново отваряне/зареждане ключът е различен и списъкът legitimately
+  // започва от началото.
+  const partnerFriendsListElBefore = root.querySelector<HTMLElement>('[data-tournament-partner-friends-list="1"]')
+  const partnerFriendsListKeyBefore = partnerFriendsListElBefore?.getAttribute('data-tournament-partner-friends-key') ?? null
+  const partnerFriendsListScrollTop = partnerFriendsListElBefore?.scrollTop ?? 0
+  const partnerPickerPanelScrollTop = root.querySelector<HTMLElement>('[data-tournament-partner-picker-panel="1"]')?.scrollTop ?? 0
+
   lastRenderedRootElement = root
-  lastRenderedRootHtml = nextRootHtml
+  lastRenderedRootHtml = nextRootHtmlCacheKey
   root.innerHTML = nextRootHtml
+
+  if (partnerFriendsListKeyBefore !== null) {
+    const partnerFriendsListElAfter = root.querySelector<HTMLElement>('[data-tournament-partner-friends-list="1"]')
+    if (
+      partnerFriendsListElAfter !== null &&
+      partnerFriendsListElAfter.getAttribute('data-tournament-partner-friends-key') === partnerFriendsListKeyBefore
+    ) {
+      partnerFriendsListElAfter.scrollTop = partnerFriendsListScrollTop
+      const partnerPickerPanelElAfter = root.querySelector<HTMLElement>('[data-tournament-partner-picker-panel="1"]')
+      if (partnerPickerPanelElAfter !== null) partnerPickerPanelElAfter.scrollTop = partnerPickerPanelScrollTop
+    }
+  }
 
   if (adminRegisteredProfilesScrollTop !== null) {
     const adminRegisteredProfilesCardElAfter = root.querySelector<HTMLElement>(

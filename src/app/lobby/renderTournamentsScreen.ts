@@ -1214,6 +1214,17 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
   const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()
   const startInfo = computeTournamentStartInfo(t)
+  // Секундният брояч се изчислява от Date.now(), т.е. HTML-ът му е различен
+  // при всеки render() — без маркера всеки несвързан render() (Лафче badge
+  // push, lobby.render() от main.ts, ...) минава покрай skip-if-unchanged
+  // guard-а в renderLobbyScreen и пресъздава целия екран, вкл. отворения
+  // "Избери партньор" picker (скролът на приятелите се нулира).
+  // data-lobby-live-text="1" изключва текста на node-а от това сравнение —
+  // САМО за node-овете, чийто текст startTournamentStartCountdownLoop в
+  // контролера обновява на живо (същите условия като там), иначе текстът
+  // би останал остарял при пропуснат rebuild.
+  const isLiveScheduledCountdown = t.status === 'open' && t.startMode === 'scheduled' && t.scheduledStartAt !== null
+  const isLiveFillCountdown = t.status === 'open' && t.startMode === 'fill' && t.fillExpiresAt !== null
 
   return `
     <section style="padding:0 4px;max-width:720px;margin:0 auto;">
@@ -1285,8 +1296,8 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         >
           <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:4px;">Старт</div>
           <div data-tournament-start-primary="1" style="font-size:13px;font-weight:800;color:#ffffff;">${escapeHtml(startInfo.primary)}</div>
-          ${startInfo.secondary !== null ? `<div data-tournament-start-secondary="1" style="margin-top:3px;font-size:11px;font-weight:700;color:#d4a520;">${escapeHtml(startInfo.secondary)}</div>` : `<div data-tournament-start-secondary="1" style="display:none;"></div>`}
-          ${startInfo.tertiary !== null ? `<div data-tournament-start-tertiary="1" style="margin-top:3px;font-size:11px;font-weight:700;color:#f87171;">${escapeHtml(startInfo.tertiary)}</div>` : `<div data-tournament-start-tertiary="1" style="display:none;"></div>`}
+          ${startInfo.secondary !== null ? `<div data-tournament-start-secondary="1"${isLiveScheduledCountdown ? ' data-lobby-live-text="1"' : ''} style="margin-top:3px;font-size:11px;font-weight:700;color:#d4a520;">${escapeHtml(startInfo.secondary)}</div>` : `<div data-tournament-start-secondary="1" style="display:none;"></div>`}
+          ${startInfo.tertiary !== null ? `<div data-tournament-start-tertiary="1"${isLiveFillCountdown ? ' data-lobby-live-text="1"' : ''} style="margin-top:3px;font-size:11px;font-weight:700;color:#f87171;">${escapeHtml(startInfo.tertiary)}</div>` : `<div data-tournament-start-tertiary="1" style="display:none;"></div>`}
         </div>
       </div>
 
@@ -1550,10 +1561,20 @@ function renderTournamentPartnerPickerPopup(state: LobbyScreenState, t: Tourname
       : friendsCandidates.length === 0
         ? `<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.55);font-size:13px;">Нямате приятели за показване.</div>`
         : friendsCandidates.map((candidate) => renderPartnerCandidateRow(candidate, state)).join('')
+  // Ключ на СЪДЪРЖАНИЕТО на списъка (кои хора, в какъв ред) — renderLobbyScreen
+  // пренася scrollTop през root rebuild само ако ключът е същият, т.е.
+  // rebuild-ът е бил несвързан със самия списък (виж
+  // data-tournament-partner-friends-key там). Eligibility/busy не участват —
+  // disabled ред не е причина списъкът да скочи в началото.
+  const friendsListKey = state.tournamentPartnerPickerLoading
+    ? 'loading'
+    : state.tournamentPartnerPickerErrorText
+      ? 'error'
+      : `list-${hashTournamentPartnerFriendsKey(friendsCandidates.map((candidate) => candidate.profileId).join('\n'))}`
 
   return `
     <div data-tournament-partner-picker-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.72);display:flex;align-items:center;justify-content:center;padding:14px;">
-      <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:14px;width:100%;max-width:460px;padding:18px;box-sizing:border-box;max-height:92vh;overflow:auto;">
+      <div data-tournament-partner-picker-panel="1" style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:14px;width:100%;max-width:460px;padding:18px;box-sizing:border-box;max-height:92vh;overflow:auto;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
           <div style="font-size:16px;font-weight:900;color:#d4a520;">Избери партньор</div>
           <button type="button" data-tournament-partner-picker-close="1" ${state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="width:32px;height:32px;border:none;background:rgba(255,255,255,0.08);border-radius:7px;color:rgba(255,255,255,0.65);font-size:18px;font-weight:800;cursor:pointer;">x</button>
@@ -1563,10 +1584,21 @@ function renderTournamentPartnerPickerPopup(state: LobbyScreenState, t: Tourname
         <input type="search" data-tournament-partner-query="1" value="${escapeHtml(state.tournamentPartnerInviteQuery)}" placeholder="Търси във всички играчи" style="width:100%;height:38px;box-sizing:border-box;margin-bottom:12px;padding:0 11px;background:#1a1a24;border:1px solid rgba(255,255,255,0.16);border-radius:8px;color:#fff;font-size:13px;">
         <div data-tournament-partner-search-results="1">${renderTournamentPartnerSearchSection(state)}</div>
         <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:rgba(255,255,255,0.45);margin-bottom:6px;">Приятели</div>
-        <div style="display:grid;gap:8px;max-height:280px;overflow-y:auto;">${friendsBody}</div>
+        <div data-tournament-partner-friends-list="1" data-tournament-partner-friends-key="${friendsListKey}" style="display:grid;gap:8px;max-height:280px;overflow-y:auto;">${friendsBody}</div>
       </div>
     </div>
   `
+}
+
+// FNV-1a 32-bit — кратък, детерминиран ключ вместо целия списък profileId-та
+// в атрибута (приятелите могат да са стотици).
+function hashTournamentPartnerFriendsKey(value: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(36)
 }
 
 // §D/§E "auto-pair solo players + partner capacity" в task spec-а —

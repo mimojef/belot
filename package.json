@@ -104,6 +104,7 @@
     "check:tournament-round-transition-room-snapshot-hijack": "npx tsx scripts/checkTournamentRoundTransitionRoomSnapshotHijack.ts",
     "check:tournament-inter-round-auto-return": "npx tsx scripts/checkTournamentInterRoundAutoReturn.ts",
     "check:tournament-partner-search-typing": "npx tsx scripts/checkTournamentPartnerSearchTyping.ts",
+    "check:tournament-partner-picker-scroll": "npx tsx scripts/checkTournamentPartnerPickerScroll.ts",
     "check:registration-verification-typing-stability": "npx tsx scripts/checkRegistrationVerificationTypingStability.ts",
     "check:tournament-solo-auto-pair-detail-refresh": "npx tsx scripts/checkTournamentSoloAutoPairDetailRefresh.ts",
     "check:tournament-scheduled-start-edit-client": "npx tsx scripts/checkTournamentScheduledStartEditClient.ts",
