@@ -920,6 +920,7 @@ export type LobbyScreenState = {
     privateRoomId: string
     stake: MatchStake
     expiresAt: number
+    inviteKind?: 'partner'
   } | null
   privateRoomInviteQueue: Array<{ inviteId: string }>
   privateRoomInfoText: string | null
@@ -1465,7 +1466,7 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsLifecycleTabChange: (tab: 'waiting' | 'playing' | 'finished') => void
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
-  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs) => void
+  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean) => void
   /** Клик върху ред в списъка — само preview navigation, не изпраща join_private_room; реалният seat claim минава през конкретния "+" на waiting-room екрана. */
   onPrivateRoomJoin: (privateRoomId: string) => void
   /** Клик върху зает seat/avatar в списъка "Частни маси" — отваря съществуващия profile popup flow (не влиза в масата). */
@@ -11465,6 +11466,16 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
       background:rgba(255,255,255,0.04);
       color:rgba(255,255,255,0.25);
     }
+    div.prl-slot-plus.prl-slot-reserved {
+      border-color:rgba(167,139,250,0.45);
+      background:rgba(167,139,250,0.06);
+      color:rgba(196,181,253,0.85);
+      font-size:9px;
+      font-weight:800;
+      line-height:1.15;
+      text-align:center;
+      padding:0 2px;
+    }
   `
 
   const roomRowHtml = (room: PrivateRoomSnapshot): string => {
@@ -11511,6 +11522,11 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
         }
 
         return `<div class="prl-slot-occupant">${slotInnerHtml}</div>`
+      }
+
+      // "Покани партньор" — мястото до домакина се заема само чрез покана.
+      if (room.partnerReservation?.team === team && room.partnerReservation.slotIndex === slotIndex) {
+        return `<div class="prl-slot-plus prl-slot-reserved" data-private-room-list-slot-reserved="1" title="Място с покана">Място с<br>покана</div>`
       }
 
       // Свободен слот. Кликаем "+" само когато: не е собствената ми маса
@@ -11889,6 +11905,10 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
             <input type="checkbox" name="manualStart" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
             <span style="font-size:13px;color:rgba(255,255,255,0.7);">Ръчен старт от създателя <span style="color:rgba(255,255,255,0.4);">(маса 4/4 чака бутон „СТАРТ“)</span></span>
           </label>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
+            <input type="checkbox" name="invitePartner" data-private-room-invite-partner-checkbox="1" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
+            <span style="font-size:13px;color:rgba(255,255,255,0.7);">Покани партньор <span style="color:rgba(255,255,255,0.4);">(мястото до вас се пази за поканен приятел)</span></span>
+          </label>
           <div>
             <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Време за изчакване на играчи</div>
             <select name="waitMinutes" style="
@@ -11948,7 +11968,7 @@ function renderPrivateRoomInvitePopup(state: LobbyScreenState): string {
         box-shadow:0 12px 48px rgba(0,0,0,0.8);
       ">
         <div style="font-size:12px;font-weight:700;color:rgba(167,139,250,0.7);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:18px;">
-          Покана за частна маса
+          ${inv.inviteKind === 'partner' ? 'Покана за партньор' : 'Покана за частна маса'}
         </div>
 
         <div style="display:flex;flex-direction:column;align-items:center;gap:10px;margin-bottom:18px;">
@@ -11956,6 +11976,9 @@ function renderPrivateRoomInvitePopup(state: LobbyScreenState): string {
             ${avatarHtml}
           </div>
           <div style="font-size:17px;font-weight:800;color:#fff;">${inv.fromDisplayName}</div>
+          ${inv.inviteKind === 'partner'
+            ? `<div data-private-room-partner-invite-text="1" style="font-size:14px;font-weight:700;color:#e9d5ff;line-height:1.4;">${escapeHtml(inv.fromDisplayName)} ви кани за партньор в частна маса</div>`
+            : ''}
           <div style="font-size:13px;color:rgba(255,255,255,0.5);">Залог: <span style="color:#fde68a;font-weight:700;">${formatStake(inv.stake)} жълтици</span></div>
         </div>
 
@@ -17409,6 +17432,7 @@ export function renderLobbyScreen(
       if (!Number.isInteger(stake) || stake < 1) return
       const isLocked = (data.get('isLocked') ?? null) !== null
       const manualStart = (data.get('manualStart') ?? null) !== null
+      const invitePartner = (data.get('invitePartner') ?? null) !== null
       const rawWaitMinutes = Number(data.get('waitMinutes'))
       const waitMinutes: 5 | 10 | 15 | 30 = [5, 10, 15, 30].includes(rawWaitMinutes)
         ? (rawWaitMinutes as 5 | 10 | 15 | 30)
@@ -17417,7 +17441,7 @@ export function renderLobbyScreen(
       const humanTurnTimeoutMs: HumanTurnTimeoutMs = isHumanTurnTimeoutMs(rawHumanTurnTimeoutMs)
         ? rawHumanTurnTimeoutMs
         : DEFAULT_HUMAN_TURN_TIMEOUT_MS
-      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs)
+      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner)
     })
 
   // Отделен бутон от "+"-ите по-долу (различно DOM поддърво в roomRowHtml) —

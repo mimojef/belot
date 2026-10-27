@@ -445,6 +445,8 @@ import type {
   PrivateRoomHumanOccupant,
   PrivateRoomBotOccupant,
   PrivateRoomSlot,
+  PrivateRoomPartnerInvite,
+  PartnerInviteEndReason,
   RoomReadiness,
 } from './game/privateRoomsStore.js'
 import { mapPrivateRoomSlotToSeat } from './game/mapPrivateRoomSlotToSeat.js'
@@ -961,6 +963,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'leave_private_room':
     case 'invite_to_private_room':
     case 'cancel_private_room_invite':
+    case 'invite_private_room_partner':
+    case 'cancel_private_room_partner_invite':
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
     case 'request_svara_tables_list':
@@ -4876,7 +4880,12 @@ const activeRoomRuntime =
     roomShadowSynchronizer: roomShadowNotificationTarget,
   })
 
-function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
+// viewerProfileId — получателят на snapshot-а. Детайлите на партньорската
+// покана (кого е поканил домакинът) отиват само при собственика на
+// резервацията; lobby списъкът и останалите членове виждат само invitePending.
+function buildPrivateRoomSnapshot(room: PrivateRoom, viewerProfileId: string | null = null): PrivateRoomSnapshot {
+  const reservation = room.partnerReservation
+  const partnerInvite = reservation?.invite ?? null
   return {
     id: room.id,
     kind: room.kind,
@@ -4912,11 +4921,28 @@ function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
     manualStart: room.manualStart,
     humanTurnTimeoutMs: room.humanTurnTimeoutMs,
     canManualStart: room.manualStart && room.slots.every((s) => s.occupant !== null),
+    partnerReservation:
+      reservation === null
+        ? null
+        : {
+            team: reservation.team,
+            slotIndex: reservation.slotIndex,
+            invitePending: partnerInvite !== null,
+            invite:
+              partnerInvite !== null && viewerProfileId !== null && viewerProfileId === reservation.ownerProfileId
+                ? {
+                    inviteId: partnerInvite.inviteId,
+                    toProfileId: partnerInvite.toProfileId,
+                    toDisplayName: partnerInvite.toDisplayName,
+                    expiresAt: partnerInvite.expiresAt,
+                  }
+                : null,
+          },
   }
 }
 
 function broadcastPrivateRoomsListToLobbyConnections(): void {
-  const snapshots = privateRoomsStore.listRooms().map(buildPrivateRoomSnapshot)
+  const snapshots = privateRoomsStore.listRooms().map((room) => buildPrivateRoomSnapshot(room))
 
   for (const conn of Object.values(serverState.connections)) {
     if (conn.status !== 'connected' || conn.currentRoomId !== null) {
@@ -5143,11 +5169,192 @@ function broadcastPrivateRoomCreatedNotice(input: {
 
 function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
   const snapshot = buildPrivateRoomSnapshot(room)
+  const ownerProfileId = room.partnerReservation?.ownerProfileId ?? null
+  const ownerSnapshot = ownerProfileId !== null ? buildPrivateRoomSnapshot(room, ownerProfileId) : snapshot
   for (const slot of room.slots) {
     if (slot.occupant?.kind === 'human') {
-      safeSendToConnection(slot.occupant.connectionId, { type: 'private_room_updated', room: snapshot })
+      safeSendToConnection(slot.occupant.connectionId, {
+        type: 'private_room_updated',
+        room: ownerProfileId !== null && slot.occupant.profileId === ownerProfileId ? ownerSnapshot : snapshot,
+      })
     }
   }
+}
+
+function buildPrivateRoomPartnerInviteReceivedMessage(room: PrivateRoom, invite: PrivateRoomPartnerInvite) {
+  return {
+    type: 'private_room_invite_received' as const,
+    inviteId: invite.inviteId,
+    fromProfileId: invite.fromProfileId,
+    fromDisplayName: invite.fromDisplayName,
+    fromAvatarUrl: playerProgressStore.getPublicProfile(invite.fromProfileId)?.avatarUrl ?? null,
+    privateRoomId: room.id,
+    stake: room.stake,
+    expiresAt: invite.expiresAt,
+    inviteKind: 'partner' as const,
+  }
+}
+
+// "Играе" за поканата за партньор — същият сигнал като isInGame в
+// /api/friends (currentRoomId), плюс активна Белот/Ludo игра и Свара маса,
+// които така или иначе биха блокирали приемането.
+function isProfileBusyForPrivateRoomPartnerInvite(profileId: string): boolean {
+  if (findProfileInGameSession(profileId) !== null || isProfileInActiveGame(profileId)) return true
+  if (findActiveLudoCommitment(profileId)?.kind === 'active_match') return true
+  if (svaraLobby.findCommitment(profileId) !== null) return true
+  return Object.values(serverState.connections).some(
+    (c) => c.profileId === profileId && c.status === 'connected' && c.currentRoomId != null,
+  )
+}
+
+function isProfileConnected(profileId: string): boolean {
+  return Object.values(serverState.connections).some((c) => c.profileId === profileId && c.status === 'connected')
+}
+
+// Отговор на поканения (Приеми/Откажи) на партньорска покана. Всеки опит за
+// приемане от правилния профил приключва поканата — или със сядане, или с
+// анулиране (домакинът е известен и бутонът му се активира отново), за да
+// не остане домакинът да чака 60 сек. покана, която вече не може да успее.
+// Жълтици НЕ се пипат тук: checkPrivateRoomStakeEligibility само проверява
+// баланса (както join_private_room), таксата се взема единствено в
+// handlePrivateRoomReady при реалния старт на мача.
+function handlePrivateRoomPartnerInviteResponse(connectionId: ConnectionId, inviteId: string, accept: boolean): void {
+  const profileId = getConnectionById(serverState, connectionId)?.profileId ?? null
+  if (profileId === null) {
+    safeSendToConnection(connectionId, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+    return
+  }
+
+  const found = privateRoomsStore.findPartnerInvite(inviteId)
+  if (found === null || found.invite.toProfileId !== profileId) {
+    safeSendToConnection(connectionId, {
+      type: 'error',
+      message: 'Поканата не съществува или е изтекла.',
+      code: 'private_room_partner_invite_invalid',
+    })
+    return
+  }
+
+  // Останалите табове/устройства на поканения също махат известието.
+  function dismissInviteForInvitee(): void {
+    sendToOpenProfileConnections(profileId!, { type: 'private_room_invite_cancelled', inviteId })
+  }
+
+  if (!accept) {
+    const declineResult = privateRoomsStore.declinePartnerInvite({ inviteId, profileId })
+    if (!declineResult.ok) {
+      safeSendToConnection(connectionId, { type: 'error', message: declineResult.message, code: declineResult.code })
+      return
+    }
+    dismissInviteForInvitee()
+    sendToOpenProfileConnections(declineResult.invite.fromProfileId, {
+      type: 'private_room_partner_invite_status',
+      status: 'declined',
+      toDisplayName: declineResult.invite.toDisplayName,
+      message: `${declineResult.invite.toDisplayName} отказа твоята покана за партньор.`,
+    })
+    sendPrivateRoomUpdateToMembers(declineResult.room)
+    return
+  }
+
+  function abandonInvite(): void {
+    const abandoned = privateRoomsStore.declinePartnerInvite({ inviteId, profileId: profileId! })
+    if (!abandoned.ok) return
+    dismissInviteForInvitee()
+    notifyPrivateRoomPartnerInviteUnavailable(abandoned.invite)
+    sendPrivateRoomUpdateToMembers(abandoned.room)
+  }
+
+  if (findProfileInGameSession(profileId) !== null) {
+    abandonInvite()
+    sendSessionInGameIfNeeded(connectionId, profileId)
+    return
+  }
+
+  const ludoCommitment = findActiveLudoCommitment(profileId)
+  if (ludoCommitment !== null) {
+    abandonInvite()
+    sendCrossGameCommitmentBlockedIfNeeded(connectionId, ludoCommitment)
+    return
+  }
+
+  if (findActiveBelotCommitment(profileId)?.kind === 'matchmaking') {
+    abandonInvite()
+    safeSendToConnection(connectionId, {
+      type: 'error',
+      message: 'Първо прекратете търсенето на игра.',
+      code: 'private_room_partner_unavailable',
+    })
+    return
+  }
+
+  if (pendingProfileModerationStore.getPending(profileId) !== null) {
+    abandonInvite()
+    safeSendToConnection(connectionId, { type: 'error', message: 'Профилът временно не може да влезе в нова игра.' })
+    return
+  }
+
+  const publicProfile = playerProgressStore.getPublicProfile(profileId)
+  if (publicProfile === null) {
+    abandonInvite()
+    safeSendToConnection(connectionId, { type: 'error', message: 'Профилът не беше намерен.' })
+    return
+  }
+
+  const eligibility = checkPrivateRoomStakeEligibility(profileId, publicProfile.level, found.room.stake)
+  if (!eligibility.ok) {
+    abandonInvite()
+    safeSendToConnection(connectionId, { type: 'error', message: eligibility.message, code: eligibility.code })
+    return
+  }
+
+  const acceptResult = privateRoomsStore.acceptPartnerInvite({
+    inviteId,
+    connectionId,
+    profileId,
+    displayName: publicProfile.displayName,
+    avatarUrl: publicProfile.avatarUrl,
+    level: publicProfile.level,
+    rankTitle: publicProfile.rankTitle,
+    isBlockedWith: (a, b) => blockStore.isBlocked(a, b),
+  })
+
+  if (!acceptResult.ok) {
+    safeSendToConnection(connectionId, { type: 'error', message: acceptResult.message, code: acceptResult.code })
+    if (acceptResult.inviteConsumed && acceptResult.invite !== undefined && acceptResult.room !== undefined) {
+      dismissInviteForInvitee()
+      notifyPrivateRoomPartnerInviteUnavailable(acceptResult.invite)
+      sendPrivateRoomUpdateToMembers(acceptResult.room)
+    }
+    return
+  }
+
+  endBelotSpectatingForProfile(profileId, 'game_commitment')
+  activityCounters.incrementRooms('privateRoomJoin')
+  dismissInviteForInvitee()
+  sendToOpenProfileConnections(acceptResult.invite.fromProfileId, {
+    type: 'private_room_invite_accepted',
+    toDisplayName: publicProfile.displayName,
+  })
+
+  // readyToStart → handlePrivateRoomReady вече е изпратил private_room_full.
+  if (!acceptResult.readyToStart) {
+    sendPrivateRoomUpdateToMembers(acceptResult.room)
+    if (acceptResult.readiness && !acceptResult.readiness.ready) {
+      broadcastPrivateRoomNotReadyInfo(acceptResult.room, acceptResult.readiness)
+    }
+  }
+}
+
+// Причината (баланс, ниво, блок...) остава само при поканения — домакинът
+// научава единствено, че мястото пак е свободно за нова покана.
+function notifyPrivateRoomPartnerInviteUnavailable(invite: PrivateRoomPartnerInvite): void {
+  sendToOpenProfileConnections(invite.fromProfileId, {
+    type: 'private_room_partner_invite_status',
+    status: 'unavailable',
+    toDisplayName: invite.toDisplayName,
+    message: `${invite.toDisplayName} не може да приеме поканата. Можете да поканите друг.`,
+  })
 }
 
 // Стаята стана 4/4, но evaluateRoomReadiness я отхвърли (блокирано
@@ -5373,8 +5580,18 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
   }
 }
 
+// Партньорската покана на маса, която спира да съществува (изтекла/затворена)
+// — поканеният получава private_room_invite_cancelled, за да изчезне
+// известието му. Таймерът ѝ вече е изчистен от privateRoomsStore.
+function cancelPartnerInviteOfRemovedPrivateRoom(room: PrivateRoom): void {
+  const invite = room.partnerReservation?.invite ?? null
+  if (invite === null) return
+  sendToOpenProfileConnections(invite.toProfileId, { type: 'private_room_invite_cancelled', inviteId: invite.inviteId })
+}
+
 function handlePrivateRoomExpired(room: PrivateRoom): void {
   privateRoomChatStore.clearRoom(room.id)
+  cancelPartnerInviteOfRemovedPrivateRoom(room)
   for (const invite of room.pendingInvites) {
     cancelPrivateRoomInviteTimer(invite.inviteId)
     const inviteeConn = Object.values(serverState.connections).find(
@@ -5441,6 +5658,7 @@ function schedulePrivateRoomInviteExpiry(
 
 function handlePrivateRoomClosed(room: PrivateRoom): void {
   privateRoomChatStore.clearRoom(room.id)
+  cancelPartnerInviteOfRemovedPrivateRoom(room)
   for (const invite of room.pendingInvites) {
     cancelPrivateRoomInviteTimer(invite.inviteId)
     const inviteeConn = Object.values(serverState.connections).find(
@@ -5484,8 +5702,31 @@ function handlePrivateRoomMemberKicked(room: PrivateRoom, occupant: PrivateRoomH
 
 const privateRoomChatStore = createPrivateRoomChatStore()
 
+// Поканата за партньор приключи без отговор (60 сек изтичане) или
+// собственикът на резервацията напусна масата.
+function handlePrivateRoomPartnerInviteEnded(
+  room: PrivateRoom,
+  invite: PrivateRoomPartnerInvite,
+  reason: PartnerInviteEndReason,
+): void {
+  if (isServerShuttingDown) return
+  if (reason === 'expired') {
+    sendToOpenProfileConnections(invite.toProfileId, { type: 'private_room_invite_expired', inviteId: invite.inviteId })
+    sendToOpenProfileConnections(invite.fromProfileId, {
+      type: 'private_room_partner_invite_status',
+      status: 'expired',
+      toDisplayName: invite.toDisplayName,
+      message: `Поканата до ${invite.toDisplayName} изтече. Можете да поканите отново.`,
+    })
+    sendPrivateRoomUpdateToMembers(room)
+    return
+  }
+  sendToOpenProfileConnections(invite.toProfileId, { type: 'private_room_invite_cancelled', inviteId: invite.inviteId })
+}
+
 const privateRoomsStore = createPrivateRoomsStore({
   onRoomsChanged: () => broadcastPrivateRoomsListToLobbyConnections(),
+  onPartnerInviteEnded: (room, invite, reason) => handlePrivateRoomPartnerInviteEnded(room, invite, reason),
   onRoomReady: (room) => handlePrivateRoomReady(room),
   onRoomExpired: (room) => handlePrivateRoomExpired(room),
   onRoomClosed: (room) => handlePrivateRoomClosed(room),
@@ -25712,11 +25953,16 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           if (reconnected !== null) {
             safeSendToConnection(connection.id, {
               type: 'private_room_updated',
-              room: buildPrivateRoomSnapshot(reconnected),
+              room: buildPrivateRoomSnapshot(reconnected, latestConnection.profileId),
             })
           }
+          // Refresh/reconnect на поканения — висящата партньорска покана се
+          // доставя отново (клиентът дедупликира по inviteId).
+          for (const { room: invitingRoom, invite } of privateRoomsStore.findPartnerInvitesForProfile(latestConnection.profileId)) {
+            safeSendToConnection(connection.id, buildPrivateRoomPartnerInviteReceivedMessage(invitingRoom, invite))
+          }
         }
-        const snapshots = privateRoomsStore.listRooms().map(buildPrivateRoomSnapshot)
+        const snapshots = privateRoomsStore.listRooms().map((room) => buildPrivateRoomSnapshot(room))
         safeSendToConnection(connection.id, { type: 'private_rooms_list', rooms: snapshots })
         return
       }
@@ -26365,6 +26611,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           waitMinutes: message.waitMinutes,
           manualStart: message.manualStart ?? false,
           humanTurnTimeoutMs: message.humanTurnTimeoutMs,
+          invitePartner: message.invitePartner === true,
         })
 
         if (!createResult.ok) {
@@ -26376,7 +26623,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
 
         safeSendToConnection(connection.id, {
           type: 'private_room_updated',
-          room: buildPrivateRoomSnapshot(createResult.room),
+          room: buildPrivateRoomSnapshot(createResult.room, latestConnection.profileId),
         })
 
         broadcastPrivateRoomCreatedNotice({
@@ -26884,6 +27131,103 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
 
         const updatedRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
         if (updatedRoom) sendPrivateRoomUpdateToMembers(updatedRoom)
+        return
+      }
+
+      if (message.type === 'invite_private_room_partner') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        const hostProfileId = latestConnection.profileId
+        const toProfile = playerProgressStore.getPublicProfile(message.toProfileId)
+        function rejectPartnerInvite(errorMessage: string): void {
+          safeSendToConnection(connection.id, { type: 'error', message: errorMessage, code: 'private_room_partner_unavailable' })
+        }
+
+        if (toProfile === null || toProfile.profileId === null) {
+          rejectPartnerInvite('Играчът не е намерен.')
+          return
+        }
+        if (!friendshipStore.listForProfile(hostProfileId).friends.some((f) => f.profile.profileId === message.toProfileId)) {
+          rejectPartnerInvite('Можете да поканите само приятел.')
+          return
+        }
+        if (blockStore.isBlocked(hostProfileId, message.toProfileId) || blockStore.isBlocked(message.toProfileId, hostProfileId)) {
+          rejectPartnerInvite(`Не можете да поканите ${toProfile.displayName}.`)
+          return
+        }
+        if (!isProfileConnected(message.toProfileId)) {
+          rejectPartnerInvite(`${toProfile.displayName} в момента е офлайн.`)
+          return
+        }
+        if (isProfileBusyForPrivateRoomPartnerInvite(message.toProfileId)) {
+          rejectPartnerInvite(`${toProfile.displayName} в момента играе.`)
+          return
+        }
+        // Същите правила за допустимост като join/accept
+        // (checkPrivateRoomStakeEligibility: активен залог → ниво → баланс),
+        // само че за поканения. Нищо не се взема и не се блокира — таксата
+        // остава единствено в handlePrivateRoomReady. Приемането и стартът
+        // проверяват наново (ниво/баланс могат да се променят междувременно).
+        const hostPrivateRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
+        if (hostPrivateRoom !== null) {
+          const eligibility = checkPrivateRoomStakeEligibility(message.toProfileId, toProfile.level, hostPrivateRoom.stake)
+          if (!eligibility.ok) {
+            safeSendToConnection(connection.id, eligibility.code === 'private_room_level_required'
+              ? {
+                  type: 'error',
+                  message: `${toProfile.displayName} не може да играе на тази маса поради недостатъчно ниво.`,
+                  code: 'private_room_partner_level_required',
+                }
+              : eligibility.code === 'private_room_insufficient_balance'
+                ? {
+                    type: 'error',
+                    message: `${toProfile.displayName} не може да играе на тази маса поради липса на достатъчно жълтици.`,
+                    code: 'private_room_partner_insufficient_balance',
+                  }
+                : { type: 'error', message: eligibility.message, code: eligibility.code })
+            return
+          }
+        }
+
+        const inviteResult = privateRoomsStore.invitePartner({
+          senderConnectionId: connection.id,
+          toProfileId: message.toProfileId,
+          toDisplayName: toProfile.displayName,
+        })
+        if (!inviteResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: inviteResult.message, code: inviteResult.code })
+          return
+        }
+
+        sendToOpenProfileConnections(
+          message.toProfileId,
+          buildPrivateRoomPartnerInviteReceivedMessage(inviteResult.room, inviteResult.invite),
+        )
+        sendPrivateRoomUpdateToMembers(inviteResult.room)
+        return
+      }
+
+      if (message.type === 'cancel_private_room_partner_invite') {
+        const cancelResult = privateRoomsStore.cancelPartnerInvite(connection.id)
+        if (!cancelResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: cancelResult.message, code: cancelResult.code })
+          return
+        }
+        sendToOpenProfileConnections(cancelResult.invite.toProfileId, {
+          type: 'private_room_invite_cancelled',
+          inviteId: cancelResult.invite.inviteId,
+        })
+        sendPrivateRoomUpdateToMembers(cancelResult.room)
+        return
+      }
+
+      if (message.type === 'respond_private_room_invite' && privateRoomsStore.findPartnerInvite(message.inviteId) !== null) {
+        handlePrivateRoomPartnerInviteResponse(connection.id, message.inviteId, message.accept)
         return
       }
 

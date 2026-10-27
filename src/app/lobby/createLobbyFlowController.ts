@@ -22,7 +22,12 @@ import {
   formatPrivateRoomCountdown,
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
-import type { PrivateRoomInviteEligibleFriend } from './privateRoomPopupMarkup'
+import {
+  matchesPrivateRoomPartnerQuery,
+  normalizePrivateRoomPartnerQuery,
+  type PrivateRoomInviteEligibleFriend,
+  type PrivateRoomPartnerCandidate,
+} from './privateRoomPopupMarkup'
 import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment, renderTournamentPartnerSearchSection, isoToDatetimeLocalValue } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
@@ -926,12 +931,14 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomsClose?: () => void
   /** "Играещи"/"Приключили" табове — извиква се веднъж при first-open на всеки от двата (lazy load, не при "Чакащи"). */
   onPrivateGamesOpen?: () => void
-  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs) => void
+  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean) => void
   onPrivateRoomJoinSlot?: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   onPrivateRoomLeave?: () => void
   onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   onCancelPrivateRoomInvite?: (inviteId: string) => void
   onPrivateRoomInviteRespond?: (inviteId: string, accept: boolean) => void
+  onPrivateRoomPartnerInvite?: (toProfileId: string) => void
+  onPrivateRoomPartnerInviteCancel?: () => void
   onPrivateRoomAddBot?: (team: Team) => void
   onPrivateRoomRemoveBot?: (team: Team) => void
   onPrivateRoomStart?: () => void
@@ -2295,6 +2302,7 @@ type InternalLobbyFlowState = {
     privateRoomId: string
     stake: MatchStake
     expiresAt: number
+    inviteKind?: 'partner'
   } | null
   privateRoomInviteQueue: Array<{
     inviteId: string
@@ -2304,6 +2312,7 @@ type InternalLobbyFlowState = {
     privateRoomId: string
     stake: MatchStake
     expiresAt: number
+    inviteKind?: 'partner'
   }>
   privateRoomInfoText: string | null
   privateRoomWaitingChatMessages: PrivateRoomChatMessageSnapshot[]
@@ -2352,6 +2361,16 @@ type InternalLobbyFlowState = {
   // всяка смяна на стаята (виж isNewRoom/leave/expired/closed handler-ите).
   // Сървърът си остава единствен authority срещу реален duplicate spam.
   privateRoomInvitedProfileIds: Set<string>
+  // "Покани партньор" — picker-ът и текстът в търсачката са чисто UI state;
+  // поканата/резервацията идват от сървъра (myPrivateRoom.partnerReservation).
+  privateRoomPartnerPickerOpen: boolean
+  privateRoomPartnerQuery: string
+  // От клика "Покани" до следващия private_room_updated/error — блокира
+  // повторно изпращане, докато сървърът не потвърди "Поканихте Х".
+  privateRoomPartnerInviteInFlight: boolean
+  // Сървърът отказа поканата (приятелят няма жълтици/ниво за масата) — текстът
+  // идва от сървъра; ОК затваря, резервацията остава непроменена.
+  privateRoomPartnerEligibilityPopupText: string | null
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -3072,6 +3091,10 @@ function createInitialState(): InternalLobbyFlowState {
     privateRoomConflictPromptVariant: 'generic',
     inviteFriendsPopupOpen: false,
     privateRoomInvitedProfileIds: new Set(),
+    privateRoomPartnerPickerOpen: false,
+    privateRoomPartnerQuery: '',
+    privateRoomPartnerInviteInFlight: false,
+    privateRoomPartnerEligibilityPopupText: null,
     blockedPlayersPopupOpen: false,
     blockedPlayers: null,
     blockedPlayersLoading: false,
@@ -7343,7 +7366,7 @@ export function createLobbyFlowController(
         state.privateRoomsCreatePopupOpen = false
         render()
       },
-      onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs) => {
+      onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner) => {
         if (state.myPrivateRoom !== null) {
           state.privateRoomsCreatePopupOpen = false
           openPrivateRoomConflictPrompt()
@@ -7376,7 +7399,7 @@ export function createLobbyFlowController(
 
         state.privateRoomsCreatePopupOpen = false
         state.privateRoomJoinInFlight = true
-        options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs)
+        options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner)
       },
       onPrivateRoomJoin: handlePrivateRoomJoin,
       onPrivateRoomMemberClick: (profileId, displayName) => {
@@ -7427,6 +7450,11 @@ export function createLobbyFlowController(
         if (state.myPrivateRoom !== null) {
           openPrivateRoomConflictPrompt()
           return
+        }
+        // Партньорската покана сяда директно (сървърът праща private_room_updated)
+        // — същият "explicit join" флаг като create/join, за да се отвори чакалнята.
+        if (state.privateRoomInvite?.inviteId === inviteId && state.privateRoomInvite.inviteKind === 'partner') {
+          state.privateRoomJoinInFlight = true
         }
         state.privateRoomInvite = state.privateRoomInviteQueue[0] ?? null
         state.privateRoomInviteQueue = state.privateRoomInviteQueue.slice(1)
@@ -18833,6 +18861,18 @@ export function createLobbyFlowController(
     const caretEnd = previousInput?.selectionEnd ?? null
     const selectionDirection = previousInput?.selectionDirection ?? null
 
+    // "Покани партньор" picker-ът живее в същия innerHTML и всеки render()
+    // (чат, snapshot, брояч...) го пресъздава. Скролът на списъка (и на
+    // самия panel на нисък екран) се пренася само при същия ключ на
+    // съдържанието — ново отваряне/зареждане започва отгоре.
+    const previousPartnerList = options.root.querySelector<HTMLElement>('[data-private-room-partner-list="1"]')
+    const partnerListKeyBefore = previousPartnerList?.getAttribute('data-private-room-partner-list-key') ?? null
+    const partnerListScrollTop = previousPartnerList?.scrollTop ?? 0
+    const partnerPanelScrollTop = options.root.querySelector<HTMLElement>('[data-private-room-partner-picker-panel="1"]')?.scrollTop ?? 0
+    const previousPartnerSearch = options.root.querySelector<HTMLInputElement>('[data-private-room-partner-search="1"]')
+    const wasPartnerSearchFocused = previousPartnerSearch !== null && document.activeElement === previousPartnerSearch
+    const partnerSearchCaret = previousPartnerSearch?.selectionStart ?? null
+
     const previousScroll = options.root.querySelector<HTMLElement>('[data-private-waiting-chat-scroll="1"]')
     const wasNearBottom = previousScroll === null
       ? true
@@ -18864,7 +18904,29 @@ export function createLobbyFlowController(
       chatErrorText: state.privateRoomWaitingChatErrorText,
       infoText: state.privateRoomInfoText,
       expiresAt: room.expiresAt,
+      partnerReservation: room.partnerReservation ?? null,
+      partnerPickerOpen: state.privateRoomPartnerPickerOpen,
+      partnerCandidates: state.privateRoomPartnerPickerOpen ? resolvePrivateRoomPartnerCandidates() : null,
+      partnerQuery: state.privateRoomPartnerQuery,
+      partnerInviteInFlight: state.privateRoomPartnerInviteInFlight,
+      partnerEligibilityPopupText: state.privateRoomPartnerEligibilityPopupText,
     })
+
+    if (partnerListKeyBefore !== null) {
+      const partnerListAfter = options.root.querySelector<HTMLElement>('[data-private-room-partner-list="1"]')
+      if (partnerListAfter !== null && partnerListAfter.getAttribute('data-private-room-partner-list-key') === partnerListKeyBefore) {
+        partnerListAfter.scrollTop = partnerListScrollTop
+        const partnerPanelAfter = options.root.querySelector<HTMLElement>('[data-private-room-partner-picker-panel="1"]')
+        if (partnerPanelAfter !== null) partnerPanelAfter.scrollTop = partnerPanelScrollTop
+      }
+    }
+    if (wasPartnerSearchFocused) {
+      const partnerSearchAfter = options.root.querySelector<HTMLInputElement>('[data-private-room-partner-search="1"]')
+      if (partnerSearchAfter !== null) {
+        partnerSearchAfter.focus({ preventScroll: true })
+        if (partnerSearchCaret !== null) partnerSearchAfter.setSelectionRange(partnerSearchCaret, partnerSearchCaret)
+      }
+    }
 
     startPrivateRoomCountdownLoop(room.id, room.expiresAt)
 
@@ -18915,6 +18977,72 @@ export function createLobbyFlowController(
         render()
       })
     })
+
+    // ─── "Покани партньор" ───────────────────────────────────────────────
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-partner-invite-open="1"]')
+      ?.addEventListener('click', (event) => {
+        if ((event.currentTarget as HTMLButtonElement).disabled) return
+        state.privateRoomPartnerPickerOpen = true
+        state.privateRoomPartnerQuery = ''
+        state.privateRoomInfoText = null
+        // Свеж онлайн/"играе" статус при всяко отваряне.
+        state.friendships = null
+        render()
+        void ensureFriendshipsLoaded()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-partner-picker-close="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomPartnerPickerOpen = false
+        render()
+      })
+
+    options.root.querySelector<HTMLElement>('[data-private-room-partner-picker-backdrop="1"]')
+      ?.addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) {
+          state.privateRoomPartnerPickerOpen = false
+          render()
+        }
+      })
+
+    // Филтрира в DOM-а без render() — фокусът, каретката и скролът остават.
+    const partnerSearchInput = options.root.querySelector<HTMLInputElement>('[data-private-room-partner-search="1"]')
+    partnerSearchInput?.addEventListener('input', () => {
+      state.privateRoomPartnerQuery = partnerSearchInput.value
+      const normalizedQuery = normalizePrivateRoomPartnerQuery(partnerSearchInput.value)
+      let anyVisible = false
+      options.root.querySelectorAll<HTMLElement>('[data-private-room-partner-row="1"]').forEach((row) => {
+        const visible = matchesPrivateRoomPartnerQuery(row.getAttribute('data-private-room-partner-name') ?? '', normalizedQuery)
+        row.hidden = !visible
+        if (visible) anyVisible = true
+      })
+      const noMatch = options.root.querySelector<HTMLElement>('[data-private-room-partner-no-match="1"]')
+      if (noMatch !== null) noMatch.hidden = anyVisible
+    })
+
+    options.root.querySelectorAll<HTMLButtonElement>('[data-private-room-partner-send]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const profileId = btn.getAttribute('data-private-room-partner-send')
+        if (!profileId || btn.disabled || state.privateRoomPartnerInviteInFlight) return
+        state.privateRoomPartnerInviteInFlight = true
+        state.privateRoomPartnerPickerOpen = false
+        state.privateRoomInfoText = null
+        options.onPrivateRoomPartnerInvite?.(profileId)
+        render()
+      })
+    })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-partner-eligibility-ok="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomPartnerEligibilityPopupText = null
+        render()
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-partner-invite-cancel="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomInfoText = null
+        options.onPrivateRoomPartnerInviteCancel?.()
+      })
 
     // "+" клик (само previewer-и получават enabled бутон — виж
     // renderSlotCard's disabled атрибут — но пазим guard и тук defensively).
@@ -21367,6 +21495,7 @@ export function createLobbyFlowController(
         if (state.currentScreen === 'private-room-waiting') {
           state.privateRoomBotActionLoadingTeam = null
           state.privateRoomStartInFlight = false
+          state.privateRoomPartnerInviteInFlight = false
         }
         state.privateRoomJoinSlotPopup = null
         if (message.code === 'private_room_creator_blocked_you') {
@@ -21380,6 +21509,11 @@ export function createLobbyFlowController(
           // Отделен X-only popup вместо generic info banner — виж
           // спецификацията за "Не можете да влезете в този отбор".
           state.privateRoomBlockedPopupText = message.message
+        } else if (
+          message.code === 'private_room_partner_insufficient_balance' ||
+          message.code === 'private_room_partner_level_required'
+        ) {
+          state.privateRoomPartnerEligibilityPopupText = message.message
         } else {
           state.privateRoomInfoText = message.message
         }
@@ -22443,6 +22577,14 @@ export function createLobbyFlowController(
       // (напр. race-loss "стаята вече не е 4/4") се разрешава именно чрез
       // fresh snapshot тук (виж §Race в task spec-а).
       state.privateRoomStartInFlight = false
+      state.privateRoomPartnerInviteInFlight = false
+      const partnerReservation = message.room.partnerReservation ?? null
+      const partnerSlotFree = partnerReservation !== null && message.room.slots.some(
+        (s) => s.team === partnerReservation.team && s.slotIndex === partnerReservation.slotIndex && s.occupant === null,
+      )
+      if (!partnerSlotFree || partnerReservation?.invitePending === true) {
+        state.privateRoomPartnerPickerOpen = false
+      }
       // Пази коя стая да покаже leave→preview fallback-ът (виж
       // private_room_left по-долу) — сетва се при всяко установяване на
       // членство, независимо от начина (list-row preview join,
@@ -22459,6 +22601,8 @@ export function createLobbyFlowController(
         state.privateRoomCreatorBlockedPopupOpen = false
         state.privateRoomBotActionLoadingTeam = null
         state.privateRoomInvitedProfileIds = new Set()
+        state.privateRoomPartnerPickerOpen = false
+        state.privateRoomPartnerQuery = ''
         // Avoid carrying a stale banner (e.g. "Домакинът затвори масата.")
         // from a previous room into a freshly (re)joined one.
         state.privateRoomInfoText = null
@@ -22528,6 +22672,11 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'private_room_invite_received') {
+      // Партньорската покана се доставя отново при reconnect/refresh
+      // (request_private_rooms_list) — не я дублираме в опашката.
+      const alreadyQueued = state.privateRoomInvite?.inviteId === message.inviteId
+        || state.privateRoomInviteQueue.some((i) => i.inviteId === message.inviteId)
+      if (alreadyQueued) return true
       const invite = {
         inviteId: message.inviteId,
         fromProfileId: message.fromProfileId,
@@ -22536,6 +22685,7 @@ export function createLobbyFlowController(
         privateRoomId: message.privateRoomId,
         stake: message.stake,
         expiresAt: message.expiresAt,
+        ...(message.inviteKind === 'partner' ? { inviteKind: 'partner' as const } : {}),
       }
       if (state.privateRoomInvite === null) {
         state.privateRoomInvite = invite
@@ -22580,6 +22730,13 @@ export function createLobbyFlowController(
 
     if (message.type === 'private_room_invite_declined') {
       state.privateRoomInfoText = `${message.toDisplayName} отказа поканата за частна игра.`
+      render()
+      return true
+    }
+
+    if (message.type === 'private_room_partner_invite_status') {
+      state.privateRoomPartnerInviteInFlight = false
+      state.privateRoomInfoText = message.message
       render()
       return true
     }
@@ -22706,6 +22863,10 @@ export function createLobbyFlowController(
     state.privateRoomBlockedPopupText = null
     state.privateRoomCreatorBlockedPopupOpen = false
     state.privateRoomBotActionLoadingTeam = null
+    state.privateRoomPartnerPickerOpen = false
+    state.privateRoomPartnerQuery = ''
+    state.privateRoomPartnerInviteInFlight = false
+    state.privateRoomPartnerEligibilityPopupText = null
   }
 
   // Reopens the SAME waiting room the user is already a member of — no new
@@ -22799,6 +22960,32 @@ export function createLobbyFlowController(
   // единствената сървърна проверка е isProfileInActiveGame (виж index.ts).
   // Затова тук НЕ филтрираме до online — offline приятели остават в списъка,
   // само с "Офлайн" индикация (informational, не gating).
+  // "Покани партньор" — всички приятели (без вече седналите), с наличност от
+  // /api/friends (isOnline/isInGame, зареждат се наново при всяко отваряне).
+  // Подредбата и филтърът по име са в privateRoomPopupMarkup.ts.
+  function resolvePrivateRoomPartnerCandidates(): PrivateRoomPartnerCandidate[] | null {
+    if (state.friendships === null) return null
+    if (state.myPrivateRoom === null) return []
+
+    const localProfileId = options.getAuthSession?.()?.profile.profileId ?? null
+    const seatedProfileIds = new Set(
+      state.myPrivateRoom.slots
+        .map((s) => s.occupant?.profileId)
+        .filter((id): id is string => id !== null && id !== undefined),
+    )
+
+    return state.friendships.friends
+      .filter((f) => f.profile.profileId !== null)
+      .filter((f) => f.profile.profileId !== localProfileId)
+      .filter((f) => !seatedProfileIds.has(f.profile.profileId as string))
+      .map((f) => ({
+        profileId: f.profile.profileId as string,
+        displayName: f.profile.displayName,
+        avatarUrl: f.profile.avatarUrl,
+        availability: f.isOnline !== true ? 'offline' as const : f.isInGame === true ? 'playing' as const : 'available' as const,
+      }))
+  }
+
   function resolveInviteEligibleFriends(): PrivateRoomInviteEligibleFriend[] | null {
     if (state.friendships === null) return null
     if (state.myPrivateRoom === null) return []

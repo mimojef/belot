@@ -985,6 +985,7 @@ export type ClientMessage =
       waitMinutes: 5 | 10 | 15 | 30
       manualStart?: boolean
       humanTurnTimeoutMs?: HumanTurnTimeoutMs
+      invitePartner?: boolean
       displayName?: string
     }
   | {
@@ -1004,6 +1005,13 @@ export type ClientMessage =
   | {
       type: 'cancel_private_room_invite'
       inviteId: string
+    }
+  | {
+      type: 'invite_private_room_partner'
+      toProfileId: string
+    }
+  | {
+      type: 'cancel_private_room_partner_invite'
     }
   | {
       type: 'respond_private_room_invite'
@@ -1455,6 +1463,16 @@ export type PrivateRoomSnapshot = {
   // "Време за реакция" (ms). Optional — стар сървър по време на deploy не го праща.
   humanTurnTimeoutMs?: number
   canManualStart: boolean
+  // "Покани партньор". Optional — стар сървър по време на deploy не го праща.
+  partnerReservation?: PrivateRoomPartnerReservationSnapshot | null
+}
+
+export type PrivateRoomPartnerReservationSnapshot = {
+  team: Team
+  slotIndex: 0 | 1
+  invitePending: boolean
+  // Само в snapshot-а към домакина (собственика на резервацията).
+  invite: { inviteId: string; toProfileId: string; toDisplayName: string; expiresAt: number } | null
 }
 
 export type RoomSeatSnapshot = {
@@ -1691,6 +1709,12 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_not_creator'
   | 'private_room_not_ready_to_start'
   | 'private_room_kick_target_invalid'
+  | 'private_room_slot_reserved'
+  | 'private_room_partner_invite_pending'
+  | 'private_room_partner_invite_invalid'
+  | 'private_room_partner_unavailable'
+  | 'private_room_partner_insufficient_balance'
+  | 'private_room_partner_level_required'
 
 export type ErrorMessage = {
   type: 'error'
@@ -2406,6 +2430,15 @@ export type PrivateRoomInviteReceivedMessage = {
   privateRoomId: string
   stake: MatchStake
   expiresAt: number
+  // 'partner' = "Покани партньор" — приемането сяда директно на резервираното място.
+  inviteKind?: 'partner'
+}
+
+export type PrivateRoomPartnerInviteStatusMessage = {
+  type: 'private_room_partner_invite_status'
+  status: 'declined' | 'expired' | 'unavailable'
+  toDisplayName: string
+  message: string
 }
 
 export type PrivateRoomInviteAcceptedMessage = {
@@ -3359,6 +3392,7 @@ export type ServerMessage =
   | PrivateRoomInviteExpiredMessage
   | PrivateRoomInviteCancelledMessage
   | PrivateRoomFriendBusyMessage
+  | PrivateRoomPartnerInviteStatusMessage
   | PrivateRoomMemberLeftMessage
   | PrivateRoomClosedMessage
   | PrivateRoomKickedMessage
@@ -3596,12 +3630,14 @@ export type GameServerClient = {
   subscribeTournamentMatches: (tournamentId: string, token: string) => void
   unsubscribeTournamentMatches: (tournamentId: string) => void
   requestPrivateGamesList: () => void
-  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs) => void
+  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   leavePrivateRoom: () => void
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
   cancelPrivateRoomInvite: (inviteId: string) => void
   respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
+  invitePrivateRoomPartner: (toProfileId: string) => void
+  cancelPrivateRoomPartnerInvite: () => void
   addBotToPrivateRoomTeam: (team: Team) => void
   removeBotFromPrivateRoomTeam: (team: Team) => void
   startPrivateRoom: () => void
@@ -4067,8 +4103,8 @@ export function createGameServerClient(
     send({ type: 'request_private_games_list' })
   }
 
-  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs): void {
-    send({ type: 'create_private_room', stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs })
+  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean): void {
+    send({ type: 'create_private_room', stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner })
   }
 
   function joinPrivateRoomSlot(privateRoomId: string, team: Team, slotIndex: 0 | 1): void {
@@ -4089,6 +4125,14 @@ export function createGameServerClient(
 
   function respondPrivateRoomInvite(inviteId: string, accept: boolean): void {
     send({ type: 'respond_private_room_invite', inviteId, accept })
+  }
+
+  function invitePrivateRoomPartner(toProfileId: string): void {
+    send({ type: 'invite_private_room_partner', toProfileId })
+  }
+
+  function cancelPrivateRoomPartnerInvite(): void {
+    send({ type: 'cancel_private_room_partner_invite' })
   }
 
   function addBotToPrivateRoomTeam(team: Team): void {
@@ -4254,6 +4298,8 @@ export function createGameServerClient(
     inviteToPrivateRoom,
     cancelPrivateRoomInvite,
     respondPrivateRoomInvite,
+    invitePrivateRoomPartner,
+    cancelPrivateRoomPartnerInvite,
     addBotToPrivateRoomTeam,
     removeBotFromPrivateRoomTeam,
     startPrivateRoom,

@@ -56,6 +56,8 @@
     "check:private-room-bot-fill-feature-flag": "tsx scripts/checkPrivateRoomBotFillFeatureFlag.ts",
     "check:topics-personal-disabled-http": "tsx scripts/checkTopicsPersonalDisabledHttp.ts",
     "check:private-room-invite-authorization": "tsx scripts/checkPrivateRoomInviteAuthorization.ts",
+    "check:private-room-partner-invite": "tsx scripts/checkPrivateRoomPartnerInvite.ts",
+    "check:private-room-partner-invite-ws": "tsx scripts/checkPrivateRoomPartnerInviteWebSocket.ts --server-root=.",
     "check:private-room-bot-identity-uniqueness": "tsx scripts/checkPrivateRoomBotIdentityUniqueness.ts",
     "check:private-room-reconnect-slot-rebinding": "tsx scripts/checkPrivateRoomReconnectSlotRebinding.ts",
     "check:private-room-wait-time-selection": "tsx scripts/checkPrivateRoomWaitTimeSelection.ts",

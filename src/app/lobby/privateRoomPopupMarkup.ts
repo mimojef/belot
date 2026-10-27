@@ -199,7 +199,162 @@ export const PRIVATE_ROOM_POPUP_STYLES = `
     color:rgba(248,250,252,0.4);
     cursor:not-allowed;
   }
+
+  .prw-partner-picker-box {
+    overflow-y:auto;
+    overscroll-behavior:contain;
+  }
+
+  .prw-partner-search {
+    width:100%;
+    height:40px;
+    box-sizing:border-box;
+    padding:0 12px;
+    border-radius:8px;
+    border:1px solid rgba(255,255,255,0.16);
+    background:#141414;
+    color:#f8fafc;
+    /* 16px — iOS Safari не zoom-ва при focus. */
+    font-size:16px;
+    font-weight:600;
+    outline:none;
+  }
+
+  .prw-partner-list {
+    max-height:min(50vh, 380px);
+    overscroll-behavior:contain;
+  }
+
+  .prw-invite-row[hidden],
+  .prw-invite-empty[hidden] {
+    display:none;
+  }
 `
+
+// ─── "Покани партньор" picker ────────────────────────────────────────────
+// Същите редове/стилове като "Покани приятели" (prw-invite-*), но за едно
+// конкретно място: търсачка, подредба по наличност и само "свободни онлайн"
+// приятели могат да бъдат поканени. Сървърът остава authority (приятелство,
+// онлайн, "играе" се проверяват отново при invite_private_room_partner).
+
+export type PrivateRoomPartnerCandidate = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  availability: 'available' | 'playing' | 'offline'
+}
+
+const PARTNER_AVAILABILITY_RANK: Record<PrivateRoomPartnerCandidate['availability'], number> = {
+  available: 0,
+  playing: 1,
+  offline: 2,
+}
+
+// Свободни онлайн → онлайн играещи → офлайн; в рамките на група по име.
+export function sortPrivateRoomPartnerCandidates(candidates: PrivateRoomPartnerCandidate[]): PrivateRoomPartnerCandidate[] {
+  return [...candidates].sort(
+    (a, b) =>
+      PARTNER_AVAILABILITY_RANK[a.availability] - PARTNER_AVAILABILITY_RANK[b.availability] ||
+      a.displayName.localeCompare(b.displayName, 'bg'),
+  )
+}
+
+export function normalizePrivateRoomPartnerQuery(value: string): string {
+  return value.trim().toLocaleLowerCase('bg')
+}
+
+export function matchesPrivateRoomPartnerQuery(displayName: string, normalizedQuery: string): boolean {
+  return normalizedQuery === '' || displayName.toLocaleLowerCase('bg').includes(normalizedQuery)
+}
+
+// FNV-1a 32-bit — кратък ключ на СЪДЪРЖАНИЕТО на списъка (кои хора, в какъв
+// ред). Чакалнята пренася scrollTop през пълен re-render само при същия ключ.
+function hashPartnerListKey(value: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+export function renderPrivateRoomPartnerPickerPopup(params: {
+  isOpen: boolean
+  candidates: PrivateRoomPartnerCandidate[] | null
+  query: string
+  inviteInFlight: boolean
+}): string {
+  if (!params.isOpen) return ''
+
+  const normalizedQuery = normalizePrivateRoomPartnerQuery(params.query)
+  const candidates = params.candidates === null ? null : sortPrivateRoomPartnerCandidates(params.candidates)
+  const listKey = candidates === null
+    ? 'loading'
+    : `list-${hashPartnerListKey(candidates.map((c) => c.profileId).join('\n'))}`
+
+  let listHtml: string
+  if (candidates === null) {
+    listHtml = `<div class="prw-invite-empty">Зарежда...</div>`
+  } else if (candidates.length === 0) {
+    listHtml = `<div class="prw-invite-empty">Нямате приятели, които да поканите.</div>`
+  } else {
+    const anyVisible = candidates.some((c) => matchesPrivateRoomPartnerQuery(c.displayName, normalizedQuery))
+    listHtml = candidates.map((c) => {
+      const avatarHtml = c.avatarUrl
+        ? `<img src="${escapeHtml(c.avatarUrl)}" alt="" class="prw-invite-avatar-img">`
+        : `<div class="prw-invite-avatar-fallback">👤</div>`
+      const statusText = c.availability === 'playing' ? 'Играе' : c.availability === 'available' ? 'Онлайн' : 'Офлайн'
+      const statusClass = c.availability === 'playing'
+        ? 'prw-invite-status-busy'
+        : c.availability === 'available' ? 'prw-invite-status-online' : 'prw-invite-status-offline'
+      const canInvite = c.availability === 'available' && !params.inviteInFlight
+      return `
+        <div
+          class="prw-invite-row"
+          data-private-room-partner-row="1"
+          data-private-room-partner-name="${escapeHtml(c.displayName.toLocaleLowerCase('bg'))}"
+          ${matchesPrivateRoomPartnerQuery(c.displayName, normalizedQuery) ? '' : 'hidden'}
+        >
+          <div class="prw-invite-avatar">${avatarHtml}</div>
+          <div class="prw-invite-info">
+            <div class="prw-invite-name">${escapeHtml(c.displayName)}</div>
+            <div class="prw-invite-status ${statusClass}">${statusText}</div>
+          </div>
+          <button
+            type="button"
+            data-private-room-partner-send="${escapeHtml(c.profileId)}"
+            class="prw-invite-send-btn"
+            ${canInvite ? '' : 'disabled'}
+          >Покани</button>
+        </div>
+      `
+    }).join('') + `<div class="prw-invite-empty" data-private-room-partner-no-match="1" ${anyVisible ? 'hidden' : ''}>Няма приятел с това име.</div>`
+  }
+
+  return `
+    <div class="prw-popup-backdrop" data-private-room-partner-picker-backdrop="1">
+      <div class="prw-popup-box prw-invite-box prw-partner-picker-box" data-private-room-partner-picker-panel="1" role="dialog" aria-modal="true" aria-label="Покани партньор">
+        <button type="button" data-private-room-partner-picker-close="1" class="prw-popup-close-x" aria-label="Затвори">✕</button>
+        <div class="prw-popup-title">Покани партньор</div>
+        <div class="prw-popup-text">Изберете приятел за мястото до вас.</div>
+        <input
+          type="search"
+          data-private-room-partner-search="1"
+          class="prw-partner-search"
+          value="${escapeHtml(params.query)}"
+          placeholder="Търси приятел..."
+          autocomplete="off"
+          maxlength="64"
+        >
+        <div
+          class="prw-invite-list prw-partner-list"
+          data-private-room-partner-list="1"
+          data-private-room-partner-list-key="${listKey}"
+        >${listHtml}</div>
+      </div>
+    </div>
+  `
+}
 
 export function renderPrivateRoomJoinConfirmPopup(popup: { team: Team } | null): string {
   if (!popup) return ''
@@ -261,6 +416,25 @@ export function renderPrivateRoomCreatorBlockedPopup(isOpen: boolean): string {
         <div class="prw-popup-text">${PRIVATE_ROOM_CREATOR_BLOCKED_POPUP_LINES.map(escapeHtml).join('<br>')}</div>
         <div class="prw-popup-actions">
           <button type="button" data-private-room-creator-blocked-popup-ok="1" class="prw-confirm-yes">ОК</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+// "Покани партньор" — сървърът отказа поканата, защото приятелят не
+// отговаря на условията на масата: няма жълтици за входа
+// ('private_room_partner_insufficient_balance') или нужното ниво
+// ('private_room_partner_level_required'). Текстът идва от сървъра; ОК само
+// затваря — резервацията не се променя.
+export function renderPrivateRoomPartnerEligibilityPopup(text: string | null): string {
+  if (!text) return ''
+  return `
+    <div class="prw-popup-backdrop" data-private-room-partner-eligibility-popup="1">
+      <div class="prw-popup-box" role="alertdialog" aria-modal="true">
+        <div class="prw-popup-text" data-private-room-partner-eligibility-text="1">${escapeHtml(text)}</div>
+        <div class="prw-popup-actions">
+          <button type="button" data-private-room-partner-eligibility-ok="1" class="prw-confirm-yes">ОК</button>
         </div>
       </div>
     </div>

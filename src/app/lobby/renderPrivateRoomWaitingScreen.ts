@@ -1,4 +1,4 @@
-import type { MatchStake, Team } from '../network/createGameServerClient'
+import type { MatchStake, PrivateRoomPartnerReservationSnapshot, Team } from '../network/createGameServerClient'
 import {
   PRIVATE_ROOM_POPUP_STYLES,
   renderPrivateRoomBlockedPopup,
@@ -6,7 +6,10 @@ import {
   renderPrivateRoomInviteFriendsPopup,
   renderPrivateRoomJoinConfirmPopup,
   renderPrivateRoomKickConfirmPopup,
+  renderPrivateRoomPartnerEligibilityPopup,
+  renderPrivateRoomPartnerPickerPopup,
   type PrivateRoomInviteEligibleFriend,
+  type PrivateRoomPartnerCandidate,
 } from './privateRoomPopupMarkup'
 import { isBelotPrivateBotFillEnabled } from './privateRoomBotFillFeatureFlag'
 
@@ -75,6 +78,16 @@ export type RenderPrivateRoomWaitingScreenParams = {
    * в index.ts) — тук е само UX visibility. */
   isLocalHost: boolean
   startInFlight: boolean
+  /** "Покани партньор" — null/липсващо = масата е без резервирано място. */
+  partnerReservation?: PrivateRoomPartnerReservationSnapshot | null
+  partnerPickerOpen?: boolean
+  /** null = приятелите още се зареждат. */
+  partnerCandidates?: PrivateRoomPartnerCandidate[] | null
+  partnerQuery?: string
+  /** Поканата е изпратена, но сървърът още не е потвърдил — блокира повторен клик. */
+  partnerInviteInFlight?: boolean
+  /** Поканата е отказана — приятелят няма жълтици/ниво за масата. Прозорец с ОК. */
+  partnerEligibilityPopupText?: string | null
 }
 
 // Pure formatter — exported so it can be unit-tested and reused by the
@@ -159,16 +172,29 @@ type TeamBotControlState = {
   enabled: boolean
 }
 
+function isReservedSlot(
+  reservation: PrivateRoomPartnerReservationSnapshot | null,
+  slot: Pick<PrivateRoomWaitingSlotSnapshot, 'team' | 'slotIndex'>,
+): boolean {
+  return reservation !== null && reservation.team === slot.team && reservation.slotIndex === slot.slotIndex
+}
+
 function computeTeamBotControlState(
   slots: PrivateRoomWaitingSlotSnapshot[],
   team: Team,
   localTeam: Team | null,
+  reservation: PrivateRoomPartnerReservationSnapshot | null,
 ): TeamBotControlState {
   const [slotA, slotB] = getTeamSlots(slots, team)
   const occupants = [slotA.occupant, slotB.occupant]
   const humanCount = occupants.filter((o) => o !== null && !o.isBot).length
   const botCount = occupants.filter((o) => o !== null && o.isBot).length
   const isOwnTeam = localTeam === team
+  // Единственото свободно място е резервирано за поканен партньор — ботът
+  // не може да го заеме (сървърът също отказва, private_room_slot_reserved).
+  const onlyFreeSlotIsReserved = [slotA, slotB].some((s) => s.occupant === null)
+    && [slotA, slotB].every((s) => s.occupant !== null || isReservedSlot(reservation, s))
+  if (onlyFreeSlotIsReserved && botCount === 0) return { label: 'Запълни с бот', mode: 'fill', enabled: false }
 
   if (!isOwnTeam) {
     // Винаги видим, никога скрит — просто disabled за противниковия отбор /
@@ -184,14 +210,65 @@ function computeTeamBotControlState(
   return { label: 'Запълни с бот', mode: 'fill', enabled: false }
 }
 
+type PartnerSlotContext = {
+  reservation: PrivateRoomPartnerReservationSnapshot | null
+  inviteInFlight: boolean
+}
+
+// Резервираното място: домакинът вижда "Покани партньор" (или "Поканихте Х" +
+// "Отмени поканата"), всички останали — некликаемо "Място с покана".
+function renderReservedSlotCard(
+  reservation: PrivateRoomPartnerReservationSnapshot,
+  viewerRole: PrivateRoomWaitingViewerRole,
+  isLocalHost: boolean,
+  inviteInFlight: boolean,
+): string {
+  if (!(isLocalHost && viewerRole === 'member')) {
+    return `
+      <div class="prw-slot prw-slot-empty prw-slot-reserved" data-private-room-slot-reserved="1">
+        <span class="prw-slot-reserved-icon" aria-hidden="true">✉</span>
+        <span class="prw-slot-name-empty">Място с покана</span>
+      </div>
+    `
+  }
+
+  const invite = reservation.invite
+  if (invite !== null || reservation.invitePending) {
+    const invitedLabel = invite !== null ? `Поканихте ${escapeHtml(invite.toDisplayName)}` : 'Поканата е изпратена'
+    return `
+      <div class="prw-slot prw-slot-empty prw-slot-reserved prw-slot-reserved-host" data-private-room-slot-reserved="1">
+        <button type="button" class="prw-partner-invite-btn" data-private-room-partner-invited="1" disabled>${invitedLabel}</button>
+        <button type="button" class="prw-partner-cancel-btn" data-private-room-partner-invite-cancel="1">Отмени поканата</button>
+      </div>
+    `
+  }
+
+  return `
+    <div class="prw-slot prw-slot-empty prw-slot-reserved prw-slot-reserved-host" data-private-room-slot-reserved="1">
+      <span class="prw-slot-name-empty">Място с покана</span>
+      <button
+        type="button"
+        class="prw-partner-invite-btn"
+        data-private-room-partner-invite-open="1"
+        ${inviteInFlight ? 'disabled' : ''}
+      >${inviteInFlight ? '...' : 'Покани партньор'}</button>
+    </div>
+  `
+}
+
 function renderSlotCard(
   slot: PrivateRoomWaitingSlotSnapshot,
   localProfileId: string | null,
   viewerRole: PrivateRoomWaitingViewerRole,
   isLocalHost: boolean,
+  partner: PartnerSlotContext,
 ): string {
   const occupant = slot.occupant
   const slotKey = `${slot.team}:${slot.slotIndex}`
+
+  if (occupant === null && partner.reservation !== null && isReservedSlot(partner.reservation, slot)) {
+    return renderReservedSlotCard(partner.reservation, viewerRole, isLocalHost, partner.inviteInFlight)
+  }
 
   if (occupant === null) {
     const clickable = viewerRole === 'previewer'
@@ -299,9 +376,10 @@ function renderTeamColumn(
   localTeam: Team | null,
   botActionLoadingTeam: Team | null,
   isLocalHost: boolean,
+  partner: PartnerSlotContext,
 ): string {
   const [slotA, slotB] = getTeamSlots(slots, team)
-  const control = computeTeamBotControlState(slots, team, localTeam)
+  const control = computeTeamBotControlState(slots, team, localTeam, partner.reservation)
   const isLoading = botActionLoadingTeam === team
   const teamLabel = team === 'A' ? 'Отбор А' : 'Отбор Б'
   // При изключен flag редът изобщо не се рендира (без празно място), освен
@@ -312,8 +390,8 @@ function renderTeamColumn(
     <div class="prw-team">
       <div class="prw-team-header">${teamLabel}</div>
       <div class="prw-team-slots">
-        ${renderSlotCard(slotA, localProfileId, viewerRole, isLocalHost)}
-        ${renderSlotCard(slotB, localProfileId, viewerRole, isLocalHost)}
+        ${renderSlotCard(slotA, localProfileId, viewerRole, isLocalHost, partner)}
+        ${renderSlotCard(slotB, localProfileId, viewerRole, isLocalHost, partner)}
       </div>
       ${showBotRow ? `
       <div class="prw-bot-row">
@@ -348,6 +426,10 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
   const occupiedCount = params.slots.filter((s) => s.occupant !== null).length
   const localTeam = getLocalTeam(params.slots, params.localProfileId)
   const isMember = params.viewerRole === 'member'
+  const partner: PartnerSlotContext = {
+    reservation: params.partnerReservation ?? null,
+    inviteInFlight: params.partnerInviteInFlight === true,
+  }
 
   return `
     <section data-private-room-waiting-screen="1" class="prw-screen">
@@ -606,6 +688,66 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-style:italic;
           color:rgba(255,255,255,0.34);
           font-weight:600;
+        }
+
+        /* ─── "Покани партньор" — резервирано място ─────────────────────── */
+
+        .prw-slot-reserved {
+          cursor:default;
+          border-color:rgba(167,139,250,0.45);
+          background:rgba(167,139,250,0.06);
+          min-height:64px;
+        }
+
+        .prw-slot-reserved .prw-slot-name-empty {
+          color:rgba(196,181,253,0.85);
+          font-style:normal;
+          font-weight:800;
+        }
+
+        .prw-slot-reserved-icon {
+          font-size:18px;
+          line-height:1;
+          color:rgba(196,181,253,0.85);
+        }
+
+        .prw-slot-reserved-host {
+          gap:6px;
+          padding:8px;
+        }
+
+        .prw-partner-invite-btn,
+        .prw-partner-cancel-btn {
+          width:100%;
+          min-height:32px;
+          padding:4px 8px;
+          border-radius:8px;
+          font-family:inherit;
+          font-size:12px;
+          font-weight:900;
+          line-height:1.2;
+          cursor:pointer;
+          overflow:hidden;
+          text-overflow:ellipsis;
+          white-space:nowrap;
+        }
+
+        .prw-partner-invite-btn {
+          border:0;
+          background:linear-gradient(180deg, #c4b5fd 0%, #8b5cf6 100%);
+          color:#0f0a1e;
+        }
+
+        .prw-partner-invite-btn:disabled {
+          cursor:default;
+          background:rgba(167,139,250,0.16);
+          color:#e9d5ff;
+        }
+
+        .prw-partner-cancel-btn {
+          border:1px solid rgba(239,68,68,0.45);
+          background:rgba(239,68,68,0.10);
+          color:#fca5a5;
         }
 
         .prw-slot-avatar {
@@ -1001,6 +1143,18 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             font-size:10px;
           }
 
+          .prw-slot-reserved {
+            min-height:56px;
+          }
+
+          .prw-partner-invite-btn,
+          .prw-partner-cancel-btn {
+            min-height:30px;
+            font-size:10px;
+            padding:4px 6px;
+            white-space:normal;
+          }
+
           .prw-host-badge,
           .prw-bot-badge {
             display:inline-flex;
@@ -1089,9 +1243,9 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}
 
         <div class="prw-teams">
-          ${renderTeamColumn(params.slots, 'A', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost)}
+          ${renderTeamColumn(params.slots, 'A', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost, partner)}
           <div class="prw-team-divider" aria-hidden="true"></div>
-          ${renderTeamColumn(params.slots, 'B', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost)}
+          ${renderTeamColumn(params.slots, 'B', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost, partner)}
         </div>
 
         <div class="prw-chat-panel">
@@ -1121,6 +1275,13 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
       </div>
 
       ${renderPrivateRoomJoinConfirmPopup(params.joinSlotPopup)}
+
+      ${renderPrivateRoomPartnerPickerPopup({
+        isOpen: params.partnerPickerOpen === true && params.isLocalHost && partner.reservation !== null,
+        candidates: params.partnerCandidates ?? null,
+        query: params.partnerQuery ?? '',
+        inviteInFlight: partner.inviteInFlight,
+      })}
 
       ${renderPrivateRoomInviteFriendsPopup({
         isOpen: params.inviteFriendsPopupOpen,
@@ -1155,6 +1316,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
 
       ${renderPrivateRoomBlockedPopup(params.blockedPopupText)}
       ${renderPrivateRoomCreatorBlockedPopup(params.creatorBlockedPopupOpen === true)}
+      ${renderPrivateRoomPartnerEligibilityPopup(params.partnerEligibilityPopupText ?? null)}
     </section>
   `
 }

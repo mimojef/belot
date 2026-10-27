@@ -651,6 +651,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         waitMinutes,
         manualStart: parsed.manualStart === true,
         humanTurnTimeoutMs,
+        invitePartner: parsed.invitePartner === true,
         displayName: normalizeOptionalDisplayName(parsed.displayName),
       }
     }
@@ -694,6 +695,16 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       const inviteId = normalizeRequiredText(parsed.inviteId)
       if (inviteId === null) return null
       return { type: 'cancel_private_room_invite', inviteId }
+    }
+
+    if (parsed.type === 'invite_private_room_partner') {
+      const toProfileId = normalizeRequiredText(parsed.toProfileId)
+      if (toProfileId === null) return null
+      return { type: 'invite_private_room_partner', toProfileId }
+    }
+
+    if (parsed.type === 'cancel_private_room_partner_invite') {
+      return { type: 'cancel_private_room_partner_invite' }
     }
 
     if (parsed.type === 'add_bot_to_private_room_team') {

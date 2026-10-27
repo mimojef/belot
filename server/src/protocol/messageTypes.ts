@@ -245,6 +245,8 @@ export type ClientMessage =
       manualStart?: boolean
       // "Време за реакция" (ms) — липсващо = DEFAULT_HUMAN_TURN_TIMEOUT_MS.
       humanTurnTimeoutMs?: HumanTurnTimeoutMs
+      // "Покани партньор" — резервира мястото под домакина (A1). Липсващо = false.
+      invitePartner?: boolean
       displayName?: string
     }
   | {
@@ -264,6 +266,15 @@ export type ClientMessage =
   | {
       type: 'cancel_private_room_invite'
       inviteId: string
+    }
+  // "Покани партньор" — само домакинът, само за резервираното място. Отговорът
+  // на поканения минава през respond_private_room_invite (същият inviteId).
+  | {
+      type: 'invite_private_room_partner'
+      toProfileId: string
+    }
+  | {
+      type: 'cancel_private_room_partner_invite'
     }
   | {
       type: 'respond_private_room_invite'
@@ -859,6 +870,14 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_not_creator'
   | 'private_room_not_ready_to_start'
   | 'private_room_kick_target_invalid'
+  | 'private_room_slot_reserved'
+  | 'private_room_partner_invite_pending'
+  | 'private_room_partner_invite_invalid'
+  | 'private_room_partner_unavailable'
+  // Поканата НЕ е създадена: приятелят няма жълтици за входа на масата.
+  | 'private_room_partner_insufficient_balance'
+  // Поканата НЕ е създадена: приятелят няма нужното ниво за залога на масата.
+  | 'private_room_partner_level_required'
 
 export type ErrorMessage = {
   type: 'error'
@@ -1272,6 +1291,17 @@ export type PrivateRoomSnapshot = {
   // клиента чрез съществуващия private_room_partner_blocked error path при
   // реален start опит, не преизчислен предварително в snapshot-а).
   canManualStart: boolean
+  // "Покани партньор" — null = масата е без резервация. `invite` се попълва
+  // САМО в snapshot-а към собственика на резервацията (домакина); всички
+  // останали (вкл. lobby списъка) виждат само invitePending.
+  partnerReservation: PrivateRoomPartnerReservationSnapshot | null
+}
+
+export type PrivateRoomPartnerReservationSnapshot = {
+  team: Team
+  slotIndex: 0 | 1
+  invitePending: boolean
+  invite: { inviteId: string; toProfileId: string; toDisplayName: string; expiresAt: number } | null
 }
 
 export type PrivateRoomsListMessage = {
@@ -1529,6 +1559,18 @@ export type PrivateRoomInviteReceivedMessage = {
   privateRoomId: string
   stake: MatchStake
   expiresAt: number
+  // 'partner' = "Покани партньор": приемането сяда директно на резервираното
+  // място. Липсващо = старата locked-room покана (само authorization).
+  inviteKind?: 'partner'
+}
+
+// Към домакина: поканата за партньор приключи без сядане — бутонът "Покани
+// партньор" отново е активен (свежият snapshot идва с private_room_updated).
+export type PrivateRoomPartnerInviteStatusMessage = {
+  type: 'private_room_partner_invite_status'
+  status: 'declined' | 'expired' | 'unavailable'
+  toDisplayName: string
+  message: string
 }
 
 export type PrivateRoomInviteAcceptedMessage = {
@@ -1816,6 +1858,7 @@ export type ServerMessage =
   | PrivateRoomInviteDeclinedMessage
   | PrivateRoomInviteExpiredMessage
   | PrivateRoomInviteCancelledMessage
+  | PrivateRoomPartnerInviteStatusMessage
   | PrivateRoomFriendBusyMessage
   | PrivateRoomMemberLeftMessage
   | PrivateRoomClosedMessage
