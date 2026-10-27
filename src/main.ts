@@ -41,6 +41,7 @@ import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
 import type { AdminCampaignEditorDraft, AdminCampaignLiveTop10Entry, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from './app/adminCampaigns/adminCampaignTypes'
 import type { AdminCampaignAction } from './app/adminCampaigns/renderAdminCampaignsPanel'
+import type { AdminBelotVisualAssetKind, AdminBelotVisualResult } from './app/adminBelotVisual/renderAdminBelotVisualSection'
 import {
   createGameServerClient,
   type ConnectedMessage,
@@ -2734,6 +2735,28 @@ async function saveAdminCampaignMarketingSender(
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
+}
+
+// "Визия на Белот" (основен админ панел) — GET/PATCH /api/admin/belot-visual.
+async function requestAdminBelotVisual(path: string, init: RequestInit): Promise<AdminBelotVisualResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/belot-visual${path}`, { credentials: 'include', ...init })
+    const body = await response.json().catch(() => null) as { ok?: boolean; message?: string; visual?: unknown } | null
+    if (response.ok && body?.ok === true && body.visual && typeof body.visual === 'object') {
+      return { ok: true, visual: body.visual as Extract<AdminBelotVisualResult, { ok: true }>['visual'] }
+    }
+    return { ok: false, message: body?.message ?? 'Действието не можа да бъде изпълнено.' }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+function patchAdminBelotVisualJson(path: string, payload: unknown): Promise<AdminBelotVisualResult> {
+  return requestAdminBelotVisual(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
 }
 
 async function saveAdminCampaignThemeAsset(
@@ -7479,6 +7502,10 @@ lobby = createLobbyFlowController({
   onAdminCampaignThemeAssetUploadRequest: (campaignId, kind, imageDataUrl) => saveAdminCampaignThemeAsset(campaignId, kind, imageDataUrl),
   onAdminCampaignLiveTop10Request: (campaignId) => loadAdminCampaignLiveTop10(campaignId),
   onAdminCampaignThemeAssetRemoveRequest: (campaignId, kind) => removeAdminCampaignThemeAsset(campaignId, kind),
+  onAdminBelotVisualLoad: () => requestAdminBelotVisual('', { method: 'GET' }),
+  onAdminBelotVisualToggleRequest: (enabled) => patchAdminBelotVisualJson('', { enabled }),
+  onAdminBelotVisualAssetUploadRequest: (kind: AdminBelotVisualAssetKind, imageDataUrl) => patchAdminBelotVisualJson(`/assets/${encodeURIComponent(kind)}`, { imageDataUrl }),
+  onAdminBelotVisualAssetRemoveRequest: (kind: AdminBelotVisualAssetKind) => patchAdminBelotVisualJson(`/assets/${encodeURIComponent(kind)}`, { imageDataUrl: null }),
   onAdminCampaignArchiveListLoad: () => loadAdminCampaignArchiveList(),
   onAdminCampaignArchiveDetailLoad: (campaignId) => loadAdminCampaignArchiveDetail(campaignId),
   onAdminCampaignArchiveNowRequest: (campaignId) => triggerAdminCampaignArchiveNow(campaignId),

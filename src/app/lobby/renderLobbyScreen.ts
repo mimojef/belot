@@ -121,6 +121,12 @@ import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentS
 import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAdminTournamentsHandlers } from '../adminTournaments/renderAdminTournamentsPanel'
 import type { AdminCampaignEditorDraft, AdminCampaignLiveTop10Entry, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from '../adminCampaigns/adminCampaignTypes'
 import { renderAdminCampaignsPanel, attachAdminCampaignsHandlers, type AdminCampaignAction, type AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel'
+import {
+  renderAdminBelotVisualSection,
+  attachAdminBelotVisualHandlers,
+  type AdminBelotVisualAssetKind,
+  type AdminBelotVisualSnapshot,
+} from '../adminBelotVisual/renderAdminBelotVisualSection'
 import { renderAdminCampaignArchivePanel, attachAdminCampaignArchivePanelHandlers } from '../adminCampaigns/renderAdminCampaignArchivePanel'
 import { renderAdCampaignManagementPanel, attachAdCampaignManagementPanelHandlers } from '../adCampaigns/renderAdCampaignManagementPanel'
 import { renderAdCampaignPopup, attachAdCampaignPopupHandlers } from '../adCampaigns/renderAdCampaignPopup'
@@ -745,6 +751,12 @@ export type LobbyScreenState = {
   adminSettingsLoading: boolean
   adminSettingsErrorText: string | null
   adminSettingsSuccessText: string | null
+  // "Визия на Белот" (основен админ панел) — виж renderAdminBelotVisualSection.
+  adminBelotVisual: AdminBelotVisualSnapshot | null
+  adminBelotVisualLoading: boolean
+  adminBelotVisualBusy: boolean
+  adminBelotVisualErrorText: string | null
+  adminBelotVisualSuccessText: string | null
   adminCoinPackages: CoinPackageSnapshot[]
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
@@ -1574,6 +1586,9 @@ export type RenderLobbyScreenOptions = {
   onAdminCampaignMarketingSenderSave?: (campaignId: string, giftSenderProfileId: string | null) => void
   onAdminCampaignThemeAssetUpload?: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => void
   onAdminCampaignThemeAssetRemove?: (campaignId: string, kind: AdminCampaignThemeAssetKind) => void
+  onAdminBelotVisualToggle?: (enabled: boolean) => void
+  onAdminBelotVisualAssetUpload?: (kind: AdminBelotVisualAssetKind, imageDataUrl: string) => void
+  onAdminBelotVisualAssetRemove?: (kind: AdminBelotVisualAssetKind) => void
   onAdminCampaignLiveTop10Load?: (campaignId: string) => void
   onAdminCampaignArchiveOpen?: () => void
   onAdminCampaignArchiveBack?: () => void
@@ -9968,6 +9983,8 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
           </button>
         </div>
       </form>
+
+      ${renderAdminBelotVisualSection(state, isMobile)}
 
       <div style="display:grid;gap:12px;margin-top:8px;">
         <div style="display:flex;align-items:end;justify-content:space-between;gap:12px;">
@@ -18423,6 +18440,12 @@ export function renderLobbyScreen(
     onThemeAssetRemove: (campaignId, kind) => { options.onAdminCampaignThemeAssetRemove?.(campaignId, kind) },
     onViewArchive: () => { options.onAdminCampaignArchiveOpen?.() },
     onViewLiveTop10: (campaignId) => { options.onAdminCampaignLiveTop10Load?.(campaignId) },
+  })
+
+  attachAdminBelotVisualHandlers(root, {
+    onToggle: (enabled) => { options.onAdminBelotVisualToggle?.(enabled) },
+    onUpload: (kind, imageDataUrl) => { options.onAdminBelotVisualAssetUpload?.(kind, imageDataUrl) },
+    onRemove: (kind) => { options.onAdminBelotVisualAssetRemove?.(kind) },
   })
 
   attachAdminCampaignArchivePanelHandlers(root, {

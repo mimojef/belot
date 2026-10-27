@@ -1862,6 +1862,16 @@ export type CampaignThemeAssets = {
 export type ActiveCampaignThemeMessage = {
   type: 'active_campaign_theme'
   theme: CampaignThemeAssets | null
+  // "Визия на Белот" — ефективните изображения на масата, разрешени на
+  // сървъра (ръчна визия → активна кампания → null = стандартна).
+  // Optional — стар сървър по време на deploy не го праща.
+  belotVisual?: BelotVisualAssets
+}
+
+export type BelotVisualAssets = {
+  tableBgDesktopUrl: string | null
+  tableBgMobileUrl: string | null
+  cardBackUrl: string | null
 }
 
 // Фаза 8 (профилен popup "Кампании под Ранг" + "Виж всички награди" +

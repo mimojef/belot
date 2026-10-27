@@ -65,6 +65,9 @@ import { createPendingProfileModerationStore } from './db/pendingProfileModerati
 import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
+import { createBelotVisualOverrideStore, isBelotVisualAssetKind, type BelotVisualAssetKind } from './belotVisual/belotVisualOverrideStore.js'
+import { resolveBelotVisual, type BelotVisualAssets } from './belotVisual/resolveBelotVisual.js'
+import { processBelotVisualImageToWebp } from './belotVisual/belotVisualImageProcessing.js'
 import { createCampaignCreditStore } from './campaigns/campaignCreditStore.js'
 import { createCampaignsStore } from './campaigns/campaignsStore.js'
 import { createCampaignAdminStore, type CampaignAdminSaveInput, type CampaignThemeAssetKind, type CampaignAdminCampaignSnapshot } from './campaigns/campaignAdminStore.js'
@@ -1116,6 +1119,8 @@ if (cleanedUpTempBots > 0) {
 const adminSettingsStore = await createAdminSettingsStore(
   databaseBootstrap.databaseFilePath,
 )
+// "Визия на Белот" — ръчна приоритетна визия (admin_settings ключове).
+const belotVisualOverrideStore = await createBelotVisualOverrideStore(databaseBootstrap.databaseFilePath)
 
 // Anti Bad Luck runtime config (admin_settings) — main thread cache, подаван
 // ЗАДЪЛЖИТЕЛНО при всеки game tick към worker-а (workerProtocol v4). Initial
@@ -18351,10 +18356,27 @@ function getCurrentActiveCampaignThemeOrNull(): CampaignThemeAssets | null {
 // тематичен ресурс, scheduler-ово automatic activate/finish) — винаги
 // преизчислява текущата истина, никога не предполага "старата" тема.
 function broadcastActiveCampaignThemeToAllLocalConnections(): void {
-  const theme = getCurrentActiveCampaignThemeOrNull()
+  const message = buildActiveCampaignThemeMessage()
   for (const conn of Object.values(serverState.connections)) {
     if (conn.status !== 'connected') continue
-    safeSendToConnection(conn.id, { type: 'active_campaign_theme', theme })
+    safeSendToConnection(conn.id, message)
+  }
+}
+
+// "Визия на Белот" — ефективните изображения на Белот масата (ръчна визия
+// → активна кампания → стандартна), поотделно за всяко изображение. Вървят
+// в същото active_campaign_theme съобщение (bootstrap при connect + broadcast
+// след всяка промяна), така че превключването важи веднага, без deploy.
+// `theme` остава непроменен — само кампанията (иконка/бонуси в магазина).
+function getCurrentBelotVisualAssets(): BelotVisualAssets {
+  return resolveBelotVisual(belotVisualOverrideStore.getSnapshot(), getCurrentActiveCampaignThemeOrNull())
+}
+
+function buildActiveCampaignThemeMessage() {
+  return {
+    type: 'active_campaign_theme' as const,
+    theme: getCurrentActiveCampaignThemeOrNull(),
+    belotVisual: getCurrentBelotVisualAssets(),
   }
 }
 
@@ -19642,6 +19664,186 @@ function getCampaignThemeAssetUrl(row: CampaignAdminCampaignSnapshot, kind: Camp
     case 'card_back':
       return row.cardBackUrl
   }
+}
+
+// "Визия на Белот" — файловете живеят под вече публичния campaign-themes/
+// root (nginx/бекъп го покриват), в собствена belot-visual/ папка, със
+// същите tables/card-backs подпапки като кампаниите. Името е винаги нов
+// randomUUID() → замяната дава нов URL (uploads се сервират immutable).
+const BELOT_VISUAL_UPLOADS_FOLDER = 'belot-visual'
+
+function getBelotVisualAssetSubfolder(kind: BelotVisualAssetKind): 'tables' | 'card-backs' {
+  return kind === 'card_back' ? 'card-backs' : 'tables'
+}
+
+const BELOT_VISUAL_UPLOAD_URL_PREFIX = `${createUploadUrl('campaign-themes', BELOT_VISUAL_UPLOADS_FOLDER)}/`
+
+// Дали URL-ът все още се ползва — от ръчната визия (друг слот) или от
+// която и да е кампания (вкл. приключили/изтрити). Защита срещу изтриване на
+// чужд файл, напр. ако URL е бил въведен/копиран ръчно в базата.
+function isBelotVisualUploadUrlStillReferenced(url: string): boolean {
+  const visual = belotVisualOverrideStore.getSnapshot()
+  if (visual.tableBgDesktopUrl === url || visual.tableBgMobileUrl === url || visual.cardBackUrl === url) return true
+  return (campaignAdminStore?.getSnapshot().campaigns ?? []).some((row) =>
+    row.unitIconUrl === url || row.tableBgDesktopUrl === url || row.tableBgMobileUrl === url || row.cardBackUrl === url,
+  )
+}
+
+// Физическо изтриване на заменен/премахнат файл на "Визия на Белот" — САМО в
+// собствената belot-visual/ папка и само ако никой не го ползва. Всичко
+// друго (кампании, gift-items, аватари...) никога не се пипа оттук.
+async function deleteBelotVisualUploadIfUnused(url: string): Promise<'deleted' | 'kept' | 'missing' | 'failed'> {
+  if (!url.startsWith(BELOT_VISUAL_UPLOAD_URL_PREFIX) || isBelotVisualUploadUrlStillReferenced(url)) return 'kept'
+  try {
+    const outcome = await deletePublicUploadFile(url, {
+      uploadsRoot: UPLOADS_ROOT_PATH,
+      publicRoots: PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS,
+      isStillReferenced: () => isBelotVisualUploadUrlStillReferenced(url),
+    })
+    if (outcome === 'deleted') return 'deleted'
+    if (outcome === 'missing') return 'missing'
+    if (outcome === 'still_referenced') return 'kept'
+    console.error(`[belot-visual] Отказано изтриване (${outcome}) на ${url}`)
+    return 'failed'
+  } catch (error) {
+    console.error(`[belot-visual] Неуспешно изтриване на ${url}:`, error)
+    return 'failed'
+  }
+}
+
+// Startup reconcile — файл без ред в базата (напр. срив между записа на файла
+// и активирането му) се премахва, за да няма натрупване на неизползвани
+// файлове. Само в belot-visual/ и само неизползвани (deleteBelotVisualUploadIfUnused).
+async function pruneUnreferencedBelotVisualUploads(): Promise<number> {
+  let removed = 0
+  for (const subfolder of ['tables', 'card-backs'] as const) {
+    let entries: string[]
+    try {
+      entries = await readdir(join(CAMPAIGN_THEME_UPLOADS_PATH, BELOT_VISUAL_UPLOADS_FOLDER, subfolder))
+    } catch {
+      continue
+    }
+    for (const filename of entries) {
+      if (!IMAGE_ATTACHMENT_FILENAME_PATTERN.test(filename)) continue
+      const outcome = await deleteBelotVisualUploadIfUnused(createUploadUrl('campaign-themes', BELOT_VISUAL_UPLOADS_FOLDER, subfolder, filename))
+      if (outcome === 'deleted') removed += 1
+    }
+  }
+  return removed
+}
+
+async function handleAdminBelotVisualRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const basePath = '/api/admin/belot-visual'
+  if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
+    return false
+  }
+
+  // Същите права като Admin → Настройки и Admin → Кампании.
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш достъп до визията на Белот.' })
+    return true
+  }
+
+  if (pathname === basePath) {
+    if (req.method === 'GET') {
+      sendJsonResponse(res, 200, { ok: true, visual: belotVisualOverrideStore.getSnapshot() })
+      return true
+    }
+    if (req.method === 'PATCH') {
+      const body = await readJsonRequestBody(req)
+      if (!isRecord(body) || typeof body.enabled !== 'boolean') {
+        sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+        return true
+      }
+      const visual = belotVisualOverrideStore.setEnabled(body.enabled)
+      broadcastActiveCampaignThemeToAllLocalConnections()
+      sendJsonResponse(res, 200, { ok: true, visual })
+      return true
+    }
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const assetMatch = new RegExp(`^${basePath}/assets/([^/]+)$`).exec(pathname)
+  if (assetMatch === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Not found' })
+    return true
+  }
+  if (req.method !== 'PATCH') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+  const kindRaw = decodeURIComponent(assetMatch[1] ?? '')
+  if (!isBelotVisualAssetKind(kindRaw)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден тип изображение.' })
+    return true
+  }
+  const kind = kindRaw
+
+  const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+    return true
+  }
+  const imageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl : null
+
+  // imageDataUrl === null → "Премахни": слотът пада към кампания/стандартна,
+  // файлът се изтрива физически.
+  if (imageDataUrl === null) {
+    const { previousUrl, snapshot } = belotVisualOverrideStore.setAssetUrl(kind, null)
+    broadcastActiveCampaignThemeToAllLocalConnections()
+    if (previousUrl !== null) await trackHttpWait('io', deleteBelotVisualUploadIfUnused(previousUrl))
+    sendJsonResponse(res, 200, { ok: true, visual: snapshot })
+    return true
+  }
+
+  // Ред: валидиране → оптимизиран WebP → запис на НОВИЯ файл → проверка, че
+  // е на диска → активиране в базата → изтриване на СТАРИЯ. Провал на коя да
+  // е стъпка преди активирането оставя старата картинка непокътната.
+  const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrl)
+  if (imageBuffer === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' })
+    return true
+  }
+  const processed = await trackHttpWait('io', processBelotVisualImageToWebp(imageBuffer, CAMPAIGN_THEME_ASSET_DIMENSION_PX[kind]))
+  if (processed === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Изображението не може да бъде обработено.' })
+    return true
+  }
+  const filename = `${randomUUID()}.webp`
+  const subfolder = getBelotVisualAssetSubfolder(kind)
+  const newUrl = createUploadUrl('campaign-themes', BELOT_VISUAL_UPLOADS_FOLDER, subfolder, filename)
+  try {
+    const filePath = await trackHttpWait('io', writeWebpUploadFile(join(CAMPAIGN_THEME_UPLOADS_PATH, BELOT_VISUAL_UPLOADS_FOLDER, subfolder), filename, processed.buffer))
+    const written = await stat(filePath)
+    if (!written.isFile() || written.size !== processed.buffer.length) throw new Error('size mismatch')
+  } catch {
+    await deleteBelotVisualUploadIfUnused(newUrl)
+    sendJsonResponse(res, 500, { ok: false, message: 'Файлът не можа да бъде записан.' })
+    return true
+  }
+
+  let activation: ReturnType<typeof belotVisualOverrideStore.setAssetUrl>
+  try {
+    activation = belotVisualOverrideStore.setAssetUrl(kind, newUrl)
+  } catch (error) {
+    console.error('[belot-visual] Неуспешно записване в базата:', error)
+    await deleteBelotVisualUploadIfUnused(newUrl)
+    sendJsonResponse(res, 500, { ok: false, message: 'Изображението не можа да бъде запазено.' })
+    return true
+  }
+
+  broadcastActiveCampaignThemeToAllLocalConnections()
+  if (activation.previousUrl !== null && activation.previousUrl !== newUrl) {
+    await trackHttpWait('io', deleteBelotVisualUploadIfUnused(activation.previousUrl))
+  }
+  sendJsonResponse(res, 200, { ok: true, visual: activation.snapshot })
+  return true
 }
 
 async function handleAdminCampaignsRequest(
@@ -23495,6 +23697,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleAdminBelotVisualRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleAdminCampaignsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -23831,10 +24037,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
   // след reconnect или при пропуснато realtime събитие" — независимо дали
   // този конкретен connection пропусна предходен broadcast, той винага
   // получава текущата истина при самото отваряне на socket-а.
-  sendJsonMessage(socket, {
-    type: 'active_campaign_theme',
-    theme: getCurrentActiveCampaignThemeOrNull(),
-  })
+  sendJsonMessage(socket, buildActiveCampaignThemeMessage())
 
   if (connection.profileId !== null) {
     if (!sendSessionInGameIfNeeded(connection.id, connection.profileId)) {
@@ -29228,6 +29431,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   }
   closeStore('playerProgressStore', () => playerProgressStore.close())
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
+  closeStore('belotVisualOverrideStore', () => belotVisualOverrideStore.close())
   closeStore('authStore', () => authStore.close())
   closeStore('friendshipStore', () => friendshipStore.close())
   closeStore('chatStore', () => chatStore.close())
@@ -29371,6 +29575,14 @@ process.once('SIGTERM', () => {
 // All game/tournament startup work and admission guards are installed. This
 // synchronous barrier finishes (or isolates Svara) before accepting any socket.
 console.log(`[svara-recovery] status=${startupTimeline.measure('svaraLobby.initializeRecovery', () => svaraLobby.initializeRecovery())}`)
+// "Визия на Белот" — изчиства неизползвани файлове ПРЕДИ първата заявка
+// (никакъв паралелен upload не може да е започнал).
+try {
+  const prunedBelotVisualUploads = await pruneUnreferencedBelotVisualUploads()
+  if (prunedBelotVisualUploads > 0) console.log(`[belot-visual] pruned ${prunedBelotVisualUploads} unreferenced upload(s)`)
+} catch (error) {
+  console.error('[belot-visual] startup prune failed:', error)
+}
 startupTimeline.measure('httpServer.listen', () => httpServer.listen(PORT, HOST, () => {
   console.log(`[http] Belot V2 server is running at http://${HOST}:${PORT}`)
   // Етап 4K2 — след възстановяването на Белот/Не се сърди човече/Свара (по-горе).

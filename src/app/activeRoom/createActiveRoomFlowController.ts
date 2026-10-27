@@ -61,6 +61,10 @@ import {
   resetPlayingUiCache,
   computeNextLastKnownWinningBid,
   setActiveCampaignTheme,
+  setActiveBelotVisual,
+  getActiveBelotVisual,
+  getBelotVisualImageFailureVersion,
+  setBelotVisualImageFailureListener,
 } from './activeRoomShared'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import {
@@ -3473,6 +3477,10 @@ export function createActiveRoomFlowController(
   let pendingActiveRoomRenderHandle: number | null = null
   let pendingFullRenderRequired = false
 
+  // "Визия на Белот" — неработещо ръчно изображение → прерисуване с
+  // резервното (кампания/стандартна) веднага, без да чакаме следващ snapshot.
+  setBelotVisualImageFailureListener(() => scheduleActiveRoomRender())
+
   function scheduleActiveRoomRender(preferAnimationPatch = false): void {
     if (!preferAnimationPatch) {
       pendingFullRenderRequired = true
@@ -3975,6 +3983,8 @@ export function createActiveRoomFlowController(
             // dedup клона долу (нищо "cutting-specific" не се е променило),
             // оставяйки стар фон/гръб до следваща ИГРОВА промяна.
             activeCampaignTheme: getActiveCampaignTheme(),
+            belotVisual: getActiveBelotVisual(),
+        belotVisualImageFailureVersion: getBelotVisualImageFailureVersion(),
           })
         : null
 
@@ -4575,6 +4585,8 @@ export function createActiveRoomFlowController(
         tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
         // Фаза 10 — виж аналогичния коментар в cuttingStableRenderKey по-горе.
         activeCampaignTheme: getActiveCampaignTheme(),
+        belotVisual: getActiveBelotVisual(),
+            belotVisualImageFailureVersion: getBelotVisualImageFailureVersion(),
       })
 
       if (
@@ -6980,6 +6992,7 @@ export function createActiveRoomFlowController(
 
     if (message.type === 'active_campaign_theme') {
       setActiveCampaignTheme(message.theme)
+      setActiveBelotVisual(message.belotVisual ?? null)
       scheduleActiveRoomRender()
       return false
     }

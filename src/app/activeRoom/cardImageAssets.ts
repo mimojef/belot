@@ -1,5 +1,5 @@
 import type { RoomCardSnapshot } from '../network/createGameServerClient'
-import { getActiveCampaignTheme } from './activeRoomShared'
+import { getEffectiveBelotVisualSlotUrl } from './activeRoomShared'
 
 export const CARD_BACK_IMAGE_PATH = '/images/cards/card-back.webp'
 
@@ -19,7 +19,7 @@ export const CARD_BACK_IMAGE_PATH = '/images/cards/card-back.webp'
  * трябва да се пипат отделно.
  */
 export function getActiveRoomCardBackImageValue(): string {
-  const themedUrl = getActiveCampaignTheme()?.cardBackUrl ?? null
+  const themedUrl = getEffectiveBelotVisualSlotUrl('cardBackUrl')
   if (!themedUrl) {
     return `url('${CARD_BACK_IMAGE_PATH}')`
   }

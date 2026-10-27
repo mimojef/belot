@@ -22,6 +22,11 @@ import {
   formatPrivateRoomCountdown,
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
+import type {
+  AdminBelotVisualAssetKind,
+  AdminBelotVisualResult,
+  AdminBelotVisualSnapshot,
+} from '../adminBelotVisual/renderAdminBelotVisualSection'
 import {
   matchesPrivateRoomPartnerQuery,
   normalizePrivateRoomPartnerQuery,
@@ -1179,6 +1184,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
     | { ok: false; message: string; forbidden?: boolean }
   >
+  onAdminBelotVisualLoad?: () => Promise<AdminBelotVisualResult>
+  onAdminBelotVisualToggleRequest?: (enabled: boolean) => Promise<AdminBelotVisualResult>
+  onAdminBelotVisualAssetUploadRequest?: (kind: AdminBelotVisualAssetKind, imageDataUrl: string) => Promise<AdminBelotVisualResult>
+  onAdminBelotVisualAssetRemoveRequest?: (kind: AdminBelotVisualAssetKind) => Promise<AdminBelotVisualResult>
   onAdminCampaignArchiveListLoad?: () => Promise<
     | { ok: true; campaigns: AdminCampaignArchiveListRow[] }
     | { ok: false; message: string; forbidden?: boolean }
@@ -2101,6 +2110,11 @@ type InternalLobbyFlowState = {
   adminSettingsLoading: boolean
   adminSettingsErrorText: string | null
   adminSettingsSuccessText: string | null
+  adminBelotVisual: AdminBelotVisualSnapshot | null
+  adminBelotVisualLoading: boolean
+  adminBelotVisualBusy: boolean
+  adminBelotVisualErrorText: string | null
+  adminBelotVisualSuccessText: string | null
   adminCoinPackages: CoinPackageSnapshot[]
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
@@ -2945,6 +2959,11 @@ function createInitialState(): InternalLobbyFlowState {
     adminSettingsLoading: false,
     adminSettingsErrorText: null,
     adminSettingsSuccessText: null,
+    adminBelotVisual: null,
+    adminBelotVisualLoading: false,
+    adminBelotVisualBusy: false,
+    adminBelotVisualErrorText: null,
+    adminBelotVisualSuccessText: null,
     adminCoinPackages: [],
     adminCoinPackagesLoading: false,
     adminCoinPackagesErrorText: null,
@@ -5569,6 +5588,11 @@ export function createLobbyFlowController(
       adminSettingsLoading: state.adminSettingsLoading,
       adminSettingsErrorText: state.adminSettingsErrorText,
       adminSettingsSuccessText: state.adminSettingsSuccessText,
+      adminBelotVisual: state.adminBelotVisual,
+      adminBelotVisualLoading: state.adminBelotVisualLoading,
+      adminBelotVisualBusy: state.adminBelotVisualBusy,
+      adminBelotVisualErrorText: state.adminBelotVisualErrorText,
+      adminBelotVisualSuccessText: state.adminBelotVisualSuccessText,
       adminCoinPackages: state.adminCoinPackages,
       adminCoinPackagesLoading: state.adminCoinPackagesLoading,
       adminCoinPackagesErrorText: state.adminCoinPackagesErrorText,
@@ -8114,6 +8138,18 @@ export function createLobbyFlowController(
       },
       onAdminCampaignThemeAssetRemove: (campaignId, kind) => {
         void submitAdminCampaignThemeAssetRemove(campaignId, kind)
+      },
+      onAdminBelotVisualToggle: (enabled) => {
+        void runAdminBelotVisualRequest(
+          () => options.onAdminBelotVisualToggleRequest?.(enabled),
+          enabled ? 'Приоритетната визия е включена.' : 'Приоритетната визия е изключена. Изображенията са запазени.',
+        )
+      },
+      onAdminBelotVisualAssetUpload: (kind, imageDataUrl) => {
+        void runAdminBelotVisualRequest(() => options.onAdminBelotVisualAssetUploadRequest?.(kind, imageDataUrl), 'Изображението е качено.')
+      },
+      onAdminBelotVisualAssetRemove: (kind) => {
+        void runAdminBelotVisualRequest(() => options.onAdminBelotVisualAssetRemoveRequest?.(kind), 'Изображението е премахнато.')
       },
       onAdminCampaignLiveTop10Load: (campaignId) => {
         void loadAdminCampaignLiveTop10(campaignId)
@@ -13993,6 +14029,51 @@ export function createLobbyFlowController(
     render()
   }
 
+  // "Визия на Белот" — зареждане при отваряне на админ панела.
+  async function loadAdminBelotVisual(): Promise<void> {
+    if (!options.onAdminBelotVisualLoad) return
+    state.adminBelotVisualLoading = true
+    state.adminBelotVisualErrorText = null
+    state.adminBelotVisualSuccessText = null
+    render()
+    const result = await options.onAdminBelotVisualLoad()
+    state.adminBelotVisualLoading = false
+    if (result.ok) {
+      state.adminBelotVisual = result.visual
+    } else {
+      state.adminBelotVisualErrorText = result.message
+    }
+    render()
+  }
+
+  // Превключване/качване/премахване — една заявка наведнъж (busy); при
+  // грешка се пази последният потвърден от сървъра snapshot.
+  async function runAdminBelotVisualRequest(
+    request: () => Promise<AdminBelotVisualResult> | undefined,
+    successText: string,
+  ): Promise<void> {
+    if (state.adminBelotVisualBusy) return
+    const pending = request()
+    if (pending === undefined) {
+      state.adminBelotVisualErrorText = 'Действието временно не е налично.'
+      render()
+      return
+    }
+    state.adminBelotVisualBusy = true
+    state.adminBelotVisualErrorText = null
+    state.adminBelotVisualSuccessText = null
+    render()
+    const result = await pending
+    state.adminBelotVisualBusy = false
+    if (result.ok) {
+      state.adminBelotVisual = result.visual
+      state.adminBelotVisualSuccessText = successText
+    } else {
+      state.adminBelotVisualErrorText = result.message
+    }
+    render()
+  }
+
   async function submitAdminCampaignThemeAssetUpload(
     campaignId: string,
     kind: AdminCampaignThemeAssetKind,
@@ -14359,7 +14440,7 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     render()
 
-    await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadMatchRooms()])
+    await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadMatchRooms(), loadAdminBelotVisual()])
   }
 
   async function loadAdminSupportConversations(): Promise<void> {

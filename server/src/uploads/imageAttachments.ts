@@ -63,6 +63,15 @@ export async function processImageAttachmentToWebp(
     dimensionPx?: number
     /** Override за withoutEnlargement. Default: false тук означава "позволи uplscale" — само gift-items route-ът подава true explicit; всички други callers не подават нищо и остават с shared withoutEnlargement:true поведението (виж resize() call-а по-долу). */
     allowEnlargement?: boolean
+    /**
+     * WebP encoder override-и ("Визия на Белот"). Неподадени = sharp
+     * default-ите, т.е. всички съществуващи callers (кампании, gift-items,
+     * avatars, chat...) остават байт-идентични.
+     */
+    lossless?: boolean
+    alphaQuality?: number
+    smartSubsample?: boolean
+    effort?: number
   } = {},
 ): Promise<ProcessedImageAttachment | null> {
   const metadata = await sharp(imageBuffer).metadata().catch(() => null)
@@ -105,7 +114,13 @@ export async function processImageAttachmentToWebp(
       fit: options.allowEnlargement === true ? 'cover' : 'inside',
       withoutEnlargement: options.allowEnlargement !== true,
     })
-    .webp({ quality: options.quality ?? IMAGE_ATTACHMENT_WEBP_QUALITY })
+    .webp({
+      quality: options.quality ?? IMAGE_ATTACHMENT_WEBP_QUALITY,
+      ...(options.lossless !== undefined ? { lossless: options.lossless } : {}),
+      ...(options.alphaQuality !== undefined ? { alphaQuality: options.alphaQuality } : {}),
+      ...(options.smartSubsample !== undefined ? { smartSubsample: options.smartSubsample } : {}),
+      ...(options.effort !== undefined ? { effort: options.effort } : {}),
+    })
     .toBuffer()
 
   const outputMetadata = await sharp(buffer).metadata().catch(() => null)

@@ -6,7 +6,7 @@ import type {
   PhraseReactionUiState,
   PlayingUiCache,
 } from './activeRoomTypes'
-import type { Seat, CampaignThemeAssets as ActiveCampaignThemeAssets } from '../network/createGameServerClient'
+import type { BelotVisualAssets, Seat, CampaignThemeAssets as ActiveCampaignThemeAssets } from '../network/createGameServerClient'
 import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 export { computeNextLastKnownWinningBid, selectWinningBidFromGame } from './winningBidHelpers'
 
@@ -108,6 +108,66 @@ export function getActiveCampaignTheme(): ActiveCampaignThemeAssets | null {
   return currentActiveCampaignTheme
 }
 
+// "Визия на Белот" — масата и гърбът на картите идват от сървърно
+// разрешената визия (ръчна → кампания → стандартна, поотделно за всяко
+// изображение). null = стар сървър без belotVisual → кампанийната тема,
+// както преди. Задава се заедно с темата от същия push.
+let currentBelotVisual: BelotVisualAssets | null = null
+
+export function setActiveBelotVisual(visual: BelotVisualAssets | null): void {
+  currentBelotVisual = visual
+}
+
+export function getActiveBelotVisual(): BelotVisualAssets | null {
+  return currentBelotVisual
+}
+
+// Ръчно изображение, което браузърът не успя да зареди (липсва/повредено/
+// мрежова грешка), се помни като неработещо и само ЗА НЕГО слотът минава към
+// кампанията → стандартната визия. Всеки URL се проверява НАЙ-МНОГО веднъж за
+// живота на страницата (няма повторни опити); ново качване = нов URL =
+// нова проверка. Проверяват се само ръчните URL-и — когато сървърът подава
+// кампанийното изображение (или стар сървър без belotVisual), поведението е
+// както преди: CSS слой върху стандартния фон, без JS проверка.
+const failedManualBelotVisualUrls = new Set<string>()
+const probedManualBelotVisualUrls = new Set<string>()
+let belotVisualImageFailureVersion = 0
+let belotVisualImageFailureListener: (() => void) | null = null
+
+export function setBelotVisualImageFailureListener(listener: (() => void) | null): void {
+  belotVisualImageFailureListener = listener
+}
+
+/** Расте при всяко ново неработещо ръчно изображение — участва в render ключовете. */
+export function getBelotVisualImageFailureVersion(): number {
+  return belotVisualImageFailureVersion
+}
+
+function probeManualBelotVisualUrl(url: string): void {
+  if (probedManualBelotVisualUrls.has(url) || typeof Image === 'undefined') return
+  probedManualBelotVisualUrls.add(url)
+  const image = new Image()
+  image.onerror = () => {
+    image.onerror = null
+    failedManualBelotVisualUrls.add(url)
+    belotVisualImageFailureVersion += 1
+    belotVisualImageFailureListener?.()
+  }
+  image.src = url
+}
+
+type BelotVisualSlot = keyof BelotVisualAssets
+
+export function getEffectiveBelotVisualSlotUrl(slot: BelotVisualSlot): string | null {
+  const campaignUrl = currentActiveCampaignTheme?.[slot] ?? null
+  if (currentBelotVisual === null) return campaignUrl
+  const resolvedUrl = currentBelotVisual[slot]
+  if (!resolvedUrl || resolvedUrl === campaignUrl) return resolvedUrl
+  // Сървърът е избрал ръчното изображение за този слот.
+  probeManualBelotVisualUrl(resolvedUrl)
+  return failedManualBelotVisualUrls.has(resolvedUrl) ? campaignUrl : resolvedUrl
+}
+
 /**
  * Замества `isPhoneLayout ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND :
  * ACTIVE_ROOM_TABLE_BACKGROUND`-ия ternary на всичките call sites (§5/§6/§7).
@@ -120,8 +180,7 @@ export function getActiveCampaignTheme(): ActiveCampaignThemeAssets | null {
  * реална снимка на mobile, когато е зададена.
  */
 export function getActiveRoomTableBackground(isPhoneLayout: boolean): string {
-  const theme = currentActiveCampaignTheme
-  const themedUrl = isPhoneLayout ? theme?.tableBgMobileUrl ?? null : theme?.tableBgDesktopUrl ?? null
+  const themedUrl = getEffectiveBelotVisualSlotUrl(isPhoneLayout ? 'tableBgMobileUrl' : 'tableBgDesktopUrl')
   const defaultBackground = isPhoneLayout ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND : ACTIVE_ROOM_TABLE_BACKGROUND
 
   if (!themedUrl) {

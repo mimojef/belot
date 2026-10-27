@@ -9,6 +9,7 @@ import type {
   AdminCampaignTierReward,
 } from './adminCampaignTypes'
 import { sofiaLocalInputToUtcIso, utcIsoToSofiaLocalInput, formatSofiaDisplayDateTime } from './campaignSofiaDateTime'
+import { renderThemeAssetWidget as renderSharedThemeAssetWidget } from './renderThemeAssetWidget'
 
 export type AdminCampaignFilter = AdminCampaignStatus | 'all' | 'deleted'
 export type AdminCampaignAction = 'schedule' | 'activate' | 'stop' | 'clone' | 'delete'
@@ -151,23 +152,7 @@ const THEME_ASSET_ACCEPT: Record<AdminCampaignThemeAssetKind, string> = {
 }
 
 function renderThemeAssetWidget(kind: AdminCampaignThemeAssetKind, label: string, url: string | null): string {
-  const previewHtml = url
-    ? `<img src="${esc(url)}" alt="${esc(label)}" style="max-width:170px;max-height:96px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);object-fit:cover;background:#000;">`
-    : `<div style="width:170px;height:96px;border-radius:6px;border:1px dashed rgba(255,255,255,0.22);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.35);font-size:11px;font-weight:800;">По подразбиране</div>`
-
-  return `
-    <div data-admin-campaign-theme-widget="${kind}" style="display:flex;flex-direction:column;gap:8px;min-width:170px;">
-      <div style="font-size:11px;font-weight:900;color:rgba(255,255,255,0.6);">${esc(label)}</div>
-      ${previewHtml}
-      <div style="display:flex;gap:6px;flex-wrap:wrap;">
-        <label style="height:30px;display:inline-flex;align-items:center;padding:0 10px;border:1px solid rgba(147,197,253,0.35);border-radius:6px;background:rgba(30,64,175,0.22);color:#bfdbfe;font-size:11px;font-weight:900;cursor:pointer;">
-          ${url ? 'Замени' : 'Качи'}
-          <input data-admin-campaign-theme-upload="${kind}" type="file" accept="${THEME_ASSET_ACCEPT[kind]}" style="display:none;">
-        </label>
-        ${url ? `<button type="button" data-admin-campaign-theme-remove="${kind}" style="height:30px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.30);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Премахни</button>` : ''}
-      </div>
-    </div>
-  `
+  return renderSharedThemeAssetWidget({ dataPrefix: 'admin-campaign-theme', kind, label, url, accept: THEME_ASSET_ACCEPT[kind] })
 }
 
 function renderThemeAssetsSection(campaignId: string, row: AdminCampaignRow): string {

@@ -1066,6 +1066,18 @@ export type CampaignThemeAssets = {
 export type ActiveCampaignThemeMessage = {
   type: 'active_campaign_theme'
   theme: CampaignThemeAssets | null
+  // "Визия на Белот" — ефективните изображения на Белот масата, вече
+  // разрешени на сървъра поотделно за всяко: ръчна визия (Admin → основен
+  // панел, ако е включена и изображението е качено) → активна кампания →
+  // null (стандартна визия). Клиентът ползва това вместо theme.* за масата
+  // и гърба на картите; theme остава за кампанията (иконка/бонуси).
+  belotVisual: BelotVisualAssets
+}
+
+export type BelotVisualAssets = {
+  tableBgDesktopUrl: string | null
+  tableBgMobileUrl: string | null
+  cardBackUrl: string | null
 }
 
 export type MatchmakingQueuedPlayerPreview = {
