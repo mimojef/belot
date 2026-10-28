@@ -4,8 +4,12 @@
 // същият picker UX (grid от preview изображения) като активна игра Белот
 // (createActiveRoomFlowController.ts::renderEmojiPickerHtml), само
 // позиционирането/grid колоните са адаптирани към Ludo bottom bar-а
-// (Ludo няма Белотовия "stage scale" concept). "Фрази" бутонът е премахнат
-// изцяло — Ludo няма измислени игрови фрази.
+// (Ludo няма Белотовия "stage scale" concept).
+//
+// "Фрази" бутонът и панелът с готови фрази са 1:1 с Белот — общият markup
+// живее в src/app/phraseReactions/phraseReactionPickerUi.ts (същият, който
+// ползва createActiveRoomFlowController.ts), само каталогът е Ludo-специфичен
+// (ludoPhraseReactions.ts).
 //
 // "Емоджита" triggер-ът е ЧИСТО изображение (preview-emoji-08.png), не
 // стандартен бутон с рамка/фон/надпис (виж task-а — button-frame styling-ът
@@ -17,6 +21,13 @@
 
 import { getAnimatedEmojiPreviewUrl, ANIMATED_EMOJI_COUNT } from '../../animatedEmoji/animatedEmojiAssets'
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
+import { getActiveRoomStageMetrics } from '../../activeRoom/activeRoomShared'
+import {
+  renderPhrasePickerPanelHtml,
+  renderPhraseToggleIconHtml,
+  renderPhraseToggleSurfaceStyle,
+} from '../../phraseReactions/phraseReactionPickerUi'
+import { LUDO_PHRASE_REACTIONS } from './ludoPhraseReactions'
 
 // viewMode ('player' default за backward compatibility — участник поведение
 // напълно непроменено): 'spectator' (Ludo Spectator Mode Phase 2) сменя
@@ -71,6 +82,8 @@ export function renderLudoBottomBar(viewMode: 'player' | 'spectator' = 'player')
 
       <div style="flex:1;"></div>
 
+      ${isSpectator ? '' : renderLudoPhraseButtonHtml()}
+
       ${isSpectator ? '' : `
       <button type="button" data-ludo-emoji-button="1" data-ludo-emoji-image-button="1" style="
         width:44px; height:44px; flex-shrink:0;
@@ -87,6 +100,59 @@ export function renderLudoBottomBar(viewMode: 'player' | 'spectator' = 'player')
       </button>`}
     </div>
   `
+}
+
+// Бутонът „Фрази“ — същата кръгла повърхност и икона като Белот. На телефон
+// е точно Белот-ският 40px бутон; на desktop е с височината на останалите
+// контроли в Ludo лентата (44px) вместо Белот-ския плаващ 80px×stageScale,
+// за да не разширява лентата. Иконата се скалира пропорционално (unit =
+// размер / 80px, както Белот phone е точно половината от desktop).
+function renderLudoPhraseButtonHtml(): string {
+  const isPhoneLayout = isPhoneLayoutViewport()
+  const sizePx = isPhoneLayout ? 40 : 44
+  return `
+      <button
+        type="button"
+        data-ludo-phrase-button="1"
+        aria-label="Фрази"
+        style="
+          width:${sizePx}px; height:${sizePx}px; flex-shrink:0;
+          -webkit-tap-highlight-color:transparent;
+          ${renderPhraseToggleSurfaceStyle(isPhoneLayout)}
+        "
+      >
+        ${renderPhraseToggleIconHtml(sizePx / 80)}
+      </button>`
+}
+
+// Панелът с фрази — същият markup като Белот (renderPhrasePickerPanelHtml):
+// desktop — fixed bottom:76px/right:16px, 420px, 2 колони, скалиран със
+// същия stage scale, който Белот има на този viewport; phone — 1 колона,
+// min(360px, 100vw-28px), max-height 52vh със скрол, 8px над долната лента
+// (в Белот 8px над долната навигация).
+export function renderLudoPhrasePickerHtml(): string {
+  const layout = getLudoPhrasePickerLayout()
+  return renderPhrasePickerPanelHtml({
+    phrases: LUDO_PHRASE_REACTIONS,
+    isPhoneLayout: layout.isPhoneLayout,
+    uiScale: layout.uiScale,
+    uiScaleKey: layout.key,
+    phoneBottomPx: layout.phoneBottomPx,
+    panelAttribute: 'data-ludo-phrase-picker',
+    pickAttribute: 'data-ludo-phrase-pick',
+  })
+}
+
+// key е записан в data-reaction-ui-scale на панела — при промяна
+// (resize/ротация) контролерът го пресъздава, както Белот прави.
+export function getLudoPhrasePickerLayout(): { isPhoneLayout: boolean; uiScale: number; phoneBottomPx: number; key: string } {
+  const isPhoneLayout = isPhoneLayoutViewport()
+  const uiScale = isPhoneLayout ? 1 : getActiveRoomStageMetrics().stageScale
+  const bottomBar = document.querySelector<HTMLElement>('[data-ludo-bottom-bar="1"]')
+  const bottomBarHeight = bottomBar ? Math.max(0, Math.round(window.innerHeight - bottomBar.getBoundingClientRect().top)) : 68
+  const phoneBottomPx = bottomBarHeight + 8
+  const key = `${isPhoneLayout ? 'phone' : 'desktop'}:${uiScale.toFixed(3)}:${isPhoneLayout ? phoneBottomPx : 0}`
+  return { isPhoneLayout, uiScale, phoneBottomPx, key }
 }
 
 function bottomBarButtonStyle(): string {

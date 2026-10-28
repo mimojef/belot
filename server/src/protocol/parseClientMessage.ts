@@ -575,6 +575,16 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'send_ludo_emoji_reaction', matchId, emojiId }
     }
 
+    if (parsed.type === 'send_ludo_phrase_reaction') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      const phraseId = normalizeRequiredText(parsed.phraseId)
+      if (matchId === null || phraseId === null) return null
+      // Само id от фиксирания каталог (ludoPhraseReactions.ts, 14 фрази) —
+      // произволен текст никога не минава през този механизъм.
+      if (!/^ludo_phrase_(?:0[1-9]|1[0-4])$/.test(phraseId)) return null
+      return { type: 'send_ludo_phrase_reaction', matchId, phraseId }
+    }
+
     // Spectator mode ("Гледай", Ludo Spectator Mode Phase 1) — same matchId
     // validation style като leave_ludo_match по-горе (единствено поле, no
     // extra numeric/enum fields).

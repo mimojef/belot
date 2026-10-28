@@ -1027,6 +1027,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'send_emoji_reaction':
     case 'send_phrase_reaction':
     case 'send_ludo_emoji_reaction':
+    case 'send_ludo_phrase_reaction':
     case 'subscribe_ad_campaign_management':
     case 'unsubscribe_ad_campaign_management':
     case 'request_pending_ad_campaigns':
@@ -26753,6 +26754,40 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
           )
           if (targetConnection) safeSendToConnection(targetConnection.id, emojiMsg)
+        }
+        return
+      }
+
+      if (message.type === 'send_ludo_phrase_reaction') {
+        // Готова фраза — същите проверки и същият broadcast като
+        // send_ludo_emoji_reaction точно по-горе: match-ът и цветът на
+        // подателя се resolve-ват от ПРОФИЛА (не от клиента), matchId е само
+        // cross-check, напуснал играч не може да изпраща, а съобщението стига
+        // само до участниците в СЪЩИЯ match. phraseId вече е валидиран срещу
+        // фиксирания каталог в parseClientMessage.ts — свободен текст няма.
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) return
+        const snapshot = ludoMatchRuntime.requestState(latestConnection.profileId)
+        if (!snapshot || snapshot.matchId !== message.matchId || snapshot.state.status === 'finished') return
+        const sender = snapshot.players.find((player) => player.profileId === latestConnection.profileId)
+        if (!sender || snapshot.state.leftColors.includes(sender.color)) return
+        const phraseMsg = {
+          type: 'ludo_phrase_reaction' as const,
+          matchId: snapshot.matchId,
+          color: sender.color,
+          phraseId: message.phraseId,
+        }
+        // До ВСИЧКИ свързани връзки на всеки участник (не само първата) —
+        // при reconnect профилът за кратко може да има стара и нова връзка,
+        // и фразата не бива да отиде само към умиращата. Само същият профил,
+        // само участниците в този match.
+        for (const player of snapshot.players) {
+          if (snapshot.state.leftColors.includes(player.color)) continue
+          for (const candidate of Object.values(serverState.connections)) {
+            if (candidate.profileId === player.profileId && candidate.status === 'connected') {
+              safeSendToConnection(candidate.id, phraseMsg)
+            }
+          }
         }
         return
       }

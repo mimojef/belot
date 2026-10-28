@@ -17,6 +17,9 @@ export const LUDO_MOVE_ROUTE_TRAIL_Z_INDEX = 7_480
 export const LUDO_CAPTURE_FLIGHT_Z_INDEX = 8_000
 export const LUDO_CAPTURE_IMPACT_Z_INDEX = 8_500
 export const LUDO_EMOJI_REACTION_Z_INDEX = 8_800
+// Body-level overlay за балончетата с готови фрази (виж
+// ludoPhraseBubbleOverlay.ts) — на същото ниво като emoji балончетата.
+export const LUDO_PHRASE_REACTION_Z_INDEX = 8_800
 export const LUDO_DICE_OVERLAY_Z_INDEX = 9_000
 // Виж task-а "Ludo подаръци" — gift flight-ът е под modal layer-а (mirror
 // на Belot's table gift z-index scheme: flight=60 < modal=65), за да не

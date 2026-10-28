@@ -148,6 +148,11 @@ import { isGameSoundsEnabled, playGameSound, setGameSoundsEnabled } from '../aud
 import { GIFT_BACK_IN_GAME_PICKER_Z_INDEX } from '../gifts/giftItemReceivedActions'
 import { PHRASE_REACTIONS, getPhraseReactionText } from './phraseReactions'
 import {
+  renderPhrasePickerPanelHtml,
+  renderPhraseToggleIconHtml,
+  renderPhraseToggleSurfaceStyle,
+} from '../phraseReactions/phraseReactionPickerUi'
+import {
   removeSeatProfileOverlay,
   showSeatProfileOverlay,
   updateSeatProfileOverlay,
@@ -2832,60 +2837,15 @@ export function createActiveRoomFlowController(
     const isPhoneLayout = isPhoneLayoutViewport()
     const uiScale = isPhoneLayout ? 1 : stageScale
     const uiScaleKey = `${isPhoneLayout ? 'phone' : 'desktop'}:${uiScale.toFixed(3)}`
-    const rows = PHRASE_REACTIONS.map((phrase) => `
-      <button
-        type="button"
-        data-phrase-pick="${escapeHtml(phrase.id)}"
-        style="
-          border:1px solid rgba(212,165,32,0.36);
-          background:rgba(255,255,255,0.055);
-          color:#ffffff;
-          border-radius:10px;
-          padding:10px 12px;
-          cursor:pointer;
-          font:${isPhoneLayout ? '800' : '400'} ${isPhoneLayout ? '13px' : '14px'}/1.15 Arial, Helvetica, sans-serif;
-          text-align:left;
-          min-height:42px;
-          transition:background 0.12s,border-color 0.12s,color 0.12s;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-        "
-        onmouseenter="this.style.background='rgba(212,165,32,0.16)';this.style.borderColor='rgba(212,165,32,0.72)'"
-        onmouseleave="this.style.background='rgba(255,255,255,0.055)';this.style.borderColor='rgba(212,165,32,0.36)'"
-      >
-        ${escapeHtml(phrase.text)}
-      </button>
-    `)
-
-    return `
-      <div
-        data-phrase-picker="1"
-        data-reaction-ui-scale="${uiScaleKey}"
-        style="
-          position:fixed;
-          bottom:${isPhoneLayout ? `${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT + 8}px` : '76px'};
-          right:${isPhoneLayout ? '14px' : '16px'};
-          transform:scale(${uiScale});
-          transform-origin:bottom right;
-          z-index:9999;
-          width:${isPhoneLayout ? 'min(360px, calc(100vw - 28px))' : '420px'};
-          max-height:${isPhoneLayout ? '52vh' : 'none'};
-          overflow:${isPhoneLayout ? 'auto' : 'visible'};
-          background:rgba(20,20,24,0.96);
-          border:1px solid rgba(255,255,255,0.12);
-          border-radius:16px;
-          padding:12px;
-          display:grid;
-          grid-template-columns:${isPhoneLayout ? '1fr' : '1fr 1fr'};
-          gap:7px;
-          box-shadow:0 8px 32px rgba(0,0,0,0.5);
-          -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
-        "
-      >
-        ${rows.join('')}
-      </div>
-    `
+    return renderPhrasePickerPanelHtml({
+      phrases: PHRASE_REACTIONS,
+      isPhoneLayout,
+      uiScale,
+      uiScaleKey,
+      phoneBottomPx: ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT + 8,
+      panelAttribute: 'data-phrase-picker',
+      pickAttribute: 'data-phrase-pick',
+    })
   }
 
   function ensureEmojiButton(isScoring: boolean, stageScale: number): void {
@@ -2963,48 +2923,10 @@ export function createActiveRoomFlowController(
             width:${isPhoneLayout ? '40px' : '80px'};height:${isPhoneLayout ? '40px' : '80px'};
             transform:scale(${uiScale});
             transform-origin:bottom right;
-            border:0;border-radius:50%;
-            background:rgba(20,20,24,0.92);
-            border:2px solid rgba(212,165,32,0.80);
-            box-shadow:0 0 12px rgba(212,165,32,0.25), 0 6px 20px rgba(0,0,0,0.50);
-            cursor:pointer;
-            display:flex;align-items:center;justify-content:center;
-            -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
-            color:#f4c432;
-            font-size:${isPhoneLayout ? '22px' : '42px'};
-            font-weight:900;
-            line-height:1;
+            ${renderPhraseToggleSurfaceStyle(isPhoneLayout)}
           "
         >
-          <span
-            aria-hidden="true"
-            style="
-              position:relative;
-              width:${isPhoneLayout ? '25px' : '50px'};
-              height:${isPhoneLayout ? '18px' : '36px'};
-              display:flex;
-              align-items:center;
-              justify-content:center;
-              gap:${isPhoneLayout ? '4px' : '8px'};
-              border-radius:50%;
-              background:#d4a520;
-            "
-          >
-            <span
-              style="
-                position:absolute;
-                left:${isPhoneLayout ? '0px' : '0px'};
-                bottom:${isPhoneLayout ? '-4px' : '-8px'};
-                width:${isPhoneLayout ? '13px' : '26px'};
-                height:${isPhoneLayout ? '10px' : '20px'};
-                background:#d4a520;
-                clip-path:polygon(0 100%, 42% 0, 100% 18%);
-              "
-            ></span>
-            <span style="width:${isPhoneLayout ? '4px' : '8px'};height:${isPhoneLayout ? '4px' : '8px'};border-radius:50%;background:#2a2018;z-index:1;"></span>
-            <span style="width:${isPhoneLayout ? '4px' : '8px'};height:${isPhoneLayout ? '4px' : '8px'};border-radius:50%;background:#2a2018;z-index:1;"></span>
-            <span style="width:${isPhoneLayout ? '4px' : '8px'};height:${isPhoneLayout ? '4px' : '8px'};border-radius:50%;background:#2a2018;z-index:1;"></span>
-          </span>
+          ${renderPhraseToggleIconHtml(isPhoneLayout ? 0.5 : 1)}
         </button>
       `)
       document.body.querySelector('[data-phrase-toggle="1"]')?.addEventListener('click', () => {

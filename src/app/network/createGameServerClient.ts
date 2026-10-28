@@ -1039,6 +1039,9 @@ export type ClientMessage =
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
   | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
+  // Готова фраза — mirror на send_phrase_reaction (Белот), id от
+  // LUDO_PHRASE_REACTIONS каталога (ludoPhraseReactions.ts).
+  | { type: 'send_ludo_phrase_reaction'; matchId: string; phraseId: string }
   // In-game gift — mirror на send_table_gift по-горе, matchId вместо roomId.
   | { type: 'send_ludo_gift'; matchId: string; recipientProfileId: string; giftItemId: string; requestId: string }
   // Spectator mode ("Гледай", Phase 2) — mirror на server-а (виж
@@ -2356,6 +2359,15 @@ export type LudoEmojiReactionMessage = {
   emojiId: string
 }
 
+// Готова фраза — същата transient семантика като LudoEmojiReactionMessage;
+// phraseId е id от фиксирания каталог, текстът се взима локално.
+export type LudoPhraseReactionMessage = {
+  type: 'ludo_phrase_reaction'
+  matchId: string
+  color: 'red' | 'blue' | 'green' | 'yellow'
+  phraseId: string
+}
+
 // Ludo in-game gifts — 1:1 mirror на ActiveTableGiftSnapshot/
 // TableGiftItemSentMessage/TableGiftSendResultMessage (Belot Stage 2) по-
 // горе, matchId/LudoColor вместо roomId/Seat. Виж server/src/index.ts
@@ -3406,6 +3418,7 @@ export type ServerMessage =
   | LudoMatchSpectatorsMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
+  | LudoPhraseReactionMessage
   | LudoGiftSentMessage
   | LudoGiftSendResultMessage
   | PrivateRoomUpdatedMessage
@@ -3636,6 +3649,7 @@ export type GameServerClient = {
   requestLudoMove: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
   requestLudoReclaim: (matchId: string, expectedRevision: number) => void
   sendLudoEmojiReaction: (matchId: string, emojiId: string) => void
+  sendLudoPhraseReaction: (matchId: string, phraseId: string) => void
   sendLudoGift: (matchId: string, recipientProfileId: string, giftItemId: string, requestId: string) => void
   requestLudoGamesList: () => void
   watchLudoMatch: (matchId: string) => void
@@ -4096,6 +4110,7 @@ export function createGameServerClient(
   function requestLudoMove(matchId: string, expectedRevision: number, slot: LudoPieceSlot): void { send({ type: 'ludo_move_request', matchId, expectedRevision, slot }) }
   function requestLudoReclaim(matchId: string, expectedRevision: number): void { send({ type: 'ludo_reclaim_request', matchId, expectedRevision }) }
   function sendLudoEmojiReaction(matchId: string, emojiId: string): void { send({ type: 'send_ludo_emoji_reaction', matchId, emojiId }) }
+  function sendLudoPhraseReaction(matchId: string, phraseId: string): void { send({ type: 'send_ludo_phrase_reaction', matchId, phraseId }) }
   function sendLudoGift(matchId: string, recipientProfileId: string, giftItemId: string, requestId: string): void {
     send({ type: 'send_ludo_gift', matchId, recipientProfileId, giftItemId, requestId })
   }
@@ -4312,6 +4327,7 @@ export function createGameServerClient(
     requestLudoMove,
     requestLudoReclaim,
     sendLudoEmojiReaction,
+    sendLudoPhraseReaction,
     sendLudoGift,
     requestLudoGamesList,
     watchLudoMatch,

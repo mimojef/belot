@@ -989,6 +989,7 @@ export type CreateLobbyFlowControllerOptions = {
   onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
   onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
   onLudoEmojiReactionSend?: (matchId: string, emojiId: string) => void
+  onLudoPhraseReactionSend?: (matchId: string, phraseId: string) => void
   // Фаза 7 — End Game "спечелени тематични единици" read-only lookup, mirror
   // на createActiveRoomFlowController.ts-овото options.requestCampaignMatchCredit
   // wiring. matchId тук е snapshot.matchId (виж server/src/protocol/
@@ -3556,6 +3557,7 @@ export function createLobbyFlowController(
     destroy: () => void
     applyAuthoritativeSnapshot: (snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot, prizeAmount: number | null) => void
     applyEmojiReaction: (matchId: string, color: 'red' | 'blue' | 'green' | 'yellow', emojiId: string) => void
+    applyPhraseReaction: (matchId: string, color: 'red' | 'blue' | 'green' | 'yellow', phraseId: string, receivedAt?: number) => void
     applySpectatorViewers: (matchId: string, viewers: Array<{ profileId: string; displayName: string }>) => void
     notifyGameplayActionRejected: () => void
     requestExit: () => void
@@ -3624,6 +3626,26 @@ export function createLobbyFlowController(
   // независимо от _ludoController/_ludoLobbyController lifecycle-а в момента
   // на закъснелия отговор.
   let _isExpectingLudoMatchRestore = false
+  // Участнически Ludo екран, който се монтира в момента (между guard-а и
+  // async import-ите в openLudoGameOverlay). Без него няколко бързи
+  // ludo_game_state преди края на import-ите минаваха guard-а
+  // (_ludoController още null) и монтираха по един екран всеки — предишните
+  // контролери оставаха "изтекли" в DOM-а, без destroy.
+  let _pendingLudoGameOverlayOpen: {
+    snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot
+    activeGifts: ActiveLudoGiftSnapshot[]
+  } | null = null
+  // Последните готови фрази (до 4.5s назад) за Ludo. При WebSocket reconnect
+  // Ludo екранът се монтира наново (closeLudoGameOverlay -> async
+  // openLudoGameOverlay), а фраза, пристигнала в този прозорец, иначе би се
+  // загубила. Новият контролер ги получава с оригиналното време на
+  // получаване, т.е. балончето живее само оставащото време.
+  const LUDO_PHRASE_REPLAY_WINDOW_MS = 4500
+  let _recentLudoPhraseReactions: Array<{ matchId: string; color: 'red' | 'blue' | 'green' | 'yellow'; phraseId: string; receivedAt: number }> = []
+  function pruneRecentLudoPhraseReactions(): void {
+    const now = Date.now()
+    _recentLudoPhraseReactions = _recentLudoPhraseReactions.filter((entry) => now - entry.receivedAt < LUDO_PHRASE_REPLAY_WINDOW_MS)
+  }
   // Lifecycle ownership за gameplay-action (roll/move/reclaim) error-и —
   // виж task-а "ludo_match_not_turn lifecycle UX bug": реален репорт —
   // natural finish (win ИЛИ loss) -> end-game popup -> OK -> /games/ludo
@@ -3933,8 +3955,35 @@ export function createLobbyFlowController(
     initialActiveGifts: ActiveLudoGiftSnapshot[] = [],
   ): Promise<void> {
     if (_ludoController || _acknowledgedLudoMatchIds.has(snapshot.matchId)) return
-    const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
-    const { createLudoMockPlayers } = await import('../games/ludo/mock/ludoMockState')
+    // Монтирането вече е в ход (async import-ите по-долу) — повторно
+    // извикване (resume push + ludo_game_state_request след Refresh/reconnect,
+    // или обикновен game update в същия прозорец) само обновява състоянието,
+    // с което текущото монтиране ще създаде ЕДИНСТВЕНИЯ екран.
+    if (_pendingLudoGameOverlayOpen) {
+      const pending = _pendingLudoGameOverlayOpen
+      if (pending.snapshot.matchId !== snapshot.matchId || snapshot.revision >= pending.snapshot.revision) {
+        pending.snapshot = snapshot
+        pending.activeGifts = initialActiveGifts
+      }
+      return
+    }
+    const pendingOpen = { snapshot, activeGifts: initialActiveGifts }
+    _pendingLudoGameOverlayOpen = pendingOpen
+    let modules: [typeof import('../games/ludo/createLudoFlowController'), typeof import('../games/ludo/mock/ludoMockState')]
+    try {
+      modules = [await import('../games/ludo/createLudoFlowController'), await import('../games/ludo/mock/ludoMockState')]
+    } catch (error) {
+      if (_pendingLudoGameOverlayOpen === pendingOpen) _pendingLudoGameOverlayOpen = null
+      throw error
+    }
+    // Отменено междувременно (closeLudoGameOverlay — напр. ludo_match_left/
+    // Изход по време на import-ите) -> не монтираме.
+    if (_pendingLudoGameOverlayOpen !== pendingOpen) return
+    _pendingLudoGameOverlayOpen = null
+    snapshot = pendingOpen.snapshot
+    initialActiveGifts = pendingOpen.activeGifts
+    if (_ludoController || _acknowledgedLudoMatchIds.has(snapshot.matchId)) return
+    const [{ createLudoFlowController }, { createLudoMockPlayers }] = modules
     const overlayRoot = document.createElement('div')
     overlayRoot.setAttribute('data-ludo-overlay-root', '1')
     overlayRoot.style.position = 'fixed'
@@ -3975,6 +4024,7 @@ export function createLobbyFlowController(
         },
         onStateRefreshRequest: () => options.onLudoGameStateOpen?.(),
         onEmojiReactionSend: (matchId, emojiId) => options.onLudoEmojiReactionSend?.(matchId, emojiId),
+        onPhraseReactionSend: (matchId, phraseId) => options.onLudoPhraseReactionSend?.(matchId, phraseId),
         onCampaignMatchCreditRequest: (matchId) => options.onLudoCampaignMatchCreditRequest?.(matchId),
         onGiftSend: (matchId, recipientProfileId, giftItemId, requestId) =>
           options.onSendLudoGift?.(matchId, recipientProfileId, giftItemId, requestId),
@@ -4020,9 +4070,14 @@ export function createLobbyFlowController(
         maybeShowNextCampaignRewardCongratulations()
       },
     })
+    pruneRecentLudoPhraseReactions()
+    for (const entry of _recentLudoPhraseReactions) {
+      _ludoController.applyPhraseReaction(entry.matchId, entry.color, entry.phraseId, entry.receivedAt)
+    }
   }
 
   function closeLudoGameOverlay(): void {
+    _pendingLudoGameOverlayOpen = null
     _ludoController?.destroy()
     _ludoController = null
     document.querySelector('[data-ludo-overlay-root="1"]')?.remove()
@@ -21029,6 +21084,13 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_emoji_reaction') {
       _ludoController?.applyEmojiReaction(message.matchId, message.color, message.emojiId)
+      return true
+    }
+    if (message.type === 'ludo_phrase_reaction') {
+      const receivedAt = Date.now()
+      pruneRecentLudoPhraseReactions()
+      _recentLudoPhraseReactions.push({ matchId: message.matchId, color: message.color, phraseId: message.phraseId, receivedAt })
+      _ludoController?.applyPhraseReaction(message.matchId, message.color, message.phraseId, receivedAt)
       return true
     }
 

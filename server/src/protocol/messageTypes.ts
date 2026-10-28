@@ -304,6 +304,9 @@ export type ClientMessage =
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
   | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
+  // Готова фраза (mirror на Belot's send_phrase_reaction) — само id от
+  // фиксирания Ludo каталог (ludo_phrase_01..14), никога свободен текст.
+  | { type: 'send_ludo_phrase_reaction'; matchId: string; phraseId: string }
   // In-game gift (виж LudoGiftSentMessage/LudoGiftSendResultMessage doc
   // коментарите по-долу и resolveLudoGiftParticipants.ts) — mirror на
   // send_table_gift по-горе, matchId вместо roomId. requestId е client-
@@ -1464,6 +1467,15 @@ export type LudoEmojiReactionMessage = {
   color: LudoColor
   emojiId: string
 }
+// Готова фраза — същата transient семантика като LudoEmojiReactionMessage
+// (никога не се персистира; color се resolve-ва server-side от profileId).
+// phraseId е id от фиксирания каталог, текстът живее само в клиента.
+export type LudoPhraseReactionMessage = {
+  type: 'ludo_phrase_reaction'
+  matchId: string
+  color: LudoColor
+  phraseId: string
+}
 
 // ─── Ludo in-game gifts — 1:1 mirror на Belot table gift (Stage 2, виж
 // TableGiftItemSentMessage/TableGiftSendResultMessage/ActiveTableGiftSnapshot
@@ -1872,6 +1884,7 @@ export type ServerMessage =
   | BelotRoomSpectatorsMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
+  | LudoPhraseReactionMessage
   | LudoGiftSentMessage
   | LudoGiftSendResultMessage
   | PrivateRoomUpdatedMessage

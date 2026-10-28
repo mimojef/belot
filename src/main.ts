@@ -7360,6 +7360,7 @@ lobby = createLobbyFlowController({
   onLudoMoveRequest: (matchId, revision, slot) => { client.requestLudoMove(matchId, revision, slot) },
   onLudoReclaimRequest: (matchId, revision) => { client.requestLudoReclaim(matchId, revision) },
   onLudoEmojiReactionSend: (matchId, emojiId) => { client.sendLudoEmojiReaction(matchId, emojiId) },
+  onLudoPhraseReactionSend: (matchId, phraseId) => { client.sendLudoPhraseReaction(matchId, phraseId) },
   onLudoCampaignMatchCreditRequest: (matchId) => { client.requestCampaignMatchCredit('ludo', matchId) },
   onSendLudoGift: (matchId, recipientProfileId, giftItemId, requestId) => {
     client.sendLudoGift(matchId, recipientProfileId, giftItemId, requestId)

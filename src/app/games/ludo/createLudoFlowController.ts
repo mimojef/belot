@@ -34,7 +34,9 @@
 
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import { renderLudoGameScreen, applyLudoBoardContent, computeLudoDesktopPanelScale, type LudoGameScreenState } from './renderLudoGameScreen'
-import { renderLudoEmojiPickerHtml } from './renderLudoBottomBar'
+import { renderLudoEmojiPickerHtml, renderLudoPhrasePickerHtml, getLudoPhrasePickerLayout } from './renderLudoBottomBar'
+import { getLudoPhraseReactionText } from './ludoPhraseReactions'
+import { LUDO_PHRASE_BUBBLE_TOTAL_MS, removeLudoPhraseBubbleOverlay, syncLudoPhraseBubbleOverlay } from './ludoPhraseBubbleOverlay'
 import { renderLudoSpectatorViewersPopoverHtml } from './renderLudoSpectatorViewersPopover'
 import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
 import { renderLudoGameEndPopup, renderLudoCampaignUnitLineHtml } from './renderLudoGameEndPopup'
@@ -113,6 +115,8 @@ export interface LudoFlowControllerOptions {
     // onMoveRequest wiring-а. Не съществува в non-authoritative (dev
     // harness) режим — emoji picker-ът остава скрит там (виж wireEvents()).
     onEmojiReactionSend?: (matchId: string, emojiId: string) => void
+    // Готови фрази — mirror на onEmojiReactionSend (Belot's sendPhraseReaction).
+    onPhraseReactionSend?: (matchId: string, phraseId: string) => void
     // Фаза 7 — End Game "спечелени тематични единици" read-only lookup,
     // mirror на Белот's requestCampaignMatchCredit (createActiveRoomFlowController.ts),
     // reuse-ващ СЪЩИЯ сървърен request_campaign_match_credit/
@@ -699,6 +703,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
 
   let isDestroyed = false
   let isEmojiPickerOpen = false
+  let isPhrasePickerOpen = false
   let hasPresentedGameEnd = false
   let isGameEndPopupOpen = false
   let isExitConfirmOpen = false
@@ -840,6 +845,65 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       render()
     }, LUDO_EMOJI_BUBBLE_TOTAL_MS)
     render()
+  }
+
+  // Готови фрази — същият lifecycle като Belot's addPhraseBubble
+  // (createActiveRoomFlowController.ts): едно активно балонче на играч, нова
+  // фраза от същия цвят го REPLACE-ва, изтича след 4500ms. Чисто
+  // presentation — никога не участва в engineState/snapshot. Рендира се в
+  // отделен body-level overlay (ludoPhraseBubbleOverlay.ts), синхронизиран
+  // в края на всеки render().
+  let phraseReactions: Partial<Record<LudoColor, { phraseId: string; startedAt: number }>> = {}
+  let phraseReactionTimers: Partial<Record<LudoColor, ReturnType<typeof setTimeout>>> = {}
+  function clearPhraseReactionTimers(): void {
+    for (const timerId of Object.values(phraseReactionTimers)) {
+      if (timerId !== undefined) clearTimeout(timerId)
+    }
+    phraseReactionTimers = {}
+    phraseReactions = {}
+  }
+  // При resync (foreground snap / revision gap — вкл. веднага след
+  // WebSocket reconnect) махаме само вече изтеклите балончета (напр. timer,
+  // забавен от скрит таб). Прясна фраза, пристигнала в самия прозорец на
+  // resync-а, остава — Белот също не чисти фразите при snapshot.
+  function pruneExpiredPhraseReactions(): void {
+    const now = Date.now()
+    for (const [color, reaction] of Object.entries(phraseReactions) as [LudoColor, { phraseId: string; startedAt: number }][]) {
+      if (now - reaction.startedAt < LUDO_PHRASE_BUBBLE_TOTAL_MS) continue
+      const timerId = phraseReactionTimers[color]
+      if (timerId !== undefined) clearTimeout(timerId)
+      delete phraseReactionTimers[color]
+      const next = { ...phraseReactions }
+      delete next[color]
+      phraseReactions = next
+    }
+  }
+  // startedAt е моментът на получаване — при seed след remount (reconnect)
+  // е в миналото и балончето живее само оставащото време.
+  function addPhraseReaction(color: LudoColor, phraseId: string, startedAt = Date.now()): void {
+    const remainingMs = LUDO_PHRASE_BUBBLE_TOTAL_MS - (Date.now() - startedAt)
+    if (remainingMs <= 0) return
+    const current = phraseReactions[color]
+    if (current && current.startedAt > startedAt) return
+    const existingTimer = phraseReactionTimers[color]
+    if (existingTimer !== undefined) clearTimeout(existingTimer)
+    phraseReactions = { ...phraseReactions, [color]: { phraseId, startedAt } }
+    phraseReactionTimers[color] = setTimeout(() => {
+      delete phraseReactionTimers[color]
+      const next = { ...phraseReactions }
+      delete next[color]
+      phraseReactions = next
+      render()
+    }, remainingMs)
+    render()
+  }
+  function syncPhraseBubbles(): void {
+    const bubbles: Array<{ color: LudoColor; text: string; startedAt: number }> = []
+    for (const [color, reaction] of Object.entries(phraseReactions) as [LudoColor, { phraseId: string; startedAt: number }][]) {
+      const text = getLudoPhraseReactionText(reaction.phraseId)
+      if (text !== null) bubbles.push({ color, text, startedAt: reaction.startedAt })
+    }
+    syncLudoPhraseBubbleOverlay(bubbles)
   }
 
   // Единствената точка, през която engineState се променя — reject-натите
@@ -1046,6 +1110,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     options.root.innerHTML = renderLudoGameScreen(currentScreenState())
     applyLudoBoardContent(options.root, currentScreenState())
     if (isEmojiPickerOpen) mountEmojiPicker()
+    if (isPhrasePickerOpen) mountPhrasePicker()
     if (showBotTakeoverPopup) mountBotTakeoverPopup()
     if (isGameEndPopupOpen) mountGameEndPopup()
     if (isExitConfirmOpen) mountExitConfirmPopup()
@@ -1053,6 +1118,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (isSpectatorViewersPopoverOpen) mountSpectatorViewersPopover()
     wireEvents()
     syncGiftOverlays()
+    syncPhraseBubbles()
   }
 
   // Ludo "Настройки" popup (виж task-а "Ludo sound settings") — reuse-ва
@@ -1271,6 +1337,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     isExitConfirmOpen = false
     isExitLeavePending = false
     isEmojiPickerOpen = false
+    isPhrasePickerOpen = false
+    document.removeEventListener('click', handlePhrasePickerOutsideClick, { capture: true })
     isSettingsPopupOpen = false
     isSpectatorViewersPopoverOpen = false
     modalLayerRoot.replaceChildren()
@@ -1330,6 +1398,53 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (!(target instanceof Element)) return
     if (target.closest('[data-ludo-emoji-picker="1"]') || target.closest('[data-ludo-emoji-button="1"]')) return
     closeEmojiPicker()
+  }
+
+  // Панелът с готови фрази — същото поведение като Белот
+  // (syncPhrasePickerPanel/closeReactionPickersOnOutsideClick): бутонът
+  // toggle-ва, изборът на фраза изпраща и затваря, клик извън панела го
+  // затваря, отварянето му затваря emoji панела (и обратно — чрез outside
+  // click handler-ите), при промяна на layout-а панелът се пресъздава. Като
+  // emoji picker-а е лек floating panel в modalLayerRoot (pointer-events:auto
+  // само върху себе си), не блокира зара/дъската.
+  function mountPhrasePicker(): void {
+    const existing = modalLayerRoot.querySelector('[data-ludo-phrase-picker="1"]')
+    if (existing && existing.getAttribute('data-reaction-ui-scale') === getLudoPhrasePickerLayout().key) return
+    existing?.remove()
+    const container = document.createElement('div')
+    container.innerHTML = renderLudoPhrasePickerHtml()
+    const panel = container.firstElementChild
+    if (!(panel instanceof HTMLElement)) return
+    panel.style.pointerEvents = 'auto'
+    modalLayerRoot.appendChild(panel)
+    panel.querySelectorAll<HTMLButtonElement>('[data-ludo-phrase-pick]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const phraseId = button.getAttribute('data-ludo-phrase-pick')
+        if (!phraseId) return
+        closePhrasePicker()
+        if (options.authoritative && authoritativeSnapshot) {
+          options.authoritative.onPhraseReactionSend?.(authoritativeSnapshot.matchId, phraseId)
+        } else {
+          // Non-authoritative dev harness — няма сървър за echo (mirror на
+          // emoji picker-а по-горе).
+          addPhraseReaction(localColor, phraseId)
+        }
+      })
+    })
+    document.addEventListener('click', handlePhrasePickerOutsideClick, { capture: true })
+  }
+
+  function closePhrasePicker(): void {
+    isPhrasePickerOpen = false
+    modalLayerRoot.querySelector('[data-ludo-phrase-picker="1"]')?.remove()
+    document.removeEventListener('click', handlePhrasePickerOutsideClick, { capture: true })
+  }
+
+  function handlePhrasePickerOutsideClick(event: MouseEvent): void {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (target.closest('[data-ludo-phrase-picker="1"]') || target.closest('[data-ludo-phrase-button="1"]')) return
+    closePhrasePicker()
   }
 
   // Viewer-indicator popover ("наднича във вашата игра") — лек floating
@@ -1532,6 +1647,12 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       if (isEmojiPickerOpen) { closeEmojiPicker(); return }
       isEmojiPickerOpen = true
       mountEmojiPicker()
+    })
+
+    options.root.querySelector('[data-ludo-phrase-button="1"]')?.addEventListener('click', () => {
+      if (isPhrasePickerOpen) { closePhrasePicker(); return }
+      isPhrasePickerOpen = true
+      mountPhrasePicker()
     })
 
     options.root.querySelectorAll<HTMLElement>('[data-ludo-piece-selectable="1"]').forEach((el) => {
@@ -2062,6 +2183,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // foreground snap/revision-gap resync не бива да остави stale bubble,
     // видима седейки от преди прозореца на прекъсването.
     clearEmojiReactionTimers()
+    pruneExpiredPhraseReactions()
     // Presentation gate reset (виж presentationGateSnapshot doc коментара) —
     // same established pattern като isAnimatingMove/movingPieceSuppressedId
     // по-горе: foreground snap/epoch invalidation не бива да остави "замразен"
@@ -2381,6 +2503,15 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     addEmojiReaction(color, emojiId)
   }
 
+  // Готова фраза — реален server echo (mirror на applyEmojiReaction по-горе и
+  // Belot's phrase_reaction handling): matchId staleness guard, а id-то се
+  // проверява и client-side срещу каталога — непознат id не се показва.
+  function applyPhraseReaction(matchId: string, color: LudoColor, phraseId: string, receivedAt = Date.now()): void {
+    if (!options.authoritative || matchId !== options.authoritative.initialSnapshot.matchId) return
+    if (getLudoPhraseReactionText(phraseId) === null) return
+    addPhraseReaction(color, phraseId, receivedAt)
+  }
+
   // Server отхвърли roll/move/reclaim request (типично ludo_match_not_turn —
   // виж createLobbyFlowController.ts _ludoGameplayActionResponsesPending doc
   // коментара за пълния routing rationale). ЕДИНСТВЕНАТА цел тук: върни зара
@@ -2455,11 +2586,14 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     window.removeEventListener('resize', handleResize)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
     document.removeEventListener('click', handleEmojiPickerOutsideClick, { capture: true })
+    document.removeEventListener('click', handlePhrasePickerOutsideClick, { capture: true })
     document.removeEventListener('click', handleSpectatorViewersPopoverOutsideClick, { capture: true })
     if (resizeTimer) clearTimeout(resizeTimer)
     clearScheduledTimers()
     clearCampaignMatchCreditRetryTimer()
     clearEmojiReactionTimers()
+    clearPhraseReactionTimers()
+    removeLudoPhraseBubbleOverlay()
     activeMoveOverlayCancel?.()
     activeMoveOverlayCancel = null
     diceResultOverlay.clearLanded()
@@ -2487,6 +2621,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     destroy,
     applyAuthoritativeSnapshot,
     applyEmojiReaction,
+    applyPhraseReaction,
     applySpectatorViewers,
     notifyGameplayActionRejected,
     requestExit,
