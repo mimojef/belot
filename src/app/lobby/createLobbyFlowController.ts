@@ -21883,25 +21883,13 @@ export function createLobbyFlowController(
     // fallback-ваме към scheduleRender() (debounce-нат coalescing, не
     // synchronous render() — high-frequency badge push-ове не трябва да
     // тригерват незабавен пълен remount дори във fallback пътя).
+    // Push-ът за брояч НИКОГА сам не маркира като прочетено. Маркирането става
+    // само при реално показано съдържание — пристигнало съобщение/отговор
+    // (topic_message / topic_reply / topic_message_catchup) или отваряне на
+    // темата/нишката. Иначе брояч, пристигнал без съдържание (повторно
+    // свързване преди повторния абонамент, или отново показани съобщения след
+    // отмяна на заявка за изтриване), би маркирал невидени съобщения.
     if (message.type === 'topic_unread_count_changed') {
-      // FIX: state.activeTopicId се задава при openTopic/openTopicThread, но
-      // НИКОГА не се reset-ва на null при напускане на Topics screen (виж
-      // switchToLobby/resetToLobby) — остава stale ("бил съм там веднъж
-      // тая сесия"), не отразява дали потребителят РЕАЛНО гледа темата сега.
-      // Старият guard third-ваше самò activeTopicId match, значи Lafche push
-      // винаги минаваше през markActiveTopicSeen (force count->0, DOM никога
-      // не вижда >0) дори когато потребителят отдавна е напуснал Topics.
-      // Добавен isReallyViewingThisTopic — mirror на established pattern-a в
-      // markActiveTopicSeen самата (`changed && state.currentScreen ===
-      // 'topics'`), за да third-ва "реално гледам сега", не само "последно
-      // отворена тема".
-      const isReallyViewingThisTopic = state.currentScreen === 'topics'
-        && state.topicsMode === 'topics'
-        && message.topicId === state.activeTopicId
-      if (isReallyViewingThisTopic && !isGeneralTopicId(message.topicId)) {
-        void markActiveTopicSeen(message.topicId)
-        return true
-      }
       const changed = updateTopicUnreadCount(message.topicId, message.unreadCount)
       if (changed) {
         const patched = refreshTopicsUnreadDom(options.root, buildLobbyScreenState())
@@ -21923,15 +21911,10 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'topic_thread_unread_count_changed') {
-      const isCurrentThread = state.topicsMode === 'thread' && state.topicThreadRootMessageId === message.rootMessageId
-      const changedRoot = updateTopicThreadUnreadCount(
-        message.rootMessageId,
-        isCurrentThread ? 0 : message.unreadCount,
-      )
+      // Без маркиране (виж коментара по-горе). Отворената нишка няма бадж
+      // (variant 'thread'); нов отговор в нея се маркира от topic_reply.
+      const changedRoot = updateTopicThreadUnreadCount(message.rootMessageId, message.unreadCount)
       const changedTopic = updateTopicUnreadCount(message.topicId, message.topicUnreadCount)
-      if (isCurrentThread) {
-        void markTopicThreadSeen(message.rootMessageId)
-      }
       if (changedRoot || changedTopic) {
         if (!refreshTopicsUnreadDom(options.root, buildLobbyScreenState())) {
           scheduleRender()
@@ -22443,19 +22426,29 @@ export function createLobbyFlowController(
         if (state.topicReplyComposerOpenRootId === message.messageId) {
           state.topicReplyComposerOpenRootId = null
         }
+        let needsFullRender = false
         if (state.topicsMode === 'thread' && state.topicThreadRootMessageId === message.messageId) {
           state.topicsMode = 'topics'
           state.topicThreadRootMessageId = null
           state.topicMessagesScrollAnchor = state.topicThreadReturnScrollAnchor
           state.topicThreadReturnScrollAnchor = null
           state.topicThreadRenderReason = null
+          needsFullRender = true
         }
         if (state.topicMessageEdit !== null && findLoadedTopicMessage(state.topicMessageEdit.messageId) === null) {
           state.topicMessageEdit = null
           state.topicMessageEditErrorText = null
           state.topicMessageEditBusy = false
+          needsFullRender = true
         }
-        render()
+        // Само премахване на картата (изтриване от модератор или скриване на
+        // автора при заявка за самоизтриване) — targeted DOM removal, без
+        // remount на списъка и без загуба на скрол. Пълен render() остава за
+        // смяна на изгледа (отворената нишка изчезва), прекъсната редакция
+        // или празен списък (empty state).
+        if (needsFullRender || (state.topicMessages ?? []).length === 0 || !removeTopicMessageDom(options.root, message.messageId, null)) {
+          render()
+        }
       } else {
         // REPLY target — маха само него от родителския replies списък. Root
         // и sibling replies остават непокътнати; replyCount на root-а се

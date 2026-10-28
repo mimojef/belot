@@ -1630,6 +1630,13 @@ function applyProfileDeletionVisibilityEvent(event: ProfileDeletionVisibilityEve
       hidden,
     })
   }
+  // Unread бройките на Темите (нишките на скрития автор) — без refresh.
+  // Отделен try: грешка тук не бива да повтаря горните ефекти при следващия poll.
+  try {
+    reconcileTopicUnreadAfterProfileVisibilityChange(event.profileId, hidden)
+  } catch (error) {
+    console.error('[profile-deletion] topic unread reconcile failed:', error)
+  }
   if (origin === 'local') {
     locallyAppliedProfileDeletionEventSeqs.add(event.eventSeq)
   }
@@ -2808,6 +2815,146 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
         rootMessageId,
         unreadCount: threadUnreadCountByProfileId.get(recipient.profileId) ?? 0,
         topicUnreadCount,
+      })
+    }
+  }
+}
+
+// Самоизтриване — скриване/показване на профил (заявка/отмяна) променя unread
+// бройките на Темите: topicReadStateStore изключва съобщенията И нишките на
+// скритите автори. Само преизчисляване + push към абонатите на директорията в
+// ТОЗИ процес (всеки процес прилага събитието, виж
+// applyProfileDeletionVisibilityEvent). НЕ маркира нищо като прочетено, за
+// разлика от reconcileTopicUnreadForDirectorySubscribers. Клиентът не маркира
+// при push за брояч; връзка, която в момента гледа non-general тема, все пак
+// се пропуска — защита за клиенти със стар bundle, при които такъв push
+// маркираше темата видяна, без отново показаните съобщения да са в DOM-а.
+//
+// Картите в „Общи“ — целево и само към връзките, които В МОМЕНТА гледат
+// „Общи“ (topicMessageSubscribersByTopicId): само там картите са заредени;
+// всяко друго отваряне на „Общи“ зарежда наново от REST. Засегнати са само
+// нишките, които профилът е докоснал:
+//   * собствените му root-ове — при скриване изчезват (topic_message_deleted,
+//     parentMessageId=null), при отмяна се връщат с ЕДИН topic_message_catchup
+//     на връзка (merge + подреждане по активност, със запазен скрол; за
+//     „Общи“ клиентът не маркира при catch-up);
+//   * чуждите root-ове с негов отговор — нова бройка
+//     (topic_thread_unread_count_changed).
+// Изтрит по 72-часовото правило root вече го няма и просто не се връща.
+const PROFILE_VISIBILITY_THREAD_UNREAD_PUSH_LIMIT = 200
+
+type ProfileVisibilityRecipient = { connectionId: ConnectionId; profileId: string; activeTopicId: string | undefined }
+
+function collectLiveProfileRecipients(connectionIds: Set<ConnectionId>): ProfileVisibilityRecipient[] {
+  const recipients: ProfileVisibilityRecipient[] = []
+  for (const connectionId of [...connectionIds]) {
+    const connection = getConnectionById(serverState, connectionId)
+    const socket = socketRegistry.get(connectionId)
+    if (connection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      connectionIds.delete(connectionId)
+      continue
+    }
+    if (connection.profileId === null) continue
+    recipients.push({
+      connectionId,
+      profileId: connection.profileId,
+      activeTopicId: topicMessageSubscriberTopicIdByConnectionId.get(connectionId),
+    })
+  }
+  return recipients
+}
+
+function reconcileTopicUnreadAfterProfileVisibilityChange(changedProfileId: string, hidden: boolean): void {
+  const topics = listActiveTopicsVisibleForDeletion()
+  if (topics.length === 0) return
+  const generalTopic = topics.find((topic) => topic.isGeneral) ?? null
+  const generalSubscriberIds = generalTopic !== null ? topicMessageSubscribersByTopicId.get(generalTopic.topicId) : undefined
+
+  const directoryRecipients = collectLiveProfileRecipients(topicsDirectorySubscriberConnectionIds)
+  const generalRecipients = generalSubscriberIds !== undefined ? collectLiveProfileRecipients(generalSubscriberIds) : []
+  if (directoryRecipients.length === 0 && generalRecipients.length === 0) return
+
+  const uniqueProfileIds = [...new Set([...directoryRecipients, ...generalRecipients].map((r) => r.profileId))]
+  const excludedSendersByViewer = buildTopicSenderExclusionsByViewerForDeletion(uniqueProfileIds)
+  let generalUnreadCountByProfileId = new Map<string, number>()
+  for (const topic of topics) {
+    const unreadCountByProfileId = getTopicUnreadCountsForProfiles(topic.topicId, uniqueProfileIds, excludedSendersByViewer)
+    if (topic.isGeneral) generalUnreadCountByProfileId = unreadCountByProfileId
+    for (const recipient of directoryRecipients) {
+      if (recipient.activeTopicId === topic.topicId && !topic.isGeneral) continue
+      safeSendToConnection(recipient.connectionId, {
+        type: 'topic_unread_count_changed',
+        topicId: topic.topicId,
+        unreadCount: unreadCountByProfileId.get(recipient.profileId) ?? 0,
+      })
+    }
+  }
+
+  if (generalTopic === null || generalRecipients.length === 0) return
+  const generalTopicId = generalTopic.topicId
+  const generalProfileIds = [...new Set(generalRecipients.map((r) => r.profileId))]
+  const touchedRoots = topicMessageStore.listLiveRootsTouchedBySender(
+    generalTopicId,
+    changedProfileId,
+    PROFILE_VISIBILITY_THREAD_UNREAD_PUSH_LIMIT,
+  )
+  const ownRootIds = touchedRoots.filter((r) => r.rootSenderProfileId === changedProfileId).map((r) => r.rootMessageId)
+  const foreignRootIds = touchedRoots.filter((r) => r.rootSenderProfileId !== changedProfileId).map((r) => r.rootMessageId)
+
+  if (hidden) {
+    const deletedAt = new Date().toISOString()
+    for (const recipient of generalRecipients) {
+      for (const messageId of ownRootIds) {
+        safeSendToConnection(recipient.connectionId, {
+          type: 'topic_message_deleted',
+          topicId: generalTopicId,
+          messageId,
+          parentMessageId: null,
+          deletedAt,
+        })
+      }
+    }
+  } else if (ownRootIds.length > 0) {
+    const restoredRoots = hydrateTopicMessagesWithCurrentAvatars(
+      topicMessageStore.getVisibleRootMessagesByIds(generalTopicId, ownRootIds, getTopicSenderExclusionsForDeletion()),
+    )
+    const viewerDataByRootId = new Map(restoredRoots.map((m) => [
+      m.messageId,
+      {
+        viewerData: topicMessageStore.getBroadcastViewerDataForProfiles(m.messageId, generalProfileIds, excludedSendersByViewer),
+        unreadCount: getTopicThreadUnreadCountsForProfiles(m.messageId, generalProfileIds, excludedSendersByViewer),
+      },
+    ] as const))
+    if (restoredRoots.length > 0) {
+      for (const recipient of generalRecipients) {
+        safeSendToConnection(recipient.connectionId, {
+          type: 'topic_message_catchup',
+          topicId: generalTopicId,
+          messages: restoredRoots.map((m) => {
+            const perViewer = viewerDataByRootId.get(m.messageId)
+            const viewerData = perViewer?.viewerData.get(recipient.profileId)
+            return {
+              ...m,
+              replyCount: viewerData?.replyCount ?? 0,
+              unreadCount: perViewer?.unreadCount.get(recipient.profileId) ?? 0,
+              viewerHasLiked: viewerData?.viewerHasLiked ?? false,
+            }
+          }),
+          truncated: false,
+        })
+      }
+    }
+  }
+
+  for (const rootMessageId of foreignRootIds) {
+    const threadUnreadCountByProfileId = getTopicThreadUnreadCountsForProfiles(rootMessageId, generalProfileIds, excludedSendersByViewer)
+    for (const recipient of generalRecipients) {
+      safeSendToConnection(recipient.connectionId, {
+        type: 'topic_thread_unread_count_changed',
+        topicId: generalTopicId,
+        rootMessageId,
+        unreadCount: threadUnreadCountByProfileId.get(recipient.profileId) ?? 0,
+        topicUnreadCount: generalUnreadCountByProfileId.get(recipient.profileId) ?? 0,
       })
     }
   }

@@ -243,6 +243,7 @@
     "check:topic-message-edit-auth-realtime": "tsx scripts/checkTopicMessageEditAuthRealtime.ts",
     "check:topic-unread-seen": "tsx scripts/checkTopicUnreadSeen.ts",
     "check:topic-unread-seen-auth-realtime": "tsx scripts/checkTopicUnreadSeenAuthRealtime.ts",
+    "check:topic-unread-deletion-visibility": "tsx scripts/checkTopicUnreadDeletionVisibility.ts",
     "check:gift-limit-frontend": "tsx scripts/checkGiftLimitFrontend.ts",
     "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:social-block-profile-authorization": "tsx scripts/checkSocialBlockProfileAuthorization.ts",

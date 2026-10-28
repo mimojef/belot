@@ -408,11 +408,72 @@ try {
     assert((await api('/api/friends', { cookie: banned.cookie })).status === 200, 'сесията е отнета')
   })
 
+  // Фантомен unread (механизъм A): нишка на hidden в „Общи“ с чужд отговор.
+  // friend отваря директорията ПРЕДИ публикациите — read state-ът му е под тях.
+  const generalUnread = async (user: User): Promise<number | undefined> =>
+    ((await api('/api/topics', { cookie: user.cookie })).json.topics as Array<{ topicId: string; unreadCount: number }>)
+      .find((topic) => topic.topicId === 'topic-general')?.unreadCount
+  await generalUnread(friend)
+  // Като topicMessageStore: root -> нов ред в topic_root_latest_seq; отговор -> latest_seq на root-а.
+  const insertGeneralMessage = (author: User, parentMessageId: string | null): string => {
+    const messageId = randomUUID()
+    db.prepare(`INSERT INTO topic_messages (message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body) VALUES (?, 'topic-general', ?, ?, ?, 'player', 'текст');`)
+      .run(messageId, parentMessageId, author.profileId, author.displayName)
+    const seq = (db.prepare('SELECT seq FROM topic_messages WHERE message_id = ?;').get(messageId) as { seq: number }).seq
+    if (parentMessageId === null) {
+      db.prepare(`INSERT INTO topic_root_latest_seq (root_message_id, topic_id, latest_seq) VALUES (?, 'topic-general', ?);`).run(messageId, seq)
+    } else {
+      db.prepare(`UPDATE topic_root_latest_seq SET latest_seq = ? WHERE root_message_id = ?;`).run(seq, parentMessageId)
+    }
+    return messageId
+  }
+  const generalHiddenRoot = insertGeneralMessage(hidden, null)       // нишка на hidden
+  insertGeneralMessage(gamer, generalHiddenRoot)                       // чужд отговор под нея
+  const generalVisibleRoot = insertGeneralMessage(inviter, null)      // видима чужда нишка
+  insertGeneralMessage(hidden, generalVisibleRoot)                     // отговор на hidden в нея
+  const generalUntouchedRoot = insertGeneralMessage(staff, null)      // контрола: hidden не участва
+  // Директно вкараните редове се анонсират от cross-instance poll-а (700 ms)
+  // като чужди за процеса — със собствен unread reconcile per root. Изчакваме
+  // го ПРЕДИ абонамента за директорията, за да са по-долните push-ове само от
+  // събитията за видимост.
+  await new Promise((r) => setTimeout(r, 2000))
+  const friendTopicReadState = () => JSON.stringify([
+    db.prepare('SELECT * FROM topic_read_state WHERE profile_id = ? ORDER BY topic_id;').all(friend.profileId),
+    db.prepare('SELECT * FROM topic_thread_read_state WHERE profile_id = ? ORDER BY root_message_id;').all(friend.profileId),
+  ])
+
   // WS връзки преди успешното подаване.
   const hiddenSocket = await openSocket(hidden.cookie)
   const friendSocket = await openSocket(friend.cookie)
   friendSocket.ws.send(JSON.stringify({ type: 'subscribe_lobby_chat' }))
   await waitFor(() => friendSocket.messages.some((m) => m.type === 'lobby_chat_history'), 'lobby history')
+  friendSocket.ws.send(JSON.stringify({ type: 'subscribe_topics_directory' }))
+  // friend гледа „Общи“ (картите са заредени) — afterSeq над всичко: празен catch-up ack.
+  friendSocket.ws.send(JSON.stringify({ type: 'subscribe_topic_messages', topicId: 'topic-general', afterSeq: 1_000_000_000 }))
+  await waitFor(() => friendSocket.messages.some((m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-general'), 'catch-up ack')
+  // Наблюдател само в директорията (не гледа „Общи“): получава общия брояч, но не и събитията за картите.
+  const directoryOnlySocket = await openSocket(inviter.cookie)
+  directoryOnlySocket.ws.send(JSON.stringify({ type: 'subscribe_topics_directory' }))
+  const isCardEventFor = (m: any, rootIds: string[]) =>
+    (m.type === 'topic_thread_unread_count_changed' && rootIds.includes(m.rootMessageId))
+    || (m.type === 'topic_message_deleted' && rootIds.includes(m.messageId))
+    || (m.type === 'topic_message_catchup' && (m.messages as Array<{ messageId: string }>).some((x) => rootIds.includes(x.messageId)))
+  const isGeneralUnreadPush = (m: any, unreadCount: number) => m.type === 'topic_unread_count_changed' && m.topicId === 'topic-general' && m.unreadCount === unreadCount
+  const isThreadUnreadPush = (m: any, rootMessageId: string, unreadCount: number, topicUnreadCount: number) =>
+    m.type === 'topic_thread_unread_count_changed' && m.topicId === 'topic-general' && m.rootMessageId === rootMessageId
+    && m.unreadCount === unreadCount && m.topicUnreadCount === topicUnreadCount
+  const threadUnreadFromHistory = async (user: User, rootMessageId: string): Promise<number | undefined> =>
+    ((await api('/api/topics/topic-general/messages', { cookie: user.cookie })).json.messages as Array<{ messageId: string; unreadCount: number }>)
+      .find((m) => m.messageId === rootMessageId)?.unreadCount
+
+  let friendTopicReadStateBefore = ''
+  await check('[E12a] Преди подаването „Общи“ = 5 за friend: нишка на hidden 2 + видима нишка с отговор на hidden 2 + контролна нишка 1', async () => {
+    const unread = await generalUnread(friend)
+    assert(unread === 5, `„Общи“: ${unread}`)
+    assert((await threadUnreadFromHistory(friend, generalVisibleRoot)) === 2, 'видимата нишка')
+    assert((await threadUnreadFromHistory(friend, generalUntouchedRoot)) === 1, 'контролната нишка')
+    friendTopicReadStateBefore = friendTopicReadState()
+  })
 
   await check('[E12] Преди подаването темата на hidden е видима в директорията', async () => {
     const topics = await api('/api/topics', { cookie: friend.cookie })
@@ -459,6 +520,28 @@ try {
   await check('[E16] Приятелят получава profile_visibility_changed (hidden) и lobby_chat_message_deleted', async () => {
     await waitFor(() => friendSocket.messages.some((m) => m.type === 'profile_visibility_changed' && m.profileId === hidden.profileId && m.hidden === true), 'visibility hidden')
     await waitFor(() => friendSocket.messages.some((m) => m.type === 'lobby_chat_message_deleted' && m.messageId === lobbyMessageId), 'lobby deletion')
+  })
+
+  let generalPushIndexAfterHide = 0
+  await check('[E16b] Без refresh: „Общи“ = 2 (без нишката на hidden и без отговора му във видимата нишка); read state непокътнат', async () => {
+    await waitFor(() => friendSocket.messages.some((m) => isGeneralUnreadPush(m, 2)), 'topic-general unread 2')
+    assert((await generalUnread(friend)) === 2, `GET /api/topics: ${await generalUnread(friend)}`)
+    assert(friendTopicReadState() === friendTopicReadStateBefore, 'read state е променен')
+  })
+
+  await check('[E16c] Без refresh, само към гледащите „Общи“: картата на hidden изчезва (topic_message_deleted), видимата нишка 2 -> 1; контролната нишка — нищо; = историята', async () => {
+    await waitFor(() => friendSocket.messages.some((m) => isThreadUnreadPush(m, generalVisibleRoot, 1, 2)), 'видимата нишка = 1')
+    await waitFor(() => friendSocket.messages.some((m) => m.type === 'topic_message_deleted' && m.topicId === 'topic-general' && m.messageId === generalHiddenRoot && m.parentMessageId === null), 'картата на hidden изчезва')
+    generalPushIndexAfterHide = friendSocket.messages.length
+    assert(!friendSocket.messages.some((m) => isCardEventFor(m, [generalUntouchedRoot])), 'излишно събитие за контролната нишка')
+    assert(!friendSocket.messages.some((m) => m.type === 'topic_thread_unread_count_changed' && m.rootMessageId === generalHiddenRoot), 'излишна бройка за изчезналата карта')
+    assert((await threadUnreadFromHistory(friend, generalVisibleRoot)) === 1, 'историята: видимата нишка')
+    assert((await threadUnreadFromHistory(friend, generalHiddenRoot)) === undefined, 'историята: нишката на hidden е скрита')
+  })
+
+  await check('[E16d] Наблюдател само в директорията: общият брояч се обновява, събития за картите — няма', async () => {
+    await waitFor(() => directoryOnlySocket.messages.some((m) => m.type === 'topic_unread_count_changed' && m.topicId === 'topic-general'), 'общ брояч')
+    assert(!directoryOnlySocket.messages.some((m) => isCardEventFor(m, [generalHiddenRoot, generalVisibleRoot, generalUntouchedRoot])), 'събитие за карта към клиент извън „Общи“')
   })
 
   await check('[E17] Приятели, разговори, търсене, профил и тема — скрити за другите; нова WS връзка на hidden е гост', async () => {
@@ -577,6 +660,26 @@ try {
     assert(!friendSocket.messages.some((m) => m.type === 'profile_visibility_changed' && m.profileId === hidden.profileId && m.hidden === false), 'видим преди потвърждението')
     writeTestLedgerAck(ledgerPath)
     await waitFor(() => friendSocket.messages.some((m) => m.type === 'profile_visibility_changed' && m.profileId === hidden.profileId && m.hidden === false), 'visibility restored')
+  })
+
+  await check('[R4b] След потвърдената отмяна, без refresh: „Общи“ отново = 5; картата на hidden се връща с ЕДИН catch-up (бройка 2, отговор 1, активност = отговора); видимата нишка = 2; read state непокътнат', async () => {
+    const afterCancel = () => friendSocket.messages.slice(generalPushIndexAfterHide)
+    await waitFor(() => afterCancel().some((m) => isGeneralUnreadPush(m, 5)), 'topic-general unread 5')
+    await waitFor(() => afterCancel().some((m) => isThreadUnreadPush(m, generalVisibleRoot, 2, 5)), 'видимата нишка = 2')
+    await waitFor(() => afterCancel().some((m) => isCardEventFor(m, [generalHiddenRoot])), 'картата на hidden се връща')
+    const restored = afterCancel().filter((m) => m.type === 'topic_message_catchup' && m.topicId === 'topic-general')
+    assert(restored.length === 1 && restored[0].truncated === false && restored[0].messages.length === 1, `catch-up: ${JSON.stringify(restored)}`)
+    const card = restored[0].messages[0]
+    const replyCreatedAt = (db.prepare(`SELECT created_at AS at FROM topic_messages WHERE parent_message_id = ?;`).get(generalHiddenRoot) as { at: string }).at
+    assert(card.messageId === generalHiddenRoot && card.parentMessageId === null && card.unreadCount === 2 && card.replyCount === 1 && card.viewerHasLiked === false, `карта: ${JSON.stringify(card)}`)
+    assert(Date.parse(card.lastActivityAt) === Date.parse(`${replyCreatedAt.replace(' ', 'T')}Z`), `активност: ${card.lastActivityAt} / ${replyCreatedAt}`)
+    assert(!afterCancel().some((m) => m.type === 'topic_thread_unread_count_changed' && m.rootMessageId === generalHiddenRoot), 'излишна отделна бройка за върнатата карта')
+    assert(!friendSocket.messages.some((m) => isCardEventFor(m, [generalUntouchedRoot])), 'излишно събитие за контролната нишка')
+    assert(!directoryOnlySocket.messages.some((m) => isCardEventFor(m, [generalHiddenRoot, generalVisibleRoot, generalUntouchedRoot])), 'събитие за карта към клиент извън „Общи“')
+    assert((await generalUnread(friend)) === 5, `GET /api/topics: ${await generalUnread(friend)}`)
+    assert((await threadUnreadFromHistory(friend, generalVisibleRoot)) === 2, 'историята: видимата нишка')
+    assert((await threadUnreadFromHistory(friend, generalHiddenRoot)) === 2, 'историята: нишката на hidden')
+    assert(friendTopicReadState() === friendTopicReadStateBefore, 'read state е променен')
   })
 
   await check('[R5] Повторна употреба на токена след отмяна -> 400', async () => {

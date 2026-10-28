@@ -38,6 +38,7 @@ import {
 import { appendProfileDeletionLedgerEntry, readProfileDeletionLedger } from '../src/db/profileDeletionLedger.js'
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
 import { createProfileDeletionWorker } from '../src/core/profileDeletionWorker.js'
+import { createTopicReadStateStore } from '../src/db/topicReadStateStore.js'
 import { isProfileSelfDeletionWorkerEnabled } from '../src/core/profileSelfDeletionFeatureFlag.js'
 import { removeProfileDeletionFile, type ProfileDeletionUploadRoots } from '../src/uploads/profileDeletionFileRemoval.js'
 
@@ -853,6 +854,68 @@ try {
     assertEqual(count('SELECT COUNT(*) AS c FROM topic_message_attachments WHERE message_id = ?;', replyA), 1, 'редът за файла на A')
     assertEqual(count('SELECT COUNT(*) AS c FROM topic_message_likes WHERE message_id IN (?, ?);', replyA, replyB), 2, 'харесванията')
     assertEqual(count('SELECT COUNT(*) AS c FROM topic_thread_read_state WHERE root_message_id = ?;', root), 0, 'read state за изтрития root')
+  })
+
+  await check('[TP2b] А1: thread read state се пренася към новия root — прочетеното остава прочетено, непрочетеното — непрочетено; бъдещ отговор е непрочетен', async () => {
+    const author = registerUser('TpRs')
+    const a = registerUser('TpRsA')
+    const b = registerUser('TpRsB')
+    const readAll = registerUser('TpRsAll')
+    const readPart = registerUser('TpRsPart')
+    const fresh = registerUser('TpRsFresh')
+    const topic = createTopic(null)
+    const root = addTopicMessage(topic, author, null)
+    const replyA = addTopicMessage(topic, a, root)
+    const replyB = addTopicMessage(topic, b, root)
+    const seq = (id: string) => (db.prepare('SELECT seq FROM topic_messages WHERE message_id = ?;').get(id) as { seq: number }).seq
+    const viewers = [readAll, readPart, fresh]
+    for (const viewer of viewers) {
+      db.prepare(`INSERT INTO topic_read_state (profile_id, topic_id, last_seen_seq) VALUES (?, ?, ?);`).run(viewer.profileId, topic, seq(root) - 1)
+    }
+    const insertThreadSeen = db.prepare(`INSERT INTO topic_thread_read_state (profile_id, root_message_id, last_seen_seq, updated_at) VALUES (?, ?, ?, '2026-10-01T10:00:00.000');`)
+    insertThreadSeen.run(readAll.profileId, root, seq(replyB))
+    insertThreadSeen.run(readPart.profileId, root, seq(replyA))
+    insertThreadSeen.run(author.profileId, root, seq(replyB))
+
+    const readState = await createTopicReadStateStore(databaseFilePath)
+    try {
+      const noExclusions = new Map<string, ReadonlySet<string>>()
+      const threadUnread = (viewer: User, rootId: string) => {
+        const single = readState.getUnreadCountsByRootMessageIds(viewer.profileId, [rootId]).get(rootId) ?? 0
+        const batch = readState.getThreadUnreadCountsForProfiles(rootId, [viewer.profileId], noExclusions).get(viewer.profileId) ?? 0
+        assertEqual(batch, single, `single == batch (${viewer.displayName})`)
+        return single
+      }
+      assertEqual(threadUnread(readAll, root), 0, 'преди: прочел всичко')
+      assertEqual(threadUnread(readPart, root), 1, 'преди: прочел до A')
+      assertEqual(threadUnread(fresh, root), 3, 'преди: нищо прочетено')
+
+      const requestId = insertDueRequest(author)
+      assertEqual((await makeWorker(executor, 'w-tp2b', [requestId]).runOnce()).completed, 1, 'completed')
+      assertEqual(parentOf(replyA), null, 'A е root')
+      assertEqual(parentOf(replyB), null, 'B е root')
+
+      for (const [viewer, expectedA, expectedB] of [[readAll, 0, 0], [readPart, 0, 1], [fresh, 1, 1]] as const) {
+        assertEqual(threadUnread(viewer, replyA), expectedA, `${viewer.displayName} A`)
+        assertEqual(threadUnread(viewer, replyB), expectedB, `${viewer.displayName} B`)
+        const total = readState.getGeneralThreadUnreadTotal(viewer.profileId, topic)
+        const totalBatch = readState.getGeneralThreadUnreadTotalsForProfiles(topic, [viewer.profileId], noExclusions).get(viewer.profileId)
+        assertEqual(total, expectedA + expectedB, `${viewer.displayName} общо`)
+        assertEqual(totalBatch, total, `${viewer.displayName} общо batch`)
+      }
+      const copied = db.prepare('SELECT profile_id, root_message_id, last_seen_seq, updated_at FROM topic_thread_read_state WHERE root_message_id IN (?, ?) ORDER BY profile_id, root_message_id;')
+        .all(replyA, replyB) as Array<{ profile_id: string; root_message_id: string; last_seen_seq: number; updated_at: string }>
+      assertEqual(copied.length, 4, 'по ред за readAll и readPart на всеки нов root (без fresh и без изтрития)')
+      assert(copied.every((row) => row.profile_id !== author.profileId && row.profile_id !== fresh.profileId), 'излишен ред')
+      assert(copied.every((row) => row.last_seen_seq === (row.profile_id === readAll.profileId ? seq(replyB) : seq(replyA))), 'прагът е копиран точно')
+      assert(copied.every((row) => row.updated_at === '2026-10-01T10:00:00.000'), 'updated_at е запазен')
+
+      // Бъдещ отговор под новия root остава непрочетен и за прочелите всичко.
+      addTopicMessage(topic, fresh, replyA)
+      assertEqual(threadUnread(readAll, replyA), 1, 'нов отговор след пренасянето')
+    } finally {
+      readState.close()
+    }
   })
 
   await check('[TP3] Няколко вложени нива от различни автори: собствените се изтриват; чуждите наследници се пренасочват към най-близкия оцелял чужд предшественик', async () => {

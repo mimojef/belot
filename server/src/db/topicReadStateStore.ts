@@ -109,6 +109,24 @@ function placeholders(count: number): string {
   return Array.from({ length: count }, () => '?').join(',')
 }
 
+// Видимост на изключените автори (Самоизтриване, Етап 2) — огледало на
+// историята (topicMessageStore: root-ове на изключен автор не се показват, а
+// с тях и цялата нишка). Изключен автор маха (1) собствените си съобщения И
+// (2) чуждите отговори под свой root — иначе те се броят, без да могат да се
+// видят или маркират като прочетени (thread seen връща 404). Read state-ът не
+// се пипа: при отмяна на заявката непрочетените се връщат същите.
+//
+// rootAlias е LEFT JOIN-натият родител на m (NULL за root съобщенията и за
+// осиротели отговори) — IS NULL guard-ът е задължителен, защото
+// `NULL NOT IN (...)` е NULL и би изхвърлил реда. Параметрите са
+// excludedSenderProfileIds два пъти, в този ред.
+function buildExcludedAuthorsVisibilityClause(rootAlias: string, excludedCount: number): string {
+  if (excludedCount === 0) return ''
+  const list = placeholders(excludedCount)
+  return `AND m.sender_profile_id NOT IN (${list})
+        AND (${rootAlias}.sender_profile_id IS NULL OR ${rootAlias}.sender_profile_id NOT IN (${list}))`
+}
+
 export async function createTopicReadStateStore(databaseFilePath: string): Promise<TopicReadStateStore> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -319,14 +337,13 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     if (uniqueTopicIds.length === 0) return counts
 
     const topicClause = placeholders(uniqueTopicIds.length)
-    const exclusionClause = excludedSenderProfileIds.length > 0
-      ? `AND m.sender_profile_id NOT IN (${placeholders(excludedSenderProfileIds.length)})`
-      : ''
+    const exclusionClause = buildExcludedAuthorsVisibilityClause('root_check', excludedSenderProfileIds.length)
 
     const statement = database.prepare(`
       SELECT m.topic_id, COUNT(*) as unread_count
       FROM topic_messages m
       JOIN topics t ON t.topic_id = m.topic_id AND t.status IN ('active', 'locked')
+      LEFT JOIN topic_messages root_check ON root_check.message_id = m.parent_message_id
       LEFT JOIN topic_read_state rs
         ON rs.profile_id = ? AND rs.topic_id = m.topic_id
       LEFT JOIN topic_sender_seen_state ss
@@ -348,6 +365,7 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
       ...uniqueTopicIds,
       profileId,
       ...excludedSenderProfileIds,
+      ...excludedSenderProfileIds,
     ) as Array<{ topic_id: string; unread_count: number }>
 
     for (const row of rows) {
@@ -357,9 +375,8 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
   }
 
   function buildThreadUnreadQuery(rootFilterSql: string, excludedSenderProfileIds: readonly string[]): string {
-    const exclusionClause = excludedSenderProfileIds.length > 0
-      ? `AND m.sender_profile_id NOT IN (${placeholders(excludedSenderProfileIds.length)})`
-      : ''
+    // root е INNER JOIN-нат (никога NULL) — guard-ът в helper-а е безвреден.
+    const exclusionClause = buildExcludedAuthorsVisibilityClause('root', excludedSenderProfileIds.length)
 
     return `
       SELECT root.message_id as root_message_id, COUNT(m.message_id) as unread_count
@@ -410,6 +427,7 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
       ...uniqueRootMessageIds,
       profileId,
       ...excludedSenderProfileIds,
+      ...excludedSenderProfileIds,
     ) as Array<{ root_message_id: string; unread_count: number }>
 
     for (const row of rows) counts.set(row.root_message_id, row.unread_count)
@@ -446,9 +464,7 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     topicId: string,
     excludedSenderProfileIds: readonly string[] = [],
   ): number {
-    const exclusionClause = excludedSenderProfileIds.length > 0
-      ? `AND m.sender_profile_id NOT IN (${placeholders(excludedSenderProfileIds.length)})`
-      : ''
+    const exclusionClause = buildExcludedAuthorsVisibilityClause('root_check', excludedSenderProfileIds.length)
 
     const statement = database.prepare(`
       SELECT COUNT(*) as unread_count
@@ -478,6 +494,7 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
       profileId,
       topicId,
       profileId,
+      ...excludedSenderProfileIds,
       ...excludedSenderProfileIds,
     ) as { unread_count: number } | undefined
     return row?.unread_count ?? 0
@@ -512,18 +529,45 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
   // единичните функции по-горе — верифицирано byte-identical резултат срещу
   // тях за произволен profile subset (виж regression теста).
 
-  type ThreadRow = { message_id: string; parent_message_id: string | null; sender_profile_id: string; seq: number }
+  // root_sender_profile_id — авторът на родителя за отговорите (NULL за root
+  // съобщенията и за осиротели отговори), за огледало на
+  // buildExcludedAuthorsVisibilityClause в single заявките.
+  type ThreadRow = {
+    message_id: string
+    parent_message_id: string | null
+    sender_profile_id: string
+    seq: number
+    root_sender_profile_id: string | null
+  }
 
+  // Видимостта (buildExcludedAuthorsVisibilityClause) зависи само от Set-а с
+  // изключени автори — index.ts дава ЕДИН и същ Set на всички viewers
+  // (buildTopicSenderExclusionsByViewerForDeletion), затова редовете се
+  // филтрират веднъж на Set, а не по веднъж на viewer × ред.
+  function createVisibleRowsLookup(rows: readonly ThreadRow[]): (excludedSenders: ReadonlySet<string> | undefined) => readonly ThreadRow[] {
+    const visibleRowsBySet = new Map<ReadonlySet<string>, readonly ThreadRow[]>()
+    return (excludedSenders) => {
+      if (excludedSenders === undefined || excludedSenders.size === 0) return rows
+      let visibleRows = visibleRowsBySet.get(excludedSenders)
+      if (visibleRows === undefined) {
+        visibleRows = rows.filter((row) =>
+          !excludedSenders.has(row.sender_profile_id)
+          && (row.root_sender_profile_id === null || !excludedSenders.has(row.root_sender_profile_id)))
+        visibleRowsBySet.set(excludedSenders, visibleRows)
+      }
+      return visibleRows
+    }
+  }
+
+  // Редът вече е видим за viewer-а (createVisibleRowsLookup).
   function isUnreadForViewer(
     row: ThreadRow,
     viewerProfileId: string,
     threadThreshold: number | undefined,
     topicThreshold: number,
     senderSeenThreshold: number,
-    excludedSenders: ReadonlySet<string> | undefined,
   ): boolean {
     if (row.sender_profile_id === viewerProfileId) return false
-    if (excludedSenders?.has(row.sender_profile_id)) return false
     const threshold = threadThreshold ?? topicThreshold
     if (row.seq <= threshold) return false
     if (row.seq <= senderSeenThreshold) return false
@@ -638,7 +682,8 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     // (defensive — production cascade-delete прави това невъзможно, но пазим
     // инварианта explicit).
     const rows = database.prepare(`
-      SELECT m.message_id, m.parent_message_id, m.sender_profile_id, m.seq
+      SELECT m.message_id, m.parent_message_id, m.sender_profile_id, m.seq,
+             root_check.sender_profile_id AS root_sender_profile_id
       FROM topic_messages m
       LEFT JOIN topic_messages root_check ON root_check.message_id = m.parent_message_id
       WHERE (m.message_id IN (${rootPlaceholders}) OR m.parent_message_id IN (${rootPlaceholders}))
@@ -648,15 +693,15 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     if (rows.length === 0) return counts
 
     // (6) In-memory aggregation — нула допълнителни SQL statements.
+    const visibleRowsFor = createVisibleRowsLookup(rows)
     for (const profileId of uniqueProfileIds) {
       const topicThreshold = topicThresholdByProfile.get(profileId) ?? 0
-      const excludedSenders = excludedSenderProfileIdsByViewer.get(profileId)
       let unreadCount = 0
-      for (const row of rows) {
+      for (const row of visibleRowsFor(excludedSenderProfileIdsByViewer.get(profileId))) {
         const effectiveRootId = row.parent_message_id ?? row.message_id
         const threadThreshold = threadThresholdByProfileAndRoot.get(`${profileId}:${effectiveRootId}`)
         const senderSeenThreshold = senderSeenThresholdByProfileAndSender.get(`${profileId}:${row.sender_profile_id}`) ?? 0
-        if (isUnreadForViewer(row, profileId, threadThreshold, topicThreshold, senderSeenThreshold, excludedSenders)) {
+        if (isUnreadForViewer(row, profileId, threadThreshold, topicThreshold, senderSeenThreshold)) {
           unreadCount++
         }
       }
@@ -678,15 +723,22 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     // (1) Целия thread (root + replies) — ЕДНА заявка, MULTI-INDEX OR
     // (message_id PK lookup за root-а + idx_topic_messages_parent за
     // replies), bounded от thread size, не topic size.
-    const rows = database.prepare(`
+    const rawRows = database.prepare(`
       SELECT message_id, parent_message_id, sender_profile_id, seq, topic_id
       FROM topic_messages
       WHERE (message_id = ? OR parent_message_id = ?) AND deleted_at IS NULL;
-    `).all(rootMessageId, rootMessageId) as Array<ThreadRow & { topic_id: string }>
-    if (rows.length === 0) return counts
+    `).all(rootMessageId, rootMessageId) as Array<Omit<ThreadRow, 'root_sender_profile_id'> & { topic_id: string }>
+    if (rawRows.length === 0) return counts
 
-    const topicId = rows.find((r) => r.message_id === rootMessageId)?.topic_id
-    if (topicId === undefined) return counts
+    const rootRow = rawRows.find((r) => r.message_id === rootMessageId)
+    if (rootRow === undefined) return counts
+    const topicId = rootRow.topic_id
+    // Отговорите носят автора на root-а (виж ThreadRow) — изключен автор на
+    // root-а прави цялата нишка невидима за съответния viewer.
+    const rows: ThreadRow[] = rawRows.map((r) => ({
+      ...r,
+      root_sender_profile_id: r.message_id === rootMessageId ? null : rootRow.sender_profile_id,
+    }))
     const liveTopic = selectLiveTopicStatement.get(topicId) as { found: number } | undefined
     if (liveTopic === undefined) return counts
 
@@ -715,14 +767,14 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     for (const r of senderSeenRows) senderSeenThresholdByProfileAndSender.set(`${r.profile_id}:${r.sender_profile_id}`, r.seen_through_seq)
 
     // (5) In-memory aggregation.
+    const visibleRowsFor = createVisibleRowsLookup(rows)
     for (const profileId of uniqueProfileIds) {
       const threadThreshold = threadThresholdByProfile.get(profileId)
       const topicThreshold = topicThresholdByProfile.get(profileId) ?? 0
-      const excludedSenders = excludedSenderProfileIdsByViewer.get(profileId)
       let unreadCount = 0
-      for (const row of rows) {
+      for (const row of visibleRowsFor(excludedSenderProfileIdsByViewer.get(profileId))) {
         const senderSeenThreshold = senderSeenThresholdByProfileAndSender.get(`${profileId}:${row.sender_profile_id}`) ?? 0
-        if (isUnreadForViewer(row, profileId, threadThreshold, topicThreshold, senderSeenThreshold, excludedSenders)) {
+        if (isUnreadForViewer(row, profileId, threadThreshold, topicThreshold, senderSeenThreshold)) {
           unreadCount++
         }
       }
@@ -749,9 +801,11 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     // filter, но за само 1 topicId вместо IN-clause по няколко теми — тук
     // batch измерението е по profile, не по topic).
     const rows = database.prepare(`
-      SELECT message_id, parent_message_id, sender_profile_id, seq
-      FROM topic_messages
-      WHERE topic_id = ? AND deleted_at IS NULL;
+      SELECT m.message_id, m.parent_message_id, m.sender_profile_id, m.seq,
+             root_check.sender_profile_id AS root_sender_profile_id
+      FROM topic_messages m
+      LEFT JOIN topic_messages root_check ON root_check.message_id = m.parent_message_id
+      WHERE m.topic_id = ? AND m.deleted_at IS NULL;
     `).all(topicId) as ThreadRow[]
     if (rows.length === 0) return counts
 
@@ -776,13 +830,13 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
 
     // (4) In-memory aggregation (без thread-level threshold — non-general
     // topics нямат го, mirror на getUnreadCountsByTopicIds семантиката).
+    const visibleRowsFor = createVisibleRowsLookup(rows)
     for (const profileId of uniqueProfileIds) {
       const topicThreshold = topicThresholdByProfile.get(profileId) ?? 0
-      const excludedSenders = excludedSenderProfileIdsByViewer.get(profileId)
       let unreadCount = 0
-      for (const row of rows) {
+      for (const row of visibleRowsFor(excludedSenderProfileIdsByViewer.get(profileId))) {
         const senderSeenThreshold = senderSeenThresholdByProfileAndSender.get(`${profileId}:${row.sender_profile_id}`) ?? 0
-        if (isUnreadForViewer(row, profileId, undefined, topicThreshold, senderSeenThreshold, excludedSenders)) {
+        if (isUnreadForViewer(row, profileId, undefined, topicThreshold, senderSeenThreshold)) {
           unreadCount++
         }
       }

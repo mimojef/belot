@@ -495,6 +495,21 @@ export async function createProfileDeletionExecutor(
     UPDATE topic_messages SET parent_message_id = ?1 WHERE message_id = ?2 AND sender_profile_id <> ?3;
   `)
 
+  // А1 — thread read state на чуждия отговор, станал root: досега прагът му
+  // беше topic_thread_read_state на стария root (който изчезва с каскадата
+  // заедно с реда си). Копира се точно същият праг към новия root, за да е
+  // unread статусът непроменен (прочетеното остава прочетено, непрочетеното
+  // — непрочетено); профили без ред остават на topic_read_state, както преди.
+  // Без реда на изтривания профил (той изчезва с него). DO NOTHING — новият
+  // root никога не е бил root, ред за него не може да съществува.
+  const copyThreadReadStateToPromotedRootStatement = database.prepare(`
+    INSERT INTO topic_thread_read_state (profile_id, root_message_id, last_seen_seq, updated_at)
+    SELECT trs.profile_id, ?1, trs.last_seen_seq, trs.updated_at
+    FROM topic_thread_read_state trs
+    WHERE trs.root_message_id = ?2 AND trs.profile_id <> ?3
+    ON CONFLICT(profile_id, root_message_id) DO NOTHING;
+  `)
+
   // Б1: теми на профила. Резервираните (is_general / Лафче) не се трият.
   const selectCreatedTopicsStatement = database.prepare(`
     SELECT topic_id, is_general FROM topics WHERE created_by_profile_id = ?1;
@@ -1376,8 +1391,12 @@ export async function createProfileDeletionExecutor(
   }
 
   type TopicCleanupPlan = {
-    /** А1: чужди преки наследници на собствени съобщения извън изтриваните теми -> нов родител (null = root). */
-    reparent: Array<{ messageId: string; newParentMessageId: string | null; promotedLiveRoot: boolean }>
+    /**
+     * А1: чужди преки наследници на собствени съобщения извън изтриваните теми -> нов родител (null = root).
+     * previousRootMessageId — най-горният собствен предшественик (досегашният root на нишката), когато
+     * съобщението става root; иначе null.
+     */
+    reparent: Array<{ messageId: string; newParentMessageId: string | null; promotedLiveRoot: boolean; previousRootMessageId: string | null }>
     /** Б1: теми на профила, които се изтриват изцяло (без резервираните). */
     ownTopicIdsToDelete: string[]
   }
@@ -1397,16 +1416,19 @@ export async function createProfileDeletionExecutor(
       // чужд предшественик оцелява. Продуктът има едно ниво (root + отговори),
       // но базата позволява повече — guard срещу цикъл в данните.
       let ancestorId = (selectTopicMessageLinkStatement.get(child.message_id) as { parent_message_id: string | null }).parent_message_id
+      let topOwnAncestorId: string | null = null
       for (let depth = 0; ancestorId !== null; depth += 1) {
         if (depth > 10_000) throw new Error('profile_deletion_topic_parent_cycle')
         const ancestor = selectTopicMessageLinkStatement.get(ancestorId) as { parent_message_id: string | null; sender_profile_id: string } | undefined
         if (ancestor === undefined || ancestor.sender_profile_id !== profileId) break
+        topOwnAncestorId = ancestorId
         ancestorId = ancestor.parent_message_id
       }
       reparent.push({
         messageId: child.message_id,
         newParentMessageId: ancestorId,
         promotedLiveRoot: ancestorId === null && child.deleted_at === null,
+        previousRootMessageId: ancestorId === null ? topOwnAncestorId : null,
       })
     }
     return { reparent, ownTopicIdsToDelete }
@@ -1504,6 +1526,10 @@ export async function createProfileDeletionExecutor(
       if (Number(moved.changes) !== 1) throw new Error('profile_deletion_topic_reparent_failed')
       if (move.newParentMessageId !== null) rootsToRecompute.add(move.newParentMessageId)
       if (move.promotedLiveRoot) promotedRoots.push(move.messageId)
+      // Преди DELETE FROM profiles — каскадата трие стария root и реда му.
+      if (move.promotedLiveRoot && move.previousRootMessageId !== null) {
+        copyThreadReadStateToPromotedRootStatement.run(move.messageId, move.previousRootMessageId, profileId)
+      }
     }
 
     // Етап 4E2 — финансовите стойности ПРЕДИ snapshot-а и DELETE-а.

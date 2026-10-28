@@ -225,11 +225,16 @@ check('[D2] topic_message_deleted: reply-target branch използва removeTo
   assert(deleteBlock.includes('removeTopicMessageDom('), 'removeTopicMessageDom call missing')
 })
 
-check('[D3] topic_message_deleted: root-target branch остава на documented пълен render() (structural exception)', () => {
+check('[D3] topic_message_deleted: root-target branch пази пълен render() за структурните случаи, иначе targeted removal', () => {
   // ROOT branch-ът съдържа topicsMode navigation промени — documented
-  // exception, брифа explicit permit-ва structural fallback тук.
-  const rootBranchMatch = deleteBlock.match(/if \(message\.parentMessageId === null\) \{[\s\S]*?render\(\)\s*\n\s*\} else \{/)
-  assert(rootBranchMatch !== null, 'root-delete branch must retain its explicit render() call (structural/navigation side effects)')
+  // exception, брифа explicit permit-ва structural fallback тук. Само
+  // премахване на картата (без смяна на изгледа/редакция/празен списък)
+  // минава през removeTopicMessageDom (скриване на автор при самоизтриване).
+  const rootBranch = deleteBlock.match(/if \(message\.parentMessageId === null\) \{[\s\S]*?\n\s*\} else \{/)?.[0] ?? ''
+  assert(rootBranch.length > 0, 'root-delete branch not found')
+  assert(/needsFullRender = true/.test(rootBranch), 'thread navigation / edit reset must force full render')
+  assert(rootBranch.includes('removeTopicMessageDom(options.root, message.messageId, null)'), 'root card must use targeted removal')
+  assert(/render\(\)/.test(rootBranch), 'root-delete branch must retain its render() fallback (structural/navigation side effects)')
 })
 
 // ─── E. Fallback existence (вече покрито individually по-горе, aggregate check) ──

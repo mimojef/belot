@@ -14,7 +14,10 @@
  *     count->0) дори когато потребителят отдавна е напуснал Topics. Fix:
  *     добавен isReallyViewingThisTopic check (state.currentScreen==='topics'
  *     && state.topicsMode==='topics' && activeTopicId match) — mirror на
- *     established pattern-a в markActiveTopicSeen самата.
+ *     established pattern-a в markActiveTopicSeen самата. По-късно (фантомни
+ *     непрочетени при самоизтриване) правилото стана по-строго: push за брояч
+ *     НИКОГА не маркира като прочетено (маркира се само при пристигнало
+ *     съдържание) — A2–A4 пазят това по-силно правило, което включва старото.
  *
  * (B) DOM PATCH GAP — mobile menu item "Теми" badge никога не се patch-ваше
  *     от refreshTopicsUnreadDom() ("Сценарий B"). Markup-ът
@@ -74,30 +77,31 @@ function extractFunctionBlock(src: string, marker: string): string {
 
 console.log('\n=== Topics unread aggregate target matrix regression (Lafche state bug + mobile Topics item DOM gap) ===\n')
 
-// ─── A. State bug fix: isReallyViewingThisTopic guard ──────────────────────
+// ─── A. State bug fix: push за брояч не маркира като прочетено ─────────────
 
 const topicUnreadHandlerBlock = extractFunctionBlock(controllerSrc, "message.type === 'topic_unread_count_changed'")
+const topicThreadUnreadHandlerBlock = extractFunctionBlock(controllerSrc, "message.type === 'topic_thread_unread_count_changed'")
 
 check('[A1] topic_unread_count_changed handler block found', () => {
   assert(topicUnreadHandlerBlock.length > 0, 'handler not found')
 })
 
-check('[A2] Guard проверява state.currentScreen === \'topics\' (не само activeTopicId match)', () => {
-  assert(
-    topicUnreadHandlerBlock.includes("state.currentScreen === 'topics'") && topicUnreadHandlerBlock.includes('isReallyViewingThisTopic'),
-    'the branch must verify currentScreen, not rely solely on potentially-stale activeTopicId',
-  )
+check('[A2] topic_unread_count_changed не маркира темата (нито при stale activeTopicId, нито при реално гледане)', () => {
+  assert(!topicUnreadHandlerBlock.includes('markActiveTopicSeen('), 'count push must never call markActiveTopicSeen')
+  assert(!topicUnreadHandlerBlock.includes('markTopicThreadSeen('), 'count push must never call markTopicThreadSeen')
 })
 
-check('[A3] Guard проверява state.topicsMode === \'topics\' (stream view, не thread/personal)', () => {
-  assert(topicUnreadHandlerBlock.includes("state.topicsMode === 'topics'"), 'the branch must also verify topicsMode to avoid stale-state false positives')
+check('[A3] topic_thread_unread_count_changed не маркира нишката, дори отворената', () => {
+  assert(topicThreadUnreadHandlerBlock.length > 0, 'thread handler not found')
+  assert(!topicThreadUnreadHandlerBlock.includes('markTopicThreadSeen('), 'thread count push must never call markTopicThreadSeen')
+  assert(!topicThreadUnreadHandlerBlock.includes('markActiveTopicSeen('), 'thread count push must never call markActiveTopicSeen')
 })
 
-check('[A4] markActiveTopicSeen branch зависи от isReallyViewingThisTopic, не directно от message.topicId === state.activeTopicId', () => {
-  assert(
-    /if \(isReallyViewingThisTopic && !isGeneralTopicId\(message\.topicId\)\) \{/.test(topicUnreadHandlerBlock),
-    'markActiveTopicSeen branch must be gated by isReallyViewingThisTopic, not the raw stale-prone comparison',
-  )
+check('[A4] Маркирането остава при пристигнало съдържание (topic_message / topic_reply)', () => {
+  const messageBlock = extractFunctionBlock(controllerSrc, "message.type === 'topic_message'")
+  const replyBlock = extractFunctionBlock(controllerSrc, "message.type === 'topic_reply'")
+  assert(messageBlock.includes('markActiveTopicSeen(message.topicId)'), 'topic_message must still mark the viewed topic')
+  assert(replyBlock.includes('markTopicThreadSeen(rootMessageId)'), 'topic_reply must still mark the open thread')
 })
 
 check('[A5] updateTopicUnreadCount fallback path остава непроменен за non-active-viewing case', () => {

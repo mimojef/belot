@@ -180,6 +180,26 @@ export type TopicMessageStore = {
   /** По message_id за единичен lookup (parent-is-root проверка при reply insert, message-exists проверка при like toggle). */
   getMessageById: (messageId: string) => TopicMessageSnapshot | null
   /**
+   * Живите root-ове в темата, които автор е „докоснал“ — собствените му root-ове
+   * и чуждите root-ове, под които има жив отговор. Целево обновяване на
+   * отворените клиенти при скриване/показване на автора (Самоизтриване).
+   */
+  listLiveRootsTouchedBySender: (
+    topicId: string,
+    senderProfileId: string,
+    limit: number,
+  ) => Array<{ rootMessageId: string; rootSenderProfileId: string }>
+  /**
+   * Живи, видими root-ове по id, с last activity точно като историята
+   * (getRecentMessages: последен жив отговор на невидим автор не се брои) —
+   * за повторно показване на нишки след отмяна на заявка за изтриване.
+   */
+  getVisibleRootMessagesByIds: (
+    topicId: string,
+    rootMessageIds: readonly string[],
+    excludedSenderProfileIds: readonly string[],
+  ) => TopicMessageSnapshot[]
+  /**
    * Moderator delete на ОТДЕЛНО root съобщение или reply (individual-message
    * moderation, различно от topicModerationStore.deleteTopic whole-topic
    * delete). Виж имплементацията за пълния transaction rationale.
@@ -860,6 +880,56 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
   function getMessageById(messageId: string): TopicMessageSnapshot | null {
     const row = selectByMessageIdStatement.get(messageId) as TopicMessageRow | undefined
     return row ? toSnapshot(row) : null
+  }
+
+  // idx_topic_messages_sender_topic_seq (sender_profile_id, topic_id, seq) +
+  // PK lookup на root-а — bounded от съобщенията на автора в темата.
+  const selectLiveRootsTouchedBySenderStatement = database.prepare(`
+    SELECT DISTINCT root.message_id AS root_message_id, root.sender_profile_id AS root_sender_profile_id
+    FROM topic_messages m
+    JOIN topic_messages root ON root.message_id = COALESCE(m.parent_message_id, m.message_id)
+    WHERE m.sender_profile_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
+      AND root.parent_message_id IS NULL AND root.deleted_at IS NULL
+    LIMIT ?;
+  `)
+
+  function listLiveRootsTouchedBySender(
+    topicId: string,
+    senderProfileId: string,
+    limit: number,
+  ): Array<{ rootMessageId: string; rootSenderProfileId: string }> {
+    return (selectLiveRootsTouchedBySenderStatement.all(senderProfileId, topicId, limit) as Array<{ root_message_id: string; root_sender_profile_id: string }>)
+      .map((row) => ({ rootMessageId: row.root_message_id, rootSenderProfileId: row.root_sender_profile_id }))
+  }
+
+  function getVisibleRootMessagesByIds(
+    topicId: string,
+    rootMessageIds: readonly string[],
+    excludedSenderProfileIds: readonly string[],
+  ): TopicMessageSnapshot[] {
+    const uniqueRootMessageIds = [...new Set(rootMessageIds)]
+    if (uniqueRootMessageIds.length === 0) return []
+    const excludedList = excludedSenderProfileIds.map(() => '?').join(',')
+    const replyExclusionClause = excludedSenderProfileIds.length > 0 ? `AND reply.sender_profile_id NOT IN (${excludedList})` : ''
+    const rootExclusionClause = excludedSenderProfileIds.length > 0 ? `AND root.sender_profile_id NOT IN (${excludedList})` : ''
+    const rows = database.prepare(`
+      SELECT
+        root.seq, root.message_id, root.topic_id, root.parent_message_id, root.sender_profile_id,
+        root.sender_display_name, root.sender_role, root.body, root.created_at,
+        COALESCE((
+          SELECT MAX(reply.created_at) FROM topic_messages reply
+          WHERE reply.parent_message_id = root.message_id AND reply.deleted_at IS NULL ${replyExclusionClause}
+        ), root.created_at) AS last_activity_at,
+        root.edited_at, root.deleted_at
+      FROM topic_messages root
+      WHERE root.topic_id = ?
+        AND root.message_id IN (${uniqueRootMessageIds.map(() => '?').join(',')})
+        AND root.parent_message_id IS NULL
+        AND root.deleted_at IS NULL
+        ${rootExclusionClause}
+      ORDER BY root.seq ASC;
+    `).all(...excludedSenderProfileIds, topicId, ...uniqueRootMessageIds, ...excludedSenderProfileIds) as TopicMessageRow[]
+    return rows.map(toSnapshot)
   }
 
   // ─── Individual message/reply moderation delete ─────────────────────────
@@ -1752,6 +1822,8 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     getRepliesAfter,
     getDeletedReplyIdsUpTo,
     getMessageById,
+    listLiveRootsTouchedBySender,
+    getVisibleRootMessagesByIds,
     deleteMessage,
     deleteOwnMessage,
     editOwnMessage,
