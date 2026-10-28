@@ -28,8 +28,13 @@ import type {
   AdminBelotVisualSnapshot,
 } from '../adminBelotVisual/renderAdminBelotVisualSection'
 import {
+  attachPrivateRoomNoticeHandlers,
   matchesPrivateRoomPartnerQuery,
   normalizePrivateRoomPartnerQuery,
+  renderPrivateRoomInfoToast,
+  renderPrivateRoomManualStartReadyNotice,
+  renderPrivateRoomPartnerNotice,
+  type PrivateRoomPartnerNoticeView,
   type PrivateRoomInviteEligibleFriend,
   type PrivateRoomPartnerCandidate,
 } from './privateRoomPopupMarkup'
@@ -944,6 +949,8 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomInviteRespond?: (inviteId: string, accept: boolean) => void
   onPrivateRoomPartnerInvite?: (toProfileId: string) => void
   onPrivateRoomPartnerInviteCancel?: () => void
+  onPrivateRoomPartnerSeatRelease?: () => void
+  onPrivateRoomPartnerNoticeDismiss?: () => void
   onPrivateRoomAddBot?: (team: Team) => void
   onPrivateRoomRemoveBot?: (team: Team) => void
   onPrivateRoomStart?: () => void
@@ -2382,6 +2389,9 @@ type InternalLobbyFlowState = {
   // От клика "Покани" до следващия private_room_updated/error — блокира
   // повторно изпращане, докато сървърът не потвърди "Поканихте Х".
   privateRoomPartnerInviteInFlight: boolean
+  // "Освободи мястото"/"Затвори" от известието е изпратено — до следващия
+  // private_room_updated/error бутоните са неактивни (без дублирани заявки).
+  privateRoomPartnerNoticeBusy: boolean
   // Сървърът отказа поканата (приятелят няма жълтици/ниво за масата) — текстът
   // идва от сървъра; ОК затваря, резервацията остава непроменена.
   privateRoomPartnerEligibilityPopupText: string | null
@@ -3113,6 +3123,7 @@ function createInitialState(): InternalLobbyFlowState {
     privateRoomPartnerPickerOpen: false,
     privateRoomPartnerQuery: '',
     privateRoomPartnerInviteInFlight: false,
+    privateRoomPartnerNoticeBusy: false,
     privateRoomPartnerEligibilityPopupText: null,
     blockedPlayersPopupOpen: false,
     blockedPlayers: null,
@@ -3518,6 +3529,14 @@ export function createLobbyFlowController(
   options: CreateLobbyFlowControllerOptions,
 ): LobbyFlowController {
   const state = createInitialState()
+  // Глобалните известия за частната маса (syncPrivateRoomNoticeHost) — тук,
+  // преди първия render(), за да няма TDZ при ранен render по време на init.
+  let privateRoomNoticeHostEl: HTMLElement | null = null
+  let privateRoomNoticeHostHtml = ''
+  let partnerNoticeDeadlineTimer: ReturnType<typeof setTimeout> | null = null
+  let partnerNoticeDeadlineAt: number | null = null
+  let privateRoomInfoToastTimer: ReturnType<typeof setTimeout> | null = null
+  let privateRoomInfoToastTimerText: string | null = null
   // Keep late HTTP history responses from restoring a confirmed deletion.
   const deletedChatMessageIds = new Set<string>()
   state.privateRoomInGameNotificationsEnabled = options.initialPrivateRoomInGameNotificationsEnabled ?? true
@@ -18991,6 +19010,18 @@ export function createLobbyFlowController(
       partnerQuery: state.privateRoomPartnerQuery,
       partnerInviteInFlight: state.privateRoomPartnerInviteInFlight,
       partnerEligibilityPopupText: state.privateRoomPartnerEligibilityPopupText,
+      noticeHtml: renderPrivateRoomPartnerNotice({
+        notice: viewerRole === 'member' ? getVisiblePrivateRoomPartnerNotice() : null,
+        busy: state.privateRoomPartnerNoticeBusy,
+        placement: 'inline',
+      }),
+    })
+
+    attachPrivateRoomNoticeHandlers(options.root, {
+      onInviteOther: () => openPartnerPickerFromNotice(),
+      onRelease: () => releasePartnerSeatFromNotice(),
+      onDismiss: () => dismissPartnerNotice(),
+      onOpenTable: () => {},
     })
 
     if (partnerListKeyBefore !== null) {
@@ -19509,6 +19540,8 @@ export function createLobbyFlowController(
   }
 
   function render(): void {
+    // Известията за частната маса — изолирано от root-а (виж syncPrivateRoomNoticeHost).
+    syncPrivateRoomNoticeHost()
     if (_renderTimerId !== null) {
       clearTimeout(_renderTimerId)
       _renderTimerId = null
@@ -21563,6 +21596,12 @@ export function createLobbyFlowController(
       // "in flight" forever if the server rejects it (e.g. stake no longer
       // available, room full, race with another joiner).
       state.privateRoomJoinInFlight = false
+      state.privateRoomPartnerNoticeBusy = false
+      // Остаряло действие от известието (масата/резервацията вече я няма) —
+      // свеж snapshot/списък от сървъра премахва известието.
+      if (message.code === 'private_room_partner_reservation_missing') {
+        options.onPrivateRoomsOpen?.()
+      }
       if (state.currentScreen === 'private-rooms' || state.currentScreen === 'private-room-waiting') {
         // The waiting room bypasses normal lobby chrome (same as
         // matchmaking-room), so it never displays the generic
@@ -22652,6 +22691,7 @@ export function createLobbyFlowController(
       // fresh snapshot тук (виж §Race в task spec-а).
       state.privateRoomStartInFlight = false
       state.privateRoomPartnerInviteInFlight = false
+      state.privateRoomPartnerNoticeBusy = false
       const partnerReservation = message.room.partnerReservation ?? null
       const partnerSlotFree = partnerReservation !== null && message.room.slots.some(
         (s) => s.team === partnerReservation.team && s.slotIndex === partnerReservation.slotIndex && s.occupant === null,
@@ -22808,9 +22848,10 @@ export function createLobbyFlowController(
       return true
     }
 
+    // Изходът вече идва като известие в snapshot-а (partnerReservation.notice,
+    // виж private_room_updated) — тук само освобождаваме "..." състоянието.
     if (message.type === 'private_room_partner_invite_status') {
       state.privateRoomPartnerInviteInFlight = false
-      state.privateRoomInfoText = message.message
       render()
       return true
     }
@@ -22862,6 +22903,8 @@ export function createLobbyFlowController(
     if (message.type === 'private_room_full') {
       leavePrivateRoomWaitingScreen()
       state.myPrivateRoom = null
+      // Тук няма render() (onMatchFound поема екрана) — известията се махат изрично.
+      queueMicrotask(() => syncPrivateRoomNoticeHost())
       state.previewedPrivateRoomId = null
       state.privateRoomInvitedProfileIds = new Set()
       state.currentScreen = 'lobby'
@@ -22919,6 +22962,139 @@ export function createLobbyFlowController(
     return false
   }
 
+  // ─── "Покани партньор" — глобално известие към домакина ───────────────
+  // Източникът е snapshot-ът (myPrivateRoom.partnerReservation.notice) —
+  // сървърът го пази до действие и го праща и при refresh/reconnect. Тук
+  // само го скриваме точно при крайния срок на масата (същия expiresAt),
+  // ако push-ът private_room_expired закъснее/липсва: един таймер за
+  // повторен render, не втори таймер за живота на масата.
+
+  // Маса с ръчен старт, която е 4/4 и чака домакина — изцяло от сървърния
+  // snapshot (manualStart + canManualStart, същите полета като бутона СТАРТ).
+  // Не в чакалнята (там е бутонът СТАРТ). Изчезва при напускане (canManualStart
+  // → false), изтичане/закриване/старт (myPrivateRoom → null) и се появява
+  // отново при ново запълване — без собствено състояние, без дубликати.
+  function isPrivateRoomManualStartReadyNoticeVisible(): boolean {
+    const room = state.myPrivateRoom
+    if (room === null || !room.manualStart || !room.canManualStart) return false
+    if (state.currentScreen === 'private-room-waiting') return false
+    if (room.expiresAt <= Date.now()) return false
+    const localProfileId = options.getAuthSession?.()?.profile.profileId ?? null
+    return localProfileId !== null && room.slots.some((s) => s.occupant?.isHost === true && s.occupant.profileId === localProfileId)
+  }
+
+  // Известията живеят в собствен контейнер в document.body, обновяван тук
+  // САМО когато HTML-ът им се промени — root-ът на лобито ("Теми", чат,
+  // профили...) не се прерисува, скролът и отворените панели остават.
+  function syncPrivateRoomNoticeHost(): void {
+    if (typeof document === 'undefined') return
+    const manualStartReady = isPrivateRoomManualStartReadyNoticeVisible()
+    // Запълнената маса с ръчен старт има приоритет пред "прие" известието.
+    const partnerNotice = getVisiblePrivateRoomPartnerNotice()
+    // В чакалнята известието е вградено в самия екран (renderPrivateRoomWaitingRoom).
+    const noticeHtml = state.currentScreen === 'private-room-waiting'
+      ? ''
+      : manualStartReady
+        ? renderPrivateRoomManualStartReadyNotice('bottom')
+        : renderPrivateRoomPartnerNotice({ notice: partnerNotice, busy: state.privateRoomPartnerNoticeBusy, placement: 'bottom' })
+    // Краткото съобщение — само в лобито (в чакалнята е банер в самия екран).
+    const toastText = isPrivateRoomInfoToastScreen() ? state.privateRoomInfoText : null
+    schedulePrivateRoomInfoToastDismiss(toastText)
+    const html = noticeHtml + renderPrivateRoomInfoToast(toastText)
+    const room = state.myPrivateRoom
+
+    // Видимо известие → един таймер към крайния срок на масата (същия
+    // expiresAt), за да изчезне точно тогава дори без push от сървъра.
+    if (noticeHtml !== '' && room !== null && partnerNoticeDeadlineAt !== room.expiresAt) {
+      if (partnerNoticeDeadlineTimer !== null) clearTimeout(partnerNoticeDeadlineTimer)
+      partnerNoticeDeadlineAt = room.expiresAt
+      partnerNoticeDeadlineTimer = setTimeout(() => {
+        partnerNoticeDeadlineTimer = null
+        partnerNoticeDeadlineAt = null
+        syncPrivateRoomNoticeHost()
+      }, Math.max(0, room.expiresAt - Date.now()) + 50)
+    }
+
+    const hostConnected = privateRoomNoticeHostEl !== null && privateRoomNoticeHostEl.isConnected
+    if (html === privateRoomNoticeHostHtml && (html === '' || hostConnected)) return
+    privateRoomNoticeHostHtml = html
+    if (html === '') {
+      privateRoomNoticeHostEl?.remove()
+      privateRoomNoticeHostEl = null
+      return
+    }
+    if (!hostConnected) {
+      privateRoomNoticeHostEl = document.createElement('div')
+      privateRoomNoticeHostEl.setAttribute('data-private-room-notice-host', '1')
+      document.body.appendChild(privateRoomNoticeHostEl)
+    }
+    privateRoomNoticeHostEl!.innerHTML = html
+    attachPrivateRoomNoticeHandlers(privateRoomNoticeHostEl!, {
+      onInviteOther: () => openPartnerPickerFromNotice(),
+      onRelease: () => releasePartnerSeatFromNotice(),
+      onDismiss: () => dismissPartnerNotice(),
+      onOpenTable: () => returnToPrivateRoomWaiting(),
+    })
+  }
+
+  // Екрани, рендерирани от renderLobbyScreen (там съобщението беше toast).
+  function isPrivateRoomInfoToastScreen(): boolean {
+    return state.currentScreen !== 'private-room-waiting'
+      && state.currentScreen !== 'matchmaking-room'
+      && !shouldSuppressLobbyRender()
+  }
+
+  // 3 сек след показване на ново съобщение (както досегашния toast).
+  function schedulePrivateRoomInfoToastDismiss(text: string | null): void {
+    if (text === privateRoomInfoToastTimerText) return
+    if (privateRoomInfoToastTimer !== null) clearTimeout(privateRoomInfoToastTimer)
+    privateRoomInfoToastTimer = null
+    privateRoomInfoToastTimerText = text
+    if (text === null) return
+    privateRoomInfoToastTimer = setTimeout(() => {
+      privateRoomInfoToastTimer = null
+      privateRoomInfoToastTimerText = null
+      if (state.privateRoomInfoText === text) state.privateRoomInfoText = null
+      syncPrivateRoomNoticeHost()
+    }, 3000)
+  }
+
+  function getVisiblePrivateRoomPartnerNotice(): PrivateRoomPartnerNoticeView | null {
+    const room = state.myPrivateRoom
+    const notice = room?.partnerReservation?.notice ?? null
+    if (room === null || notice === null) return null
+    if (room.expiresAt <= Date.now()) return null
+    return { kind: notice.kind, toDisplayName: notice.toDisplayName }
+  }
+
+  // "Покани друг" — отваря същия picker в чакалнята (масата остава същата,
+  // нищо не се изпраща към сървъра до избора на приятел).
+  function openPartnerPickerFromNotice(): void {
+    if (state.myPrivateRoom === null || getVisiblePrivateRoomPartnerNotice() === null) return
+    state.privateRoomPartnerPickerOpen = true
+    state.privateRoomPartnerQuery = ''
+    state.privateRoomInfoText = null
+    state.friendships = null
+    state.currentScreen = 'private-room-waiting'
+    render()
+    void ensureFriendshipsLoaded()
+  }
+
+  function releasePartnerSeatFromNotice(): void {
+    if (state.privateRoomPartnerNoticeBusy || getVisiblePrivateRoomPartnerNotice() === null) return
+    state.privateRoomPartnerNoticeBusy = true
+    state.privateRoomPartnerPickerOpen = false
+    options.onPrivateRoomPartnerSeatRelease?.()
+    render()
+  }
+
+  function dismissPartnerNotice(): void {
+    if (state.privateRoomPartnerNoticeBusy || getVisiblePrivateRoomPartnerNotice()?.kind !== 'accepted') return
+    state.privateRoomPartnerNoticeBusy = true
+    options.onPrivateRoomPartnerNoticeDismiss?.()
+    render()
+  }
+
   function leavePrivateRoomWaitingScreen(): void {
     clearPrivateRoomCountdownLoop()
     if (state.myPrivateRoom !== null) {
@@ -22941,6 +23117,7 @@ export function createLobbyFlowController(
     state.privateRoomPartnerQuery = ''
     state.privateRoomPartnerInviteInFlight = false
     state.privateRoomPartnerEligibilityPopupText = null
+    state.privateRoomPartnerNoticeBusy = false
   }
 
   // Reopens the SAME waiting room the user is already a member of — no new
@@ -23428,6 +23605,9 @@ export function createLobbyFlowController(
   return {
     render,
     destroy: () => {
+      privateRoomNoticeHostEl?.remove()
+      privateRoomNoticeHostEl = null
+      privateRoomNoticeHostHtml = ''
       leaveAdminServerIfActive()
       state.lobbyChatFullscreen = false
       releaseLobbyChatBodyScrollLock()

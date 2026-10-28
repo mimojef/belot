@@ -968,6 +968,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'cancel_private_room_invite':
     case 'invite_private_room_partner':
     case 'cancel_private_room_partner_invite':
+    case 'release_private_room_partner_seat':
+    case 'dismiss_private_room_partner_notice':
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
     case 'request_svara_tables_list':
@@ -5089,6 +5091,10 @@ function buildPrivateRoomSnapshot(room: PrivateRoom, viewerProfileId: string | n
                     expiresAt: partnerInvite.expiresAt,
                   }
                 : null,
+            notice:
+              reservation.notice !== null && viewerProfileId !== null && viewerProfileId === reservation.ownerProfileId
+                ? { ...reservation.notice }
+                : null,
           },
   }
 }
@@ -5410,7 +5416,7 @@ function handlePrivateRoomPartnerInviteResponse(connectionId: ConnectionId, invi
   }
 
   function abandonInvite(): void {
-    const abandoned = privateRoomsStore.declinePartnerInvite({ inviteId, profileId: profileId! })
+    const abandoned = privateRoomsStore.declinePartnerInvite({ inviteId, profileId: profileId!, outcome: 'unavailable' })
     if (!abandoned.ok) return
     dismissInviteForInvitee()
     notifyPrivateRoomPartnerInviteUnavailable(abandoned.invite)
@@ -5484,10 +5490,9 @@ function handlePrivateRoomPartnerInviteResponse(connectionId: ConnectionId, invi
   endBelotSpectatingForProfile(profileId, 'game_commitment')
   activityCounters.incrementRooms('privateRoomJoin')
   dismissInviteForInvitee()
-  sendToOpenProfileConnections(acceptResult.invite.fromProfileId, {
-    type: 'private_room_invite_accepted',
-    toDisplayName: publicProfile.displayName,
-  })
+  // Домакинът научава за приемането от известието 'accepted' в своя snapshot
+  // (виж sendPrivateRoomUpdateToMembers по-долу) — показва се на всяка
+  // страница и оцелява refresh, без принудително пренасочване.
 
   // readyToStart → handlePrivateRoomReady вече е изпратил private_room_full.
   if (!acceptResult.readyToStart) {
@@ -27573,6 +27578,32 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           inviteId: cancelResult.invite.inviteId,
         })
         sendPrivateRoomUpdateToMembers(cancelResult.room)
+        return
+      }
+
+      if (message.type === 'release_private_room_partner_seat') {
+        const releaseResult = privateRoomsStore.releasePartnerReservation(connection.id)
+        if (!releaseResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: releaseResult.message, code: releaseResult.code })
+          return
+        }
+        if (releaseResult.cancelledInvite !== null) {
+          sendToOpenProfileConnections(releaseResult.cancelledInvite.toProfileId, {
+            type: 'private_room_invite_cancelled',
+            inviteId: releaseResult.cancelledInvite.inviteId,
+          })
+        }
+        sendPrivateRoomUpdateToMembers(releaseResult.room)
+        return
+      }
+
+      if (message.type === 'dismiss_private_room_partner_notice') {
+        const dismissResult = privateRoomsStore.dismissPartnerNotice(connection.id)
+        if (!dismissResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: dismissResult.message, code: dismissResult.code })
+          return
+        }
+        sendPrivateRoomUpdateToMembers(dismissResult.room)
         return
       }
 

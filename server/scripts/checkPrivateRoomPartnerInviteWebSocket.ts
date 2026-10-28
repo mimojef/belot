@@ -22,6 +22,14 @@
  *  - допустимост при поканата (жълтици, ниво — съществуващите правила на
  *    checkPrivateRoomStakeEligibility): покана не се създава, резервацията
  *    остава; приемането проверява наново;
+ *  - известие към домакина в snapshot-а (отказ/изтичане/прието): само
+ *    домакинът го вижда, възстановява се при refresh, "Покани друг" го
+ *    изчиства без да пипа крайния срок на масата, "Освободи мястото"
+ *    премахва резервацията, остарели/дублирани действия се отказват;
+ *  - маса с ръчен старт: snapshot-ът към домакина носи canManualStart при
+ *    4/4 (източникът на известието "масата се запълни"), пада при напускане,
+ *    връща се при повторно запълване и при refresh; с поканен партньор —
+ *    приемането запълва масата; автоматичен старт стартира веднага;
  *  - ЖЪЛТИЦИ: нито покана, нито приемане, нито отказ движат баланса или
  *    match_economy_ledger; таксата се взема едва при реалния старт.
  */
@@ -81,6 +89,10 @@ async function waitForCondition(label: string, predicate: () => Promise<boolean>
   throw new Error(`Timeout: ${label}`)
 }
 
+let testIpCounter = 0
+// Различен IP на заявка — регистрациите/верификациите са rate-limited по IP.
+const nextTestIp = () => `203.0.118.${(testIpCounter = (testIpCounter % 250) + 1)}`
+
 async function httpJson(
   port: number,
   method: string,
@@ -90,7 +102,7 @@ async function httpJson(
 ): Promise<{ status: number; body: any; setCookie: string | null }> {
   const res = await fetch(`http://localhost:${port}${pathname}`, {
     method,
-    headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextTestIp(), ...(cookie ? { Cookie: cookie } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   const setCookie = (res.headers.getSetCookie?.()[0] ?? res.headers.get('set-cookie'))?.split(';')[0] ?? null
@@ -344,7 +356,7 @@ try {
   console.log('Server ready.\n')
 
   const accounts: Record<string, Account> = {}
-  for (const tag of ['host', 'friend', 'friend2', 'stranger', 'opp', 'offline', 'busy', 'busyHelper', 'hostX', 'friendX', 'hostZ', 'friendZ', 'hostB', 'poor', 'late', 'rich', 'adminL', 'hostL', 'novice', 'poorNovice', 'veteran']) {
+  for (const tag of ['host', 'friend', 'friend2', 'stranger', 'opp', 'offline', 'busy', 'busyHelper', 'hostX', 'friendX', 'hostZ', 'friendZ', 'hostB', 'poor', 'late', 'rich', 'adminL', 'hostL', 'novice', 'poorNovice', 'veteran', 'hostN', 'friendN', 'friendN2', 'joinerN', 'hostM', 'friendM', 'hostP', 'friendP', 'hostS', 'sB0', 'sB1', 'sA1', 'hostT', 'tB0', 'tB1', 'friendT', 'hostU', 'uB0', 'uB1', 'uA1']) {
     accounts[tag] = await registerProfile(port, tag)
   }
   for (const tag of ['friend', 'friend2', 'offline', 'busy']) await makeFriends(port, accounts.host!, accounts[tag]!)
@@ -352,9 +364,13 @@ try {
   await makeFriends(port, accounts.hostZ!, accounts.friendZ!)
   for (const tag of ['poor', 'late', 'rich']) await makeFriends(port, accounts.hostB!, accounts[tag]!)
   for (const tag of ['novice', 'poorNovice', 'veteran']) await makeFriends(port, accounts.hostL!, accounts[tag]!)
+  for (const tag of ['friendN', 'friendN2']) await makeFriends(port, accounts.hostN!, accounts[tag]!)
+  await makeFriends(port, accounts.hostM!, accounts.friendM!)
+  await makeFriends(port, accounts.hostP!, accounts.friendP!)
+  await makeFriends(port, accounts.hostT!, accounts.friendT!)
 
   const c: Record<string, TestClient> = {}
-  for (const tag of ['host', 'friend', 'friend2', 'stranger', 'opp', 'busy', 'busyHelper', 'hostX', 'friendX', 'hostZ', 'friendZ', 'hostB', 'poor', 'late', 'rich', 'hostL', 'novice', 'poorNovice', 'veteran']) {
+  for (const tag of ['host', 'friend', 'friend2', 'stranger', 'opp', 'busy', 'busyHelper', 'hostX', 'friendX', 'hostZ', 'friendZ', 'hostB', 'poor', 'late', 'rich', 'hostL', 'novice', 'poorNovice', 'veteran', 'hostN', 'friendN', 'friendN2', 'joinerN', 'hostM', 'friendM', 'hostP', 'friendP', 'hostS', 'sB0', 'sB1', 'sA1', 'hostT', 'tB0', 'tB1', 'friendT', 'hostU', 'uB0', 'uB1', 'uA1']) {
     c[tag] = await openSocket(port, accounts[tag]!)
     openClients.push(c[tag]!)
   }
@@ -493,6 +509,9 @@ try {
     if (status.status !== 'declined' || status.message !== 'PI friend отказа твоята покана за партньор.') throw new Error(JSON.stringify(status))
     const upd = await waitForFrame(hostC(), (f) => f.type === 'private_room_updated' && f.room.partnerReservation?.invitePending === false, 5_000, 'reservation free')
     if (slotOccupant(upd.room, 'A', 1) !== null) throw new Error('A1 occupied after decline')
+    if (upd.room.partnerReservation.notice?.kind !== 'declined' || upd.room.partnerReservation.notice.toDisplayName !== 'PI friend') throw new Error(JSON.stringify(upd.room.partnerReservation))
+    const oppView = lastRoomUpdate(opp!)
+    if (oppView.partnerReservation.notice !== null) throw new Error('notice leaked to a non-host member')
   })
 
   // ─── Отмяна ──────────────────────────────────────────────────────────────
@@ -547,7 +566,7 @@ try {
   await check('[W16] приемане → поканеният е настанен на A1 и получава чакалнята', async () => {
     const upd = await waitForFrame(hostC(), (f) => f.type === 'private_room_updated' && slotOccupant(f.room, 'A', 1)?.profileId === friend2!.profileId, 5_000, 'seated')
     if (upd.room.partnerReservation.invite !== null) throw new Error('invite not cleared')
-    await waitForFrame(hostC(), (f) => f.type === 'private_room_invite_accepted', 5_000, 'host accepted notice')
+    if (upd.room.partnerReservation.notice?.kind !== 'accepted' || upd.room.partnerReservation.notice.toDisplayName !== 'PI friend2') throw new Error(`host notice: ${JSON.stringify(upd.room.partnerReservation.notice)}`)
     await waitForFrame(friend2!, (f) => f.type === 'private_room_updated' && f.room.id === roomId, 5_000, 'friend2 snapshot')
   })
 
@@ -559,7 +578,10 @@ try {
     if (errors.length !== 1) throw new Error(`errors=${errors.length}`)
     const humans = lastRoomUpdate(hostC()).slots.filter((s: any) => s.occupant !== null && !s.occupant.isBot)
     if (humans.length !== 3) throw new Error(`humans=${humans.length}`)
-    if (hostC().frames.filter((f) => f.type === 'private_room_invite_accepted').length !== 1) throw new Error('host notified twice')
+    // Известието за приемане е в snapshot-а (без отделното toast съобщение).
+    if (hostC().frames.some((f) => f.type === 'private_room_invite_accepted')) throw new Error('legacy accepted toast sent')
+    const acceptedSnapshots = hostC().frames.filter((f) => f.type === 'private_room_updated' && f.room.partnerReservation?.notice?.kind === 'accepted')
+    if (acceptedSnapshots.length < 1) throw new Error('no accepted notice')
   })
 
   await check('[W18] ЖЪЛТИЦИ: покани/откази/приемане не са движили баланса и ledger-а', () => {
@@ -576,6 +598,13 @@ try {
     await waitForFrame(hostC(), (f) => f.type === 'private_room_full', 10_000, 'match start')
     await waitForCondition('stakes collected', () => [hostC(), friend2!, opp!].every((cl) => getWalletBalance(cl.profileId) === START_BALANCE - STAKE), 5_000)
     if (getWalletBalance(friendC().profileId) !== START_BALANCE) throw new Error('friend (declined) was charged')
+  })
+
+  await check('[W19b] след старта действията от известието са остарели → отказ', async () => {
+    hostC().frames.length = 0
+    send(hostC(), { type: 'release_private_room_partner_seat' })
+    send(hostC(), { type: 'dismiss_private_room_partner_notice' })
+    await waitForCondition('two stale errors', () => hostC().frames.filter((f) => f.type === 'error' && f.code === 'private_room_partner_reservation_missing').length === 2, 5_000)
   })
 
   // ─── Домакинът напуска с висяща покана ───────────────────────────────────
@@ -711,6 +740,181 @@ try {
     }
   })
 
+  // ─── Известие към домакина, "Покани друг", "Освободи мястото" ─────────────
+  console.log('--- Известие към домакина ---')
+  const { hostN, friendN, friendN2, joinerN, hostM, friendM, hostP, friendP } = c as Record<string, TestClient>
+  const roomN = await createPartnerRoom(hostN!)
+  const roomNExpiresAt = lastRoomUpdate(hostN!).expiresAt as number
+  friendN!.frames.length = 0
+  const inviteN1 = await invitePartner(hostN!, friendN!)
+  await waitForFrame(friendN!, (f) => f.type === 'private_room_invite_received' && f.inviteId === inviteN1, 5_000, 'inviteN1')
+
+  await check('[N1] отказ → известие "declined" в snapshot-а на домакина (на която и да е страница)', async () => {
+    hostN!.frames.length = 0
+    send(friendN!, { type: 'respond_private_room_invite', inviteId: inviteN1, accept: false })
+    const upd = await waitForFrame(hostN!, (f) => f.type === 'private_room_updated' && f.room.partnerReservation?.notice?.kind === 'declined', 5_000, 'declined notice')
+    if (upd.room.partnerReservation.notice.toDisplayName !== 'PI friendN') throw new Error(JSON.stringify(upd.room.partnerReservation.notice))
+    if (upd.room.expiresAt !== roomNExpiresAt) throw new Error('room deadline changed')
+  })
+
+  await check('[N2] refresh/reconnect на домакина преди крайния срок → известието се възстановява', async () => {
+    await closeSocket(hostN!)
+    c.hostN = await openSocket(port, accounts.hostN!)
+    openClients.push(c.hostN)
+    send(c.hostN, { type: 'request_private_rooms_list' })
+    const upd = await waitForFrame(c.hostN, (f) => f.type === 'private_room_updated' && f.room.id === roomN, 5_000, 'hostN resync')
+    if (upd.room.partnerReservation?.notice?.kind !== 'declined') throw new Error(JSON.stringify(upd.room.partnerReservation))
+    if (slotOccupant(upd.room, 'A', 0)?.profileId !== c.hostN.profileId) throw new Error('host lost the seat')
+  })
+  const hostNC = () => c.hostN!
+
+  await check('[N3] "Покани друг" → известието изчезва; крайният срок на масата НЕ се променя', async () => {
+    friendN2!.frames.length = 0
+    const inviteN2 = await invitePartner(hostNC(), friendN2!)
+    const room = lastRoomUpdate(hostNC())
+    if (room.partnerReservation.notice !== null) throw new Error('notice not cleared by the new invite')
+    if (room.expiresAt !== roomNExpiresAt) throw new Error(`expiresAt ${roomNExpiresAt} -> ${room.expiresAt}`)
+    await waitForFrame(friendN2!, (f) => f.type === 'private_room_invite_received' && f.inviteId === inviteN2, 5_000, 'inviteN2')
+    hostNC().frames.length = 0
+    send(friendN2!, { type: 'respond_private_room_invite', inviteId: inviteN2, accept: false })
+    await waitForFrame(hostNC(), (f) => f.type === 'private_room_updated' && f.room.partnerReservation?.notice?.toDisplayName === 'PI friendN2', 5_000, 'second decline')
+  })
+
+  await check('[N4] "Освободи мястото" → резервацията изчезва и друг играч сяда на A1', async () => {
+    hostNC().frames.length = 0
+    send(hostNC(), { type: 'release_private_room_partner_seat' })
+    const upd = await waitForFrame(hostNC(), (f) => f.type === 'private_room_updated' && f.room.partnerReservation === null, 5_000, 'released')
+    if (upd.room.expiresAt !== roomNExpiresAt) throw new Error('room deadline changed by release')
+    joinerN!.frames.length = 0
+    send(joinerN!, { type: 'join_private_room', privateRoomId: roomN, team: 'A', slotIndex: 1 })
+    await waitForFrame(joinerN!, (f) => f.type === 'private_room_updated' && slotOccupant(f.room, 'A', 1)?.profileId === joinerN!.profileId, 5_000, 'joiner on A1')
+  })
+
+  await check('[N5] дублирано "Освободи мястото" и нова покана след освобождаване → отказ', async () => {
+    hostNC().frames.length = 0
+    send(hostNC(), { type: 'release_private_room_partner_seat' })
+    await expectError(hostNC(), 'duplicate release', (f) => f.code === 'private_room_partner_reservation_missing')
+    hostNC().frames.length = 0
+    send(hostNC(), { type: 'invite_private_room_partner', toProfileId: friendN!.profileId })
+    await expectError(hostNC(), 'invite after release')
+  })
+
+  await check('[N6] "Освободи мястото" при висяща покана → поканата се анулира при поканения', async () => {
+    await createPartnerRoom(hostP!)
+    friendP!.frames.length = 0
+    const inviteP = await invitePartner(hostP!, friendP!)
+    await waitForFrame(friendP!, (f) => f.type === 'private_room_invite_received' && f.inviteId === inviteP, 5_000, 'inviteP')
+    send(hostP!, { type: 'release_private_room_partner_seat' })
+    await waitForFrame(friendP!, (f) => f.type === 'private_room_invite_cancelled' && f.inviteId === inviteP, 5_000, 'cancelled on release')
+    friendP!.frames.length = 0
+    send(friendP!, { type: 'respond_private_room_invite', inviteId: inviteP, accept: true })
+    await expectError(friendP!, 'accept after release')
+  })
+
+  await check('[N7] приемане → известие "accepted" само за домакина; "Затвори" го премахва; refresh не го връща', async () => {
+    const roomM = await createPartnerRoom(hostM!)
+    friendM!.frames.length = 0
+    const inviteM = await invitePartner(hostM!, friendM!)
+    await waitForFrame(friendM!, (f) => f.type === 'private_room_invite_received' && f.inviteId === inviteM, 5_000, 'inviteM')
+    hostM!.frames.length = 0
+    send(friendM!, { type: 'respond_private_room_invite', inviteId: inviteM, accept: true })
+    const upd = await waitForFrame(hostM!, (f) => f.type === 'private_room_updated' && f.room.partnerReservation?.notice?.kind === 'accepted', 5_000, 'accepted notice')
+    if (upd.room.partnerReservation.notice.toDisplayName !== 'PI friendM') throw new Error('wrong name')
+    const friendView = await waitForFrame(friendM!, (f) => f.type === 'private_room_updated' && f.room.id === roomM, 5_000, 'friendM snapshot')
+    if (friendView.room.partnerReservation.notice !== null) throw new Error('notice leaked to the partner')
+    hostM!.frames.length = 0
+    send(hostM!, { type: 'dismiss_private_room_partner_notice' })
+    await waitForFrame(hostM!, (f) => f.type === 'private_room_updated' && f.room.partnerReservation?.notice === null, 5_000, 'dismissed')
+    send(hostM!, { type: 'dismiss_private_room_partner_notice' })
+    await expectError(hostM!, 'duplicate dismiss', (f) => f.code === 'private_room_partner_reservation_missing')
+    await closeSocket(hostM!)
+    c.hostM = await openSocket(port, accounts.hostM!)
+    openClients.push(c.hostM)
+    send(c.hostM, { type: 'request_private_rooms_list' })
+    const resync = await waitForFrame(c.hostM, (f) => f.type === 'private_room_updated' && f.room.id === roomM, 5_000, 'hostM resync')
+    if (resync.room.partnerReservation.notice !== null) throw new Error('dismissed notice came back after refresh')
+  })
+
+  await check('[N8] съобщението "release" от не-домакин се отказва', async () => {
+    joinerN!.frames.length = 0
+    send(joinerN!, { type: 'release_private_room_partner_seat' })
+    await expectError(joinerN!, 'release by non-host')
+  })
+
+  // ─── Маса с ръчен старт: "масата се запълни" ─────────────────────────────
+  console.log('--- Ръчен старт ---')
+  const { hostS, sB0, sB1, sA1, hostT, tB0, tB1, friendT, hostU, uB0, uB1, uA1 } = c as Record<string, TestClient>
+  const joinSeat = async (cl: TestClient, roomIdToJoin: string, team: 'A' | 'B', slotIndex: 0 | 1) => {
+    cl.frames.length = 0
+    send(cl, { type: 'join_private_room', privateRoomId: roomIdToJoin, team, slotIndex })
+    await waitForFrame(cl, (fr) => fr.type === 'private_room_updated' && slotOccupant(fr.room, team, slotIndex)?.profileId === cl.profileId, 5_000, `${cl.tag} joins ${team}${slotIndex}`)
+  }
+  hostS!.frames.length = 0
+  send(hostS!, { type: 'create_private_room', stake: STAKE, isLocked: false, waitMinutes: 15, manualStart: true })
+  const roomS = (await waitForFrame(hostS!, (fr) => fr.type === 'private_room_updated', 10_000, 'manual room')).room.id as string
+
+  await check('[MS1] ръчен старт без покана: 3/4 → canManualStart=false; последното място → true към домакина', async () => {
+    await joinSeat(sB0!, roomS, 'B', 0)
+    await joinSeat(sB1!, roomS, 'B', 1)
+    if (lastRoomUpdate(hostS!).canManualStart !== false) throw new Error('canManualStart at 3/4')
+    hostS!.frames.length = 0
+    await joinSeat(sA1!, roomS, 'A', 1)
+    const upd = await waitForFrame(hostS!, (fr) => fr.type === 'private_room_updated' && fr.room.canManualStart === true, 5_000, 'full')
+    if (upd.room.manualStart !== true) throw new Error('manualStart flag')
+    await sleep(300)
+    if (hostS!.frames.some((fr) => fr.type === 'private_room_full')) throw new Error('manual-start room auto-started')
+  })
+  await check('[MS2] refresh/reconnect на домакина → пълната маса чака ръчен старт (canManualStart=true)', async () => {
+    await closeSocket(hostS!)
+    c.hostS = await openSocket(port, accounts.hostS!)
+    openClients.push(c.hostS)
+    send(c.hostS, { type: 'request_private_rooms_list' })
+    const upd = await waitForFrame(c.hostS, (fr) => fr.type === 'private_room_updated' && fr.room.id === roomS, 5_000, 'hostS resync')
+    if (upd.room.canManualStart !== true) throw new Error('not restored')
+  })
+  await check('[MS3] играч напуска → false; повторно запълване → отново true', async () => {
+    c.hostS!.frames.length = 0
+    send(sA1!, { type: 'leave_private_room' })
+    await waitForFrame(c.hostS!, (fr) => fr.type === 'private_room_updated' && fr.room.canManualStart === false, 5_000, 'after leave')
+    c.hostS!.frames.length = 0
+    await joinSeat(sA1!, roomS, 'A', 1)
+    await waitForFrame(c.hostS!, (fr) => fr.type === 'private_room_updated' && fr.room.canManualStart === true, 5_000, 'refilled')
+  })
+  await check('[MS4] домакинът стартира ръчно → private_room_full (единственият начин за старт)', async () => {
+    c.hostS!.frames.length = 0
+    send(c.hostS!, { type: 'start_private_room' })
+    await waitForFrame(c.hostS!, (fr) => fr.type === 'private_room_full', 10_000, 'manual start')
+  })
+
+  await check('[MS5] ръчен старт + поканен партньор: приемането запълва масата → canManualStart и "accepted" известие', async () => {
+    hostT!.frames.length = 0
+    send(hostT!, { type: 'create_private_room', stake: STAKE, isLocked: false, waitMinutes: 15, manualStart: true, invitePartner: true })
+    const roomT = (await waitForFrame(hostT!, (fr) => fr.type === 'private_room_updated', 10_000, 'manual partner room')).room.id as string
+    await joinSeat(tB0!, roomT, 'B', 0)
+    await joinSeat(tB1!, roomT, 'B', 1)
+    friendT!.frames.length = 0
+    const inviteT = await invitePartner(hostT!, friendT!)
+    await waitForFrame(friendT!, (fr) => fr.type === 'private_room_invite_received' && fr.inviteId === inviteT, 5_000, 'inviteT')
+    hostT!.frames.length = 0
+    send(friendT!, { type: 'respond_private_room_invite', inviteId: inviteT, accept: true })
+    const upd = await waitForFrame(hostT!, (fr) => fr.type === 'private_room_updated' && fr.room.canManualStart === true, 5_000, 'filled by partner')
+    if (upd.room.partnerReservation.notice?.kind !== 'accepted') throw new Error(JSON.stringify(upd.room.partnerReservation))
+    await sleep(300)
+    if (hostT!.frames.some((fr) => fr.type === 'private_room_full')) throw new Error('auto-started')
+  })
+
+  await check('[MS6] автоматичен старт: 4/4 → стартира веднага, без чакане на домакина', async () => {
+    hostU!.frames.length = 0
+    send(hostU!, { type: 'create_private_room', stake: STAKE, isLocked: false, waitMinutes: 15 })
+    const roomU = (await waitForFrame(hostU!, (fr) => fr.type === 'private_room_updated', 10_000, 'auto room')).room.id as string
+    if (lastRoomUpdate(hostU!).manualStart !== false) throw new Error('manualStart default')
+    await joinSeat(uB0!, roomU, 'B', 0)
+    await joinSeat(uB1!, roomU, 'B', 1)
+    send(uA1!, { type: 'join_private_room', privateRoomId: roomU, team: 'A', slotIndex: 1 })
+    await waitForFrame(hostU!, (fr) => fr.type === 'private_room_full', 10_000, 'auto start')
+    if (hostU!.frames.some((fr) => fr.type === 'private_room_updated' && fr.room.canManualStart === true)) throw new Error('canManualStart on auto room')
+  })
+
   // ─── Изтичане (реалните 60 сек) ──────────────────────────────────────────
   console.log('--- Изтичане (изчаква до 60 сек) ---')
   await check('[W21] след 60 сек поканата изтича — поканеният и домакинът са известени', async () => {
@@ -719,6 +923,8 @@ try {
     const status = await waitForFrame(hostX!, (f) => f.type === 'private_room_partner_invite_status' && f.status === 'expired', 5_000, 'host expired status')
     if (!String(status.message).includes('изтече')) throw new Error(status.message)
     if (Date.now() - inviteXSentAt < 59_000) throw new Error('expired too early')
+    const upd = await waitForFrame(hostX!, (f) => f.type === 'private_room_updated' && f.room.partnerReservation?.notice?.kind === 'expired', 5_000, 'expired notice')
+    if (upd.room.partnerReservation.notice.toDisplayName !== 'PI friendX') throw new Error(JSON.stringify(upd.room.partnerReservation.notice))
   })
 
   await check('[W22] след изтичане мястото остава резервирано и може нова покана', async () => {
@@ -727,8 +933,12 @@ try {
     friendX!.frames.length = 0
     send(friendX!, { type: 'respond_private_room_invite', inviteId: inviteX, accept: true })
     await expectError(friendX!, 'accept after expiry')
+    const expiresAtBefore = room.expiresAt
     const again = await invitePartner(hostX!, friendX!)
     if (again === inviteX) throw new Error('same inviteId reused')
+    const after = lastRoomUpdate(hostX!)
+    if (after.partnerReservation.notice !== null) throw new Error('expired notice not cleared by the new invite')
+    if (after.expiresAt !== expiresAtBefore) throw new Error('new invite extended the room deadline')
   })
 } finally {
   for (const cl of openClients) {

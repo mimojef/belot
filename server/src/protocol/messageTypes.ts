@@ -276,6 +276,14 @@ export type ClientMessage =
   | {
       type: 'cancel_private_room_partner_invite'
     }
+  // Действия от известието за отказ/изтичане: "Освободи мястото" и
+  // затваряне на известието "прие".
+  | {
+      type: 'release_private_room_partner_seat'
+    }
+  | {
+      type: 'dismiss_private_room_partner_notice'
+    }
   | {
       type: 'respond_private_room_invite'
       inviteId: string
@@ -878,6 +886,8 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_partner_insufficient_balance'
   // Поканата НЕ е създадена: приятелят няма нужното ниво за залога на масата.
   | 'private_room_partner_level_required'
+  // Резервацията/масата вече не съществува (остаряло действие от известието).
+  | 'private_room_partner_reservation_missing'
 
 export type ErrorMessage = {
   type: 'error'
@@ -1314,6 +1324,9 @@ export type PrivateRoomPartnerReservationSnapshot = {
   slotIndex: 0 | 1
   invitePending: boolean
   invite: { inviteId: string; toProfileId: string; toDisplayName: string; expiresAt: number } | null
+  // Известие към домакина за изхода на последната покана (само в неговия
+  // snapshot). Валидно до room.expiresAt — същия краен срок на масата.
+  notice: { kind: 'declined' | 'expired' | 'unavailable' | 'accepted'; toDisplayName: string; createdAt: number } | null
 }
 
 export type PrivateRoomsListMessage = {

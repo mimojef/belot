@@ -231,6 +231,174 @@ export const PRIVATE_ROOM_POPUP_STYLES = `
   }
 `
 
+// ─── Глобални известия за частната маса (към домакина) ──────────────────
+// Рендерират се в собствен контейнер в document.body (виж
+// syncPrivateRoomNoticeHost в createLobbyFlowController.ts) — НЕ в root-а на
+// лобито, така че появата/изчезването им не прерисува страницата (скролът в
+// "Теми", отворените панели и полетата остават непокътнати). Не блокират
+// сайта: без backdrop, само картичката приема кликове. Не се скриват с
+// таймер — само при действие, нов snapshot или при крайния срок на масата.
+
+export type PrivateRoomPartnerNoticeView = {
+  kind: 'declined' | 'expired' | 'unavailable' | 'accepted'
+  toDisplayName: string
+}
+
+export const PRIVATE_ROOM_MANUAL_START_READY_TEXT =
+  'Създадената от теб маса се запълни. Всички играчи са готови. Върни се, за да стартираш играта.'
+
+export function getPrivateRoomPartnerNoticeText(notice: PrivateRoomPartnerNoticeView): string {
+  switch (notice.kind) {
+    case 'declined':
+      return `${notice.toDisplayName} отказа твоята покана за партньор.`
+    case 'expired':
+      return `Изтекоха 60 секунди. ${notice.toDisplayName} не отговори на поканата.`
+    case 'unavailable':
+      return `${notice.toDisplayName} не може да приеме поканата.`
+    case 'accepted':
+      return `${notice.toDisplayName} прие поканата ти и седна на масата.`
+  }
+}
+
+// flex-basis 140px: при картичка под ~300px съдържание (телефон 320px) двата
+// бутона минават един под друг; min-height 44px — удобна цел за пръст.
+const NOTICE_BUTTON_BASE = 'flex:1 1 140px;min-height:44px;padding:8px 12px;border-radius:10px;font-family:inherit;font-size:14px;font-weight:900;line-height:1.2;cursor:pointer;white-space:normal;overflow-wrap:anywhere;'
+const NOTICE_BUTTON_PRIMARY = `${NOTICE_BUTTON_BASE}border:0;background:linear-gradient(135deg,#7c3aed,#a78bfa);color:#fff;`
+const NOTICE_BUTTON_SECONDARY = `${NOTICE_BUTTON_BASE}border:1px solid rgba(255,255,255,0.22);background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.88);`
+
+// 'inline' — в чакалнята: в потока на екрана (под бутоните), без да закрива
+// СТАРТ или полето за чат.
+export type PrivateRoomNoticePlacement = 'bottom' | 'inline'
+
+function renderPrivateRoomNoticeCard(params: {
+  dataAttr: string
+  title: string
+  text: string
+  accent: 'violet' | 'green' | 'gold'
+  actionsHtml: string
+  placement: PrivateRoomNoticePlacement
+}): string {
+  const border = params.accent === 'green' ? 'rgba(74,222,128,0.5)' : params.accent === 'gold' ? 'rgba(244,201,91,0.6)' : 'rgba(167,139,250,0.55)'
+  const titleColor = params.accent === 'green' ? '#86efac' : params.accent === 'gold' ? '#f4c95b' : 'rgba(196,181,253,0.85)'
+  return `
+    <style>
+      /* Лоби: долу (мобилното лоби няма долна навигация — менюто е горе).
+         Чакалня: в потока на екрана. Отстъпи по safe-area
+         (notch/системни ленти); никога по-широко от екрана; при много дълъг
+         текст картичката се свива по височина и скролира вътрешно. */
+      .prw-partner-notice {
+        position:fixed;
+        left:50%;
+        transform:translateX(-50%);
+        z-index:9050;
+        width:min(440px, calc(100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
+        max-height:calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+        overflow-y:auto;
+        overscroll-behavior:contain;
+        box-sizing:border-box;
+        pointer-events:auto;
+        font-family:Inter, Arial, sans-serif;
+      }
+      .prw-partner-notice[data-placement="bottom"] {
+        bottom:calc(24px + env(safe-area-inset-bottom, 0px));
+      }
+      .prw-partner-notice[data-placement="inline"] {
+        position:static;
+        left:auto;
+        transform:none;
+        width:100%;
+        max-height:none;
+        overflow:visible;
+      }
+      @media (max-width: 640px) {
+        .prw-partner-notice[data-placement="bottom"] {
+          bottom:calc(12px + env(safe-area-inset-bottom, 0px));
+        }
+      }
+    </style>
+    <div class="prw-partner-notice" data-placement="${params.placement}" ${params.dataAttr} role="status" aria-live="polite">
+      <div style="background:linear-gradient(160deg,#1c1c33,#13132a);border:1.5px solid ${border};border-radius:14px;padding:14px;box-shadow:0 10px 36px rgba(0,0,0,0.75);display:grid;gap:10px;box-sizing:border-box;">
+        <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:${titleColor};">${escapeHtml(params.title)}</div>
+        <div data-private-room-notice-text="1" style="font-size:15px;font-weight:700;color:#ffffff;line-height:1.4;overflow-wrap:anywhere;">${escapeHtml(params.text)}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">${params.actionsHtml}</div>
+      </div>
+    </div>
+  `
+}
+
+export function renderPrivateRoomPartnerNotice(params: {
+  notice: PrivateRoomPartnerNoticeView | null
+  busy: boolean
+  placement: PrivateRoomNoticePlacement
+}): string {
+  const notice = params.notice
+  if (notice === null) return ''
+  const disabled = params.busy ? 'disabled' : ''
+  const actionsHtml = notice.kind === 'accepted'
+    ? `<button type="button" data-private-room-partner-notice-dismiss="1" style="${NOTICE_BUTTON_PRIMARY}" ${disabled}>ОК</button>`
+    : `
+      <button type="button" data-private-room-partner-notice-invite="1" style="${NOTICE_BUTTON_PRIMARY}" ${disabled}>Покани друг</button>
+      <button type="button" data-private-room-partner-notice-release="1" style="${NOTICE_BUTTON_SECONDARY}" ${disabled}>Освободи мястото</button>
+    `
+  return renderPrivateRoomNoticeCard({
+    dataAttr: `data-private-room-partner-notice="${notice.kind}"`,
+    title: 'Покана за партньор',
+    text: getPrivateRoomPartnerNoticeText(notice),
+    accent: notice.kind === 'accepted' ? 'green' : 'violet',
+    actionsHtml,
+    placement: params.placement,
+  })
+}
+
+// Маса с ръчен старт е 4/4 и чака домакина ("Изчакай в лоби").
+export function renderPrivateRoomManualStartReadyNotice(placement: PrivateRoomNoticePlacement): string {
+  return renderPrivateRoomNoticeCard({
+    dataAttr: 'data-private-room-manual-start-notice="1"',
+    title: 'Частна маса',
+    text: PRIVATE_ROOM_MANUAL_START_READY_TEXT,
+    accent: 'gold',
+    actionsHtml: `<button type="button" data-private-room-manual-start-notice-open="1" style="${NOTICE_BUTTON_PRIMARY}">Към масата</button>`,
+    placement,
+  })
+}
+
+// Краткото информационно съобщение за частните маси ("Х излезе от масата."
+// и т.н.) — преместено от root-а на лобито в същия изолиран контейнер, за да
+// не прерисува страницата при поява/скриване. Скрива се след 3 сек (както
+// преди) — таймерът е в контролера.
+export function renderPrivateRoomInfoToast(text: string | null): string {
+  if (!text) return ''
+  return `
+    <div data-private-room-info-toast="1" style="position:fixed;inset:0;z-index:9500;display:flex;align-items:center;justify-content:center;pointer-events:none;padding:0 16px;">
+      <div style="pointer-events:auto;background:#1a1a2e;border:1px solid rgba(167,139,250,0.5);border-radius:16px;padding:22px 28px;text-align:center;box-shadow:0 8px 48px rgba(0,0,0,0.8);min-width:min(260px, calc(100vw - 48px));max-width:calc(100vw - 48px);box-sizing:border-box;animation:prInfoIn 0.18s ease both;">
+        <style>
+          @keyframes prInfoIn {
+            from { opacity:0; transform:scale(0.92); }
+            to   { opacity:1; transform:scale(1); }
+          }
+        </style>
+        <div style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.9);overflow-wrap:anywhere;">${escapeHtml(text)}</div>
+      </div>
+    </div>
+  `
+}
+
+export function attachPrivateRoomNoticeHandlers(
+  root: ParentNode,
+  handlers: { onInviteOther: () => void; onRelease: () => void; onDismiss: () => void; onOpenTable: () => void },
+): void {
+  const bind = (selector: string, handler: () => void) => {
+    root.querySelector<HTMLButtonElement>(selector)?.addEventListener('click', (event) => {
+      if ((event.currentTarget as HTMLButtonElement).disabled) return
+      handler()
+    })
+  }
+  bind('[data-private-room-partner-notice-invite="1"]', handlers.onInviteOther)
+  bind('[data-private-room-partner-notice-release="1"]', handlers.onRelease)
+  bind('[data-private-room-partner-notice-dismiss="1"]', handlers.onDismiss)
+  bind('[data-private-room-manual-start-notice-open="1"]', handlers.onOpenTable)
+}
+
 // ─── "Покани партньор" picker ────────────────────────────────────────────
 // Същите редове/стилове като "Покани приятели" (prw-invite-*), но за едно
 // конкретно място: търсачка, подредба по наличност и само "свободни онлайн"

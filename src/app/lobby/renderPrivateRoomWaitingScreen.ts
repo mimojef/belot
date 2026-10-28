@@ -88,6 +88,8 @@ export type RenderPrivateRoomWaitingScreenParams = {
   partnerInviteInFlight?: boolean
   /** Поканата е отказана — приятелят няма жълтици/ниво за масата. Прозорец с ОК. */
   partnerEligibilityPopupText?: string | null
+  /** Известието за изхода на поканата — вградено под бутоните (не плаващо). */
+  noticeHtml?: string
 }
 
 // Pure formatter — exported so it can be unit-tested and reused by the
@@ -1239,6 +1241,8 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
               >${params.startInFlight ? '...' : 'СТАРТ'}</button>`
             : ''}
         </div>
+
+        ${params.noticeHtml ?? ''}
 
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}
 

@@ -19,6 +19,18 @@
  *  [X]  "Отмени поканата" → известието при поканения изчезва.
  *  [A]  "Приеми" → поканеният е в чакалнята на A1.
  *  [M]  на телефон (390px) няма хоризонтален overflow в чакалнята/picker-а.
+ *  [G]  глобално известие към домакина, докато е в "Теми": отказ → текст +
+ *       "Покани друг"/"Освободи мястото", не блокира и не се скрива само,
+ *       оцелява refresh, "Покани друг" отваря списъка, нова покана не мести
+ *       крайния срок, "Освободи мястото" маха резервацията.
+ *  [mn/mp] маса с ръчен старт (без/с поканен партньор), домакинът в "Теми":
+ *       4/4 → "Създадената от теб маса се запълни..." + "Към масата"; не се
+ *       дублира; refresh; напускане и повторно запълване; без popup в
+ *       чакалнята; краен срок; старт на мача. [AS] автоматичен старт — без.
+ *  [S1] и навсякъде: появата/изчезването на известие не прерисува "Теми"
+ *       (същият DOM възел) и не мести скрола.
+ *  [H]  приемане в "Теми" → "прие поканата ти" само с "ОК"; refresh не го връща;
+ *       краен срок на масата скрива известието; старт на мача го премахва.
  */
 
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
@@ -78,9 +90,13 @@ async function waitForCondition(label: string, predicate: () => Promise<boolean>
   throw new Error(`Timeout: ${label}`)
 }
 
+let testIpCounter = 0
+// Различен IP на заявка — регистрациите/верификациите са rate-limited по IP.
+const nextTestIp = () => `203.0.117.${(testIpCounter = (testIpCounter % 250) + 1)}`
+
 async function httpJson(port: number, method: string, pathname: string, cookie: string | null, body?: unknown) {
   const res = await fetch(`http://127.0.0.1:${port}${pathname}`, {
-    method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+    method, headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextTestIp(), ...(cookie ? { Cookie: cookie } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   const setCookie = (res.headers.getSetCookie?.()[0] ?? res.headers.get('set-cookie'))?.split(';')[0] ?? null
@@ -497,8 +513,8 @@ try {
 
     await check(`${label} [A2] домакинът вижда партньора и съобщение за приемане`, async () => {
       await host.page.locator('[data-private-room-slot-reserved="1"]').waitFor({ state: 'detached', timeout: 5_000 })
-      const banner = await host.page.locator('.prw-info-banner').textContent()
-      assert((banner ?? '').includes('прие поканата'), `banner: ${banner}`)
+      const text = await host.page.locator('[data-private-room-partner-notice="accepted"] [data-private-room-notice-text="1"]').textContent()
+      assert((text ?? '').includes('прие поканата'), `notice: ${text}`)
     })
 
     if (viewport.width < 600) {
@@ -576,6 +592,392 @@ try {
 
   await runLevelFlow('desktop', { width: 1280, height: 800 })
   await runLevelFlow('mobile', { width: 390, height: 844 })
+
+  // ─── Глобално известие към домакина ──────────────────────────────────────
+  const NOTICE = '[data-private-room-partner-notice]'
+  const noticeText = (p: Page) => p.locator('[data-private-room-notice-text="1"]').textContent()
+  const MANUAL_NOTICE = '[data-private-room-manual-start-notice="1"]'
+
+  // Маркира текущия DOM на "Теми" и скрола — ако root-ът на лобито бъде
+  // пресъздаден (innerHTML), маркерът сочи откачен възел и скролът се губи.
+  async function markTopicsView(p: Page): Promise<void> {
+    await p.evaluate(() => {
+      document.body.style.minHeight = '6000px'
+      ;(window as any).__topicsRootMarker = document.querySelector('[data-lobby-screen-root="1"]')
+      ;(window as any).__topicsRootChildMarker = document.querySelector('[data-lobby-screen-root="1"]')?.firstElementChild ?? null
+      window.scrollTo(0, 1500)
+    })
+  }
+  async function assertTopicsViewIntact(p: Page, what: string): Promise<void> {
+    const state = await p.evaluate(() => {
+      const marker = (window as any).__topicsRootMarker as Element | null
+      const child = (window as any).__topicsRootChildMarker as Element | null
+      return {
+        hasMarker: marker !== null,
+        sameRoot: marker !== null && marker.isConnected && marker === document.querySelector('[data-lobby-screen-root="1"]'),
+        sameChild: child === null || child.isConnected,
+        scrollY: window.scrollY,
+        screen: (window as any).__partnerHarness.getCurrentScreen(),
+      }
+    })
+    assert(state.hasMarker, `${what}: no lobby root`)
+    assert(state.sameRoot && state.sameChild, `${what}: the Topics page was re-rendered`)
+    assert(Math.abs(state.scrollY - 1500) <= 2, `${what}: scroll ${state.scrollY}`)
+    assert(state.screen === 'topics', `${what}: screen ${state.screen}`)
+  }
+  const screenOf = (p: Page) => p.evaluate(() => (window as any).__partnerHarness.getCurrentScreen() as string)
+
+  async function goToTopics(party: Party): Promise<void> {
+    await party.page.evaluate(() => (window as any).__partnerHarness.goToTopics())
+    await party.page.waitForFunction(() => (window as any).__partnerHarness.getCurrentScreen() === 'topics', null, { timeout: 5_000 })
+  }
+
+  // Refresh: нова страница със същата сесия + resync (като main.ts onOpen).
+  async function refresh(party: Party): Promise<void> {
+    await party.page.reload()
+    await party.page.waitForFunction(() => (window as any).__partnerHarness !== undefined, undefined, { timeout: 15_000 })
+    await party.page.evaluate(({ profileId, displayName }) => (window as any).__partnerHarness.setLocalProfile(profileId, displayName), party.profile)
+    await party.page.evaluate((url) => (window as any).__partnerHarness.connect(url), wsUrl)
+    await party.page.evaluate(() => (window as any).__partnerHarness.resync())
+  }
+
+  async function createRoomAndEnter(host: Party, friends: unknown[]): Promise<string> {
+    await host.page.evaluate((list) => (window as any).__partnerHarness.setFriendships(list), friends)
+    await host.page.evaluate((stake) => (window as any).__partnerHarness.send({ type: 'create_private_room', stake, isLocked: false, waitMinutes: 15, invitePartner: true }), STAKE)
+    await host.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_updated'), null, { timeout: 10_000 })
+    const roomId: string = await host.page.evaluate(() => (window as any).__partnerHarness.getReceivedFrames().find((f: any) => f.type === 'private_room_updated').room.id)
+    await enterOwnWaitingRoom(host, roomId)
+    return roomId
+  }
+
+  async function inviteViaPicker(host: Party, friendProfileId: string): Promise<void> {
+    if (await host.page.locator('[data-private-room-partner-picker-backdrop="1"]').count() === 0) {
+      await host.page.click('[data-private-room-partner-invite-open="1"]')
+    }
+    await host.page.locator(`[data-private-room-partner-send="${friendProfileId}"]`).waitFor({ state: 'visible', timeout: 5_000 })
+    await host.page.click(`[data-private-room-partner-send="${friendProfileId}"]`)
+    await host.page.locator('[data-private-room-partner-invited="1"]').waitFor({ state: 'visible', timeout: 5_000 })
+  }
+
+  async function friendsList(hostP: Profile): Promise<unknown[]> {
+    return (await httpJson(backendPort, 'GET', '/api/friends', hostP.cookie)).body.friendships.friends
+  }
+
+  async function runNoticeFlow(label: string, viewport: { width: number; height: number }): Promise<void> {
+    console.log(`--- ${label} известие (${viewport.width}x${viewport.height}) ---`)
+    const hostP = await registerProfile(backendPort, `${label} nhost`)
+    const friendP = await registerProfile(backendPort, `${label} nfriend`)
+    const friend2P = await registerProfile(backendPort, `${label} nfriendtwo`)
+    await makeFriends(backendPort, hostP, friendP)
+    await makeFriends(backendPort, hostP, friend2P)
+    const host = await openParty(hostP, viewport)
+    const friend = await openParty(friendP, viewport)
+    const friend2 = await openParty(friend2P, viewport)
+    const roomId = await createRoomAndEnter(host, await friendsList(hostP))
+    const expiresAt: number = await host.page.evaluate(() => [...(window as any).__partnerHarness.getReceivedFrames()].reverse().find((f: any) => f.type === 'private_room_updated').room.expiresAt)
+
+    await inviteViaPicker(host, friendP.profileId)
+    await friend.page.locator('[data-private-room-partner-invite-text="1"]').waitFor({ state: 'visible', timeout: 5_000 })
+    await goToTopics(host)
+    await markTopicsView(host.page)
+    await friend.page.click('[data-private-room-invite-decline]')
+
+    await check(`${label} [G1] отказ, докато домакинът е в "Теми" → известие с точния текст и двата бутона`, async () => {
+      await host.page.locator(NOTICE).waitFor({ state: 'visible', timeout: 5_000 })
+      assert((await noticeText(host.page))?.trim() === `${friendP.displayName} отказа твоята покана за партньор.`, `text: ${await noticeText(host.page)}`)
+      assert(await host.page.locator('[data-private-room-partner-notice-invite="1"]').isVisible(), '"Покани друг" missing')
+      assert(await host.page.locator('[data-private-room-partner-notice-release="1"]').isVisible(), '"Освободи мястото" missing')
+      assert(await screenOf(host.page) === 'topics', 'host was navigated away from Topics')
+    })
+
+    await check(`${label} [S1] появата на известието не прерисува "Теми" и не мести скрола`, async () => {
+      await assertTopicsViewIntact(host.page, 'notice appeared')
+    })
+
+    await check(`${label} [G2] известието не блокира сайта (без фон) и не се скрива само`, async () => {
+      const blocked = await host.page.evaluate(() => {
+        const notice = document.querySelector('[data-private-room-partner-notice]')
+        const hit = document.elementFromPoint(5, 5)
+        return notice !== null && hit !== null && notice.contains(hit)
+      })
+      assert(!blocked, 'notice covers the page')
+      const box = await host.page.locator(`${NOTICE} > div`).boundingBox()
+      assert(box !== null && box.height < viewport.height / 2, `notice too large: ${JSON.stringify(box)}`)
+      await new Promise((r) => setTimeout(r, 3_500))
+      assert(await host.page.locator(NOTICE).isVisible(), 'notice auto-hidden')
+      if (viewport.width < 600) {
+        assert(box!.x >= 0 && box!.x + box!.width <= viewport.width + 1, `notice off-screen ${JSON.stringify(box)}`)
+        assert(await host.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1), 'horizontal overflow')
+      }
+    })
+
+    await check(`${label} [G3] refresh преди крайния срок → известието се възстановява, мястото е запазено`, async () => {
+      await refresh(host)
+      await host.page.locator(NOTICE).waitFor({ state: 'visible', timeout: 8_000 })
+      assert((await noticeText(host.page))?.includes('отказа твоята покана за партньор') === true, 'wrong text after refresh')
+      const room = await host.page.evaluate(() => [...(window as any).__partnerHarness.getReceivedFrames()].reverse().find((f: any) => f.type === 'private_room_updated').room)
+      assert(room.id === roomId && room.partnerReservation !== null && room.expiresAt === expiresAt, 'room/reservation/deadline changed')
+    })
+
+    await check(`${label} [G4] "Покани друг" → чакалнята със списъка с приятели; нова покана махa известието, срокът не се променя`, async () => {
+      await host.page.evaluate((list) => (window as any).__partnerHarness.setFriendships(list), await friendsList(hostP))
+      await host.page.click('[data-private-room-partner-notice-invite="1"]')
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getCurrentScreen() === 'private-room-waiting', null, { timeout: 5_000 })
+      await host.page.locator('[data-private-room-partner-picker-backdrop="1"]').waitFor({ state: 'visible', timeout: 5_000 })
+      await inviteViaPicker(host, friend2P.profileId)
+      await host.page.locator(NOTICE).waitFor({ state: 'detached', timeout: 5_000 })
+      const room = await host.page.evaluate(() => [...(window as any).__partnerHarness.getReceivedFrames()].reverse().find((f: any) => f.type === 'private_room_updated').room)
+      assert(room.expiresAt === expiresAt, 'new invite changed the room deadline')
+    })
+
+    await check(`${label} [G5] втори отказ в "Теми" → "Освободи мястото" премахва резервацията на сървъра`, async () => {
+      await friend2.page.locator('[data-private-room-partner-invite-text="1"]').waitFor({ state: 'visible', timeout: 5_000 })
+      await goToTopics(host)
+      await markTopicsView(host.page)
+      await friend2.page.click('[data-private-room-invite-decline]')
+      await host.page.locator(NOTICE).waitFor({ state: 'visible', timeout: 5_000 })
+      await assertTopicsViewIntact(host.page, 'second notice appeared')
+      await host.page.click('[data-private-room-partner-notice-release="1"]')
+      await host.page.locator(NOTICE).waitFor({ state: 'detached', timeout: 5_000 })
+      await host.page.waitForTimeout(300)
+      await assertTopicsViewIntact(host.page, 'notice removed by release')
+      await host.page.waitForFunction(() => {
+        const frames = (window as any).__partnerHarness.getReceivedFrames()
+        const last = [...frames].reverse().find((f: any) => f.type === 'private_room_updated')
+        return last?.room.partnerReservation === null
+      }, null, { timeout: 5_000 })
+      assert(await screenOf(host.page) === 'topics', 'release navigated away')
+    })
+
+    await check(`${label} [G6] след освобождаване A1 е обикновено свободно място`, async () => {
+      await host.page.evaluate(() => (window as any).__partnerHarness.controller.navigateToPrivateRooms())
+      await host.page.click(`[data-private-room-list-enter="${roomId}"]`)
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getCurrentScreen() === 'private-room-waiting', null, { timeout: 5_000 })
+      assert(await host.page.locator('[data-private-room-slot-reserved="1"]').count() === 0, 'reserved card still shown')
+    })
+
+    for (const party of [host, friend, friend2]) await party.context.close()
+  }
+
+  async function runAcceptFlow(label: string, viewport: { width: number; height: number }, mode: 'dismiss' | 'start'): Promise<void> {
+    console.log(`--- ${label} приемане/${mode} (${viewport.width}x${viewport.height}) ---`)
+    const hostP = await registerProfile(backendPort, `${label} ahost ${mode}`)
+    const friendP = await registerProfile(backendPort, `${label} afriend ${mode}`)
+    const oppP = await registerProfile(backendPort, `${label} aopp ${mode}`)
+    await makeFriends(backendPort, hostP, friendP)
+    const host = await openParty(hostP, viewport)
+    const friend = await openParty(friendP, viewport)
+    const opp = await openParty(oppP, viewport)
+    const roomId = await createRoomAndEnter(host, await friendsList(hostP))
+    await inviteViaPicker(host, friendP.profileId)
+    await friend.page.locator('[data-private-room-partner-invite-text="1"]').waitFor({ state: 'visible', timeout: 5_000 })
+    await goToTopics(host)
+    await markTopicsView(host.page)
+    await friend.page.click('[data-private-room-invite-accept]')
+
+    await check(`${label} [H1] приемане, докато домакинът чете "Теми" → "Х прие поканата ти и седна на масата." само с "ОК", без пренасочване`, async () => {
+      await host.page.locator('[data-private-room-partner-notice="accepted"]').waitFor({ state: 'visible', timeout: 5_000 })
+      assert((await noticeText(host.page))?.trim() === `${friendP.displayName} прие поканата ти и седна на масата.`, `text: ${await noticeText(host.page)}`)
+      const buttons = await host.page.$$eval('[data-private-room-partner-notice] button', (els) => els.map((e) => e.textContent?.trim()))
+      assert(JSON.stringify(buttons) === JSON.stringify(['ОК']), `buttons: ${JSON.stringify(buttons)}`)
+      await assertTopicsViewIntact(host.page, 'accepted notice appeared')
+    })
+
+    if (mode === 'dismiss') {
+    await check(`${label} [H2] "ОК" → известието изчезва без прерисуване на "Теми"; refresh не го връща`, async () => {
+      await host.page.click('[data-private-room-partner-notice-dismiss="1"]')
+      await host.page.locator(NOTICE).waitFor({ state: 'detached', timeout: 5_000 })
+      await host.page.waitForTimeout(300)
+      await assertTopicsViewIntact(host.page, 'accepted notice dismissed')
+      await refresh(host)
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_updated'), null, { timeout: 8_000 })
+      await new Promise((r) => setTimeout(r, 500))
+      assert(await host.page.locator(NOTICE).count() === 0, 'dismissed notice came back')
+    })
+
+    await check(`${label} [H3] краен срок на масата → известието изчезва само, без съобщение от сървъра`, async () => {
+      const room = await host.page.evaluate(() => [...(window as any).__partnerHarness.getReceivedFrames()].reverse().find((f: any) => f.type === 'private_room_updated').room)
+      const withNotice = (expiresInMs: number) => ({
+        type: 'private_room_updated',
+        room: { ...room, expiresAt: Date.now() + expiresInMs, partnerReservation: { ...room.partnerReservation, notice: { kind: 'declined', toDisplayName: 'Тест', createdAt: Date.now() } } },
+      })
+      await host.page.evaluate((m) => (window as any).__partnerHarness.inject(m), withNotice(1_500))
+      await host.page.locator(NOTICE).waitFor({ state: 'visible', timeout: 3_000 })
+      await host.page.locator(NOTICE).waitFor({ state: 'detached', timeout: 4_000 })
+      await host.page.evaluate((m) => (window as any).__partnerHarness.inject(m), withNotice(-1_000))
+      await new Promise((r) => setTimeout(r, 300))
+      assert(await host.page.locator(NOTICE).count() === 0, 'notice shown for an expired room (refresh after deadline)')
+      // Връщаме истинския snapshot.
+      await host.page.evaluate(() => (window as any).__partnerHarness.resync())
+    })
+
+    }
+
+    if (mode === 'start') {
+    await check(`${label} [H4] старт на мача, докато "прие" е видимо → известието и действията изчезват`, async () => {
+      assert(await host.page.locator(NOTICE).isVisible(), 'accepted notice not visible before start')
+      await opp.page.evaluate((id) => (window as any).__partnerHarness.send({ type: 'join_private_room', privateRoomId: id, team: 'B', slotIndex: 0 }), roomId)
+      await opp.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_updated'), null, { timeout: 5_000 })
+      await opp.page.evaluate(() => (window as any).__partnerHarness.send({ type: 'add_bot_to_private_room_team', team: 'B' }))
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_full'), null, { timeout: 10_000 })
+      // В приложението private_room_full подменя екрана с масата (onMatchFound);
+      // harness-ът няма активна стая, затова проверяваме състоянието с render().
+      await host.page.evaluate(() => (window as any).__partnerHarness.render())
+      await host.page.locator(NOTICE).waitFor({ state: 'detached', timeout: 5_000 })
+    })
+    }
+
+    for (const party of [host, friend, opp]) await party.context.close()
+  }
+
+  // Маса с ръчен старт — "Създадената от теб маса се запълни..."
+  async function runManualStartFlow(label: string, viewport: { width: number; height: number }, withPartner: boolean): Promise<void> {
+    const tag = withPartner ? 'mp' : 'mn'
+    console.log(`--- ${label} ръчен старт ${withPartner ? 'с партньор' : 'без покана'} (${viewport.width}x${viewport.height}) ---`)
+    const hostP = await registerProfile(backendPort, `${label} ${tag} host`)
+    const b0P = await registerProfile(backendPort, `${label} ${tag} bzero`)
+    const b1P = await registerProfile(backendPort, `${label} ${tag} bone`)
+    const a1P = await registerProfile(backendPort, `${label} ${tag} aone`)
+    if (withPartner) await makeFriends(backendPort, hostP, a1P)
+    const host = await openParty(hostP, viewport)
+    const b0 = await openParty(b0P, viewport)
+    const b1 = await openParty(b1P, viewport)
+    const a1 = await openParty(a1P, viewport)
+    await host.page.evaluate((list) => (window as any).__partnerHarness.setFriendships(list), await friendsList(hostP))
+    await host.page.evaluate(({ stake, invitePartner }) => (window as any).__partnerHarness.send({ type: 'create_private_room', stake, isLocked: false, waitMinutes: 15, manualStart: true, invitePartner }), { stake: STAKE, invitePartner: withPartner })
+    await host.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_updated'), null, { timeout: 10_000 })
+    const roomId: string = await host.page.evaluate(() => (window as any).__partnerHarness.getReceivedFrames().find((f: any) => f.type === 'private_room_updated').room.id)
+    await enterOwnWaitingRoom(host, roomId)
+    const join = async (party: Party, team: 'A' | 'B', slotIndex: 0 | 1) => {
+      await party.page.evaluate(({ id, t, i }) => (window as any).__partnerHarness.send({ type: 'join_private_room', privateRoomId: id, team: t, slotIndex: i }), { id: roomId, t: team, i: slotIndex })
+      await host.page.waitForFunction(({ t, i, pid }) => {
+        const last = [...(window as any).__partnerHarness.getReceivedFrames()].reverse().find((f: any) => f.type === 'private_room_updated')
+        return last?.room.slots.some((sl: any) => sl.team === t && sl.slotIndex === i && sl.occupant?.profileId === pid)
+      }, { t: team, i: slotIndex, pid: party.profile.profileId }, { timeout: 5_000 })
+    }
+    await join(b0, 'B', 0)
+    await join(b1, 'B', 1)
+    if (withPartner) await inviteViaPicker(host, a1P.profileId)
+    await goToTopics(host)
+    await markTopicsView(host.page)
+    await check(`${label} [${tag}1] 3/4 → няма известие за запълнена маса`, async () => {
+      await host.page.waitForTimeout(300)
+      assert(await host.page.locator(MANUAL_NOTICE).count() === 0, 'manual notice before full')
+    })
+    if (withPartner) {
+      await a1.page.locator('[data-private-room-partner-invite-text="1"]').waitFor({ state: 'visible', timeout: 5_000 })
+      await a1.page.click('[data-private-room-invite-accept]')
+    } else {
+      await join(a1, 'A', 1)
+    }
+
+    await check(`${label} [${tag}2] последното място е заето, домакинът е в "Теми" → глобално известие с "Към масата"`, async () => {
+      await host.page.locator(MANUAL_NOTICE).waitFor({ state: 'visible', timeout: 5_000 })
+      assert((await noticeText(host.page))?.trim() === 'Създадената от теб маса се запълни. Всички играчи са готови. Върни се, за да стартираш играта.', `text: ${await noticeText(host.page)}`)
+      const buttons = await host.page.$$eval(`${MANUAL_NOTICE} button`, (els) => els.map((e) => e.textContent?.trim()))
+      assert(JSON.stringify(buttons) === JSON.stringify(['Към масата']), `buttons ${JSON.stringify(buttons)}`)
+      if (withPartner) assert(await host.page.locator('[data-private-room-partner-notice]').count() === 0, 'accepted notice shown instead of the full-table notice')
+      await assertTopicsViewIntact(host.page, 'manual-start notice appeared')
+    })
+
+    await check(`${label} [${tag}3] не изчезва само и не се дублира при повторни WebSocket събития`, async () => {
+      await host.page.waitForTimeout(3_500)
+      await host.page.evaluate(() => (window as any).__partnerHarness.resync())
+      await host.page.evaluate(() => (window as any).__partnerHarness.send({ type: 'request_private_rooms_list' }))
+      await host.page.waitForTimeout(500)
+      assert(await host.page.locator(MANUAL_NOTICE).count() === 1, `count ${await host.page.locator(MANUAL_NOTICE).count()}`)
+      assert(await host.page.locator('[data-private-room-notice-host="1"]').count() === 1, 'duplicate notice hosts')
+      await assertTopicsViewIntact(host.page, 'repeated snapshots')
+    })
+
+    await check(`${label} [${tag}4] refresh/reconnect → известието се възстановява`, async () => {
+      await refresh(host)
+      await host.page.locator(MANUAL_NOTICE).waitFor({ state: 'visible', timeout: 8_000 })
+      await goToTopics(host)
+      await markTopicsView(host.page)
+      assert(await host.page.locator(MANUAL_NOTICE).count() === 1, 'notice lost on navigation')
+    })
+
+    await check(`${label} [${tag}5] играч напуска → известието изчезва; повторно запълване → появява се отново`, async () => {
+      await b1.page.evaluate(() => (window as any).__partnerHarness.send({ type: 'leave_private_room' }))
+      await host.page.locator(MANUAL_NOTICE).waitFor({ state: 'detached', timeout: 5_000 })
+      await host.page.waitForTimeout(200)
+      await assertTopicsViewIntact(host.page, 'manual notice removed')
+      await join(b1, 'B', 1)
+      await host.page.locator(MANUAL_NOTICE).waitFor({ state: 'visible', timeout: 5_000 })
+      await assertTopicsViewIntact(host.page, 'manual notice re-appeared')
+    })
+
+    await check(`${label} [${tag}6] "Към масата" → чакалнята, без автоматичен старт; в чакалнята няма popup`, async () => {
+      await host.page.click('[data-private-room-manual-start-notice-open="1"]')
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getCurrentScreen() === 'private-room-waiting', null, { timeout: 5_000 })
+      await host.page.waitForTimeout(500)
+      assert(await host.page.locator(MANUAL_NOTICE).count() === 0, 'popup shown in the waiting room')
+      assert(!(await host.page.evaluate(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_full'))), 'match started automatically')
+      assert(await host.page.locator('[data-private-room-manual-start="1"]').isEnabled(), 'START not available')
+      if (withPartner) {
+        // Неотхвърленото "прие" остава за чакалнята (с "ОК").
+        assert(await host.page.locator('[data-private-room-partner-notice="accepted"]').count() === 1, 'accepted notice missing in the waiting room')
+      }
+    })
+
+    await check(`${label} [${tag}7] краен срок на масата → известието изчезва (и не се връща за изтекла маса)`, async () => {
+      await goToTopics(host)
+      await host.page.locator(MANUAL_NOTICE).waitFor({ state: 'visible', timeout: 5_000 })
+      const room = await host.page.evaluate(() => [...(window as any).__partnerHarness.getReceivedFrames()].reverse().find((f: any) => f.type === 'private_room_updated').room)
+      await host.page.evaluate((m) => (window as any).__partnerHarness.inject(m), { type: 'private_room_updated', room: { ...room, expiresAt: Date.now() + 1_500 } })
+      await host.page.locator(MANUAL_NOTICE).waitFor({ state: 'detached', timeout: 4_000 })
+      await host.page.evaluate((m) => (window as any).__partnerHarness.inject(m), { type: 'private_room_updated', room: { ...room, expiresAt: Date.now() - 1_000 } })
+      await host.page.waitForTimeout(300)
+      assert(await host.page.locator(MANUAL_NOTICE).count() === 0, 'notice for an expired room')
+      await host.page.evaluate(() => (window as any).__partnerHarness.resync())
+      await host.page.locator(MANUAL_NOTICE).waitFor({ state: 'visible', timeout: 5_000 })
+    })
+
+    await check(`${label} [${tag}8] мачът започва (СТАРТ от чакалнята) → известието изчезва`, async () => {
+      await host.page.click('[data-private-room-manual-start-notice-open="1"]')
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getCurrentScreen() === 'private-room-waiting', null, { timeout: 5_000 })
+      await host.page.click('[data-private-room-manual-start="1"]')
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_full'), null, { timeout: 10_000 })
+      await host.page.waitForTimeout(300)
+      assert(await host.page.locator('[data-private-room-notice-host="1"]').count() === 0, 'notice after match start')
+    })
+
+    for (const party of [host, b0, b1, a1]) await party.context.close()
+  }
+
+  async function runAutoStartFlow(label: string, viewport: { width: number; height: number }): Promise<void> {
+    console.log(`--- ${label} автоматичен старт (${viewport.width}x${viewport.height}) ---`)
+    const parties = await Promise.all(['host', 'bzero', 'bone', 'aone'].map(async (t) => openParty(await registerProfile(backendPort, `${label} auto ${t}`), viewport)))
+    const [host, b0, b1, a1] = parties as [Party, Party, Party, Party]
+    await host.page.evaluate((stake) => (window as any).__partnerHarness.send({ type: 'create_private_room', stake, isLocked: false, waitMinutes: 15 }), STAKE)
+    await host.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_updated'), null, { timeout: 10_000 })
+    const roomId: string = await host.page.evaluate(() => (window as any).__partnerHarness.getReceivedFrames().find((f: any) => f.type === 'private_room_updated').room.id)
+    await goToTopics(host)
+    for (const [party, team, slotIndex] of [[b0, 'B', 0], [b1, 'B', 1], [a1, 'A', 1]] as const) {
+      await party.page.evaluate(({ id, t, i }) => (window as any).__partnerHarness.send({ type: 'join_private_room', privateRoomId: id, team: t, slotIndex: i }), { id: roomId, t: team, i: slotIndex })
+      await host.page.waitForTimeout(250)
+    }
+    await check(`${label} [AS] маса с автоматичен старт → стартира, без известие за запълнена маса`, async () => {
+      await host.page.waitForFunction(() => (window as any).__partnerHarness.getReceivedFrames().some((f: any) => f.type === 'private_room_full'), null, { timeout: 10_000 })
+      assert(await host.page.locator(MANUAL_NOTICE).count() === 0, 'manual-start notice on an auto-start table')
+    })
+    for (const party of parties) await party.context.close()
+  }
+
+  for (const withPartner of [false, true]) {
+    await runManualStartFlow('desktop', { width: 1280, height: 800 }, withPartner)
+    await runManualStartFlow('mobile', { width: 390, height: 844 }, withPartner)
+  }
+  await runAutoStartFlow('desktop', { width: 1280, height: 800 })
+  await runAutoStartFlow('mobile', { width: 390, height: 844 })
+
+  await runNoticeFlow('desktop', { width: 1280, height: 800 })
+  await runNoticeFlow('mobile', { width: 390, height: 844 })
+  for (const mode of ['dismiss', 'start'] as const) {
+    await runAcceptFlow('desktop', { width: 1280, height: 800 }, mode)
+    await runAcceptFlow('mobile', { width: 390, height: 844 }, mode)
+  }
 } finally {
   await browser?.close()
   await vite?.close()

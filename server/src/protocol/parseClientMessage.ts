@@ -707,6 +707,14 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'cancel_private_room_partner_invite' }
     }
 
+    if (parsed.type === 'release_private_room_partner_seat') {
+      return { type: 'release_private_room_partner_seat' }
+    }
+
+    if (parsed.type === 'dismiss_private_room_partner_notice') {
+      return { type: 'dismiss_private_room_partner_notice' }
+    }
+
     if (parsed.type === 'add_bot_to_private_room_team') {
       const team = parsePrivateRoomTeam(parsed.team)
       if (team === null) return null

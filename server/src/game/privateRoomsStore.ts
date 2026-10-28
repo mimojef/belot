@@ -68,14 +68,27 @@ export type PrivateRoomPartnerInvite = {
   expiresAt: number
 }
 
+// Известие към домакина за изхода на последната партньорска покана. Пази се
+// в резервацията (не в клиента), така че оцелява refresh/reconnect и
+// изчезва заедно с масата — при нейния единствен краен срок (expiresAt),
+// закриване или старт. 'accepted' се затваря от домакина; останалите — с
+// действие ("Покани друг" = нова покана, "Освободи мястото").
+export type PrivateRoomPartnerNotice = {
+  kind: 'declined' | 'expired' | 'unavailable' | 'accepted'
+  toDisplayName: string
+  createdAt: number
+}
+
 // Резервацията живее, докато собственикът (създателят) е в масата: ако
 // партньорът по-късно напусне/бъде изритан, мястото отново става "Място с
-// покана". Освобождава се само при напускане на собственика.
+// покана". Освобождава се при напускане на собственика или с "Освободи
+// мястото" (releasePartnerReservation).
 export type PrivateRoomPartnerReservation = {
   team: Team
   slotIndex: 0 | 1
   ownerProfileId: string
   invite: PrivateRoomPartnerInvite | null
+  notice: PrivateRoomPartnerNotice | null
 }
 
 // Мястото под домакина (A0) в отбор А.
@@ -130,6 +143,16 @@ export type PrivateRoom = {
   readonly humanTurnTimeoutMs: HumanTurnTimeoutMs
   /** null = масата е създадена без "Покани партньор" (старото поведение). */
   partnerReservation: PrivateRoomPartnerReservation | null
+}
+
+// Партньорът напусна/беше изритан — "прие" известието вече не е вярно.
+function withoutStaleAcceptedNotice(
+  reservation: PrivateRoomPartnerReservation | null,
+  team: Team,
+  slotIndex: 0 | 1,
+): PrivateRoomPartnerReservation | null {
+  if (reservation === null || reservation.team !== team || reservation.slotIndex !== slotIndex) return reservation
+  return reservation.notice?.kind === 'accepted' ? { ...reservation, notice: null } : reservation
 }
 
 export function isPartnerReservedSlot(
@@ -291,10 +314,12 @@ export type PrivateRoomsStore = {
   kickMember: (input: KickMemberInput) => KickMemberResult
   invitePartner: (input: InvitePartnerInput) => InvitePartnerResult
   cancelPartnerInvite: (senderConnectionId: string) => PartnerInviteResolutionResult
-  declinePartnerInvite: (input: { inviteId: string; profileId: string }) => PartnerInviteResolutionResult
+  declinePartnerInvite: (input: { inviteId: string; profileId: string; outcome?: 'declined' | 'unavailable' }) => PartnerInviteResolutionResult
   acceptPartnerInvite: (input: AcceptPartnerInviteInput) => AcceptPartnerInviteResult
   findPartnerInvite: (inviteId: string) => { room: PrivateRoom; invite: PrivateRoomPartnerInvite } | null
   findPartnerInvitesForProfile: (profileId: string) => Array<{ room: PrivateRoom; invite: PrivateRoomPartnerInvite }>
+  releasePartnerReservation: (connectionId: string) => ReleasePartnerReservationResult
+  dismissPartnerNotice: (connectionId: string) => PartnerNoticeDismissResult
   listRooms: () => PrivateRoom[]
   getRoomByConnectionId: (connectionId: string) => PrivateRoom | null
   getRoomByProfileId: (profileId: string) => PrivateRoom | null
@@ -440,6 +465,14 @@ export type AcceptPartnerInviteResult =
 
 export type PartnerInviteEndReason = 'expired' | 'owner_left'
 
+export type ReleasePartnerReservationResult =
+  | { ok: true; room: PrivateRoom; cancelledInvite: PrivateRoomPartnerInvite | null }
+  | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
+
+export type PartnerNoticeDismissResult =
+  | { ok: true; room: PrivateRoom }
+  | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
+
 type StoreCallbacks = {
   onRoomsChanged: () => void
   // Фиксира "стаята стана 4/4 И мина final block validation" — за разлика от
@@ -485,9 +518,19 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     }
   }
 
-  function withPartnerInvite(room: PrivateRoom, invite: PrivateRoomPartnerInvite | null): PrivateRoom {
+  // Всяка промяна на поканата задава и известието към домакина (явно на
+  // всяко място — нова покана/отмяна го изчистват, изходът го записва).
+  function withPartnerInvite(
+    room: PrivateRoom,
+    invite: PrivateRoomPartnerInvite | null,
+    notice: PrivateRoomPartnerNotice | null,
+  ): PrivateRoom {
     if (room.partnerReservation === null) return room
-    return { ...room, partnerReservation: { ...room.partnerReservation, invite } }
+    return { ...room, partnerReservation: { ...room.partnerReservation, invite, notice } }
+  }
+
+  function partnerNotice(kind: PrivateRoomPartnerNotice['kind'], toDisplayName: string): PrivateRoomPartnerNotice {
+    return { kind, toDisplayName, createdAt: Date.now() }
   }
 
   function schedulePartnerInviteExpiry(roomId: string, invite: PrivateRoomPartnerInvite): void {
@@ -498,7 +541,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       // Поканата може вече да е приета/отказана/отменена — тогава таймерът е
       // изчистен; проверката по inviteId е защита срещу закъснял callback.
       if (current === undefined || current.partnerReservation?.invite?.inviteId !== invite.inviteId) return
-      const nextRoom = withPartnerInvite(current, null)
+      const nextRoom = withPartnerInvite(current, null, partnerNotice('expired', invite.toDisplayName))
       rooms.set(roomId, nextRoom)
       callbacks.onPartnerInviteEnded?.(nextRoom, invite, 'expired')
       callbacks.onRoomsChanged()
@@ -653,6 +696,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
               slotIndex: PRIVATE_ROOM_PARTNER_RESERVED_SLOT_INDEX,
               ownerProfileId: input.profileId,
               invite: null,
+              notice: null,
             }
           : null,
     }
@@ -983,7 +1027,11 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       nextSlots = nextSlots.map((s, i) => (i === partnerSlotIndex ? { ...s, occupant: null } : s))
     }
 
-    const nextRoom: PrivateRoom = { ...room, slots: nextSlots as PrivateRoomSlots }
+    const nextRoom: PrivateRoom = {
+      ...room,
+      slots: nextSlots as PrivateRoomSlots,
+      partnerReservation: withoutStaleAcceptedNotice(room.partnerReservation, targetSlot.team, targetSlot.slotIndex),
+    }
     rooms.set(roomId, nextRoom)
     connectionToRoom.delete(kickedOccupant.connectionId)
 
@@ -1068,7 +1116,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       slots: finalSlots,
       hostConnectionId: nextHostConnectionId,
       hostProfileId: nextHostProfileId,
-      partnerReservation: ownerLeft ? null : room.partnerReservation,
+      partnerReservation: ownerLeft ? null : withoutStaleAcceptedNotice(room.partnerReservation, leaverSlot.team, leaverSlot.slotIndex),
     }
 
     rooms.set(roomId, nextRoom)
@@ -1332,7 +1380,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       expiresAt: now + partnerInviteTtlMs,
     }
 
-    const nextRoom = withPartnerInvite(room, invite)
+    const nextRoom = withPartnerInvite(room, invite, null)
     rooms.set(room.id, nextRoom)
     schedulePartnerInviteExpiry(room.id, invite)
     callbacks.onRoomsChanged()
@@ -1363,14 +1411,20 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     }
 
     cancelPartnerInviteTimer(room.id)
-    const nextRoom = withPartnerInvite(room, null)
+    const nextRoom = withPartnerInvite(room, null, null)
     rooms.set(room.id, nextRoom)
     callbacks.onRoomsChanged()
 
     return { ok: true, room: nextRoom, invite }
   }
 
-  function declinePartnerInvite(input: { inviteId: string; profileId: string }): PartnerInviteResolutionResult {
+  // outcome 'unavailable' — index.ts анулира поканата, защото поканеният не
+  // може да я приеме (играе, баланс, ниво...), а не защото е отказал.
+  function declinePartnerInvite(input: {
+    inviteId: string
+    profileId: string
+    outcome?: 'declined' | 'unavailable'
+  }): PartnerInviteResolutionResult {
     const found = findPartnerInvite(input.inviteId)
     if (found === null) {
       return { ok: false, message: 'Поканата не съществува или е изтекла.', code: 'private_room_partner_invite_invalid' }
@@ -1380,7 +1434,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     }
 
     cancelPartnerInviteTimer(found.room.id)
-    const nextRoom = withPartnerInvite(found.room, null)
+    const nextRoom = withPartnerInvite(found.room, null, partnerNotice(input.outcome ?? 'declined', found.invite.toDisplayName))
     rooms.set(nextRoom.id, nextRoom)
     callbacks.onRoomsChanged()
 
@@ -1414,7 +1468,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
 
     function reject(message: string, code: PrivateRoomActionErrorCode): AcceptPartnerInviteResult {
       cancelPartnerInviteTimer(room.id)
-      const nextRoom = withPartnerInvite(room, null)
+      const nextRoom = withPartnerInvite(room, null, partnerNotice('unavailable', invite.toDisplayName))
       rooms.set(nextRoom.id, nextRoom)
       callbacks.onRoomsChanged()
       return { ok: false, message, code, inviteConsumed: true, room: nextRoom, invite }
@@ -1469,7 +1523,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     nextAuthorizedProfileIds.add(input.profileId)
 
     const nextRoom: PrivateRoom = {
-      ...withPartnerInvite(room, null),
+      ...withPartnerInvite(room, null, partnerNotice('accepted', input.displayName)),
       slots: nextSlots,
       authorizedProfileIds: nextAuthorizedProfileIds,
     }
@@ -1478,6 +1532,54 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
 
     const outcome = tryAutoStartIfFull(nextRoom, input.isBlockedWith)
     return { ok: true, room: outcome.room, invite, readyToStart: outcome.readyToStart, readiness: outcome.readiness }
+  }
+
+  function getOwnedReservationRoom(connectionId: string):
+    | { ok: true; room: PrivateRoom; reservation: PrivateRoomPartnerReservation }
+    | { ok: false; message: string; code?: PrivateRoomActionErrorCode } {
+    const roomId = connectionToRoom.get(connectionId)
+    const room = roomId === undefined ? undefined : rooms.get(roomId)
+    if (room === undefined) {
+      return { ok: false, message: 'Масата вече не съществува.', code: 'private_room_partner_reservation_missing' }
+    }
+    const reservation = room.partnerReservation
+    const sender = findSlotByConnectionId(room, connectionId)?.occupant as PrivateRoomHumanOccupant | undefined
+    if (reservation === null) {
+      return { ok: false, message: 'Мястото вече не е резервирано.', code: 'private_room_partner_reservation_missing' }
+    }
+    if (sender === undefined || sender.profileId !== reservation.ownerProfileId) {
+      return { ok: false, message: 'Само домакинът може да управлява резервираното място.', code: 'private_room_not_creator' }
+    }
+    return { ok: true, room, reservation }
+  }
+
+  // "Освободи мястото" — резервацията се премахва и A1 става обикновено
+  // свободно място. Висяща покана (ако има) се анулира. Повторна/остаряла
+  // заявка (вече освободено, масата я няма, партньорът вече седна) се отказва.
+  function releasePartnerReservation(connectionId: string): ReleasePartnerReservationResult {
+    const owned = getOwnedReservationRoom(connectionId)
+    if (!owned.ok) return owned
+    const { room, reservation } = owned
+    if (findSlot(room, reservation.team, reservation.slotIndex)?.occupant !== null) {
+      return { ok: false, message: 'Партньорът вече седна на мястото.', code: 'private_room_slot_taken' }
+    }
+    cancelPartnerInviteTimer(room.id)
+    const nextRoom: PrivateRoom = { ...room, partnerReservation: null }
+    rooms.set(room.id, nextRoom)
+    callbacks.onRoomsChanged()
+    return { ok: true, room: nextRoom, cancelledInvite: reservation.invite }
+  }
+
+  // Затваря само известието "прие" — отказ/изтичане изискват действие.
+  function dismissPartnerNotice(connectionId: string): PartnerNoticeDismissResult {
+    const owned = getOwnedReservationRoom(connectionId)
+    if (!owned.ok) return owned
+    if (owned.reservation.notice?.kind !== 'accepted') {
+      return { ok: false, message: 'Няма известие за затваряне.', code: 'private_room_partner_reservation_missing' }
+    }
+    const nextRoom: PrivateRoom = { ...owned.room, partnerReservation: { ...owned.reservation, notice: null } }
+    rooms.set(nextRoom.id, nextRoom)
+    return { ok: true, room: nextRoom }
   }
 
   function listRooms(): PrivateRoom[] {
@@ -1552,6 +1654,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     acceptPartnerInvite,
     findPartnerInvite,
     findPartnerInvitesForProfile,
+    releasePartnerReservation,
+    dismissPartnerNotice,
     addBotToTeam,
     removeBotFromTeam,
     startRoom,

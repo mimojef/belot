@@ -1014,6 +1014,12 @@ export type ClientMessage =
       type: 'cancel_private_room_partner_invite'
     }
   | {
+      type: 'release_private_room_partner_seat'
+    }
+  | {
+      type: 'dismiss_private_room_partner_notice'
+    }
+  | {
       type: 'respond_private_room_invite'
       inviteId: string
       accept: boolean
@@ -1473,6 +1479,15 @@ export type PrivateRoomPartnerReservationSnapshot = {
   invitePending: boolean
   // Само в snapshot-а към домакина (собственика на резервацията).
   invite: { inviteId: string; toProfileId: string; toDisplayName: string; expiresAt: number } | null
+  // Изходът на последната покана (само към домакина) — глобалното известие.
+  // Optional — стар сървър не го праща.
+  notice?: PrivateRoomPartnerNoticeSnapshot | null
+}
+
+export type PrivateRoomPartnerNoticeSnapshot = {
+  kind: 'declined' | 'expired' | 'unavailable' | 'accepted'
+  toDisplayName: string
+  createdAt: number
 }
 
 export type RoomSeatSnapshot = {
@@ -1715,6 +1730,7 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_partner_unavailable'
   | 'private_room_partner_insufficient_balance'
   | 'private_room_partner_level_required'
+  | 'private_room_partner_reservation_missing'
 
 export type ErrorMessage = {
   type: 'error'
@@ -3648,6 +3664,8 @@ export type GameServerClient = {
   respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
   invitePrivateRoomPartner: (toProfileId: string) => void
   cancelPrivateRoomPartnerInvite: () => void
+  releasePrivateRoomPartnerSeat: () => void
+  dismissPrivateRoomPartnerNotice: () => void
   addBotToPrivateRoomTeam: (team: Team) => void
   removeBotFromPrivateRoomTeam: (team: Team) => void
   startPrivateRoom: () => void
@@ -4145,6 +4163,14 @@ export function createGameServerClient(
     send({ type: 'cancel_private_room_partner_invite' })
   }
 
+  function releasePrivateRoomPartnerSeat(): void {
+    send({ type: 'release_private_room_partner_seat' })
+  }
+
+  function dismissPrivateRoomPartnerNotice(): void {
+    send({ type: 'dismiss_private_room_partner_notice' })
+  }
+
   function addBotToPrivateRoomTeam(team: Team): void {
     send({ type: 'add_bot_to_private_room_team', team })
   }
@@ -4310,6 +4336,8 @@ export function createGameServerClient(
     respondPrivateRoomInvite,
     invitePrivateRoomPartner,
     cancelPrivateRoomPartnerInvite,
+    releasePrivateRoomPartnerSeat,
+    dismissPrivateRoomPartnerNotice,
     addBotToPrivateRoomTeam,
     removeBotFromPrivateRoomTeam,
     startPrivateRoom,

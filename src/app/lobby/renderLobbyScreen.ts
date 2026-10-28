@@ -1636,7 +1636,6 @@ let composerEmojiPickerOutsideClickListenerAttachedFor: HTMLElement | null = nul
 let composerEmojiPickerEscListenerAttached = false
 let composerEmojiPickerResizeListenerAttached = false
 let latestComposerEmojiPickerCloseHandler: (() => void) | null = null
-let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
 // Skip-if-unchanged guard за root.innerHTML rebuild-а по-долу (виж коментара
 // при lastRenderedRootHtml/root.innerHTML assignment-а) — пази последния root
 // element И последния HTML string, за да не съвпадне грешно с кеш, оставен
@@ -12477,38 +12476,6 @@ export function renderMarketingActionToast(state: LobbyScreenState): string {
   `
 }
 
-function renderPrivateRoomInfoPopup(state: LobbyScreenState): string {
-  if (!state.privateRoomInfoText) return ''
-  return `
-    <div data-private-room-info-toast="1" style="
-      position:fixed;inset:0;z-index:9500;
-      display:flex;align-items:center;justify-content:center;
-      pointer-events:none;
-    ">
-      <div style="
-        pointer-events:auto;
-        background:#1a1a2e;
-        border:1px solid rgba(167,139,250,0.5);
-        border-radius:16px;
-        padding:22px 36px;
-        text-align:center;
-        box-shadow:0 8px 48px rgba(0,0,0,0.8);
-        min-width:260px;
-        max-width:calc(100vw - 48px);
-        animation:prInfoIn 0.18s ease both;
-      ">
-        <style>
-          @keyframes prInfoIn {
-            from { opacity:0; transform:scale(0.92); }
-            to   { opacity:1; transform:scale(1); }
-          }
-        </style>
-        <div style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.9);">${state.privateRoomInfoText}</div>
-      </div>
-    </div>
-  `
-}
-
 function renderDailyRewardsPopup(state: LobbyScreenState): string {
   if (!state.dailyRewardsPopupOpen) return ''
 
@@ -13789,7 +13756,6 @@ export function renderLobbyScreen(
         freeSeats: state.myPrivateRoom ? 4 - state.myPrivateRoom.slots.filter((s) => s.occupant !== null).length : 0,
         friends: state.inviteFriends,
       })}
-      ${renderPrivateRoomInfoPopup(state)}
       ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
       ${renderAdminTopicReportsPanel(state)}
@@ -14098,7 +14064,6 @@ export function renderLobbyScreen(
         freeSeats: state.myPrivateRoom ? 4 - state.myPrivateRoom.slots.filter((s) => s.occupant !== null).length : 0,
         friends: state.inviteFriends,
       })}
-      ${renderPrivateRoomInfoPopup(state)}
       ${renderPrivateRoomConflictPopup(state)}
       ${renderSubadminActionConfirmPopup(state)}
       ${renderAdminTopicReportsPanel(state)}
@@ -17868,19 +17833,6 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-marketing-action-cancel="1"]')
     ?.addEventListener('click', options.onMarketingActionCancel)
-
-  if (root.querySelector('[data-private-room-info-toast="1"]')) {
-    if (privateRoomInfoDismissTimer !== null) clearTimeout(privateRoomInfoDismissTimer)
-    privateRoomInfoDismissTimer = setTimeout(() => {
-      privateRoomInfoDismissTimer = null
-      options.onPrivateRoomInfoDismiss()
-    }, 3000)
-  } else {
-    if (privateRoomInfoDismissTimer !== null) {
-      clearTimeout(privateRoomInfoDismissTimer)
-      privateRoomInfoDismissTimer = null
-    }
-  }
 
   if (inviteCountdownTimer !== null) {
     clearInterval(inviteCountdownTimer)

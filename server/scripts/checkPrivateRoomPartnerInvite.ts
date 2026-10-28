@@ -19,7 +19,10 @@
  *  - reconnect на домакина и на поканения;
  *  - едновременни заявки (приемане срещу отмяна, двойно приемане);
  *  - блокиране между поканения и домакина;
- *  - приемане, което запълва 4/4 → onRoomReady точно веднъж.
+ *  - приемане, което запълва 4/4 → onRoomReady точно веднъж;
+ *  - известие към домакина (отказ/изтичане/не може/прието), "Освободи
+ *    мястото", затваряне, остарели/дублирани действия, reconnect и крайния
+ *    срок на масата (новите покани не го удължават).
  */
 
 import { createPrivateRoomsStore, type PrivateRoom, type PrivateRoomPartnerInvite } from '../src/game/privateRoomsStore.js'
@@ -393,6 +396,145 @@ console.log('\ncheckPrivateRoomPartnerInvite\n')
   const res = accept(store, inv.invite.inviteId, 'friend')
   check('[15c] приемането запълва 4/4 → readyToStart', res.ok && res.readyToStart)
   check('[15d] onRoomReady е извикан точно веднъж с партньора на A1', ready.length === 1 && (ready[0]!.slots[1]!.occupant as any)?.profileId === 'profile-friend')
+}
+
+
+// ─── Известие към домакина, "Освободи мястото", краен срок на масата ──────
+console.log('\n--- Известие към домакина ---')
+
+const noticeOf = (store: ReturnType<typeof createPrivateRoomsStore>, roomId: string) =>
+  currentRoom(store, roomId)?.partnerReservation?.notice ?? null
+
+// [16] Отказ / изтичане / не може / прието → известие с правилния вид.
+{
+  const { store } = createTrackedStore(80)
+  const room = createRoom(store)
+  check('[16a] нова маса — няма известие', noticeOf(store, room.id) === null)
+  let inv = invite(store, 'friend')
+  if (!inv.ok) throw new Error('invite failed')
+  store.declinePartnerInvite({ inviteId: inv.invite.inviteId, profileId: 'profile-friend' })
+  check('[16b] отказ → notice "declined" с името на поканения', noticeOf(store, room.id)?.kind === 'declined' && noticeOf(store, room.id)?.toDisplayName === 'Player friend')
+  inv = invite(store, 'friend2')
+  check('[16c] нова покана ("Покани друг") изчиства известието', inv.ok && noticeOf(store, room.id) === null)
+  await sleep(160)
+  check('[16d] 60-те секунди изтичат → notice "expired"', noticeOf(store, room.id)?.kind === 'expired' && noticeOf(store, room.id)?.toDisplayName === 'Player friend2')
+  check('[16e] резервацията остава след изтичане', currentRoom(store, room.id)?.partnerReservation !== null)
+  inv = invite(store, 'friend3')
+  if (!inv.ok) throw new Error('invite failed')
+  store.declinePartnerInvite({ inviteId: inv.invite.inviteId, profileId: 'profile-friend3', outcome: 'unavailable' })
+  check('[16f] анулирана от сървъра (поканеният не може) → notice "unavailable"', noticeOf(store, room.id)?.kind === 'unavailable')
+  inv = invite(store, 'friend4')
+  if (!inv.ok) throw new Error('invite failed')
+  store.cancelPartnerInvite('conn-host')
+  check('[16g] "Отмени поканата" от домакина — без известие', noticeOf(store, room.id) === null)
+  inv = invite(store, 'friend5')
+  if (!inv.ok) throw new Error('invite failed')
+  accept(store, inv.invite.inviteId, 'friend5')
+  check('[16h] приемане → notice "accepted"', noticeOf(store, room.id)?.kind === 'accepted' && noticeOf(store, room.id)?.toDisplayName === 'Player friend5')
+  store.leaveRoom('conn-friend5')
+  check('[16i] партньорът напуска → старото "accepted" известие изчезва', noticeOf(store, room.id) === null)
+}
+
+// [17] Новата покана НЕ удължава и НЕ рестартира крайния срок на масата.
+{
+  const { store } = createTrackedStore(40)
+  const room = createRoom(store)
+  const expiresAt = room.expiresAt
+  for (const id of ['a', 'b', 'c']) {
+    const inv = invite(store, id)
+    if (inv.ok) store.declinePartnerInvite({ inviteId: inv.invite.inviteId, profileId: `profile-${id}` })
+  }
+  await sleep(80)
+  invite(store, 'd')
+  await sleep(80)
+  check('[17] покани/откази/изтичания не пипат room.expiresAt', currentRoom(store, room.id)?.expiresAt === expiresAt)
+}
+
+// [18] "Освободи мястото".
+{
+  const { store } = createTrackedStore()
+  const room = createRoom(store)
+  store.joinTeam({ ...makeHuman('opp'), privateRoomId: room.id, team: 'B', slotIndex: 0, isBlockedWith: noBlocks })
+  const inv = invite(store, 'friend')
+  if (!inv.ok) throw new Error('invite failed')
+  store.declinePartnerInvite({ inviteId: inv.invite.inviteId, profileId: 'profile-friend' })
+  const byOpp = store.releasePartnerReservation('conn-opp')
+  check('[18a] не-домакин не може да освободи мястото', !byOpp.ok && byOpp.code === 'private_room_not_creator')
+  const released = store.releasePartnerReservation('conn-host')
+  check('[18b] домакинът освобождава → резервацията и известието изчезват', released.ok && currentRoom(store, room.id)?.partnerReservation === null)
+  const again = store.releasePartnerReservation('conn-host')
+  check('[18c] повторно (дублирано) освобождаване се отказва', !again.ok && again.code === 'private_room_partner_reservation_missing')
+  const join = store.joinTeam({ ...makeHuman('x'), privateRoomId: room.id, team: 'A', slotIndex: 1, isBlockedWith: noBlocks })
+  check('[18d] след освобождаване друг играч сяда на A1', join.ok)
+  check('[18e] покана след освобождаване се отказва (няма резервация)', !invite(store, 'friend2').ok)
+}
+{
+  const { store } = createTrackedStore()
+  const room = createRoom(store)
+  const inv = invite(store, 'friend')
+  if (!inv.ok) throw new Error('invite failed')
+  const released = store.releasePartnerReservation('conn-host')
+  check('[18f] освобождаване с висяща покана → поканата се връща за анулиране', released.ok && released.cancelledInvite?.inviteId === inv.invite.inviteId)
+  check('[18g] приемане на анулираната покана е невалидно', !accept(store, inv.invite.inviteId, 'friend').ok && a1(store, room.id) === null)
+}
+{
+  const { store } = createTrackedStore()
+  createRoom(store)
+  const inv = invite(store, 'friend')
+  if (!inv.ok) throw new Error('invite failed')
+  accept(store, inv.invite.inviteId, 'friend')
+  const res = store.releasePartnerReservation('conn-host')
+  check('[18h] остаряло "Освободи мястото" след приемане се отказва (партньорът седна)', !res.ok && res.code === 'private_room_slot_taken')
+}
+
+// [19] Затваряне на известието "прие".
+{
+  const { store } = createTrackedStore()
+  const room = createRoom(store)
+  let inv = invite(store, 'friend')
+  if (!inv.ok) throw new Error('invite failed')
+  store.declinePartnerInvite({ inviteId: inv.invite.inviteId, profileId: 'profile-friend' })
+  const dismissDeclined = store.dismissPartnerNotice('conn-host')
+  check('[19a] отказ не може да бъде "затворен" без действие', !dismissDeclined.ok && noticeOf(store, room.id)?.kind === 'declined')
+  inv = invite(store, 'friend2')
+  if (!inv.ok) throw new Error('invite failed')
+  accept(store, inv.invite.inviteId, 'friend2')
+  check('[19b] не-домакин не може да затвори известието', !store.dismissPartnerNotice('conn-friend2').ok)
+  check('[19c] домакинът затваря "прие"', store.dismissPartnerNotice('conn-host').ok && noticeOf(store, room.id) === null)
+  check('[19d] второ затваряне (дублирано) се отказва', !store.dismissPartnerNotice('conn-host').ok)
+}
+
+// [20] Reconnect пази известието; крайният срок на масата го премахва.
+{
+  const { store, expired } = createTrackedStore()
+  const room = store.createRoom({
+    ...makeHuman('host'), stake: 1000, isLocked: false, waitMinutes: 0.003 as unknown as 5, manualStart: false, invitePartner: true,
+  })
+  if (!room.ok) throw new Error('setup failed')
+  const inv = invite(store, 'friend')
+  if (!inv.ok) throw new Error('invite failed')
+  store.declinePartnerInvite({ inviteId: inv.invite.inviteId, profileId: 'profile-friend' })
+  const reconnected = store.reconnectMember('conn-host-2', 'profile-host')
+  check('[20a] reconnect преди крайния срок → известието е налично', reconnected?.partnerReservation?.notice?.kind === 'declined')
+  await sleep(260)
+  check('[20b] крайният срок на масата изтича → onRoomExpired, масата я няма', expired.length === 1 && store.listRooms().length === 0)
+  check('[20c] reconnect след крайния срок → няма маса и известие', store.reconnectMember('conn-host-3', 'profile-host') === null)
+  check('[20d] действия след крайния срок се отказват', !store.releasePartnerReservation('conn-host-2').ok && !invite(store, 'friend2', 'host-2').ok)
+}
+
+// [21] Масата стартира → известието отпада заедно с нея.
+{
+  const { store, ready } = createTrackedStore()
+  const room = createRoom(store)
+  store.joinTeam({ ...makeHuman('b0'), privateRoomId: room.id, team: 'B', slotIndex: 0, isBlockedWith: noBlocks })
+  store.joinTeam({ ...makeHuman('b1'), privateRoomId: room.id, team: 'B', slotIndex: 1, isBlockedWith: noBlocks })
+  let inv = invite(store, 'friend')
+  if (!inv.ok) throw new Error('invite failed')
+  store.declinePartnerInvite({ inviteId: inv.invite.inviteId, profileId: 'profile-friend' })
+  inv = invite(store, 'friend2')
+  if (!inv.ok) throw new Error('invite failed')
+  accept(store, inv.invite.inviteId, 'friend2')
+  check('[21] старт на мача → масата е извън store-а, действията от известието се отказват', ready.length === 1 && !store.releasePartnerReservation('conn-host').ok && !store.dismissPartnerNotice('conn-host').ok)
 }
 
 console.log(`\nPassed: ${passed}  Failed: ${failed}`)

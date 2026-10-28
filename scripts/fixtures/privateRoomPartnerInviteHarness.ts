@@ -45,7 +45,10 @@ const controller = createLobbyFlowController({
   onPrivateRoomInviteRespond: (inviteId, accept) => send({ type: 'respond_private_room_invite', inviteId, accept }),
   onPrivateRoomPartnerInvite: (toProfileId) => send({ type: 'invite_private_room_partner', toProfileId }),
   onPrivateRoomPartnerInviteCancel: () => send({ type: 'cancel_private_room_partner_invite' }),
+  onPrivateRoomPartnerSeatRelease: () => send({ type: 'release_private_room_partner_seat' }),
+  onPrivateRoomPartnerNoticeDismiss: () => send({ type: 'dismiss_private_room_partner_notice' }),
   onPrivateRoomAddBot: (team) => send({ type: 'add_bot_to_private_room_team', team }),
+  onPrivateRoomStart: () => send({ type: 'start_private_room' }),
   onPrivateRoomRemoveBot: (team) => send({ type: 'remove_bot_from_private_room_team', team }),
   onPrivateRoomChatSubscribe: (privateRoomId) => send({ type: 'subscribe_private_room_chat', privateRoomId }),
   onPrivateRoomChatUnsubscribe: (privateRoomId) => send({ type: 'unsubscribe_private_room_chat', privateRoomId }),
@@ -83,6 +86,15 @@ const controller = createLobbyFlowController({
   render: () => controller.render(),
   // "Запълни с бот" е скрит в продукция (feature flag) — тестът го включва временно.
   setBotFillOverride: (value: boolean | undefined) => __setBelotPrivateBotFillOverrideForTests(value),
+  // Реалният бутон "Теми" от навигацията (домакинът разглежда сайта).
+  goToTopics: async () => {
+    controller.resetToLobby()
+    await new Promise((r) => setTimeout(r, 50))
+    root.querySelector<HTMLElement>('[data-lobby-nav-topics="1"]')?.click()
+  },
+  // Като main.ts onOpen: при всяко (re)connect — server-side reconnectMember.
+  resync: () => controller.resyncPrivateRoomMembership(),
+  inject: (message: unknown) => controller.handleServerMessage(message as any),
   openCreatePopup: async () => {
     controller.resetToLobby()
     // resetToLobby() стартира (async) зареждането на залозите.

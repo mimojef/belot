@@ -140,6 +140,7 @@
     "check:private-room-top-seat-profile-popup": "npx tsx scripts/checkPrivateRoomTopSeatProfilePopup.ts",
     "check:private-room-invite-friends-ui": "npx tsx scripts/checkPrivateRoomInviteFriendsUi.ts",
     "check:private-room-partner-invite-ui": "npx tsx scripts/checkPrivateRoomPartnerInviteUi.ts",
+    "check:private-room-notice-mobile-layout": "npx tsx scripts/checkPrivateRoomNoticeMobileLayout.ts",
     "check:belot-visual-client": "npx tsx scripts/checkBelotVisualClient.ts",
     "check:pika-support-chat-routing": "npx tsx scripts/checkPikaSupportChatRouting.ts",
     "check:profile-image-upload-frontend": "node server/node_modules/tsx/dist/cli.mjs scripts/checkProfileImageUploadFrontend.ts",
