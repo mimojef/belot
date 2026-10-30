@@ -8,7 +8,7 @@
  *  [2]  0 непрочетени → края, без разделител, без seen заявка
  *  [3]  1 непрочетен → разделител; след видимост → 0; повторно отваряне в края
  *  [4]  25 непрочетени, частично прочитане → повторно отваряне при първия останал
- *  [5]  бързо скролване/прескачане → невидените остават непрочетени
+ *  [5]  бързо ръчно скролване до края → всичко преминато е прочетено (продуктово правило)
  *  [6]  нов отговор при четене на по-стари → без преместване, без маркиране
  *  [7]  нов отговор, когато потребителят е най-долу → остава най-долу, маркира се
  *  [8]  автоматично зареждане нагоре — котвата не мърда, без дубликати, до №1
@@ -17,7 +17,7 @@
  *  [11] „Лафче“ — без разделител/прозорец/thread заявки, непроменено поведение
  *  [12] собствен отговор при 60 и 250 непрочетени → без прескок, без маркиране
  *  [13] собствен отговор при четене на по-стари / най-долу
- *  [14] отговор по-висок от екрана: постепенно четене → прочетен; прескачане → не
+ *  [14] отговор по-висок от екрана: само първият екран → не; преминат до края (бавно или бързо) → прочетен
  */
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
 import { chromium, type Browser, type BrowserContext, type Page, type ViewportSize } from 'playwright'
@@ -141,9 +141,14 @@ try {
         assert(offset !== null && Math.abs(offset) <= 16, `divider must sit at the top of the viewport (offset ${offset})`)
         assert(!(await h<boolean>(page, 'hasLoadMoreButton')), '„Покажи още“ must be gone')
         const loaded: number[] = await h(page, 'getLoadedReplySeqs')
-        assert(loaded.length === 30 && loaded[0] === seqs[160] && loaded[29] === seqs[189], `bounded initial window: ${loaded.length}`)
-        await page.waitForTimeout(300)
-        assert((await h<any[]>(page, 'getSeenLog')).length === 0, 'opening alone must not mark anything read')
+        // 10 прочетени + 20 непрочетени, плюс предварително заредена по-стара страница над тях.
+        assert(loaded.length <= 120 && loaded[loaded.length - 1] === seqs[189] && loaded.includes(seqs[160]!), `bounded initial window: ${loaded.length}`)
+        assert(loaded.every((seq, i) => i === 0 || seqs.indexOf(seq) === seqs.indexOf(loaded[i - 1]!) + 1), 'contiguous initial window')
+        await page.waitForTimeout(600)
+        // Отварянето маркира само показаното на екрана — никога отговорите под него.
+        const openedWatermark: number = await h(page, 'getWatermark', 'root-big')
+        const shownAtOpen: number[] = await h(page, 'getVisibleSeqs')
+        assert(openedWatermark <= Math.max(...shownAtOpen), `opening marked replies below the screen (watermark ${openedWatermark})`)
         await page.waitForTimeout(READ_SETTLE_MS)
         const watermark: number = await h(page, 'getWatermark', 'root-big')
         const visible: number[] = await h(page, 'getVisibleSeqs')
@@ -206,12 +211,12 @@ try {
       })
     })
 
-    await check(`[${vp}] [5] бързо скролване до края → прескочените остават непрочетени`, async () => {
+    await check(`[${vp}] [5] бързо ръчно скролване до края → всичко преминато е прочетено`, async () => {
       await withHarness(async (page) => {
         const seqs: number[] = await h(page, 'seedThread', 'root-skip', 90, 10)
         await openGeneral(page)
         await openThread(page, 'root-skip')
-        // Рязко до края, страница по страница, по-бързо от dwell прага.
+        // Рязко до края (ръчно), страница по страница.
         for (let i = 0; i < 12; i++) {
           await h(page, 'scrollThreadToBottom')
           await page.waitForTimeout(40)
@@ -220,11 +225,12 @@ try {
         assert(loaded[loaded.length - 1] === seqs[89], `fast scroll must reach the end (last ${loaded[loaded.length - 1]})`)
         assert(new Set(loaded).size === loaded.length, 'no duplicate replies after auto-loading')
         await page.waitForTimeout(READ_SETTLE_MS)
-        const watermark: number = await h(page, 'getWatermark', 'root-skip')
-        assert(watermark < seqs[10]!, `skipped replies must stay unread (watermark ${watermark}, first unread ${seqs[10]})`)
+        assert((await h<number>(page, 'getWatermark', 'root-skip')) === seqs[89], 'all manually passed replies are read')
         await backToList(page)
+        assert((await h(page, 'getRootCardBadge', 'root-skip')) === null, 'badge cleared')
         await openThread(page, 'root-skip')
-        assert((await h(page, 'getDividerNextSeq')) === seqs[10], 'divider still before the first skipped reply')
+        assert(!(await h(page, 'hasDivider')), 'no divider after reading')
+        assert((await h<number>(page, 'getThreadBottomDistance')) <= 8, 'reopens at the bottom')
       })
     })
 
@@ -267,29 +273,36 @@ try {
       })
     })
 
-    await check(`[${vp}] [8] автоматично зареждане нагоре — котвата не мърда, без дубликати, до №1`, async () => {
+    await check(`[${vp}] [8] автоматично зареждане нагоре — котвата не мърда, без дубликати, до №1, прозорец ≤120`, async () => {
       await withHarness(async (page) => {
         const seqs: number[] = await h(page, 'seedThread', 'root-up', 190, 190)
         await openGeneral(page)
         await openThread(page, 'root-up')
         assert((await h<number[]>(page, 'getLoadedReplySeqs')).length === 30, 'tail window')
-        for (let round = 0; round < 12; round++) {
+        for (let round = 0; round < 20; round++) {
           const loadedBefore: number[] = await h(page, 'getLoadedReplySeqs')
           if (loadedBefore[0] === seqs[0]) break
           await h(page, 'setThreadScrollTop', 0)
           await page.waitForTimeout(30)
+          // Долният ръб — при вмъкване над него отговорът получава разделителна линия.
           const anchorSeq = loadedBefore[0]!
-          const topBefore = await h<number>(page, 'getItemTop', anchorSeq)
-          await page.waitForFunction((count) => document.querySelectorAll('[data-topic-replies-section] [data-topic-reply]').length > count, loadedBefore.length, { timeout: 5000 })
+          const bottomBefore = await h<number>(page, 'getItemBottom', anchorSeq)
+          await page.waitForFunction((first) => {
+            const el = document.querySelector<HTMLElement>('[data-topic-replies-section] [data-topic-reply]')
+            return el !== null && Number(el.dataset.topicThreadSeq) !== first
+          }, loadedBefore[0], { timeout: 5000 })
           await page.waitForTimeout(30)
-          const topAfter = await h<number>(page, 'getItemTop', anchorSeq)
-          assert(Math.abs(topAfter - topBefore) <= 2, `round ${round}: anchor moved ${topAfter - topBefore}px`)
+          const bottomAfter = await h<number>(page, 'getItemBottom', anchorSeq)
+          assert(Math.abs(bottomAfter - bottomBefore) <= 2, `round ${round}: anchor moved ${bottomAfter - bottomBefore}px`)
+          const loaded: number[] = await h(page, 'getLoadedReplySeqs')
+          assert(loaded.length <= 120 && new Set(loaded).size === loaded.length, `round ${round}: window ${loaded.length}`)
         }
         const loaded: number[] = await h(page, 'getLoadedReplySeqs')
-        assert(loaded.length === 190 && new Set(loaded).size === 190, `all 190 loaded once (got ${loaded.length})`)
-        assert(loaded.every((seq, i) => seq === seqs[i]), 'chronological order')
+        assert(loaded[0] === seqs[0], 'reached the first reply')
+        assert(loaded.length <= 120, `sliding window keeps at most 120 (got ${loaded.length})`)
+        assert(loaded.every((seq, i) => seq === seqs[i]), 'chronological, contiguous order from №1')
         const sentinels = await h<{ older: string; newer: string }>(page, 'getSentinelVisibility')
-        assert(sentinels.older === 'none' && sentinels.newer === 'none', `sentinels hidden at both ends: ${JSON.stringify(sentinels)}`)
+        assert(sentinels.older === 'none' && sentinels.newer === 'flex', `older end reached, newest released: ${JSON.stringify(sentinels)}`)
       })
     })
 
@@ -496,7 +509,7 @@ try {
       })
     })
 
-    await check(`[${vp}] [14b] бързо прескачане на дълъг отговор → остава непрочетен`, async () => {
+    await check(`[${vp}] [14b] бързо ръчно преминаване през дълъг отговор → прочетен`, async () => {
       await withHarness(async (page) => {
         const seqs: number[] = await h(page, 'seedThread', 'root-long-skip', 12, 5, 0, [6])
         await openGeneral(page)
@@ -510,12 +523,9 @@ try {
           await page.waitForTimeout(60)
         }
         await h(page, 'scrollItemToTop', seqs[6]!, 0)
-        await page.waitForTimeout(READ_SETTLE_MS + 500)
+        await page.waitForTimeout(READ_SETTLE_MS)
         const watermark = (await h<number>(page, 'getWatermark', 'root-long-skip')) ?? 0
-        assert(watermark < longSeq, `skimmed long reply must stay unread (watermark ${watermark}, long ${longSeq})`)
-        await backToList(page)
-        await openThread(page, 'root-long-skip')
-        assert((await h(page, 'getDividerNextSeq')) === longSeq, 'divider still before the skimmed long reply')
+        assert(watermark >= longSeq, `manually passed long reply must be read (watermark ${watermark}, long ${longSeq})`)
       })
     })
 

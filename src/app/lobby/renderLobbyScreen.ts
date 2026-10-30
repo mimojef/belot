@@ -136,7 +136,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton, renderTopicModerationActionPopup, renderTopicThreadEdgeSentinel, renderTopicThreadOwnReplyNotice } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton, renderTopicModerationActionPopup, renderTopicThreadEdgeSentinel, renderTopicThreadOwnReplyNotice, renderTopicThreadUnreadDivider, findTopicThreadDividerIndex } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderRegistrationVerificationPopup, attachRegistrationVerificationPopupEventListeners, type RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
@@ -13106,7 +13106,8 @@ export function refreshTopicsUnreadDom(root: HTMLElement, state: LobbyScreenStat
   // patch-ва всички съществуващи thread badge nodes с текущата стойност от
   // state.topicMessages; ако конкретен root message няма ВЕЧЕ badge node
   // (defense-in-depth за списъци с много нишки), fallback се налага.
-  const threadMessages = state.topicMessages ?? []
+  const isThreadViewMounted = root.querySelector('[data-topic-thread-scroll="1"]') !== null
+  const threadMessages = isThreadViewMounted ? [] : (state.topicMessages ?? [])
   for (const message of threadMessages) {
     const badgeText = formatTopicUnreadBadgeCount(message.unreadCount)
     const badgeEl = root.querySelector<HTMLElement>(`[data-topic-thread-unread-badge="${cssEscape(message.messageId)}"]`)
@@ -13416,6 +13417,33 @@ export function syncTopicThreadOwnReplyNoticeDom(root: HTMLElement, state: Lobby
   if (!node) return false
   scrollEl.appendChild(node)
   node.querySelector<HTMLButtonElement>('[data-topic-thread-own-reply-reveal="1"]')?.addEventListener('click', onReveal)
+  return true
+}
+
+/**
+ * Разделителят „Нови отговори“ след вмъкване/освобождаване на отговори —
+ * същото правило като пълния render (findTopicThreadDividerIndex).
+ */
+export function syncTopicThreadDividerDom(root: HTMLElement, state: LobbyScreenState): boolean {
+  const view = state.topicThreadView
+  if (view === null || state.topicsMode !== 'thread' || state.topicThreadRootMessageId !== view.rootMessageId) return false
+  const sectionEl = root.querySelector<HTMLElement>(`[data-topic-replies-section="${cssEscape(view.rootMessageId)}"]`)
+  if (!sectionEl) return false
+  const replies = state.topicRepliesByRootId[view.rootMessageId] ?? []
+  const index = findTopicThreadDividerIndex(replies, view.dividerSeq, view.hasMoreBefore)
+  const current = sectionEl.querySelector<HTMLElement>(':scope > [data-topic-thread-unread-divider="1"]')
+  const target = index < 0
+    ? null
+    : sectionEl.querySelector<HTMLElement>(`:scope > [data-topic-reply="${cssEscape(replies[index]!.messageId)}"]`)
+  if (index >= 0 && target === null) return false
+  if (current !== null && target !== null && current.nextElementSibling === target) return true
+  current?.remove()
+  if (target === null) return true
+  const template = document.createElement('template')
+  template.innerHTML = renderTopicThreadUnreadDivider().trim()
+  const divider = template.content.firstElementChild
+  if (!divider) return false
+  sectionEl.insertBefore(divider, target)
   return true
 }
 

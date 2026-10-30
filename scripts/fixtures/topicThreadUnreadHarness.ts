@@ -14,7 +14,22 @@ const OWN = 'me'
 const CONTEXT = 10
 const PAGE = 30
 
-type DbReply = { seq: number; messageId: string; senderProfileId: string; body: string; deleted: boolean }
+type DbReply = { seq: number; messageId: string; senderProfileId: string; body: string; deleted: boolean; image?: boolean }
+
+// Реална снимка (не 1×1) с фиксирано съотношение — като production attachment.
+const IMAGE_DATA_URL = (() => {
+  const canvas = document.createElement('canvas')
+  canvas.width = 320
+  canvas.height = 180
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    ctx.fillStyle = '#7a5a12'
+    ctx.fillRect(0, 0, 320, 180)
+    ctx.fillStyle = '#f4c95b'
+    ctx.fillRect(20, 20, 120, 60)
+  }
+  return canvas.toDataURL('image/png')
+})()
 type DbRoot = { seq: number; messageId: string; senderProfileId: string; body: string; replies: DbReply[] }
 type Db = {
   nextSeq: number
@@ -74,7 +89,9 @@ function toReplySnapshot(db: Db, root: DbRoot, reply: DbReply): TopicReplySnapsh
     editedAt: null,
     likeCount: 0,
     viewerHasLiked: false,
-    attachment: null,
+    attachment: reply.image
+      ? { attachmentId: `att-${reply.messageId}`, width: 320, height: 180, byteSize: 1024, viewUrl: IMAGE_DATA_URL, downloadUrl: IMAGE_DATA_URL }
+      : null,
     isTopicsSectionMuted: false,
     isUnread: isUnread(db, root.messageId, reply),
   }
@@ -119,6 +136,8 @@ const seenLog: Array<{ rootMessageId: string; throughSeq: number | undefined }> 
 const topicSeenLog: string[] = []
 const replySendLog: Array<{ parentMessageId: string; body: string; requestId: string }> = []
 let responseDelayMs = 0
+let threadLoadsInFlight = 0
+let maxThreadLoadsInFlight = 0
 
 const authSession: LobbyAuthSession = {
   account: { role: 'player' },
@@ -230,9 +249,15 @@ const controller = createLobbyFlowController({
   },
   onTopicThreadRepliesLoad: async (_topicId: string, rootMessageId: string, cursor: TopicThreadRepliesCursor) => {
     threadLoadLog.push({ rootMessageId, cursor })
-    const result = loadThreadPage(rootMessageId, cursor)
-    await delay()
-    return result
+    threadLoadsInFlight++
+    maxThreadLoadsInFlight = Math.max(maxThreadLoadsInFlight, threadLoadsInFlight)
+    try {
+      const result = loadThreadPage(rootMessageId, cursor)
+      await delay()
+      return result
+    } finally {
+      threadLoadsInFlight--
+    }
   },
   onTopicRepliesLoad: async (_topicId: string, rootMessageId: string) => {
     legacyRepliesLoadLog.push(rootMessageId)
@@ -267,15 +292,41 @@ function replyBody(index: number): string {
     seenLog.length = 0
     topicSeenLog.length = 0
     replySendLog.length = 0
+    maxThreadLoadsInFlight = 0
+  },
+  getMaxConcurrentThreadLoads: () => maxThreadLoadsInFlight,
+  /** Заредено над/под изгледа, видими ли са root картата и маркерите за зареждане. */
+  getLoadedBeyond: () => {
+    const scroll = threadScroll()
+    if (!scroll) return null
+    const view = scroll.getBoundingClientRect()
+    const rects = Array.from(scroll.querySelectorAll<HTMLElement>('[data-topic-replies-section] [data-topic-reply]')).map((el) => el.getBoundingClientRect())
+    const inView = (el: Element | null) => {
+      if (!el) return false
+      const rect = el.getBoundingClientRect()
+      return rect.height > 0 && rect.bottom > view.top && rect.top < view.bottom
+    }
+    return {
+      aboveCount: rects.filter((rect) => rect.bottom <= view.top).length,
+      belowCount: rects.filter((rect) => rect.top >= view.bottom).length,
+      abovePx: rects.length > 0 ? Math.max(0, view.top - rects[0]!.top) : 0,
+      belowPx: rects.length > 0 ? Math.max(0, rects[rects.length - 1]!.bottom - view.bottom) : 0,
+      viewHeight: view.height,
+      rootVisible: inView(scroll.querySelector('[data-topic-thread-list] > [data-topic-message]')),
+      olderSentinelVisible: inView(scroll.querySelector('[data-topic-thread-older-sentinel="1"]')),
+      newerSentinelVisible: inView(scroll.querySelector('[data-topic-thread-newer-sentinel="1"]')),
+    }
   },
   /** Нишка с replyCount отговора; readThrough = колко от тях са прочетени (null = нишката никога не е отваряна). */
   /** longAt — номера на отговори (от 1) с много дълъг текст (няколко екрана). */
-  seedThread: (rootMessageId: string, replyCount: number, readThrough: number | null, ownEvery = 0, longAt: number[] = []) => mutate((db) => {
+  /** variety: true — всеки 7-и със снимка, всеки 11-и дълъг (около екран); 'long' — всеки отговор около 1-2 екрана. */
+  seedThread: (rootMessageId: string, replyCount: number, readThrough: number | null, ownEvery = 0, longAt: number[] = [], variety: boolean | 'long' = false) => mutate((db) => {
     const rootRecord: DbRoot = { seq: db.nextSeq++, messageId: rootMessageId, senderProfileId: 'alice', body: `Тема ${rootMessageId}`, replies: [] }
     for (let i = 1; i <= replyCount; i++) {
       const sender = ownEvery > 0 && i % ownEvery === 0 ? OWN : (i % 2 === 0 ? 'bob' : 'carol')
       const body = longAt.includes(i) ? `Дълъг отговор ${i} ${'много дълъг текст на отговора, който заема няколко екрана '.repeat(160)}` : replyBody(i)
-      rootRecord.replies.push({ seq: db.nextSeq++, messageId: `${rootMessageId}-r${i}`, senderProfileId: sender, body, deleted: false })
+      const varietyBody = variety === 'long' ? `Дълъг отговор ${i} ${'по-дълъг текст за проверка на различни височини '.repeat(30 + (i % 4) * 15)}` : variety && i % 11 === 0 ? `Дълъг отговор ${i} ${'по-дълъг текст за проверка на различни височини '.repeat(40)}` : body
+      rootRecord.replies.push({ seq: db.nextSeq++, messageId: `${rootMessageId}-r${i}`, senderProfileId: sender, body: varietyBody, deleted: false, image: variety === true && i % 7 === 0 })
     }
     db.roots.push(rootRecord)
     if (readThrough !== null) {
@@ -335,6 +386,19 @@ function replyBody(index: number): string {
   getTopicSeenLog: () => topicSeenLog,
   getRootCardBadge: (rootMessageId: string) => q<HTMLElement>(`[data-topic-thread-unread-badge="${rootMessageId}"]`)?.textContent?.trim() ?? null,
   getLoadedReplySeqs: () => Array.from(document.querySelectorAll<HTMLElement>('[data-topic-replies-section] [data-topic-reply]')).map((el) => Number(el.dataset.topicThreadSeq)),
+  /** Горният ръб на първия изцяло видим отговор спрямо изгледа. */
+  getTopVisibleReply: () => {
+    const scroll = threadScroll()
+    if (!scroll) return null
+    const view = scroll.getBoundingClientRect()
+    for (const el of Array.from(scroll.querySelectorAll<HTMLElement>('[data-topic-replies-section] [data-topic-reply]'))) {
+      const rect = el.getBoundingClientRect()
+      if (rect.top >= view.top && rect.top < view.bottom) return { seq: Number(el.dataset.topicThreadSeq), top: rect.top - view.top, bottom: rect.bottom - view.top }
+    }
+    return null
+  },
+  countThreadRequests: (kind: 'before' | 'after' | 'window') => threadLoadLog.filter((entry) =>
+    kind === 'window' ? 'window' in entry.cursor : kind === 'before' ? 'beforeSeq' in entry.cursor : 'afterSeq' in entry.cursor).length,
   getLoadedReplyIds: () => Array.from(document.querySelectorAll<HTMLElement>('[data-topic-replies-section] [data-topic-reply]')).map((el) => el.dataset.topicReply ?? ''),
   hasDivider: () => q('[data-topic-thread-unread-divider="1"]') !== null,
   /** Изпраща собствен отговор през реалния composer; връща requestId-то. */
@@ -380,6 +444,11 @@ function replyBody(index: number): string {
     const divider = q<HTMLElement>('[data-topic-thread-unread-divider="1"]')
     const scroll = threadScroll()
     return divider && scroll ? divider.getBoundingClientRect().top - scroll.getBoundingClientRect().top : null
+  },
+  getItemBottom: (seq: number) => {
+    const el = q<HTMLElement>(`[data-topic-thread-seq="${seq}"]`)
+    const scroll = threadScroll()
+    return el && scroll ? el.getBoundingClientRect().bottom - scroll.getBoundingClientRect().top : null
   },
   getItemTop: (seq: number) => {
     const el = q<HTMLElement>(`[data-topic-thread-seq="${seq}"]`)
