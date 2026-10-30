@@ -1,0 +1,6 @@
+Pika.bg mobile redesign — WORK IN PROGRESS.
+
+This tracked sentinel marks feature/mobile-redesign as NOT deployable.
+scripts/deploy-production.sh refuses any target commit whose tree contains
+this file. Delete it only in the final, approved merge of the redesign into
+v2-clean-architecture.
