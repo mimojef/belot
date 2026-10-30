@@ -88,6 +88,9 @@ import {
   type TopicSnapshot,
   type TopicMessageSnapshot,
   type TopicReplySnapshot,
+  type TopicThreadRepliesCursor,
+  type TopicThreadRepliesPageResult,
+  type TopicThreadRepliesReadState,
   type TournamentPartnerCandidateSnapshot,
   type TournamentPartnerInviteSnapshot,
   type TournamentMatchAssignmentSnapshot,
@@ -5913,9 +5916,13 @@ async function markTopicSeen(
   }
 }
 
+// throughSeq — „Теми“: прочетено само до последния реално видян отговор
+// (без него сървърът маркира цялата нишка — досегашното поведение).
+// keepalive: изпращането оцелява при затваряне/refresh на страницата.
 async function markTopicThreadSeen(
   topicId: string,
   rootMessageId: string,
+  throughSeq?: number,
 ): Promise<
   | { ok: true; lastSeenSeq: number; unreadCount: number; topicUnreadCount: number }
   | { ok: false; message: string }
@@ -5926,6 +5933,9 @@ async function markTopicThreadSeen(
       {
         method: 'POST',
         credentials: 'include',
+        ...(throughSeq !== undefined
+          ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ throughSeq }), keepalive: true }
+          : {}),
       },
     )
     const data = (await response.json().catch(() => ({}))) as {
@@ -5981,6 +5991,48 @@ async function loadTopicReplies(
       hasMore: data.hasMore ?? false,
       oldestSeq: data.oldestSeq ?? null,
       deletedMessageIds: Array.isArray(data.deletedMessageIds) ? data.deletedMessageIds : [],
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+// „Теми“ — прозорец от отговори на нишка (без „Покажи още“): около първия
+// непрочетен, последната страница или съседна страница при скрол.
+async function loadTopicThreadReplies(
+  topicId: string,
+  rootMessageId: string,
+  cursor: TopicThreadRepliesCursor,
+): Promise<TopicThreadRepliesPageResult> {
+  try {
+    const qs = new URLSearchParams()
+    qs.set('limit', '30')
+    if ('window' in cursor) qs.set('window', cursor.window)
+    else if ('beforeSeq' in cursor) qs.set('before', String(cursor.beforeSeq))
+    else qs.set('after', String(cursor.afterSeq))
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/messages/${encodeURIComponent(rootMessageId)}/replies?${qs.toString()}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      message?: string
+      replies?: TopicReplySnapshot[]
+      hasMoreBefore?: boolean
+      hasMoreAfter?: boolean
+      deletedMessageIds?: string[]
+      readState?: TopicThreadRepliesReadState
+    }
+    if (!response.ok || !data.ok || !Array.isArray(data.replies)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на отговорите.' }
+    }
+    return {
+      ok: true,
+      replies: data.replies,
+      hasMoreBefore: data.hasMoreBefore === true,
+      hasMoreAfter: data.hasMoreAfter === true,
+      deletedMessageIds: Array.isArray(data.deletedMessageIds) ? data.deletedMessageIds : [],
+      readState: data.readState ?? null,
     }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
@@ -7539,7 +7591,8 @@ lobby = createLobbyFlowController({
   onTournamentBetaAccessSubmit: (password) => submitTournamentBetaAccessPasswordRequest(password),
   onTopicsLoad: () => loadTopics(),
   onTopicMarkSeen: (topicId) => markTopicSeen(topicId),
-  onTopicThreadMarkSeen: (topicId, rootMessageId) => markTopicThreadSeen(topicId, rootMessageId),
+  onTopicThreadMarkSeen: (topicId, rootMessageId, throughSeq) => markTopicThreadSeen(topicId, rootMessageId, throughSeq),
+  onTopicThreadRepliesLoad: (topicId, rootMessageId, cursor) => loadTopicThreadReplies(topicId, rootMessageId, cursor),
   onProfileByIdLoad: (profileId) => loadProfileById(profileId),
   onTopicMessagesLoad: (topicId, beforeSeq) => loadTopicMessages(topicId, beforeSeq),
   onTopicRepliesLoad: (topicId, rootMessageId, afterSeq) => loadTopicReplies(topicId, rootMessageId, afterSeq),

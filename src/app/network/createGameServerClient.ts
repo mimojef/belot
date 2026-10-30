@@ -3069,7 +3069,41 @@ export type TopicReplySnapshot = {
   attachment: TopicAttachmentSnapshot | null
   /** Derived at read time — виж TopicMessageSnapshot.isTopicsSectionMuted. */
   isTopicsSectionMuted: boolean
+  /**
+   * Само в REST страниците на нишка („Теми“): непрочетен ли е за зрителя
+   * към момента на заявката (същите прагове като броячите). Live push-ът
+   * не го носи — клиентът го приема за непрочетен, ако не е собствен.
+   */
+  isUnread?: boolean
 }
+
+/** Read-state контекст на отворена нишка („Теми“) от REST страницата с отговори. */
+export type TopicThreadRepliesReadState = {
+  lastSeenSeq: number
+  firstUnreadSeq: number | null
+  rootIsUnread: boolean
+}
+
+/**
+ * Прозорец от отговори на нишка („Теми“): 'unread' = около първия непрочетен
+ * (или края), 'latest' = последната страница, before/after = съседна страница.
+ */
+export type TopicThreadRepliesCursor =
+  | { window: 'unread' }
+  | { window: 'latest' }
+  | { beforeSeq: number }
+  | { afterSeq: number }
+
+export type TopicThreadRepliesPageResult =
+  | {
+      ok: true
+      replies: TopicReplySnapshot[]
+      hasMoreBefore: boolean
+      hasMoreAfter: boolean
+      deletedMessageIds: string[]
+      readState: TopicThreadRepliesReadState | null
+    }
+  | { ok: false; message: string }
 
 export type TopicMessageCatchupMessage = {
   type: 'topic_message_catchup'

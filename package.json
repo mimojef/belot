@@ -76,6 +76,7 @@
     "check:tournament-matches-browser-e2e": "npx tsx scripts/checkTournamentMatchesBrowserE2E.ts",
     "check:topic-message-self-delete-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageSelfDeleteClient.ts --project-root=.",
     "check:topic-message-edit-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageEditClient.ts --project-root=.",
+    "check:topic-thread-unread-client": "npx tsx scripts/checkTopicThreadUnreadClient.ts",
     "check:topic-unread-seen-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicUnreadSeenClient.ts --project-root=.",
     "check:topics-personal-integration-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsPersonalIntegrationClient.ts --project-root=.",
     "check:global-topics-mute-ux-text": "node server/node_modules/tsx/dist/cli.mjs scripts/checkGlobalTopicsMuteUxText.ts --project-root=.",

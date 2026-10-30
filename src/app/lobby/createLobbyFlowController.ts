@@ -69,6 +69,10 @@ import {
   refreshTopicMessageLikeDom,
   refreshTopicMessageContentDom,
   removeTopicMessageDom,
+  insertTopicThreadReplyNodes,
+  syncTopicThreadSentinelsDom,
+  syncTopicThreadOwnReplyNoticeDom,
+  type TopicThreadViewState,
   type TopicMessageNodeCallbacks,
   type AvatarCropSelection,
   type GuestContactFormInput,
@@ -91,6 +95,15 @@ import {
 } from './shopResumeConfirmState'
 import { createDebouncedPlayerSearch } from './createDebouncedPlayerSearch'
 import { formatTopicsSectionMuteErrorText, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT } from './renderTopicsScreen'
+import {
+  captureTopicThreadScrollAnchor,
+  computeTopicThreadContiguousSeenSeq,
+  createTopicThreadViewportWatcher,
+  findTopicThreadScrollElement,
+  isTopicThreadNearBottom,
+  restoreTopicThreadScrollAnchor,
+  type TopicThreadReadItem,
+} from './topicThreadReadTracking'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -137,6 +150,8 @@ import type {
   TopicSnapshot,
   TopicMessageSnapshot,
   TopicReplySnapshot,
+  TopicThreadRepliesCursor,
+  TopicThreadRepliesPageResult,
   TopicLockSnapshot,
   TopicMuteSnapshot,
   TopicReportSnapshot,
@@ -1251,7 +1266,8 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; lastSeenSeq: number; unreadCount: number }
     | { ok: false; message: string }
   >
-  onTopicThreadMarkSeen?: (topicId: string, rootMessageId: string) => Promise<
+  /** throughSeq (само „Теми“ прозорец) — прочетено до този seq; без него — цялата нишка (стар път). */
+  onTopicThreadMarkSeen?: (topicId: string, rootMessageId: string, throughSeq?: number) => Promise<
     | { ok: true; lastSeenSeq: number; unreadCount: number; topicUnreadCount: number }
     | { ok: false; message: string }
   >
@@ -1274,7 +1290,13 @@ export type CreateLobbyFlowControllerOptions = {
   onTopicMessagesUnsubscribe?: (topicId: string) => void
   /** requestId се генерира от контролера (не от викащия) — служи само за ack correlation, виж Етап 2 брифа т.7. imageDataUrl опционален — Attachment feature, reuse на СЪЩИЯ data-URL pipeline като friend chat. */
   onTopicMessageSend?: (topicId: string, body: string, requestId: string, imageDataUrl?: string) => void
-  /** afterSeq=null → първите N replies; иначе → следващи от afterSeq (forward cursor, "Покажи още"). Етап 3. */
+  /**
+   * „Теми“ — прозорец от отговори на отворена нишка (без „Покажи още“):
+   * около първия непрочетен, последната страница или съседна страница при
+   * скрол. Без тази опция нишката ползва стария onTopicRepliesLoad път.
+   */
+  onTopicThreadRepliesLoad?: (topicId: string, rootMessageId: string, cursor: TopicThreadRepliesCursor) => Promise<TopicThreadRepliesPageResult>
+  /** afterSeq=null → първите N replies; иначе → следващи от afterSeq (forward cursor). Етап 3. */
   onTopicRepliesLoad?: (topicId: string, rootMessageId: string, afterSeq: number | null) => Promise<
     | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null; deletedMessageIds?: string[] }
     | { ok: false; message: string }
@@ -3526,6 +3548,44 @@ class TournamentBetaAccessAwareError extends Error {
   }
 }
 
+/** Пауза преди изпращане на прочетеното (събира няколко видени отговора в една заявка). */
+const TOPIC_THREAD_SEEN_FLUSH_DELAY_MS = 400
+
+/** Състояние на отворената нишка в „Теми“ (виж startTopicThreadWindow). */
+type TopicThreadWindow = {
+  topicId: string
+  rootMessageId: string
+  status: 'loading' | 'ready' | 'error'
+  hasMoreBefore: boolean
+  hasMoreAfter: boolean
+  loadingBefore: boolean
+  loadingAfter: boolean
+  retryAfterMs: number
+  /** Разделителят „Нови отговори“ — фиксиран при отварянето. */
+  dividerSeq: number | null
+  /** Само „Общи“ — там непрочетените са per thread. */
+  tracksRead: boolean
+  rootSeq: number
+  rootIsUnread: boolean
+  /** Последният потвърден от сървъра праг (topic_thread_read_state). */
+  watermark: number
+  requestedThroughSeq: number
+  /** Таван след прескок към края (дупка в заредения диапазон). */
+  readCeilingSeq: number | null
+  seenSeqs: Set<number>
+  unreadBySeq: Map<number, boolean>
+  pendingLiveReplies: TopicReplySnapshot[]
+  seenFlushTimerId: ReturnType<typeof setTimeout> | null
+  seenInFlight: boolean
+  seenQueued: boolean
+  /**
+   * Собствен отговор, публикуван докато потребителят чете по-горе: екранът
+   * НЕ се мести; показва се бутон „Отговорът ти е публикуван ↓“ до момента,
+   * в който отговорът реално стане видим (или потребителят натисне бутона).
+   */
+  ownReplyNoticeSeq: number | null
+}
+
 export function createLobbyFlowController(
   options: CreateLobbyFlowControllerOptions,
 ): LobbyFlowController {
@@ -3540,6 +3600,29 @@ export function createLobbyFlowController(
   let privateRoomInfoToastTimerText: string | null = null
   // Keep late HTTP history responses from restoring a confirmed deletion.
   const deletedChatMessageIds = new Set<string>()
+  // „Теми“ — прозорецът на отворената нишка (виж startTopicThreadWindow).
+  // Тук, преди първия render(), за да няма TDZ в buildLobbyScreenState.
+  let topicThreadWindow: TopicThreadWindow | null = null
+  const topicThreadViewportWatcher = createTopicThreadViewportWatcher({
+    root: options.root,
+    onSeen: (seqs) => handleTopicThreadSeqsSeen(seqs),
+    onNearTop: () => {
+      void loadTopicThreadAdjacentPage('older')
+    },
+    onNearBottom: () => {
+      void loadTopicThreadAdjacentPage('newer')
+    },
+  })
+  if (typeof window !== 'undefined') {
+    // Прочетеното до момента не се губи при затваряне/refresh/скриване.
+    const flushActiveTopicThreadSeen = (): void => {
+      if (topicThreadWindow !== null) void flushTopicThreadSeen(topicThreadWindow)
+    }
+    window.addEventListener('pagehide', flushActiveTopicThreadSeen)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushActiveTopicThreadSeen()
+    })
+  }
   state.privateRoomInGameNotificationsEnabled = options.initialPrivateRoomInGameNotificationsEnabled ?? true
   state.privateRoomCreatedSoundEnabled = options.initialPrivateRoomCreatedSoundEnabled ?? true
   const _initialScreen = LOBBY_PATH_TO_SCREEN[window.location.pathname]
@@ -6013,6 +6096,7 @@ export function createLobbyFlowController(
       topicThreadRootMessageId: state.topicThreadRootMessageId,
       topicThreadReturnScrollAnchor: state.topicThreadReturnScrollAnchor,
       topicThreadRenderReason: state.topicThreadRenderReason,
+      topicThreadView: buildTopicThreadViewState(),
       topicComposerDraftByTopicId: state.topicComposerDraftByTopicId,
       topicComposerPendingRequestIdByTopicId: state.topicComposerPendingRequestIdByTopicId,
       topicComposerErrorTextByTopicId: state.topicComposerErrorTextByTopicId,
@@ -6500,14 +6584,14 @@ export function createLobbyFlowController(
       onTopicMessagesLoadOlder: () => {
         void loadOlderTopicMessages()
       },
-      onTopicRepliesLoadMore: (rootMessageId) => {
-        void loadMoreReplies(rootMessageId)
-      },
       onTopicThreadOpen: (rootMessageId, scrollAnchor) => {
         openTopicThread(rootMessageId, scrollAnchor ?? null)
       },
       onTopicThreadBack: () => {
         closeTopicThreadToGeneral()
+      },
+      onTopicThreadOwnReplyReveal: () => {
+        revealTopicThreadOwnReply()
       },
       onTopicMessageLikeToggleClick: (messageId) => {
         submitTopicMessageLikeToggle(messageId)
@@ -10369,6 +10453,15 @@ export function createLobbyFlowController(
       state.topicExpandedReplyRootIds = [...state.topicExpandedReplyRootIds, rootMessageId]
     }
     pushTopicThreadHistory()
+    const topicId = state.activeTopicId
+    if (topicId !== null && canUseTopicThreadWindow(topicId)) {
+      // „Теми“: отваряне при първия непрочетен, без маркиране на цялата
+      // нишка — прочетеното се отчита по видимост (виж topicThreadReadTracking).
+      state.topicThreadRenderReason = null
+      startTopicThreadWindow(topicId, rootMessageId)
+      render()
+      return
+    }
     render()
     void markTopicThreadSeen(rootMessageId)
     void expandReplyThread(rootMessageId)
@@ -10540,52 +10633,375 @@ export function createLobbyFlowController(
     render()
   }
 
-  async function loadMoreReplies(rootMessageId: string): Promise<void> {
-    const topicId = state.activeTopicId
-    const existing = state.topicRepliesByRootId[rootMessageId]
-    if (
-      topicId === null ||
-      !options.onTopicRepliesLoad ||
-      existing === undefined ||
-      existing === null ||
-      state.topicRepliesLoadingByRootId[rootMessageId] ||
-      !state.topicRepliesHasMoreByRootId[rootMessageId]
-    ) {
-      return
+  // ─── „Теми“: прозорец на нишката + прочетено по видимост ─────────────────
+  //
+  // Без „Покажи още“: нишката се отваря около първия непрочетен отговор (или
+  // в края, ако няма), а при скрол нагоре/надолу се зареждат съседни страници
+  // (insertTopicThreadReplyNodes, без remount — скролът не се прекъсва).
+  // Зареденият диапазон остава НЕПРЕКЪСНАТ: live отговор се добавя само ако
+  // прозорецът стига до края. Така прагът може да се вдига безопасно през
+  // заредените отговори (computeTopicThreadContiguousSeenSeq).
+  //
+  // Прочетеното (само „Общи“ — там броячите са per thread) е СЪЩИЯТ сървърен
+  // праг topic_thread_read_state.last_seen_seq: вдига се само до последния
+  // непрекъснато видян отговор (POST .../seen с throughSeq). „Лафче“ няма
+  // thread view и никога не влиза тук (canUseTopicThreadWindow).
+
+  function getOwnTopicProfileId(): string | null {
+    return (options.getAuthSession?.() ?? null)?.profile.profileId ?? null
+  }
+
+  function canUseTopicThreadWindow(topicId: string): boolean {
+    return topicId !== LAFCHE_TOPIC_ID && options.onTopicThreadRepliesLoad !== undefined
+  }
+
+  function isTopicThreadWindowShown(w: TopicThreadWindow): boolean {
+    return (
+      state.currentScreen === 'topics' &&
+      state.topicsMode === 'thread' &&
+      state.activeTopicId === w.topicId &&
+      state.topicThreadRootMessageId === w.rootMessageId
+    )
+  }
+
+  function buildTopicThreadViewState(): TopicThreadViewState | null {
+    const w = topicThreadWindow
+    if (w === null || state.topicThreadRootMessageId !== w.rootMessageId) return null
+    return {
+      rootMessageId: w.rootMessageId,
+      status: w.status,
+      hasMoreBefore: w.hasMoreBefore,
+      hasMoreAfter: w.hasMoreAfter,
+      loadingBefore: w.loadingBefore,
+      loadingAfter: w.loadingAfter,
+      dividerSeq: w.dividerSeq,
+      ownReplyNotice: w.ownReplyNoticeSeq !== null,
     }
+  }
 
-    const lastKnownSeq = existing.length > 0 ? existing[existing.length - 1]!.seq : null
-    if (lastKnownSeq === null) return
-
-    state.topicRepliesLoadingByRootId[rootMessageId] = true
-    render()
-
-    const result = await options.onTopicRepliesLoad(topicId, rootMessageId, lastKnownSeq)
-
-    const isCurrentThread = state.topicsMode === 'thread' && state.topicThreadRootMessageId === rootMessageId
-    if (state.activeTopicId !== topicId || (!state.topicExpandedReplyRootIds.includes(rootMessageId) && !isCurrentThread)) {
-      state.topicRepliesLoadingByRootId[rootMessageId] = false
-      return
+  function startTopicThreadWindow(topicId: string, rootMessageId: string): void {
+    closeTopicThreadWindow()
+    const rootMessage = findLoadedTopicRootMessage(rootMessageId)
+    const w: TopicThreadWindow = {
+      topicId,
+      rootMessageId,
+      status: 'loading',
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+      loadingBefore: false,
+      loadingAfter: false,
+      retryAfterMs: 0,
+      dividerSeq: null,
+      tracksRead: isGeneralTopicId(topicId),
+      rootSeq: rootMessage?.seq ?? 0,
+      rootIsUnread: false,
+      watermark: 0,
+      requestedThroughSeq: 0,
+      readCeilingSeq: null,
+      seenSeqs: new Set(),
+      unreadBySeq: new Map(),
+      pendingLiveReplies: [],
+      seenFlushTimerId: null,
+      seenInFlight: false,
+      seenQueued: false,
+      ownReplyNoticeSeq: null,
     }
-
+    topicThreadWindow = w
+    // Свеж прозорец всеки път — кешът от предишно отваряне може да е от
+    // друга позиция в нишката (и би направил дупка в диапазона).
+    delete state.topicRepliesByRootId[rootMessageId]
     state.topicRepliesLoadingByRootId[rootMessageId] = false
+    void loadTopicThreadInitialWindow(w)
+  }
+
+  function closeTopicThreadWindow(): void {
+    const w = topicThreadWindow
+    if (w === null) return
+    topicThreadWindow = null
+    topicThreadViewportWatcher.stop()
+    void flushTopicThreadSeen(w)
+  }
+
+  function sortRepliesBySeq(replies: readonly TopicReplySnapshot[]): TopicReplySnapshot[] {
+    return [...replies].sort((a, b) => a.seq - b.seq)
+  }
+
+  function rememberTopicThreadPage(w: TopicThreadWindow, result: Extract<TopicThreadRepliesPageResult, { ok: true }>): void {
+    for (const reply of result.replies) {
+      w.unreadBySeq.set(reply.seq, reply.isUnread === true)
+    }
+    if (result.readState !== null) {
+      w.watermark = Math.max(w.watermark, result.readState.lastSeenSeq)
+    }
+    seedLikeStateFromMessages(result.replies)
+  }
+
+  async function loadTopicThreadInitialWindow(w: TopicThreadWindow): Promise<void> {
+    if (!options.onTopicThreadRepliesLoad) return
+    const result = await options.onTopicThreadRepliesLoad(w.topicId, w.rootMessageId, { window: 'unread' })
+    if (topicThreadWindow !== w) return
 
     if (!result.ok) {
+      w.status = 'error'
       render()
       return
     }
 
-    const currentReplies = state.topicRepliesByRootId[rootMessageId] ?? []
-    const byId = new Map<string, TopicReplySnapshot>()
-    for (const r of currentReplies) byId.set(r.messageId, r)
-    for (const r of result.replies) byId.set(r.messageId, r)
-    state.topicRepliesByRootId[rootMessageId] = [...byId.values()].sort((a, b) => a.seq - b.seq)
-    state.topicRepliesHasMoreByRootId[rootMessageId] = result.hasMore
-    for (const reply of result.replies) {
-      state.topicMessageLikeCountById[reply.messageId] = reply.likeCount
-      state.topicMessageViewerHasLikedById[reply.messageId] = reply.viewerHasLiked
+    rememberTopicThreadPage(w, result)
+    w.hasMoreBefore = result.hasMoreBefore
+    w.hasMoreAfter = result.hasMoreAfter
+    w.rootIsUnread = result.readState?.rootIsUnread === true
+    w.dividerSeq = w.tracksRead ? (result.readState?.firstUnreadSeq ?? null) : null
+
+    let replies = sortRepliesBySeq(result.replies)
+    // Live отговори, пристигнали докато страницата се е зареждала — само ако
+    // прозорецът стига до края (иначе ще дойдат със следваща страница).
+    if (!w.hasMoreAfter && w.pendingLiveReplies.length > 0) {
+      const lastSeq = replies.length > 0 ? replies[replies.length - 1]!.seq : w.rootSeq
+      const known = new Set(replies.map((reply) => reply.messageId))
+      const ownProfileId = getOwnTopicProfileId()
+      const late = w.pendingLiveReplies.filter((reply) => reply.seq > lastSeq && !known.has(reply.messageId))
+      for (const reply of late) w.unreadBySeq.set(reply.seq, reply.senderProfileId !== ownProfileId)
+      replies = sortRepliesBySeq([...replies, ...late])
     }
+    w.pendingLiveReplies = []
+    state.topicRepliesByRootId[w.rootMessageId] = replies
+    w.status = 'ready'
     render()
+    positionTopicThreadAfterInitialLoad(w)
+    topicThreadViewportWatcher.start()
+  }
+
+  // Начална позиция: изцяло нова нишка → най-горе (root-ът); има непрочетени
+  // → разделителят „Нови отговори“ в горния край; няма → последният отговор.
+  function positionTopicThreadAfterInitialLoad(w: TopicThreadWindow): void {
+    const scrollEl = findTopicThreadScrollElement(options.root)
+    if (scrollEl === null) return
+    const divider = scrollEl.querySelector<HTMLElement>('[data-topic-thread-unread-divider="1"]')
+    if (w.tracksRead && w.rootIsUnread) {
+      scrollEl.scrollTop = 0
+    } else if (divider !== null) {
+      scrollEl.scrollTop += divider.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top - 6
+    } else {
+      scrollEl.scrollTop = scrollEl.scrollHeight
+    }
+  }
+
+  async function loadTopicThreadAdjacentPage(direction: 'older' | 'newer'): Promise<void> {
+    const w = topicThreadWindow
+    if (w === null || w.status !== 'ready' || !options.onTopicThreadRepliesLoad || !isTopicThreadWindowShown(w)) return
+    if (Date.now() < w.retryAfterMs) return
+    const isOlder = direction === 'older'
+    if (isOlder ? (!w.hasMoreBefore || w.loadingBefore) : (!w.hasMoreAfter || w.loadingAfter)) return
+    const replies = state.topicRepliesByRootId[w.rootMessageId] ?? []
+    const edgeReply = isOlder ? replies[0] : replies[replies.length - 1]
+    if (edgeReply === undefined) return
+
+    if (isOlder) w.loadingBefore = true
+    else w.loadingAfter = true
+    const result = await options.onTopicThreadRepliesLoad(
+      w.topicId,
+      w.rootMessageId,
+      isOlder ? { beforeSeq: edgeReply.seq } : { afterSeq: edgeReply.seq },
+    )
+    if (topicThreadWindow !== w) return
+    if (isOlder) w.loadingBefore = false
+    else w.loadingAfter = false
+
+    if (!result.ok) {
+      // Без спам при постоянна грешка — следващ опит след малко.
+      w.retryAfterMs = Date.now() + 3000
+      return
+    }
+    rememberTopicThreadPage(w, result)
+    if (isOlder) w.hasMoreBefore = result.hasMoreBefore
+    else w.hasMoreAfter = result.hasMoreAfter
+    applyTopicThreadPage(w, result.replies, result.deletedMessageIds, isOlder ? 'prepend' : 'append')
+  }
+
+  // Вмъква страница в state и DOM, като пази видимия отговор на същото място
+  // (котва) — без подскачане при зареждане нагоре.
+  function applyTopicThreadPage(
+    w: TopicThreadWindow,
+    incoming: readonly TopicReplySnapshot[],
+    deletedMessageIds: readonly string[],
+    position: 'prepend' | 'append',
+  ): void {
+    const current = state.topicRepliesByRootId[w.rootMessageId] ?? []
+    const knownIds = new Set(current.map((reply) => reply.messageId))
+    const deletedIds = new Set(deletedMessageIds)
+    const fresh = incoming.filter((reply) => !knownIds.has(reply.messageId) && !deletedIds.has(reply.messageId))
+    const removedLoaded = current.some((reply) => deletedIds.has(reply.messageId))
+    state.topicRepliesByRootId[w.rootMessageId] = sortRepliesBySeq([
+      ...current.filter((reply) => !deletedIds.has(reply.messageId)),
+      ...fresh,
+    ])
+
+    const anchor = captureTopicThreadScrollAnchor(options.root)
+    const lobbyState = buildLobbyScreenState()
+    let patched = !removedLoaded
+    if (patched && fresh.length > 0) {
+      patched = insertTopicThreadReplyNodes(options.root, lobbyState, topicMessageNodeCallbacks(), w.rootMessageId, fresh, position)
+    }
+    if (patched) patched = syncTopicThreadSentinelsDom(options.root, lobbyState)
+    if (!patched) render()
+    restoreTopicThreadScrollAnchor(options.root, anchor)
+    topicThreadViewportWatcher.evaluate()
+  }
+
+  function syncTopicThreadOwnReplyNotice(): void {
+    if (!syncTopicThreadOwnReplyNoticeDom(options.root, buildLobbyScreenState(), revealTopicThreadOwnReply)) {
+      scheduleRender()
+    }
+  }
+
+  // Бутонът „Отговорът ти е публикуван ↓“ — единственият път, по който
+  // собственият отговор мести екрана, и то само по изричен избор.
+  function revealTopicThreadOwnReply(): void {
+    const w = topicThreadWindow
+    if (w === null || !isTopicThreadWindowShown(w)) return
+    w.ownReplyNoticeSeq = null
+    syncTopicThreadOwnReplyNotice()
+    if (w.status === 'ready' && !w.hasMoreAfter) {
+      const scrollEl = findTopicThreadScrollElement(options.root)
+      if (scrollEl !== null) scrollEl.scrollTop = scrollEl.scrollHeight
+      topicThreadViewportWatcher.evaluate()
+      return
+    }
+    void jumpTopicThreadWindowToLatest(w)
+  }
+
+  // Прескок до края по избор на потребителя (бутона по-горе): доизтегля
+  // страниците до края. При много голям остатък — последната страница, а
+  // прагът спира пред първия НЕВИДЯН отговор отпреди прескока (никога не
+  // маркира прескочени отговори).
+  async function jumpTopicThreadWindowToLatest(w: TopicThreadWindow): Promise<void> {
+    if (!options.onTopicThreadRepliesLoad || w.loadingAfter || w.status !== 'ready') return
+    w.loadingAfter = true
+    for (let page = 0; page < 6 && w.hasMoreAfter; page++) {
+      const replies = state.topicRepliesByRootId[w.rootMessageId] ?? []
+      const lastSeq = replies.length > 0 ? replies[replies.length - 1]!.seq : w.rootSeq
+      const result = await options.onTopicThreadRepliesLoad(w.topicId, w.rootMessageId, { afterSeq: lastSeq })
+      if (topicThreadWindow !== w) return
+      if (!result.ok) {
+        w.loadingAfter = false
+        return
+      }
+      rememberTopicThreadPage(w, result)
+      w.hasMoreAfter = result.hasMoreAfter
+      applyTopicThreadPage(w, result.replies, result.deletedMessageIds, 'append')
+    }
+    if (w.hasMoreAfter) {
+      const result = await options.onTopicThreadRepliesLoad(w.topicId, w.rootMessageId, { window: 'latest' })
+      if (topicThreadWindow !== w) return
+      if (!result.ok) {
+        w.loadingAfter = false
+        return
+      }
+      // Таванът е докъдето е видяно БЕЗ прекъсване в стария диапазон — не
+      // последният зареден (иначе невидените между тях биха станали прочетени).
+      w.readCeilingSeq = computeTopicThreadReadTarget(w)
+      rememberTopicThreadPage(w, result)
+      w.hasMoreBefore = result.hasMoreBefore
+      w.hasMoreAfter = false
+      state.topicRepliesByRootId[w.rootMessageId] = sortRepliesBySeq(result.replies)
+      render()
+    }
+    w.loadingAfter = false
+    const scrollEl = findTopicThreadScrollElement(options.root)
+    if (scrollEl !== null) scrollEl.scrollTop = scrollEl.scrollHeight
+    topicThreadViewportWatcher.evaluate()
+  }
+
+  // WS reconnect: отговорите, пропуснати докато връзката е била прекъсната,
+  // се добавят в края (само ако прозорецът стига до края) + tombstones за
+  // изтритите междувременно. Скролът не се мести, освен ако потребителят е
+  // бил най-долу.
+  async function reconcileTopicThreadWindowAfterReconnect(): Promise<void> {
+    const w = topicThreadWindow
+    if (w === null || !options.onTopicThreadRepliesLoad || !isTopicThreadWindowShown(w)) return
+    if (w.status === 'error') {
+      w.status = 'loading'
+      render()
+      await loadTopicThreadInitialWindow(w)
+      return
+    }
+    if (w.status !== 'ready' || w.hasMoreAfter || w.loadingAfter) return
+    const replies = state.topicRepliesByRootId[w.rootMessageId] ?? []
+    const lastSeq = replies.length > 0 ? replies[replies.length - 1]!.seq : w.rootSeq
+    w.loadingAfter = true
+    const result = await options.onTopicThreadRepliesLoad(w.topicId, w.rootMessageId, { afterSeq: lastSeq })
+    if (topicThreadWindow !== w) return
+    w.loadingAfter = false
+    if (!result.ok) return
+    rememberTopicThreadPage(w, result)
+    w.hasMoreAfter = result.hasMoreAfter
+    const wasNearBottom = isTopicThreadNearBottom(options.root)
+    applyTopicThreadPage(w, result.replies, result.deletedMessageIds, 'append')
+    if (wasNearBottom && result.replies.length > 0) {
+      const scrollEl = findTopicThreadScrollElement(options.root)
+      if (scrollEl !== null) scrollEl.scrollTop = scrollEl.scrollHeight
+    }
+  }
+
+  function handleTopicThreadSeqsSeen(seqs: readonly number[]): void {
+    const w = topicThreadWindow
+    if (w === null) return
+    if (w.ownReplyNoticeSeq !== null && seqs.includes(w.ownReplyNoticeSeq)) {
+      w.ownReplyNoticeSeq = null
+      syncTopicThreadOwnReplyNotice()
+    }
+    if (!w.tracksRead || w.status !== 'ready') return
+    for (const seq of seqs) w.seenSeqs.add(seq)
+    if (computeTopicThreadReadTarget(w) <= Math.max(w.watermark, w.requestedThroughSeq)) return
+    if (w.seenFlushTimerId !== null) return
+    w.seenFlushTimerId = setTimeout(() => {
+      w.seenFlushTimerId = null
+      void flushTopicThreadSeen(w)
+    }, TOPIC_THREAD_SEEN_FLUSH_DELAY_MS)
+  }
+
+  function computeTopicThreadReadTarget(w: TopicThreadWindow): number {
+    const ownProfileId = getOwnTopicProfileId()
+    const items: TopicThreadReadItem[] = [{ seq: w.rootSeq, isUnread: w.rootIsUnread }]
+    for (const reply of state.topicRepliesByRootId[w.rootMessageId] ?? []) {
+      items.push({ seq: reply.seq, isUnread: w.unreadBySeq.get(reply.seq) ?? reply.senderProfileId !== ownProfileId })
+    }
+    const target = computeTopicThreadContiguousSeenSeq(items, w.seenSeqs, w.watermark)
+    return w.readCeilingSeq === null ? target : Math.min(target, Math.max(w.readCeilingSeq, w.watermark))
+  }
+
+  async function flushTopicThreadSeen(w: TopicThreadWindow): Promise<void> {
+    if (w.seenFlushTimerId !== null) {
+      clearTimeout(w.seenFlushTimerId)
+      w.seenFlushTimerId = null
+    }
+    if (!w.tracksRead || !options.onTopicThreadMarkSeen || w.status !== 'ready') return
+    const target = computeTopicThreadReadTarget(w)
+    if (target <= Math.max(w.watermark, w.requestedThroughSeq)) return
+    if (w.seenInFlight) {
+      w.seenQueued = true
+      return
+    }
+    w.seenInFlight = true
+    w.requestedThroughSeq = target
+    const result = await options.onTopicThreadMarkSeen(w.topicId, w.rootMessageId, target)
+    w.seenInFlight = false
+    if (result.ok) {
+      w.watermark = Math.max(w.watermark, result.lastSeenSeq)
+      const changedTopic = updateTopicUnreadCount(w.topicId, result.topicUnreadCount)
+      const changedRoot = updateTopicThreadUnreadCount(w.rootMessageId, result.unreadCount)
+      if ((changedTopic || changedRoot) && !refreshTopicsUnreadDom(options.root, buildLobbyScreenState())) {
+        scheduleRender()
+      }
+    } else {
+      // Неуспех — позволяваме нов опит при следващото видяно/напускане.
+      w.requestedThroughSeq = w.watermark
+    }
+    if (w.seenQueued) {
+      w.seenQueued = false
+      void flushTopicThreadSeen(w)
+    }
   }
 
   // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
@@ -10804,6 +11220,7 @@ export function createLobbyFlowController(
   function forceTopicMessagesResubscribeIfOnTopicsScreen(): void {
     if (state.currentScreen !== 'topics' || state.activeTopicId === null) return
     subscribeToTopicMessagesGapClosing(state.activeTopicId)
+    void reconcileTopicThreadWindowAfterReconnect()
   }
 
   /** WS reconnect hook за directory-wide subscription-а (Custom Topic Creation) — mirror на forceTopicMessagesResubscribeIfOnTopicsScreen, извиква се от main.ts на всяко WS onOpen. */
@@ -19597,6 +20014,11 @@ export function createLobbyFlowController(
   function render(): void {
     // Известията за частната маса — изолирано от root-а (виж syncPrivateRoomNoticeHost).
     syncPrivateRoomNoticeHost()
+    // „Теми“ — напусната нишка (назад, друга тема, друг екран, изтрит root):
+    // изпраща видяното до момента и спира наблюдението.
+    if (topicThreadWindow !== null && !isTopicThreadWindowShown(topicThreadWindow)) {
+      closeTopicThreadWindow()
+    }
     if (_renderTimerId !== null) {
       clearTimeout(_renderTimerId)
       _renderTimerId = null
@@ -22025,6 +22447,11 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'topic_thread_seen_updated') {
+      // Друго устройство е вдигнало прага — отворената нишка го приема
+      // (разделителят остава на мястото си до напускане).
+      if (topicThreadWindow !== null && topicThreadWindow.rootMessageId === message.rootMessageId) {
+        topicThreadWindow.watermark = Math.max(topicThreadWindow.watermark, message.lastSeenSeq)
+      }
       const changedRoot = updateTopicThreadUnreadCount(message.rootMessageId, message.unreadCount)
       const changedTopic = updateTopicUnreadCount(message.topicId, message.topicUnreadCount)
       if (changedRoot || changedTopic) {
@@ -22188,7 +22615,21 @@ export function createLobbyFlowController(
       const isCurrentThread = state.topicsMode === 'thread' && state.topicThreadRootMessageId === rootMessageId
       const isExpanded = state.topicExpandedReplyRootIds.includes(rootMessageId)
       const alreadyLoaded = state.topicRepliesByRootId[rootMessageId] !== undefined && state.topicRepliesByRootId[rootMessageId] !== null
-      if ((isExpanded || isCurrentThread) && alreadyLoaded) {
+      // „Теми“ прозорец: отговорът се добавя само ако прозорецът стига до
+      // края на нишката; иначе ще дойде със следващата страница при скрол
+      // надолу (без дупка в заредения диапазон). Докато първата страница
+      // още се зарежда — буферира се.
+      const threadWindow = topicThreadWindow !== null && topicThreadWindow.rootMessageId === rootMessageId && topicThreadWindow.topicId === message.topicId
+        ? topicThreadWindow
+        : null
+      const isThreadWindowTail = threadWindow === null || (threadWindow.status === 'ready' && !threadWindow.hasMoreAfter)
+      if (threadWindow !== null && threadWindow.status === 'loading') {
+        threadWindow.pendingLiveReplies.push(incomingReply)
+      }
+      if (threadWindow !== null && isThreadWindowTail) {
+        threadWindow.unreadBySeq.set(incomingReply.seq, incomingReply.senderProfileId !== getOwnTopicProfileId())
+      }
+      if ((isExpanded || isCurrentThread) && alreadyLoaded && isThreadWindowTail) {
         const existing = state.topicRepliesByRootId[rootMessageId] ?? []
         const byId = new Map<string, TopicReplySnapshot>()
         for (const r of existing) byId.set(r.messageId, r)
@@ -22205,7 +22646,8 @@ export function createLobbyFlowController(
         state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = null
         state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
         clearTopicReplyComposerPendingImage(rootMessageId)
-        state.topicThreadRenderReason = isCurrentThread ? 'own-reply' : state.topicThreadRenderReason
+        // „Теми“ прозорец: собственият отговор не мести екрана (виж ownReplyNoticeSeq).
+        state.topicThreadRenderReason = isCurrentThread && threadWindow === null ? 'own-reply' : state.topicThreadRenderReason
       }
 
       if (rootMessage) {
@@ -22215,9 +22657,26 @@ export function createLobbyFlowController(
       }
 
       if (isCurrentThread) {
-        void markTopicThreadSeen(rootMessageId)
+        // „Общи“ прозорец: само реално видените (topicThreadViewportWatcher),
+        // не цялата нишка при всеки нов отговор.
+        if (threadWindow === null || !threadWindow.tracksRead) {
+          void markTopicThreadSeen(rootMessageId)
+        }
       } else {
         void markActiveTopicSeen(message.topicId)
+      }
+
+      if (rootMessage && isCurrentThread && threadWindow !== null && !isThreadWindowTail) {
+        if (isOwnReplyAck) {
+          // Прозорецът не стига до края — отговорът ще се появи на мястото си
+          // при скрол надолу (страниците са непрекъснати); позицията на
+          // четене се пази, нищо прескочено не се маркира.
+          resetTopicsReplyComposerAfterOwnSendDom(options.root, rootMessageId)
+          state.topicThreadRenderReason = null
+          threadWindow.ownReplyNoticeSeq = incomingReply.seq
+          syncTopicThreadOwnReplyNotice()
+        }
+        return true
       }
 
       // Perf audit fix: по-рано ВСЯКА reply (навсякъде в отворената тема,
@@ -22234,23 +22693,34 @@ export function createLobbyFlowController(
       // targeted patch-а fallback-ват към render() при структурно
       // несъответствие (thread view не mounted / root card не mounted).
       if (rootMessage && isCurrentThread) {
+        // Близостта до дъното се мери ПРЕДИ добавянето — висок нов отговор
+        // иначе би „изместил“ потребителя, който вече е бил най-долу.
+        const wasNearBottom = isTopicThreadNearBottom(options.root)
         const appended = appendTopicReplyNode(options.root, buildLobbyScreenState(), topicMessageNodeCallbacks(), rootMessageId, incomingReply)
         if (appended) {
-          const threadScrollEl = options.root.querySelector<HTMLElement>('[data-topic-thread-scroll="1"]')
-          if (threadScrollEl) {
-            const wasNearBottom = threadScrollEl.scrollHeight - threadScrollEl.scrollTop - threadScrollEl.clientHeight <= 96
-            if (isOwnReplyAck || wasNearBottom) {
-              threadScrollEl.scrollTop = threadScrollEl.scrollHeight
-            }
-          }
           // appendTopicReplyNode пипа само replies секцията — reply composer
           // формата (textarea/Send бутон/attachment preview) трябва изрично
           // да се sync-не тук, инак остава stuck със изпратения текст и
           // disabled бутон (production bug, огледално на root composer-a,
-          // виж resetTopicsReplyComposerAfterOwnSendDom).
+          // виж resetTopicsReplyComposerAfterOwnSendDom). ПРЕДИ скрола —
+          // composer-ът сменя височината си и иначе оставя потребителя
+          // няколко px над дъното.
           if (isOwnReplyAck) {
             resetTopicsReplyComposerAfterOwnSendDom(options.root, rootMessageId)
           }
+          const threadScrollEl = findTopicThreadScrollElement(options.root)
+          if (threadScrollEl) {
+            // „Теми“ прозорец: само ако потребителят вече е бил най-долу —
+            // собственият отговор, публикуван докато чете по-горе, не мести
+            // екрана (бутонът „Отговорът ти е публикуван ↓“ води до него).
+            if (wasNearBottom || (isOwnReplyAck && threadWindow === null)) {
+              threadScrollEl.scrollTop = threadScrollEl.scrollHeight
+            } else if (isOwnReplyAck && threadWindow !== null) {
+              threadWindow.ownReplyNoticeSeq = incomingReply.seq
+              syncTopicThreadOwnReplyNotice()
+            }
+          }
+          if (threadWindow !== null) topicThreadViewportWatcher.evaluate()
           state.topicThreadRenderReason = null
           return true
         }

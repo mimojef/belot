@@ -36,6 +36,33 @@ export type TopicReadStateStore = {
     profileId: string,
     rootMessageId: string,
   ) => { ok: true; state: TopicThreadReadStateSnapshot; topicId: string } | { ok: false; code: 'not_found' }
+  /**
+   * Частично прочитане на нишка („Теми“, видимост на екрана) — вдига
+   * last_seen_seq до seenSeq (никога надолу, MAX upsert), ограничен до
+   * последния seq в нишката. СЪЩИЯТ ред като markThreadSeenToLatestSeq, не
+   * отделна система.
+   */
+  markThreadSeenThroughSeq: (
+    profileId: string,
+    rootMessageId: string,
+    seenSeq: number,
+  ) => { ok: true; state: TopicThreadReadStateSnapshot; topicId: string } | { ok: false; code: 'not_found' }
+  /**
+   * Прагове за „непрочетено“ в една нишка — СЪЩАТА семантика като
+   * buildThreadUnreadQuery: COALESCE(thread, topic, 0) + sender-seen per автор.
+   */
+  getThreadReadContext: (
+    profileId: string,
+    rootMessageId: string,
+    topicId: string,
+    senderProfileIds: readonly string[],
+  ) => { threshold: number; senderSeenThroughBySender: Map<string, number> }
+  /** Най-малкият seq на непрочетен отговор в нишката (огледало на броенето) или null. */
+  getFirstUnreadReplySeq: (
+    profileId: string,
+    rootMessageId: string,
+    excludedSenderProfileIds?: readonly string[],
+  ) => number | null
   markSenderSeenThroughCurrent: (profileId: string, senderProfileId: string) => void
   getReadState: (profileId: string, topicId: string) => TopicReadStateSnapshot | null
   getThreadReadState: (profileId: string, rootMessageId: string) => TopicThreadReadStateSnapshot | null
@@ -320,6 +347,98 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
       database.exec('ROLLBACK;')
       throw error
     }
+  }
+
+  function markThreadSeenThroughSeq(
+    profileId: string,
+    rootMessageId: string,
+    seenSeq: number,
+  ): { ok: true; state: TopicThreadReadStateSnapshot; topicId: string } | { ok: false; code: 'not_found' } {
+    const liveRoot = selectLiveRootMessageStatement.get(rootMessageId) as { topic_id: string; latestSeq: number } | undefined
+    if (liveRoot === undefined) return { ok: false, code: 'not_found' }
+    const normalizedSeq = Number.isInteger(seenSeq) && seenSeq > 0 ? Math.min(seenSeq, liveRoot.latestSeq) : 0
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      // Първо прочитане с праг под текущия topic-level fallback не бива да
+      // „връща“ вече прочетени отговори: COALESCE(trs, rs) в броенето
+      // предпочита thread реда, затова новият ред стартира от MAX(праг, rs).
+      const existing = getThreadReadState(profileId, rootMessageId)
+      const topicState = existing === null ? getReadState(profileId, liveRoot.topic_id) : null
+      const floorSeq = topicState?.lastSeenSeq ?? 0
+      upsertThreadReadStateStatement.run(profileId, rootMessageId, Math.max(normalizedSeq, floorSeq))
+      const state = getThreadReadState(profileId, rootMessageId)
+      database.exec('COMMIT;')
+      if (state === null) return { ok: false, code: 'not_found' }
+      return { ok: true, state, topicId: liveRoot.topic_id }
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+  }
+
+  function getThreadReadContext(
+    profileId: string,
+    rootMessageId: string,
+    topicId: string,
+    senderProfileIds: readonly string[],
+  ): { threshold: number; senderSeenThroughBySender: Map<string, number> } {
+    const threadState = getThreadReadState(profileId, rootMessageId)
+    const threshold = threadState?.lastSeenSeq ?? getReadState(profileId, topicId)?.lastSeenSeq ?? 0
+    const senderSeenThroughBySender = new Map<string, number>()
+    const uniqueSenders = [...new Set(senderProfileIds)]
+    if (uniqueSenders.length > 0) {
+      const rows = database.prepare(`
+        SELECT sender_profile_id, seen_through_seq
+        FROM topic_sender_seen_state
+        WHERE profile_id = ? AND topic_id = ? AND sender_profile_id IN (${placeholders(uniqueSenders.length)});
+      `).all(profileId, topicId, ...uniqueSenders) as Array<{ sender_profile_id: string; seen_through_seq: number }>
+      for (const row of rows) senderSeenThroughBySender.set(row.sender_profile_id, row.seen_through_seq)
+    }
+    return { threshold, senderSeenThroughBySender }
+  }
+
+  function getFirstUnreadReplySeq(
+    profileId: string,
+    rootMessageId: string,
+    excludedSenderProfileIds: readonly string[] = [],
+  ): number | null {
+    // Огледало на buildThreadUnreadQuery, само за отговорите (root-ът се
+    // проверява отделно от caller-а) и MIN вместо COUNT.
+    const exclusionClause = buildExcludedAuthorsVisibilityClause('root', excludedSenderProfileIds.length)
+    const row = database.prepare(`
+      SELECT MIN(m.seq) as first_seq
+      FROM topic_messages root
+      JOIN topics t ON t.topic_id = root.topic_id AND t.status IN ('active', 'locked')
+      JOIN topic_messages m
+        ON m.topic_id = root.topic_id
+        AND m.parent_message_id = root.message_id
+      LEFT JOIN topic_thread_read_state trs
+        ON trs.profile_id = ? AND trs.root_message_id = root.message_id
+      LEFT JOIN topic_read_state rs
+        ON rs.profile_id = ? AND rs.topic_id = root.topic_id
+      LEFT JOIN topic_sender_seen_state ss
+        ON ss.profile_id = ?
+        AND ss.topic_id = m.topic_id
+        AND ss.sender_profile_id = m.sender_profile_id
+      WHERE root.message_id = ?
+        AND root.parent_message_id IS NULL
+        AND root.deleted_at IS NULL
+        AND m.deleted_at IS NULL
+        AND m.sender_profile_id != ?
+        AND m.seq > COALESCE(trs.last_seen_seq, rs.last_seen_seq, 0)
+        AND m.seq > COALESCE(ss.seen_through_seq, 0)
+        ${exclusionClause};
+    `).get(
+      profileId,
+      profileId,
+      profileId,
+      rootMessageId,
+      profileId,
+      ...excludedSenderProfileIds,
+      ...excludedSenderProfileIds,
+    ) as { first_seq: number | null } | undefined
+    return row?.first_seq ?? null
   }
 
   function markSenderSeenThroughCurrent(profileId: string, senderProfileId: string): void {
@@ -855,6 +974,9 @@ export async function createTopicReadStateStore(databaseFilePath: string): Promi
     markTopicSeenToLatestSeq,
     markTopicSeenThroughSeq,
     markThreadSeenToLatestSeq,
+    markThreadSeenThroughSeq,
+    getThreadReadContext,
+    getFirstUnreadReplySeq,
     markSenderSeenThroughCurrent,
     getReadState,
     getThreadReadState,
