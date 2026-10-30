@@ -116,6 +116,16 @@ classify_path() {
       # Deletion ledger backup/restore tooling + systemd unit-и (DELETION_LEDGER.md) —
       # същото правило: инсталират се РЪЧНО на VPS, никога от deploy-а.
       echo "non-runtime" ;;
+    temp/*.png)
+      # Дизайн source изображения (напр. 3574009 — 27 PNG икони, mobile
+      # redesign art). Проверено: temp/ НЕ е build/runtime вход — frontend
+      # build = tsc (include: src) + vite (index.html, импорти, public/),
+      # backend build = server/src/**/*.ts, worker-ите публикуват само dist/;
+      # нищо в src/, server/src/, public/, index.html или конфигурациите не
+      # реферира temp/. В case pattern `*` покрива и `/`, значи и PNG-та в
+      # поддиректории. САМО .png (малки букви) — всеки друг файл под temp/
+      # (.ts/.js/.svg/.json/.PNG/...) остава "unclassified" -> STOP.
+      echo "non-runtime" ;;
     *)
       echo "unclassified" ;;
   esac
@@ -166,22 +176,18 @@ TARGET_SHORT_SHA="$(git rev-parse --short HEAD)"
 log "Target (текущ Git HEAD): $TARGET_SHA"
 
 # ─── Redesign WIP guard ─────────────────────────────────────────────────────
-# feature/mobile-redesign носи ПРОСЛЕДЯВАН sentinel файл .redesign-wip в
-# корена на repo-то. Проверяваме TREE-то на самия target commit (не името на
-# branch-а, не working directory-то) — работи еднакво при branch и detached
-# HEAD. Fail-closed: ако git ls-tree се провали, STOP вместо предположение.
-# Независим слой от classify_path() по-долу: .redesign-wip там е
-# "unclassified", но delta-та го съдържа само ако marker-ът още НЕ го има,
-# докато тази проверка гледа target-а директно. Изпълнява се ПРЕДИ marker
-# четене, worker-и, build, backup, migrations и restart.
-REDESIGN_WIP_SENTINEL=".redesign-wip"
-if ! REDESIGN_WIP_MATCH="$(git ls-tree --full-tree --name-only "$TARGET_SHA" -- "$REDESIGN_WIP_SENTINEL")"; then
-  fail "Redesign WIP guard: git ls-tree се провали за target $TARGET_SHA — не мога да потвърдя, че target-ът не е незавършеният редизайн. STOP."
-fi
-if [ -n "$REDESIGN_WIP_MATCH" ]; then
-  fail "Redesign WIP guard: target $TARGET_SHORT_SHA съдържа $REDESIGN_WIP_SENTINEL — това е незавършеният mobile redesign (feature/mobile-redesign), не production commit. Нищо не е build-нато, мигрирано, backup-нато или рестартирано. Върни VPS checkout-а на v2-clean-architecture или hotfix commit без $REDESIGN_WIP_SENTINEL."
-fi
-log "Redesign WIP guard: target не съдържа $REDESIGN_WIP_SENTINEL — OK"
+# Отказва target commit, чието tree съдържа .redesign-wip (незавършеният
+# feature/mobile-redesign) — споделена логика в scripts/lib/redesignWipGuard.sh,
+# същата като в двата worker-а и deployFrontendAtomic.sh. Fail-closed, работи
+# и при detached HEAD. Независим слой от classify_path() по-долу:
+# .redesign-wip там е "unclassified", но delta-та го съдържа само ако
+# marker-ът още НЕ го има, докато тази проверка гледа target-а директно.
+# Изпълнява се ПРЕДИ marker четене, worker-и, build, backup, migrations и restart.
+REDESIGN_WIP_GUARD_LIB="$PROJECT_ROOT/scripts/lib/redesignWipGuard.sh"
+[ -f "$REDESIGN_WIP_GUARD_LIB" ] || fail "Redesign WIP guard библиотеката липсва: $REDESIGN_WIP_GUARD_LIB — STOP (fail-closed)."
+# shellcheck source=lib/redesignWipGuard.sh
+. "$REDESIGN_WIP_GUARD_LIB"
+assert_target_not_redesign_wip "$PROJECT_ROOT" "$TARGET_SHA"
 
 # ─── 1. Прочети deployment state marker-ите ─────────────────────────────────
 section "Reading deployment state markers"
@@ -279,7 +285,12 @@ fetch_changed_files_output() {
     printf ''
     return 0
   fi
-  git diff --name-only "$from_sha" "$TARGET_SHA"
+  # core.quotePath=false: без него git огражда в кавички и octal-escape-ва
+  # всеки не-ASCII path (напр. "temp/\320\223...png" от 3574009), който тогава
+  # не съвпада с нито един classify_path() pattern. Пътища с control
+  # символи, `"` или `\` git продължава да quote-ва -> остават "unclassified"
+  # -> STOP (fail-safe, както досега).
+  git -c core.quotePath=false diff --name-only "$from_sha" "$TARGET_SHA"
 }
 
 require_ancestor "$FRONTEND_SHA" "Frontend"
@@ -358,7 +369,7 @@ section "Migration safety check (backend marker -> target)"
 # ОТДЕЛНО, ПРЕДИ да мине през grep.
 declare -a MIGRATION_NAME_STATUS=()
 if [ "$BACKEND_SHA" != "$TARGET_SHA" ]; then
-  if ! MIGRATION_DIFF_RAW="$(git diff --name-status "$BACKEND_SHA" "$TARGET_SHA" -- "server/database/migrations/")"; then
+  if ! MIGRATION_DIFF_RAW="$(git -c core.quotePath=false diff --name-status "$BACKEND_SHA" "$TARGET_SHA" -- "server/database/migrations/")"; then
     fail "git diff --name-status се провали за backend marker ($BACKEND_SHA -> $TARGET_SHA) на server/database/migrations/ — STOP, не мога безопасно да определя migration delta-та."
   fi
   MIGRATION_DIFF_FILTERED="$(printf '%s' "$MIGRATION_DIFF_RAW" | grep -v '^$' || true)"

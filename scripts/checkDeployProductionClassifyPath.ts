@@ -23,8 +23,18 @@
  *       "non-runtime"; реалната delta от production frontend marker-а
  *       (38770ac) няма unclassified path, а тази от backend marker-а
  *       (c0311e6) няма backend/migration path -> FRONTEND ONLY.
+ *   [6] temp/*.png (вкл. поддиректории) е "non-runtime" — дизайн source
+ *       изображения, не build/runtime вход. Commit 3574009 (27 PNG) и
+ *       изображенията на mobile redesign-а са изцяло non-runtime; всеки
+ *       друг файл под temp/ (код, svg, json, .PNG, ...) и .redesign-wip
+ *       остават "unclassified"; src/ и public/ PNG-та остават "frontend".
  *
  * [1]/[2] са закрепени към delta-та на оригиналната поправка (9e8761f..bb971a4).
+ * [5c] е закрепен към 89b8a99 — commit-а, в който е написан: решението
+ * "FRONTEND ONLY" се отнася за конкретния deploy от 2026-10-25, не за всеки
+ * бъдещ HEAD (всеки по-късен backend commit би го "счупил" без дефект).
+ * [5b] остава срещу HEAD — инвариант: основният клон никога не натрупва
+ * unclassified path спрямо 38770ac.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -76,8 +86,9 @@ function classifyPaths(paths: string[]): Map<string, string> {
   return result
 }
 
+// Същото извикване като fetch_changed_files_output() в контролера (виж [6h]).
 function gitDiffNameOnly(fromRef: string, toRef: string): string[] {
-  const output = execFileSync('git', ['diff', '--name-only', fromRef, toRef], { cwd: repoRoot, encoding: 'utf8' })
+  const output = execFileSync('git', ['-c', 'core.quotePath=false', 'diff', '--name-only', fromRef, toRef], { cwd: repoRoot, encoding: 'utf8' })
   return output.split('\n').filter((line) => line.length > 0)
 }
 
@@ -189,11 +200,104 @@ check('[5b] Delta-та от production frontend marker-а (38770ac..HEAD) ням
   assert(delta.some((p) => classified.get(p) === 'frontend'), 'очаквах frontend промени')
 })
 
-check('[5c] Delta-та от production backend marker-а (c0311e6..HEAD) няма backend/migration path -> решение FRONTEND ONLY', () => {
-  const delta = gitDiffNameOnly(BACKEND_MARKER_REF, 'HEAD')
+// Commit-ът, в който [5] е написан (fix(deploy): classify deletion ledger
+// tooling as non-runtime) — виж бележката за [5c] в началото на файла.
+const LEDGER_FIX_REF = '89b8a99'
+
+check(`[5c] Delta-та от production backend marker-а (c0311e6..${LEDGER_FIX_REF}) няма backend/migration path -> решение FRONTEND ONLY`, () => {
+  const delta = gitDiffNameOnly(BACKEND_MARKER_REF, LEDGER_FIX_REF)
   const classified = classifyPaths(delta)
   const backendImpact = delta.filter((p) => classified.get(p) === 'backend' || classified.get(p) === 'migration' || classified.get(p) === 'unclassified')
   assert(backendImpact.length === 0, `backend-impact path(и): ${backendImpact.join(', ')}`)
+})
+
+// ─── [6] temp/*.png ─────────────────────────────────────────────────────────
+const ICONS_COMMIT_REF = '3574009'
+
+check('[6a] Commit 3574009 съдържа точно 27 PNG под temp/ и ВСИЧКИ са "non-runtime"', () => {
+  const delta = gitDiffNameOnly(`${ICONS_COMMIT_REF}^`, ICONS_COMMIT_REF)
+  assert(delta.length === 27, `очаквах 27 файла в ${ICONS_COMMIT_REF}, получих ${delta.length}`)
+  assert(delta.every((p) => p.startsWith('temp/') && p.endsWith('.png')), `не всички са temp/*.png: ${delta.join(', ')}`)
+  const classified = classifyPaths(delta)
+  const wrong = delta.filter((p) => classified.get(p) !== 'non-runtime')
+  assert(wrong.length === 0, `не са "non-runtime": ${wrong.map((p) => `${p} -> ${classified.get(p)}`).join(', ')}`)
+})
+
+check('[6b] Delta само с 3574009 -> решение NO RUNTIME DEPLOY (нито frontend, нито backend impact)', () => {
+  const classified = classifyPaths(gitDiffNameOnly(`${ICONS_COMMIT_REF}^`, ICONS_COMMIT_REF))
+  const runtime = [...classified.entries()].filter(([, c]) => c !== 'non-runtime')
+  assert(runtime.length === 0, `runtime/unclassified path(и): ${runtime.map(([p, c]) => `${p} -> ${c}`).join(', ')}`)
+})
+
+check('[6c] PNG в поддиректории на temp/ (вкл. интервали/кирилица) -> "non-runtime"', () => {
+  const paths = [
+    'temp/a.png',
+    'temp/redesign/landing/art.png',
+    'temp/a/b/c/d.png',
+    'temp/icon-learn-belot (1).png',
+    'temp/Гланцирана икона.png',
+  ]
+  const classified = classifyPaths(paths)
+  for (const p of paths) assert(classified.get(p) === 'non-runtime', `${p} -> ${classified.get(p)}`)
+})
+
+check('[6d] Всичко друго под temp/ остава "unclassified" (тясно правило, не temp/* wildcard)', () => {
+  const paths = [
+    'temp/x.ts',
+    'temp/x.js',
+    'temp/x.mjs',
+    'temp/x.sh',
+    'temp/x.svg',
+    'temp/x.json',
+    'temp/x.webp',
+    'temp/x.jpg',
+    'temp/x.PNG',
+    'temp/x.png.ts',
+    'temp/png',
+    'temp/sub/x.html',
+    'temp',
+  ]
+  const classified = classifyPaths(paths)
+  for (const p of paths) assert(classified.get(p) === 'unclassified', `${p} -> ${classified.get(p)}, очаквах "unclassified"`)
+})
+
+check('[6e] PNG извън temp/ не е засегнат: src/ и public/ -> "frontend", друг корен -> "unclassified"', () => {
+  const classified = classifyPaths(['src/assets/x.png', 'public/assets/lobby/x.png', 'public/temp/x.png', 'src/temp/x.png', 'x.png', 'tempx/a.png', 'server/temp/a.png'])
+  assert(classified.get('src/assets/x.png') === 'frontend', 'src/assets/x.png')
+  assert(classified.get('public/assets/lobby/x.png') === 'frontend', 'public/assets/lobby/x.png')
+  assert(classified.get('public/temp/x.png') === 'frontend', 'public/temp/x.png')
+  assert(classified.get('src/temp/x.png') === 'frontend', 'src/temp/x.png')
+  for (const p of ['x.png', 'tempx/a.png', 'server/temp/a.png']) {
+    assert(classified.get(p) === 'unclassified', `${p} -> ${classified.get(p)}, очаквах "unclassified"`)
+  }
+})
+
+check('[6f] .redesign-wip sentinel остава "unclassified" (първият слой защита не е отслабен)', () => {
+  assert(classifyPaths(['.redesign-wip']).get('.redesign-wip') === 'unclassified', '.redesign-wip не е unclassified')
+})
+
+check('[6h] Контролерът вика двата git diff-а с core.quotePath=false (иначе кирилският PNG от 3574009 идва в кавички -> unclassified)', () => {
+  const src = deployScriptSource.replace(/\r\n/g, '\n')
+  assert(src.includes('git -c core.quotePath=false diff --name-only "$from_sha" "$TARGET_SHA"'), 'delta diff-ът не е с core.quotePath=false')
+  assert(src.includes('git -c core.quotePath=false diff --name-status "$BACKEND_SHA" "$TARGET_SHA" -- "server/database/migrations/"'), 'migration diff-ът не е с core.quotePath=false')
+  const quoted = execFileSync('git', ['diff', '--name-only', `${ICONS_COMMIT_REF}^`, ICONS_COMMIT_REF], { cwd: repoRoot, encoding: 'utf8' })
+    .split('\n').filter((l) => l.startsWith('"'))
+  assert(quoted.length === 1, `очаквах точно 1 quote-нат path без флага (кирилското име), получих ${quoted.length}`)
+  assert(classifyPaths(quoted).get(quoted[0]!) === 'unclassified', 'quote-натият path би трябвало да е unclassified (доказва нуждата от флага)')
+})
+
+check('[6g] Изображенията на mobile redesign-а (45c73ac..ba00c14, 14 PNG) са "non-runtime", ако commit-ът е наличен', () => {
+  let delta: string[]
+  try {
+    delta = gitDiffNameOnly('45c73ac', 'ba00c14')
+  } catch {
+    // Клонинг без feature/mobile-redesign историята — нищо за проверка.
+    return
+  }
+  assert(delta.length === 14, `очаквах 14 файла, получих ${delta.length}`)
+  const classified = classifyPaths(delta)
+  const wrong = delta.filter((p) => classified.get(p) !== 'non-runtime')
+  assert(wrong.length === 0, `не са "non-runtime": ${wrong.join(', ')}`)
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)
