@@ -165,6 +165,24 @@ TARGET_SHA="$(git rev-parse HEAD)"
 TARGET_SHORT_SHA="$(git rev-parse --short HEAD)"
 log "Target (текущ Git HEAD): $TARGET_SHA"
 
+# ─── Redesign WIP guard ─────────────────────────────────────────────────────
+# feature/mobile-redesign носи ПРОСЛЕДЯВАН sentinel файл .redesign-wip в
+# корена на repo-то. Проверяваме TREE-то на самия target commit (не името на
+# branch-а, не working directory-то) — работи еднакво при branch и detached
+# HEAD. Fail-closed: ако git ls-tree се провали, STOP вместо предположение.
+# Независим слой от classify_path() по-долу: .redesign-wip там е
+# "unclassified", но delta-та го съдържа само ако marker-ът още НЕ го има,
+# докато тази проверка гледа target-а директно. Изпълнява се ПРЕДИ marker
+# четене, worker-и, build, backup, migrations и restart.
+REDESIGN_WIP_SENTINEL=".redesign-wip"
+if ! REDESIGN_WIP_MATCH="$(git ls-tree --full-tree --name-only "$TARGET_SHA" -- "$REDESIGN_WIP_SENTINEL")"; then
+  fail "Redesign WIP guard: git ls-tree се провали за target $TARGET_SHA — не мога да потвърдя, че target-ът не е незавършеният редизайн. STOP."
+fi
+if [ -n "$REDESIGN_WIP_MATCH" ]; then
+  fail "Redesign WIP guard: target $TARGET_SHORT_SHA съдържа $REDESIGN_WIP_SENTINEL — това е незавършеният mobile redesign (feature/mobile-redesign), не production commit. Нищо не е build-нато, мигрирано, backup-нато или рестартирано. Върни VPS checkout-а на v2-clean-architecture или hotfix commit без $REDESIGN_WIP_SENTINEL."
+fi
+log "Redesign WIP guard: target не съдържа $REDESIGN_WIP_SENTINEL — OK"
+
 # ─── 1. Прочети deployment state marker-ите ─────────────────────────────────
 section "Reading deployment state markers"
 
