@@ -660,8 +660,21 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   `
 }
 
+/**
+ * Пред кой отговор от прозореца стои „Нови отговори“ (-1 = в прозореца го
+ * няма). Ако прозорецът започва след първия непрочетен (по-старите са
+ * освободени), разделителят не се показва — той е по-горе.
+ */
+export function findTopicThreadDividerIndex(replies: readonly { seq: number }[], dividerSeq: number | null, hasMoreBefore: boolean): number {
+  if (dividerSeq === null) return -1
+  const index = replies.findIndex((reply) => reply.seq >= dividerSeq)
+  if (index < 0) return -1
+  if (index === 0 && hasMoreBefore && replies[0]!.seq !== dividerSeq) return -1
+  return index
+}
+
 // Разделител „Нови отговори“ — дискретен, със златист акцент (Pika.bg).
-function renderTopicThreadUnreadDivider(): string {
+export function renderTopicThreadUnreadDivider(): string {
   return `
     <div data-topic-thread-unread-divider="1" role="separator" aria-label="Нови отговори" style="display:flex;align-items:center;gap:10px;margin:8px 10px 6px 12px;">
       <span aria-hidden="true" style="flex:1 1 auto;height:1px;background:linear-gradient(90deg,rgba(212,165,32,0) 0%,rgba(212,165,32,0.6) 100%);"></span>
@@ -706,8 +719,7 @@ function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): s
   } else if (replies.length === 0) {
     listHtml = `<div data-topic-replies-empty="1" style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.36);font-size:12px;">Все още няма отговори.</div>`
   } else {
-    const dividerSeq = threadView?.dividerSeq ?? null
-    const dividerIndex = dividerSeq === null ? -1 : replies.findIndex((r) => r.seq >= dividerSeq)
+    const dividerIndex = threadView === null ? -1 : findTopicThreadDividerIndex(replies, threadView.dividerSeq, threadView.hasMoreBefore)
     listHtml = replies.map((r, index) => `${index === dividerIndex ? renderTopicThreadUnreadDivider() : ''}${renderTopicReplyRow(state, r)}`).join('')
   }
 
@@ -1274,7 +1286,7 @@ function renderTopicThreadView(state: LobbyScreenState): string {
         .topic-message-personal-btn { min-height:30px; padding:0 10px; }
       }
     </style>
-    <div data-topic-thread-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
+    <div data-topic-thread-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overflow-anchor:none;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       <div data-topic-thread-list="1" style="display:flex;flex-direction:column;gap:8px;padding:6px 6px 10px;box-sizing:border-box;">
         ${renderTopicMessageRow(state, rootMessage, { variant: 'thread' })}
         ${renderRepliesSection(state, rootMessageId)}
