@@ -148,6 +148,17 @@ GIT_SHA="$(git rev-parse HEAD)"
 GIT_SHORT_SHA="$(git rev-parse --short HEAD)"
 log "Git SHA: $GIT_SHA"
 
+# ─── Redesign WIP guard ─────────────────────────────────────────────────────
+# Отказва commit от незавършения feature/mobile-redesign (.redesign-wip в
+# tree-то) и при директно извикване покрай deploy-production.sh. Споделена
+# логика (scripts/lib/redesignWipGuard.sh), fail-closed, работи и при
+# detached HEAD. ПРЕДИ deploy-state preflight, build, release, publish, switch.
+REDESIGN_WIP_GUARD_LIB="$PROJECT_ROOT/scripts/lib/redesignWipGuard.sh"
+[ -f "$REDESIGN_WIP_GUARD_LIB" ] || fail "Redesign WIP guard библиотеката липсва: $REDESIGN_WIP_GUARD_LIB — STOP (fail-closed)."
+# shellcheck source=lib/redesignWipGuard.sh
+. "$REDESIGN_WIP_GUARD_LIB"
+assert_target_not_redesign_wip "$PROJECT_ROOT" "$GIT_SHA"
+
 [ -d "$RELEASES_DIR" ] || fail "releases/ директорията липсва: $RELEASES_DIR"
 [ -d "$SHARED_ASSETS_DIR" ] || fail "assets/ директорията липсва: $SHARED_ASSETS_DIR"
 if [ -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ]; then

@@ -285,6 +285,21 @@ command -v npm >/dev/null 2>&1 || fail "npm не е намерен в PATH."
 
 cd "$PROJECT_ROOT"
 
+# ─── Redesign WIP guard ─────────────────────────────────────────────────────
+# Отказва commit от незавършения feature/mobile-redesign (.redesign-wip в
+# tree-то). Споделена логика (lib/redesignWipGuard.sh до този скрипт),
+# fail-closed: PROJECT_ROOT без валиден git HEAD -> STOP. Покрива deploy и
+# --adopt (публикуват нов release); --list/--rollback/--gc-assets не
+# публикуват нов commit и умишлено НЕ се блокират (спешен rollback).
+# ПРЕДИ build директорията, build-а, publish и switch на current.
+REDESIGN_WIP_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/redesignWipGuard.sh"
+[ -f "$REDESIGN_WIP_GUARD_LIB" ] || fail "Redesign WIP guard библиотеката липсва: $REDESIGN_WIP_GUARD_LIB — STOP (fail-closed)."
+# shellcheck source=lib/redesignWipGuard.sh
+. "$REDESIGN_WIP_GUARD_LIB"
+GUARD_TARGET_SHA="$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)" \
+  || fail "Redesign WIP guard: $PROJECT_ROOT няма валиден git HEAD — не мога да потвърдя кой commit се публикува. STOP (fail-closed)."
+assert_target_not_redesign_wip "$PROJECT_ROOT" "$GUARD_TARGET_SHA"
+
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo 'nogit')"
 # Позволява explicit override (напр. regression тестове, hotfix re-deploy на
 # същия commit) — по подразбиране пада към git SHA както преди.

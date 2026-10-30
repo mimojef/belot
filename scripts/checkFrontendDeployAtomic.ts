@@ -39,7 +39,7 @@
  * production host преди първо истинско използване.
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { createServer as createHttpServer, type Server } from 'node:http'
@@ -99,6 +99,30 @@ async function check(label: string, fn: () => Promise<void> | void): Promise<voi
 
 const PROJECT_ROOT = resolve(process.cwd())
 const SCRIPT_PATH = join(PROJECT_ROOT, 'scripts', 'deployFrontendAtomic.sh')
+
+// Довършва fixture проект до това, което deployFrontendAtomic.sh реално
+// изисква от production checkout:
+//  - server/src: от 10f6c4f (2026-09-24) frontend-ът импортира и от
+//    server/src (shared константи/типове, ludo engine re-export-и) — без него
+//    `npx tsc` в deploy скрипта пада ПРЕДИ стъпката, която съответният тест
+//    реално проверява (реалният build минава).
+//  - git repo с HEAD commit без .redesign-wip: Redesign WIP guard-ът
+//    (scripts/lib/redesignWipGuard.sh) е fail-closed и отказва PROJECT_ROOT
+//    без валиден git HEAD. Commit-ва се само .gitignore — guard-ът проверява
+//    tree-то на HEAD, а build-ът чете working файловете.
+async function completeFixtureProject(fixtureRoot: string): Promise<void> {
+  await cp(join(PROJECT_ROOT, 'server', 'src'), join(fixtureRoot, 'server', 'src'), { recursive: true })
+  await writeFile(join(fixtureRoot, '.gitignore'), 'node_modules\n')
+  const git = (...args: string[]): void => {
+    execFileSync('git', args, { cwd: fixtureRoot, stdio: 'ignore' })
+  }
+  git('init', '-q')
+  git('config', 'user.name', 'Fixture')
+  git('config', 'user.email', 'fixture@example.invalid')
+  git('config', 'commit.gpgsign', 'false')
+  git('add', '.gitignore')
+  git('commit', '-q', '-m', 'fixture')
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
@@ -407,6 +431,7 @@ try {
     const { symlink } = await import('node:fs/promises')
     await symlink(join(PROJECT_ROOT, 'node_modules'), join(brokenProjectRoot, 'node_modules'), 'junction')
     await cp(join(PROJECT_ROOT, 'src'), join(brokenProjectRoot, 'src'), { recursive: true })
+    await completeFixtureProject(brokenProjectRoot)
     await cp(join(PROJECT_ROOT, 'public'), join(brokenProjectRoot, 'public'), { recursive: true }).catch(() => {})
     // Невалиден index.html — без module script tag.
     await writeFile(join(brokenProjectRoot, 'index.html'), '<!doctype html><html><body>broken, no module script</body></html>')
@@ -449,6 +474,7 @@ try {
     await cp(join(PROJECT_ROOT, 'index.html'), join(pcProjectRoot, 'index.html'))
     await symlink(join(PROJECT_ROOT, 'node_modules'), join(pcProjectRoot, 'node_modules'), 'junction')
     await cp(join(PROJECT_ROOT, 'src'), join(pcProjectRoot, 'src'), { recursive: true })
+    await completeFixtureProject(pcProjectRoot)
     await cp(join(PROJECT_ROOT, 'public'), join(pcProjectRoot, 'public'), { recursive: true }).catch(() => {})
     await mkdir(join(pcProjectRoot, 'scripts'), { recursive: true })
     await cp(join(PROJECT_ROOT, 'scripts', 'validatePrecacheClosure.mjs'), join(pcProjectRoot, 'scripts', 'validatePrecacheClosure.mjs'))
@@ -534,6 +560,7 @@ try {
     await cp(join(PROJECT_ROOT, 'index.html'), join(mutProjectRoot, 'index.html'))
     await symlink(join(PROJECT_ROOT, 'node_modules'), join(mutProjectRoot, 'node_modules'), 'junction')
     await cp(join(PROJECT_ROOT, 'src'), join(mutProjectRoot, 'src'), { recursive: true })
+    await completeFixtureProject(mutProjectRoot)
     await cp(join(PROJECT_ROOT, 'public'), join(mutProjectRoot, 'public'), { recursive: true }).catch(() => {})
     await mkdir(join(mutProjectRoot, 'scripts'), { recursive: true })
     await cp(join(PROJECT_ROOT, 'scripts', 'validatePrecacheClosure.mjs'), join(mutProjectRoot, 'scripts', 'validatePrecacheClosure.mjs'))
@@ -637,6 +664,7 @@ try {
     await cp(join(PROJECT_ROOT, 'index.html'), join(hProjectRoot, 'index.html'))
     await symlink(join(PROJECT_ROOT, 'node_modules'), join(hProjectRoot, 'node_modules'), 'junction')
     await cp(join(PROJECT_ROOT, 'src'), join(hProjectRoot, 'src'), { recursive: true })
+    await completeFixtureProject(hProjectRoot)
     await cp(join(PROJECT_ROOT, 'public'), join(hProjectRoot, 'public'), { recursive: true }).catch(() => {})
     await mkdir(join(hProjectRoot, 'scripts'), { recursive: true })
     await cp(join(PROJECT_ROOT, 'scripts', 'validatePrecacheClosure.mjs'), join(hProjectRoot, 'scripts', 'validatePrecacheClosure.mjs'))
@@ -740,6 +768,7 @@ try {
     await cp(join(PROJECT_ROOT, 'index.html'), join(vProjectRoot, 'index.html'))
     await symlink(join(PROJECT_ROOT, 'node_modules'), join(vProjectRoot, 'node_modules'), 'junction')
     await cp(join(PROJECT_ROOT, 'src'), join(vProjectRoot, 'src'), { recursive: true })
+    await completeFixtureProject(vProjectRoot)
     await cp(join(PROJECT_ROOT, 'public'), join(vProjectRoot, 'public'), { recursive: true }).catch(() => {})
     await mkdir(join(vProjectRoot, 'scripts'), { recursive: true })
     await cp(join(PROJECT_ROOT, 'scripts', 'validatePrecacheClosure.mjs'), join(vProjectRoot, 'scripts', 'validatePrecacheClosure.mjs'))
