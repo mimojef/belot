@@ -322,6 +322,7 @@
     "check:round-capot-mission": "tsx scripts/checkRoundCapotMission.ts",
     "check:sweep-down-the-cards": "tsx scripts/checkSweepDownTheCards.ts",
     "check:belot-hand-journal": "tsx scripts/checkBelotHandJournal.ts",
+    "check:belot-tie-carry-over": "tsx scripts/checkBelotTieCarryOverAccumulation.ts",
     "check:belot-hand-journal-archive": "tsx scripts/checkBelotHandJournalArchive.ts",
     "bench:belot-hand-journal-compression": "tsx scripts/benchBelotHandJournalCompression.ts",
     "check:belot-hand-journal-chunked-delete": "tsx scripts/checkBelotHandJournalChunkedDelete.ts",

@@ -767,9 +767,12 @@ function buildOfficialRoundScore(input: {
     teamA: 0,
     teamB: 0,
   }
+  // Равна игра не е решено раздаване — вече висящите точки не се присъждат,
+  // а се пренасят заедно с новите (натрупване при поредни равни игри).
+  const isTieOutcome = input.roundOutcome.outcome === 'tie'
 
   if (
-    input.roundOutcome.outcome === 'tie' &&
+    isTieOutcome &&
     input.roundOutcome.defenderTeam !== null &&
     input.roundOutcome.bidderTeam !== null
   ) {
@@ -830,9 +833,10 @@ function buildOfficialRoundScore(input: {
     )
 
     nextCarryOver = setCarryOverForTeam(
-      nextCarryOver,
+      { ...input.currentCarryOver },
       input.roundOutcome.bidderTeam,
-      bidderRecordedPoints * counterMultiplier,
+      getCarryOverForTeam(input.currentCarryOver, input.roundOutcome.bidderTeam) +
+        bidderRecordedPoints * counterMultiplier,
     )
   }
 
@@ -844,21 +848,23 @@ function buildOfficialRoundScore(input: {
 
   totalScore = multiplyRoundScore(totalScore, counterMultiplier)
   const awardedAfterMultiplier = totalScore
-  totalScore = applyResolvedCarryOver(
-    totalScore,
-    'A',
-    getCarryOverForTeam(input.currentCarryOver, 'A'),
-    input.roundOutcome.winningTeam,
-  )
-  totalScore = applyResolvedCarryOver(
-    totalScore,
-    'B',
-    getCarryOverForTeam(input.currentCarryOver, 'B'),
-    input.roundOutcome.winningTeam,
-  )
+  if (!isTieOutcome) {
+    totalScore = applyResolvedCarryOver(
+      totalScore,
+      'A',
+      getCarryOverForTeam(input.currentCarryOver, 'A'),
+      input.roundOutcome.winningTeam,
+    )
+    totalScore = applyResolvedCarryOver(
+      totalScore,
+      'B',
+      getCarryOverForTeam(input.currentCarryOver, 'B'),
+      input.roundOutcome.winningTeam,
+    )
+  }
 
   const carryOverResolutions: ServerCarryOverResolutionTrace[] = []
-  for (const ownerTeam of ['A', 'B'] as const) {
+  for (const ownerTeam of isTieOutcome ? [] : (['A', 'B'] as const)) {
     const points = getCarryOverForTeam(input.currentCarryOver, ownerTeam)
     if (points <= 0) continue
     const ownerWon = input.roundOutcome.winningTeam === ownerTeam

@@ -520,6 +520,21 @@ await check('[5b] висящи точки се консумират: собст�
   }
 })
 
+await check('[5c] поредна висяща игра: старите висящи не се присъждат, а се натрупват (без аномалии)', async () => {
+  const { store, journal } = await createTempJournal()
+  const { room, plays } = scriptedRoom({ specs: TIE_SPECS, firstLeader: 'bottom', carryOver: { teamA: 0, teamB: 13 } })
+  playScript(journal, room, plays)
+  journal.flushSync()
+  const events = allEvents(store, room.id)
+  assert(anomalies(events).length === 0, `anomalies: ${describeAnomalies(events)}`)
+  const x = (handEvents(events, 'hand_scored')[0]!.payload as any).explanation
+  assert(x.outcome.outcome === 'tie', 'tie')
+  assert(x.official.carryOverResolutions.length === 0, 'no carry resolution on tie')
+  assert(x.roundBreakdown.total.teamA === 0 && x.roundBreakdown.total.teamB === 13, `total ${JSON.stringify(x.roundBreakdown.total)}`)
+  assert(x.carryOverAfter.teamA === 13 && x.carryOverAfter.teamB === 13, `carry after ${JSON.stringify(x.carryOverAfter)}`)
+  journal.close()
+})
+
 // ─── [6] sweep ───────────────────────────────────────────────────────────────
 let sweepAcceptEvents: BelotHandJournalStoredEvent[] = []
 await check('[6a] „Долу картите“ прието (+ отхвърлено решение от грешно място) → капо чрез sweep', async () => {

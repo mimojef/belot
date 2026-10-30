@@ -999,7 +999,6 @@ function checkScoringExplanation(
   // Сурови → начислени: всяка точка трябва да е обяснена от клона на
   // правилата (закръгляне, всичко към един отбор, висящи).
   const awardedSum = sum(trace.awardedBeforeMultiplier)
-  const heldBeforeMultiplier = sum(trace.nextCarryOver) / trace.counterMultiplier
   let rawVsAwardedOk = true
   let rawVsAwardedDetail = ''
   if (explanation.outcome.outcome === 'made' || explanation.outcome.outcome === 'inside') {
@@ -1020,7 +1019,14 @@ function checkScoringExplanation(
       rawVsAwardedDetail += ` rounding=${expectedA}/${expectedB}`
     }
   } else if (explanation.outcome.outcome === 'tie') {
-    const defenderHeld = trace.nextCarryOver[teamKey(explanation.defenderTeam)]
+    // При равна игра nextCarryOver = входящите висящи + новите; тук се
+    // обясняват само новите (входящите се пренасят непроменени).
+    const newlyHeld: ServerRoundScore = {
+      teamA: trace.nextCarryOver.teamA - trace.carryOverIn.teamA,
+      teamB: trace.nextCarryOver.teamB - trace.carryOverIn.teamB,
+    }
+    const heldBeforeMultiplier = sum(newlyHeld) / trace.counterMultiplier
+    const defenderHeld = newlyHeld[teamKey(explanation.defenderTeam)]
     rawVsAwardedOk =
       defenderHeld === 0 &&
       trace.awardedBeforeMultiplier[teamKey(explanation.bidderTeam)] === 0 &&
@@ -1039,10 +1045,17 @@ function checkScoringExplanation(
 
   const carryInSum = sum(trace.carryOverIn)
   const carryResolvedSum = trace.carryOverResolutions.reduce((total, item) => total + item.points, 0)
+  // Равна игра не консумира висящите — те трябва да преминат изцяло към
+  // nextCarryOver; решено раздаване ги консумира точно веднъж.
+  const isTie = explanation.outcome.outcome === 'tie'
   checks.push({
     name: 'carry_over_in_consumed_exactly_once',
-    ok:
-      carryResolvedSum === carryInSum &&
+    ok: isTie
+      ? carryResolvedSum === 0 &&
+        sum(explanation.roundBreakdown.total) === sum(trace.awardedAfterMultiplier) &&
+        trace.nextCarryOver.teamA >= trace.carryOverIn.teamA &&
+        trace.nextCarryOver.teamB >= trace.carryOverIn.teamB
+      : carryResolvedSum === carryInSum &&
       sum(explanation.roundBreakdown.total) === sum(trace.awardedAfterMultiplier) + carryInSum &&
       trace.carryOverResolutions.every(
         (item) =>
