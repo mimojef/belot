@@ -44,6 +44,8 @@ type ServerRoundOutcome = {
 type OfficialRoundScoreResult = {
   roundBreakdown: ServerScoreBreakdown
   nextCarryOver: ServerCarryOverPoints
+  // Висящи точки, реално присъдени в ТОВА раздаване, по получил отбор.
+  awardedCarryOver: ServerRoundScore
   trace: ServerOfficialScoreTrace
 }
 
@@ -885,6 +887,8 @@ function buildOfficialRoundScore(input: {
       total: totalScore,
     },
     nextCarryOver,
+    // Точно това, което applyResolvedCarryOver е добавил горе (0/0 при равна).
+    awardedCarryOver: subtractRoundScores(totalScore, awardedAfterMultiplier),
     trace: {
       ruleBranch,
       counterMultiplier,
@@ -1011,6 +1015,7 @@ export function resolveServerScoring(
       officialRoundPoints,
       matchTotals,
       carryOver,
+      awardedCarryOver: officialRoundScore.awardedCarryOver,
       isCapotRound,
       isNonCapotRound,
       outcomeLabel: getServerOutcomeLabel(roundOutcome.outcome),

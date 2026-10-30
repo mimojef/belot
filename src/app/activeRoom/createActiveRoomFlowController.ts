@@ -2107,6 +2107,7 @@ export function createActiveRoomFlowController(
       officialRoundPoints: scoring.officialRoundPoints,
       matchTotals: scoring.matchTotals,
       carryOver: scoring.carryOver,
+      awardedCarryOver: scoring.awardedCarryOver ?? null,
       outcomeLabel: scoring.outcomeLabel,
       outcomeShortLabel: scoring.outcomeShortLabel,
       counterMultiplier: scoring.counterMultiplier,

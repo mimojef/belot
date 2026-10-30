@@ -328,6 +328,7 @@ function createScoringSnapshot(
     officialRoundPoints: createTeamPointsSnapshot(scoring.officialRoundPoints),
     matchTotals: createTeamPointsSnapshot(scoring.matchTotals),
     carryOver: createTeamPointsSnapshot(scoring.carryOver),
+    awardedCarryOver: createTeamPointsSnapshot(scoring.awardedCarryOver ?? { teamA: 0, teamB: 0 }),
     isCapotRound: scoring.isCapotRound,
     isNonCapotRound: scoring.isNonCapotRound,
     outcomeLabel: scoring.outcomeLabel,

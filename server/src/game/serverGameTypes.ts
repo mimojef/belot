@@ -178,7 +178,11 @@ export type ServerScoringState = {
   sumPoints: ServerRoundScore
   officialRoundPoints: ServerRoundScore
   matchTotals: ServerRoundScore
+  // Висящите за СЛЕДВАЩОТО раздаване (след това).
   carryOver: ServerCarryOverPoints
+  // Висящите, присъдени В ТОВА раздаване, по получил отбор. Optional —
+  // state, записан преди полето (active_room_snapshots), го няма.
+  awardedCarryOver?: ServerRoundScore
   isCapotRound: boolean
   isNonCapotRound: boolean
   outcomeLabel: string

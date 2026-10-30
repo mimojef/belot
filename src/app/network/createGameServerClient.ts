@@ -1659,7 +1659,11 @@ export type RoomScoringSnapshot = {
   sumPoints: RoomTeamPointsSnapshot
   officialRoundPoints: RoomTeamPointsSnapshot
   matchTotals: RoomTeamPointsSnapshot
+  // Висящите за следващото раздаване — НЕ присъдените в това.
   carryOver: RoomTeamPointsSnapshot
+  // Висящите, присъдени в това раздаване (вече включени в officialRoundPoints).
+  // Optional — по-стар сървър не го изпраща.
+  awardedCarryOver?: RoomTeamPointsSnapshot
   isCapotRound: boolean
   isNonCapotRound: boolean
   outcomeLabel: string

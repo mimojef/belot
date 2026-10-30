@@ -493,6 +493,10 @@ function formatBonusValue(value: number | string): string {
   return value > 0 ? `+${value}` : '0'
 }
 
+function formatAwardedCarryOverValue(points: number): string {
+  return points > 0 ? `+${points}` : '—'
+}
+
 function formatRawHandValue(points: number, tricksWon: number): string {
   if (tricksWon === 0) {
     return `
@@ -852,6 +856,13 @@ function renderScoringPanelHtml(
   const rawHandTricksWon = getPerspectivePoints(scoring.rawHandTricksWon, localSeat)
   const sumPoints = getPerspectivePoints(scoring.sumPoints, localSeat)
   const officialRoundPoints = getPerspectivePoints(scoring.officialRoundPoints, localSeat)
+  // Само висящите, присъдени в ТОВА раздаване (не scoring.carryOver — той е
+  // за следващото). Редът се показва само ако има реално присъдени точки.
+  const awardedCarryOver = getPerspectivePoints(
+    scoring.awardedCarryOver ?? { teamA: 0, teamB: 0 },
+    localSeat,
+  )
+  const hasAwardedCarryOver = awardedCarryOver.ourPoints > 0 || awardedCarryOver.theirPoints > 0
   const scoringDeclarationItems = buildScoringDeclarationItems(game.declarations)
   const teamABeloteItems = scoringDeclarationItems.filter((item) => {
     return item.declaration.team === 'A' && item.declaration.type === 'belote'
@@ -983,6 +994,14 @@ function renderScoringPanelHtml(
             overflowVisible: true,
             useValueHtml: true,
           })}
+          ${hasAwardedCarryOver
+            ? renderMatrixRow(
+                'Висящи',
+                formatAwardedCarryOverValue(awardedCarryOver.ourPoints),
+                formatAwardedCarryOverValue(awardedCarryOver.theirPoints),
+                { valueColor: '#f4b63a' },
+              )
+            : ''}
         </div>
 
         ${renderOutcomeRow(scoring.outcomeShortLabel)}
