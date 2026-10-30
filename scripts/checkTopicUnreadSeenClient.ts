@@ -43,7 +43,9 @@ await check('[2] main wires POST /seen into lobby controller', () => {
   assert(mainSrc.includes('method: \'POST\''), 'markTopicSeen must POST')
   assert(mainSrc.includes('onTopicMarkSeen: (topicId) => markTopicSeen(topicId)'), 'controller option missing')
   assert(mainSrc.includes('/messages/${encodeURIComponent(rootMessageId)}/seen'), 'markTopicThreadSeen endpoint missing')
-  assert(mainSrc.includes('onTopicThreadMarkSeen: (topicId, rootMessageId) => markTopicThreadSeen(topicId, rootMessageId)'), 'thread seen controller option missing')
+  assert(mainSrc.includes('onTopicThreadMarkSeen: (topicId, rootMessageId, throughSeq) => markTopicThreadSeen(topicId, rootMessageId, throughSeq)'), 'thread seen controller option missing')
+  assert(mainSrc.includes('body: JSON.stringify({ throughSeq })'), 'thread seen must send throughSeq (partial read by visibility)')
+  assert(mainSrc.includes('onTopicThreadRepliesLoad: (topicId, rootMessageId, cursor) => loadTopicThreadReplies(topicId, rootMessageId, cursor)'), 'thread replies window loader missing')
 })
 
 await check('[3] flow keeps legacy topic seen separate from General thread seen', () => {

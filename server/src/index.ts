@@ -2692,13 +2692,14 @@ function getTopicThreadUnreadCountsForProfiles(
   return topicReadStateStore.getThreadUnreadCountsForProfiles(rootMessageId, profileIds, excludedSenderProfileIdsByViewer)
 }
 
-function broadcastTopicThreadSeenUpdatedToProfile(profileId: string, topicId: string, rootMessageId: string, lastSeenSeq: number): void {
+function broadcastTopicThreadSeenUpdatedToProfile(profileId: string, topicId: string, rootMessageId: string, lastSeenSeq: number, unreadCount: number): void {
   broadcastToProfileConnections(profileId, {
     type: 'topic_thread_seen_updated',
     topicId,
     rootMessageId,
     lastSeenSeq,
-    unreadCount: 0,
+    // Частичното прочитане оставя реален остатък — не винаги 0.
+    unreadCount,
     topicUnreadCount: getTopicUnreadCountForProfile(profileId, topicId),
   })
 }
@@ -14204,7 +14205,28 @@ async function handleTopicThreadSeenRequest(
     return true
   }
 
-  const result = topicReadStateStore.markThreadSeenToLatestSeq(auth.profileId, rootMessageId)
+  // „Теми“ — прочетено по видимост: клиентът праща throughSeq = последният
+  // НЕПРЕКЪСНАТО видян отговор и праговете се вдигат само дотам (MAX upsert,
+  // никога надолу; второ устройство не може да „върне“ прочетеното). Без body
+  // (стар клиент по време на deploy) — досегашното „до края на нишката“.
+  let throughSeq: number | null = null
+  try {
+    const body = await readJsonRequestBody(req, 1_000) as { throughSeq?: unknown } | null
+    if (body !== null && typeof body === 'object' && body.throughSeq !== undefined) {
+      if (typeof body.throughSeq !== 'number' || !Number.isInteger(body.throughSeq) || body.throughSeq < 0) {
+        sendJsonResponse(res, 400, { ok: false, message: 'Невалидна позиция на прочитане.' })
+        return true
+      }
+      throughSeq = body.throughSeq
+    }
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+
+  const result = throughSeq === null
+    ? topicReadStateStore.markThreadSeenToLatestSeq(auth.profileId, rootMessageId)
+    : topicReadStateStore.markThreadSeenThroughSeq(auth.profileId, rootMessageId, throughSeq)
   if (!result.ok) {
     sendJsonResponse(res, 404, {
       ok: false,
@@ -14213,13 +14235,14 @@ async function handleTopicThreadSeenRequest(
     return true
   }
 
-  broadcastTopicThreadSeenUpdatedToProfile(auth.profileId, topicId, rootMessageId, result.state.lastSeenSeq)
+  const unreadCount = getTopicThreadUnreadCountForProfile(auth.profileId, rootMessageId)
+  broadcastTopicThreadSeenUpdatedToProfile(auth.profileId, topicId, rootMessageId, result.state.lastSeenSeq, unreadCount)
   sendJsonResponse(res, 200, {
     ok: true,
     topicId,
     rootMessageId,
     lastSeenSeq: result.state.lastSeenSeq,
-    unreadCount: 0,
+    unreadCount,
     topicUnreadCount: getTopicUnreadCountForProfile(auth.profileId, topicId),
   })
   return true
@@ -14352,6 +14375,8 @@ async function handleTopicMessagesRequest(
 
 const TOPIC_REPLIES_DEFAULT_LIMIT = 20
 const TOPIC_REPLIES_MAX_LIMIT = 50
+/** Прочетени отговори над разделителя „Нови отговори“ при отваряне. */
+const TOPIC_REPLIES_UNREAD_CONTEXT_LIMIT = 10
 
 function clampTopicRepliesLimit(rawValue: string | null): number {
   const parsed = rawValue !== null ? Number.parseInt(rawValue, 10) : NaN
@@ -14415,11 +14440,50 @@ async function handleTopicRepliesRequest(
   const limit = clampTopicRepliesLimit(requestUrl.searchParams.get('limit'))
   const afterRaw = requestUrl.searchParams.get('after')
   const afterSeq = afterRaw !== null ? Number.parseInt(afterRaw, 10) : null
+  const beforeRaw = requestUrl.searchParams.get('before')
+  const beforeSeq = beforeRaw !== null ? Number.parseInt(beforeRaw, 10) : null
+  // „Теми“ без „Покажи още“: window=unread отваря нишката около първия
+  // непрочетен отговор (или в края, ако няма), before/after допълват
+  // прозореца при скрол. Без параметри — досегашният първи page.
+  // window=latest — последната страница (собствен отговор, изпратен докато
+  // прозорецът не стига до края на нишката).
+  const windowMode = requestUrl.searchParams.get('window')
+  const isUnreadWindow = windowMode === 'unread'
+  const isLatestWindow = windowMode === 'latest'
+  const isOlderPage = !isUnreadWindow && !isLatestWindow && beforeSeq !== null && Number.isInteger(beforeSeq)
+  const hiddenSenders = getTopicSenderExclusionsForDeletion()
 
-  const isGapClosingReconcile = afterSeq !== null && Number.isInteger(afterSeq)
-  const page = isGapClosingReconcile
-    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq!, limit, getTopicSenderExclusionsForDeletion())
-    : topicMessageStore.getReplies(rootMessageId, limit, getTopicSenderExclusionsForDeletion())
+  const isGapClosingReconcile = !isUnreadWindow && !isLatestWindow && !isOlderPage && afterSeq !== null && Number.isInteger(afterSeq)
+  let hasMoreBefore = false
+  let hasMoreAfter = false
+  let firstUnreadSeq: number | null = null
+  let page: ReturnType<typeof topicMessageStore.getReplies>
+  if (isLatestWindow) {
+    page = topicMessageStore.getRepliesBefore(rootMessageId, null, limit, hiddenSenders)
+    hasMoreBefore = page.hasMore
+  } else if (isUnreadWindow) {
+    firstUnreadSeq = topicReadStateStore.getFirstUnreadReplySeq(auth.profileId, rootMessageId, hiddenSenders)
+    if (firstUnreadSeq === null) {
+      const tail = topicMessageStore.getRepliesBefore(rootMessageId, null, limit, hiddenSenders)
+      page = tail
+      hasMoreBefore = tail.hasMore
+    } else {
+      // Малко прочетен контекст над разделителя + страница от първия непрочетен.
+      const older = topicMessageStore.getRepliesBefore(rootMessageId, firstUnreadSeq, TOPIC_REPLIES_UNREAD_CONTEXT_LIMIT, hiddenSenders)
+      const newer = topicMessageStore.getRepliesAfter(rootMessageId, firstUnreadSeq - 1, limit, hiddenSenders)
+      page = { messages: [...older.messages, ...newer.messages], hasMore: newer.hasMore, oldestSeq: older.oldestSeq ?? newer.oldestSeq }
+      hasMoreBefore = older.hasMore
+      hasMoreAfter = newer.hasMore
+    }
+  } else if (isOlderPage) {
+    page = topicMessageStore.getRepliesBefore(rootMessageId, beforeSeq!, limit, hiddenSenders)
+    hasMoreBefore = page.hasMore
+  } else {
+    page = isGapClosingReconcile
+      ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq!, limit, hiddenSenders)
+      : topicMessageStore.getReplies(rootMessageId, limit, hiddenSenders)
+    hasMoreAfter = page.hasMore
+  }
 
   // Reopen reconciliation (виж createLobbyFlowController.ts expandReplyThread):
   // getRepliesAfter само добавя НОВИ redове (seq > afterSeq) — soft-delete
@@ -14437,8 +14501,21 @@ async function handleTopicRepliesRequest(
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   const messageIds = page.messages.map((m) => m.messageId)
-  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, getTopicSenderExclusionsForDeletion())
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, hiddenSenders)
   const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
+
+  // isUnread per отговор (и за root-а) — СЪЩИТЕ прагове като броячите
+  // (getThreadReadContext), за да не изчислява клиентът собствена версия.
+  const readContext = topicReadStateStore.getThreadReadContext(
+    auth.profileId,
+    rootMessageId,
+    topicId,
+    [rootMessage.senderProfileId, ...uniqueSenderProfileIds],
+  )
+  const isUnreadForViewer = (message: { senderProfileId: string; seq: number }): boolean =>
+    message.senderProfileId !== auth.profileId
+    && message.seq > readContext.threshold
+    && message.seq > (readContext.senderSeenThroughBySender.get(message.senderProfileId) ?? 0)
 
   const enrichedReplies = page.messages.map((message) => {
     const aggregates = aggregatesByMessageId.get(message.messageId)
@@ -14458,6 +14535,7 @@ async function handleTopicRepliesRequest(
       likeCount: aggregates?.likeCount ?? 0,
       viewerHasLiked: aggregates?.viewerHasLiked ?? false,
       isTopicsSectionMuted: activeSectionMutedProfileIds.has(message.senderProfileId),
+      isUnread: isUnreadForViewer(message),
     }
   })
 
@@ -14465,8 +14543,15 @@ async function handleTopicRepliesRequest(
     ok: true,
     replies: enrichedReplies,
     hasMore: page.hasMore,
+    hasMoreBefore,
+    hasMoreAfter,
     oldestSeq: page.oldestSeq,
     deletedMessageIds,
+    readState: {
+      lastSeenSeq: readContext.threshold,
+      firstUnreadSeq,
+      rootIsUnread: rootMessage.parentMessageId === null && isUnreadForViewer(rootMessage),
+    },
   })
   return true
 }

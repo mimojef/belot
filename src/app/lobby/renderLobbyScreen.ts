@@ -136,7 +136,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton, renderTopicModerationActionPopup } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton, renderTopicModerationActionPopup, renderTopicThreadEdgeSentinel, renderTopicThreadOwnReplyNotice } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderRegistrationVerificationPopup, attachRegistrationVerificationPopupEventListeners, type RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
@@ -433,6 +433,18 @@ export type GuestContactFormInput = {
   website: string
 }
 
+export type TopicThreadViewState = {
+  rootMessageId: string
+  status: 'loading' | 'ready' | 'error'
+  hasMoreBefore: boolean
+  hasMoreAfter: boolean
+  loadingBefore: boolean
+  loadingAfter: boolean
+  dividerSeq: number | null
+  /** Собствен отговор е публикуван под текущата позиция на четене. */
+  ownReplyNotice: boolean
+}
+
 export type LobbyScreenState = {
   /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
   apiBaseUrl: string
@@ -454,6 +466,13 @@ export type LobbyScreenState = {
   topicThreadRootMessageId: string | null
   topicThreadReturnScrollAnchor: { messageId: string; top: number } | null
   topicThreadRenderReason: 'initial' | 'live-append' | 'own-reply' | null
+  /**
+   * Прозорецът на отворената нишка в „Теми“ (без „Покажи още“): дали има
+   * още отговори нагоре/надолу, дали се зареждат, и пред кой seq стои
+   * разделителят „Нови отговори“ (фиксиран при отварянето). null = нишката
+   * не е в този режим.
+   */
+  topicThreadView: TopicThreadViewState | null
   topicComposerDraftByTopicId: Record<string, string>
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
@@ -1219,9 +1238,9 @@ export type RenderLobbyScreenOptions = {
   onTopicComposerMutedTap: () => void
   onTopicComposerImageSelect: (topicId: string, file: File) => void
   onTopicComposerImageRemove: (topicId: string) => void
-  onTopicRepliesLoadMore: (rootMessageId: string) => void
   onTopicThreadOpen: (rootMessageId: string, scrollAnchor?: { messageId: string; top: number } | null) => void
   onTopicThreadBack: () => void
+  onTopicThreadOwnReplyReveal: () => void
   onTopicMessageLikeToggleClick: (messageId: string) => void
   onTopicReplyClick: (rootMessageId: string, scrollAnchor?: { messageId: string; top: number } | null) => void
   onTopicReplyComposerNonVipTap: () => void
@@ -13319,14 +13338,102 @@ export function appendTopicReplyNode(
   const emptyPlaceholder = sectionEl.querySelector<HTMLElement>('[data-topic-replies-empty="1"]')
   emptyPlaceholder?.remove()
 
-  const loadMoreBtn = sectionEl.querySelector<HTMLElement>('[data-topic-replies-load-more]')
-  if (loadMoreBtn) {
-    sectionEl.insertBefore(newNode, loadMoreBtn)
+  // Прозорецът на нишката („Теми“) държи маркер за по-нови отговори в края —
+  // новият отговор застава преди него.
+  const newerSentinel = sectionEl.querySelector<HTMLElement>(':scope > [data-topic-thread-newer-sentinel="1"]')
+  if (newerSentinel) {
+    sectionEl.insertBefore(newNode, newerSentinel)
   } else {
     sectionEl.appendChild(newNode)
   }
 
   wireTopicMessageNode(root, state, options, newNode)
+  return true
+}
+
+/**
+ * Автоматично зареждане в нишката („Теми“) — вмъква страница отговори в
+ * началото ('prepend', след маркера за по-стари) или в края ('append', преди
+ * маркера за по-нови) на СЪЩИЯ скрол елемент, без пълен remount: скролът (и
+ * инерцията на mobile) не се прекъсва. Позицията се коригира от caller-а
+ * чрез котва. Връща false при структурно несъответствие → caller-ът прави
+ * пълен render().
+ */
+export function insertTopicThreadReplyNodes(
+  root: HTMLElement,
+  state: LobbyScreenState,
+  options: TopicMessageNodeCallbacks,
+  rootMessageId: string,
+  replies: readonly TopicReplySnapshot[],
+  position: 'prepend' | 'append',
+): boolean {
+  if (state.topicsMode !== 'thread' || state.topicThreadRootMessageId !== rootMessageId) return false
+  const sectionEl = root.querySelector<HTMLElement>(`[data-topic-replies-section="${cssEscape(rootMessageId)}"]`)
+  if (!sectionEl) return false
+  const existingRows = sectionEl.querySelectorAll(':scope > [data-topic-reply]')
+  if (existingRows.length === 0) return false
+
+  const nodes: HTMLElement[] = []
+  for (const reply of replies) {
+    if (sectionEl.querySelector(`[data-topic-reply="${cssEscape(reply.messageId)}"]`)) continue
+    const template = document.createElement('template')
+    template.innerHTML = renderTopicReplyRow(state, reply).trim()
+    const node = template.content.firstElementChild as HTMLElement | null
+    if (!node) return false
+    nodes.push(node)
+  }
+
+  const fragment = document.createDocumentFragment()
+  for (const node of nodes) fragment.appendChild(node)
+  if (position === 'prepend') {
+    sectionEl.insertBefore(fragment, existingRows[0]!)
+  } else {
+    const newerSentinel = sectionEl.querySelector<HTMLElement>(':scope > [data-topic-thread-newer-sentinel="1"]')
+    sectionEl.insertBefore(fragment, newerSentinel)
+  }
+  for (const node of nodes) wireTopicMessageNode(root, state, options, node)
+  return true
+}
+
+/**
+ * Бутонът „Отговорът ти е публикуван ↓“ — добавя/маха го в СЪЩИЯ скрол
+ * елемент (sticky, нулева височина — не мести съдържанието).
+ */
+export function syncTopicThreadOwnReplyNoticeDom(root: HTMLElement, state: LobbyScreenState, onReveal: () => void): boolean {
+  const view = state.topicThreadView
+  if (view === null || state.topicsMode !== 'thread' || state.topicThreadRootMessageId !== view.rootMessageId) return false
+  const scrollEl = root.querySelector<HTMLElement>('[data-topic-thread-scroll="1"]')
+  if (!scrollEl) return false
+  const current = scrollEl.querySelector<HTMLElement>(':scope > [data-topic-thread-own-reply-notice="1"]')
+  if (!view.ownReplyNotice) {
+    current?.remove()
+    return true
+  }
+  if (current) return true
+  const template = document.createElement('template')
+  template.innerHTML = renderTopicThreadOwnReplyNotice().trim()
+  const node = template.content.firstElementChild as HTMLElement | null
+  if (!node) return false
+  scrollEl.appendChild(node)
+  node.querySelector<HTMLButtonElement>('[data-topic-thread-own-reply-reveal="1"]')?.addEventListener('click', onReveal)
+  return true
+}
+
+/** Синхронизира маркерите за автоматично зареждане с state.topicThreadView. */
+export function syncTopicThreadSentinelsDom(root: HTMLElement, state: LobbyScreenState): boolean {
+  const view = state.topicThreadView
+  if (view === null || state.topicsMode !== 'thread' || state.topicThreadRootMessageId !== view.rootMessageId) return false
+  const sectionEl = root.querySelector<HTMLElement>(`[data-topic-replies-section="${cssEscape(view.rootMessageId)}"]`)
+  if (!sectionEl) return false
+  const isReady = view.status === 'ready'
+  for (const [edge, isVisible] of [['older', isReady && view.hasMoreBefore], ['newer', isReady && view.hasMoreAfter]] as const) {
+    const current = sectionEl.querySelector<HTMLElement>(`:scope > [data-topic-thread-${edge}-sentinel="1"]`)
+    if (!current) return false
+    const template = document.createElement('template')
+    template.innerHTML = renderTopicThreadEdgeSentinel(edge, isVisible)
+    const next = template.content.firstElementChild
+    if (next && current.outerHTML !== next.outerHTML) current.replaceWith(next)
+  }
   return true
 }
 
@@ -14914,6 +15021,10 @@ export function renderLobbyScreen(
     options.onTopicThreadBack()
   })
 
+  root.querySelector<HTMLButtonElement>('[data-topic-thread-own-reply-reveal="1"]')?.addEventListener('click', () => {
+    options.onTopicThreadOwnReplyReveal()
+  })
+
   root.querySelector<HTMLButtonElement>('[data-topic-lock]')?.addEventListener('click', (event) => {
     const btn = event.currentTarget as HTMLButtonElement
     const topicId = btn.dataset.topicLock ?? ''
@@ -15044,14 +15155,6 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-topic-report-submit="1"]')?.addEventListener('click', () => {
     options.onTopicReportSubmit()
-  })
-
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-replies-load-more]').forEach((btn) => {
-    const rootMessageId = btn.dataset.topicRepliesLoadMore ?? ''
-    if (!rootMessageId) return
-    btn.addEventListener('click', () => {
-      options.onTopicRepliesLoadMore(rootMessageId)
-    })
   })
 
   root.querySelectorAll<HTMLButtonElement>('[data-topics-reply-composer-cancel]').forEach((btn) => {

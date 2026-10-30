@@ -640,7 +640,7 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
 export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySnapshot): string {
   const isEditing = state.topicMessageEdit?.messageId === reply.messageId
   return `
-    <div data-topic-reply="${escapeHtml(reply.messageId)}">
+    <div data-topic-reply="${escapeHtml(reply.messageId)}" data-topic-thread-seq="${reply.seq}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px 12px;">
         ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted)}
       </div>
@@ -660,37 +660,67 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   `
 }
 
+// Разделител „Нови отговори“ — дискретен, със златист акцент (Pika.bg).
+function renderTopicThreadUnreadDivider(): string {
+  return `
+    <div data-topic-thread-unread-divider="1" role="separator" aria-label="Нови отговори" style="display:flex;align-items:center;gap:10px;margin:8px 10px 6px 12px;">
+      <span aria-hidden="true" style="flex:1 1 auto;height:1px;background:linear-gradient(90deg,rgba(212,165,32,0) 0%,rgba(212,165,32,0.6) 100%);"></span>
+      <span style="flex:0 0 auto;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Нови отговори</span>
+      <span aria-hidden="true" style="flex:1 1 auto;height:1px;background:linear-gradient(90deg,rgba(212,165,32,0.6) 0%,rgba(212,165,32,0) 100%);"></span>
+    </div>
+  `
+}
+
+// Автоматично зареждане (без „Покажи още“) — маркер в горния/долния край на
+// прозореца, видим само докато има още отговори в тази посока.
+export function renderTopicThreadEdgeSentinel(edge: 'older' | 'newer', isVisible: boolean): string {
+  const label = edge === 'older' ? 'Зареждане на по-стари отговори…' : 'Зареждане на по-нови отговори…'
+  return `<div data-topic-thread-${edge}-sentinel="1" aria-hidden="${isVisible ? 'false' : 'true'}" style="display:${isVisible ? 'flex' : 'none'};align-items:center;height:32px;padding:0 0 0 ${REPLY_INDENT_PX}px;box-sizing:border-box;color:rgba(248,250,252,0.42);font-size:12px;">${label}</div>`
+}
+
+// Собствен отговор, публикуван под позицията на четене — sticky в долния
+// край на скрола, с нулева височина (не мести съдържанието); натискането е
+// единственият път, по който екранът отива до него.
+export function renderTopicThreadOwnReplyNotice(): string {
+  return `
+    <div data-topic-thread-own-reply-notice="1" style="position:sticky;bottom:12px;height:0;display:flex;justify-content:center;z-index:2;pointer-events:none;">
+      <button
+        type="button"
+        data-topic-thread-own-reply-reveal="1"
+        style="pointer-events:auto;transform:translateY(-100%);display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 14px;border-radius:17px;border:1px solid rgba(212,165,32,0.55);background:#111;color:#f4c95b;font-size:12px;font-weight:900;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.45);"
+      >Отговорът ти е публикуван <span aria-hidden="true">&#8595;</span></button>
+    </div>
+  `
+}
+
 function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): string {
   const replies = state.topicRepliesByRootId[rootMessageId]
   const isLoading = Boolean(state.topicRepliesLoadingByRootId[rootMessageId])
-  const hasMore = Boolean(state.topicRepliesHasMoreByRootId[rootMessageId])
+  const threadView = state.topicThreadView?.rootMessageId === rootMessageId ? state.topicThreadView : null
 
-  const listHtml = replies === null || replies === undefined
-    ? (isLoading ? `<div style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.42);font-size:12px;">Зареждане на отговори...</div>` : '')
-    : replies.length === 0
-      ? `<div data-topic-replies-empty="1" style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.36);font-size:12px;">Все още няма отговори.</div>`
-      : replies.map((r) => renderTopicReplyRow(state, r)).join('')
+  let listHtml: string
+  if (threadView !== null && threadView.status === 'error' && (replies === null || replies === undefined || replies.length === 0)) {
+    listHtml = `<div data-topic-replies-error="1" style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:#f87171;font-size:12px;">Отговорите не можаха да се заредят.</div>`
+  } else if (replies === null || replies === undefined || (threadView !== null && threadView.status === 'loading')) {
+    listHtml = isLoading || threadView !== null ? `<div style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.42);font-size:12px;">Зареждане на отговори...</div>` : ''
+  } else if (replies.length === 0) {
+    listHtml = `<div data-topic-replies-empty="1" style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.36);font-size:12px;">Все още няма отговори.</div>`
+  } else {
+    const dividerSeq = threadView?.dividerSeq ?? null
+    const dividerIndex = dividerSeq === null ? -1 : replies.findIndex((r) => r.seq >= dividerSeq)
+    listHtml = replies.map((r, index) => `${index === dividerIndex ? renderTopicThreadUnreadDivider() : ''}${renderTopicReplyRow(state, r)}`).join('')
+  }
 
-  const loadMoreHtml = hasMore && replies !== null && replies !== undefined
-    ? `
-      <div style="padding-left:${REPLY_INDENT_PX}px;padding-bottom:6px;">
-        <button
-          type="button"
-          data-topic-replies-load-more="${escapeHtml(rootMessageId)}"
-          ${isLoading ? 'disabled' : ''}
-          style="border:0;background:transparent;color:#d4a520;font-size:12px;font-weight:800;cursor:${isLoading ? 'default' : 'pointer'};padding:4px 0;"
-        >${isLoading ? 'Зареждане...' : 'Покажи още'}</button>
-      </div>
-    `
-    : ''
+  const isWindowReady = threadView !== null && threadView.status === 'ready'
+  const olderSentinel = threadView !== null ? renderTopicThreadEdgeSentinel('older', isWindowReady && threadView.hasMoreBefore) : ''
+  const newerSentinel = threadView !== null ? renderTopicThreadEdgeSentinel('newer', isWindowReady && threadView.hasMoreAfter) : ''
 
   // Златната вертикала — по-ярка и по-ясно видима (т.1 от брифа: "около 2px",
   // "малко по-ярка", "без прекален glow") — alpha вдигнат от 0.16 на 0.55,
   // без box-shadow/glow ефект, за да остане елегантен, не крещящ.
   return `
     <div data-topic-replies-section="${escapeHtml(rootMessageId)}" style="border-left:1px solid rgba(212,165,32,0.55);margin:0 12px 12px 16px;padding:2px 0 0 0;box-sizing:border-box;">
-      ${listHtml}
-      ${loadMoreHtml}
+      ${olderSentinel}${listHtml}${newerSentinel}
     </div>
   `
 }
@@ -742,7 +772,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
     ? ''
     : `data-topic-card-open="${escapeHtml(message.messageId)}" role="button" tabindex="0" aria-label="Отвори разговора"`
   return `
-    <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
+    <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs}${isThread ? ` data-topic-thread-seq="${message.seq}"` : ''} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
       ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px rgba(0,0,0,0.72);z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
         ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted)}
@@ -1249,6 +1279,7 @@ function renderTopicThreadView(state: LobbyScreenState): string {
         ${renderTopicMessageRow(state, rootMessage, { variant: 'thread' })}
         ${renderRepliesSection(state, rootMessageId)}
       </div>
+      ${state.topicThreadView?.rootMessageId === rootMessageId && state.topicThreadView.ownReplyNotice ? renderTopicThreadOwnReplyNotice() : ''}
     </div>
   `
 }

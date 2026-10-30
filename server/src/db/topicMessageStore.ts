@@ -171,6 +171,17 @@ export type TopicMessageStore = {
     excludedSenderProfileIds: readonly string[],
   ) => TopicMessageHistoryPage
   /**
+   * Replies ПРЕДИ `beforeSeq` (null = от края на нишката), старо→ново —
+   * автоматично зареждане при скрол нагоре в „Теми“. hasMore = има още
+   * по-стари; oldestSeq = най-старият seq в страницата.
+   */
+  getRepliesBefore: (
+    parentMessageId: string,
+    beforeSeq: number | null,
+    limit: number,
+    excludedSenderProfileIds: readonly string[],
+  ) => TopicMessageHistoryPage
+  /**
    * messageId-та на replies с `seq <= maxSeq`, които са били soft-deleted —
    * gap-closing reconciliation companion за getRepliesAfter (виж коментара
    * при имплементацията: getRepliesAfter никога не връща изтрити редове,
@@ -858,6 +869,40 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     excludedSenderProfileIds: readonly string[],
   ): TopicMessageHistoryPage {
     return runRepliesPage(parentMessageId, limit, excludedSenderProfileIds, afterSeq)
+  }
+
+  // Backward (DESC + reverse) — огледало на getRecentMessages/getMessagesBefore
+  // за root историята, но върху отговорите на една нишка.
+  function getRepliesBefore(
+    parentMessageId: string,
+    beforeSeq: number | null,
+    limit: number,
+    excludedSenderProfileIds: readonly string[],
+  ): TopicMessageHistoryPage {
+    const normalizedLimit = Number.isInteger(limit) && limit > 0 ? limit : 20
+    const exclusionClause = excludedSenderProfileIds.length > 0
+      ? `AND sender_profile_id NOT IN (${Array(excludedSenderProfileIds.length).fill('?').join(',')})`
+      : ''
+    const statement = database.prepare(`
+      SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
+      FROM topic_messages
+      WHERE parent_message_id = ?
+        AND deleted_at IS NULL
+        ${beforeSeq !== null ? 'AND seq < ?' : ''}
+        ${exclusionClause}
+      ORDER BY seq DESC
+      LIMIT ?;
+    `)
+    const args: Array<string | number> = [parentMessageId]
+    if (beforeSeq !== null) args.push(beforeSeq)
+    args.push(...excludedSenderProfileIds)
+    args.push(normalizedLimit + 1)
+
+    const rows = statement.all(...args) as TopicMessageRow[]
+    const hasMore = rows.length > normalizedLimit
+    const pageRows = (hasMore ? rows.slice(0, normalizedLimit) : rows).reverse()
+    const messages = pageRows.map(toSnapshot)
+    return { messages, hasMore, oldestSeq: messages.length > 0 ? messages[0]!.seq : null }
   }
 
   // Gap-closing reconciliation companion за getRepliesAfter — soft-delete
@@ -1820,6 +1865,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     insertReply,
     getReplies,
     getRepliesAfter,
+    getRepliesBefore,
     getDeletedReplyIdsUpTo,
     getMessageById,
     listLiveRootsTouchedBySender,
