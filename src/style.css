@@ -215,6 +215,62 @@ body::before {
 }
 
 /*
+ * Mobile landing CTA — лек, модерен 3D вид: фин вертикален градиент около
+ * основния #7950E8, тънка светла линия + мек отблясък горе, по-тъмен долен
+ * ръб (релеф) и мека външна сянка. При натискане бутонът "потъва" с 1px.
+ * Потъването е чрез translate (а не transform), за да не се бие с
+ * pwa-cta-pulse, която анимира transform. Само за телефонния вариант —
+ * desktop бутонът няма този клас.
+ */
+.pwa-cta-3d {
+  background: linear-gradient(180deg, #8961F0 0%, #7950E8 55%, #6C43DD 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 0 rgba(52, 22, 140, 0.28),
+    0 1px 2px rgba(52, 22, 140, 0.22),
+    0 8px 20px rgba(121, 80, 232, 0.32);
+  text-shadow: 0 1px 1px rgba(40, 14, 110, 0.3);
+  transition: box-shadow 0.12s ease, filter 0.12s ease, translate 0.12s ease;
+}
+
+.pwa-cta-3d::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 100%);
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pwa-cta-3d:hover {
+    filter: brightness(1.05);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.3),
+      inset 0 -2px 0 rgba(52, 22, 140, 0.28),
+      0 1px 2px rgba(52, 22, 140, 0.22),
+      0 10px 26px rgba(121, 80, 232, 0.4);
+  }
+}
+
+.pwa-cta-3d:active {
+  translate: 0 1px;
+  filter: brightness(0.97);
+  box-shadow:
+    inset 0 2px 3px rgba(40, 14, 110, 0.28),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
+    0 1px 1px rgba(52, 22, 140, 0.2),
+    0 3px 8px rgba(121, 80, 232, 0.26);
+}
+
+.pwa-cta-3d:active::before {
+  opacity: 0.45;
+}
+
+/*
  * Registration-only password/repeat-password inputs (renderLobbyScreen.ts's
  * auth modal, register mode) — реалният <input> е type="text" (НЕ
  * type="password"), за да не се разпознава от Chrome Password Manager като
