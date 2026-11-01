@@ -9953,6 +9953,13 @@ void loadGuestTrialStatus().finally(() => {
   let overlayEl: HTMLElement | null = null
   let networkMonitorInFlight = false
   let consecutiveNetworkFailures = 0
+  // Логото на светлия телефонен вариант — заредено предварително, докато
+  // има връзка, и преизползвано, за да се показва и без интернет.
+  const OFFLINE_LIGHT_LOGO_URL = '/assets/lobby-mobile/logo-pika-text.webp'
+  const offlineLightLogo = new Image(168, 56)
+  offlineLightLogo.alt = 'Pika.bg'
+  offlineLightLogo.style.cssText = 'width:168px;height:56px;display:block;object-fit:contain;'
+  if (isPhoneLayoutViewport()) offlineLightLogo.src = OFFLINE_LIGHT_LOGO_URL
 
   function showOfflineOverlay(): void {
     if (isSvaraReconnectContext() && !lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
@@ -9963,6 +9970,37 @@ void loadGuestTrialStatus().finally(() => {
     }
     if (overlayEl) return
     const el = document.createElement('div')
+    if (isPhoneLayoutViewport()) {
+      // Телефон (гости и регистрирани): светлият вид на новото мобилно лоби.
+      // Текстът, бутонът и handler-ът са същите като при тъмния вариант.
+      el.style.cssText = [
+        'position:fixed;inset:0;z-index:99998;',
+        'background:#F5F7FC;',
+        'color:#17233C;',
+        "font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;",
+        'display:flex;flex-direction:column;align-items:center;justify-content:center;',
+        'padding:24px;text-align:center;box-sizing:border-box;',
+      ].join('')
+      el.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;gap:14px;width:100%;max-width:320px;">
+          <div data-offline-logo-slot="1" style="margin-bottom:10px;"></div>
+          <h1 style="font-size:22px;font-weight:800;margin:0;color:#17233C;">Няма връзка с интернет</h1>
+          <p style="font-size:15px;font-weight:500;color:#667085;line-height:1.5;margin:0;">
+            Белот онлайн изисква активна интернет връзка. Провери свързаността и опитай отново.
+          </p>
+          <button id="offline-retry-btn" class="lobby-violet-btn" style="
+            margin-top:10px;width:100%;max-width:260px;height:48px;padding:0 28px;border:0;border-radius:8px;
+            color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;
+          ">Опитай отново</button>
+        </div>
+      `
+      if (!offlineLightLogo.src) offlineLightLogo.src = OFFLINE_LIGHT_LOGO_URL
+      el.querySelector('[data-offline-logo-slot="1"]')?.appendChild(offlineLightLogo)
+      el.querySelector('#offline-retry-btn')?.addEventListener('click', hardReload)
+      document.body.appendChild(el)
+      overlayEl = el
+      return
+    }
     el.style.cssText = [
       'position:fixed;inset:0;z-index:99998;',
       'background:#0a0a0a;',

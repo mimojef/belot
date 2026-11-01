@@ -3,6 +3,7 @@ import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPerson
 import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError, formatMarketingDailyGiftLimitError } from './formatGiftLimitError'
 import { mergeIncomingAdCampaignDispatches, dequeueNextAdCampaignPopup } from '../adCampaigns/adCampaignPendingQueue'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { decideOpenImageViewer, decideRequestImageViewerClose, decideHandlePopstate, type ImageViewerAction, type ImageViewerHistoryState } from './imageViewerHistoryState'
 import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tournamentEconomyNotificationQueue.js'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
@@ -4383,14 +4384,33 @@ export function createLobbyFlowController(
   let _initOverlayFallbackId: ReturnType<typeof setTimeout> | null = null
 
   function createInitialOverlay(): void {
+    // Телефон (гости и регистрирани): светлият вид на новото мобилно лоби —
+    // логото от горната му лента над виолетова лента. Лентата, анимацията и
+    // условията за скриване са общи; desktop/таблет — старият вид.
+    const isPhone = isPhoneLayoutViewport()
     const overlay = document.createElement('div')
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#242424;transition:opacity 0.3s ease;'
+    overlay.style.cssText = `position:fixed;inset:0;z-index:99999;background:${isPhone ? '#F5F7FC' : '#242424'};transition:opacity 0.3s ease;`
     const track = document.createElement('div')
-    track.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:350px;height:8px;background:rgba(244,201,91,0.15);border-radius:4px;overflow:hidden;'
+    track.style.cssText = isPhone
+      ? 'width:220px;height:8px;background:#E9E3FC;border-radius:4px;overflow:hidden;'
+      : 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:350px;height:8px;background:rgba(244,201,91,0.15);border-radius:4px;overflow:hidden;'
     const bar = document.createElement('div')
-    bar.style.cssText = 'height:100%;background:linear-gradient(90deg,#f4c95b,#c98f13);width:0%;transition:width 0.6s cubic-bezier(0.4,0,0.2,1);border-radius:4px;'
+    bar.style.cssText = `height:100%;background:${isPhone ? 'linear-gradient(90deg,#8961F0,#6C43DD)' : 'linear-gradient(90deg,#f4c95b,#c98f13)'};width:0%;transition:width 0.6s cubic-bezier(0.4,0,0.2,1);border-radius:4px;`
     track.appendChild(bar)
-    overlay.appendChild(track)
+    if (isPhone) {
+      const group = document.createElement('div')
+      group.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:24px;'
+      const logo = document.createElement('img')
+      logo.src = '/assets/lobby-mobile/logo-pika-text.webp'
+      logo.alt = 'Pika.bg'
+      logo.width = 168
+      logo.height = 56
+      logo.style.cssText = 'width:168px;height:56px;display:block;object-fit:contain;'
+      group.append(logo, track)
+      overlay.appendChild(group)
+    } else {
+      overlay.appendChild(track)
+    }
     document.body.appendChild(overlay)
     _initOverlayEl = overlay
     _initBarEl = bar
@@ -7542,6 +7562,10 @@ export function createLobbyFlowController(
           case 'learn': showLearnPage(); break
           case 'fair-play': showFairPlayPage(); break
           case 'faq': showFaqPage(); break
+          case 'about': showAboutPage(); break
+          case 'terms':
+          case 'privacy':
+          case 'contact': showPublicLegalPage(screen); scrollLobbyRootToTop(); break
         }
       },
       onPrivateRoomsClose: () => {
@@ -15753,7 +15777,21 @@ export function createLobbyFlowController(
     await showFriendsDirectory()
   }
 
+  // Гост: "Харесай", "Влез, за да поканиш" и "Подарък" в профила изискват
+  // вход — затваря профила (същия път като "×") и показва подканата ('cta').
+  // Без затварянето подканата (в root-а на лобито) остава скрита под profile
+  // popup-а (document.body, z-index 12000). Връща true, ако е обработено.
+  function promptGuestLoginFromProfilePopup(): boolean {
+    if ((options.getAuthSession?.() ?? null) !== null) return false
+    if (state.profilePopupOpen) getPopupCallbacks().onClose()
+    state.authModalMode = 'cta'
+    state.authErrorText = null
+    render()
+    return true
+  }
+
   async function likeProfile(profileId: string): Promise<void> {
+    if (promptGuestLoginFromProfilePopup()) return
     const result = await options.onLikeProfile?.(profileId)
     if (!result?.ok) return
 
@@ -15784,11 +15822,9 @@ export function createLobbyFlowController(
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession === null) {
-      state.authModalMode = 'cta'
-      state.authErrorText = null
       state.friendActionMessageProfileId = profileId
       state.friendActionMessage = null
-      render()
+      promptGuestLoginFromProfilePopup()
       return
     }
 
@@ -16580,6 +16616,7 @@ export function createLobbyFlowController(
   let _profileGiftPrecheckToken = 0
 
   function openGiftItemModalWithPrecheck(recipientProfileId: string): void {
+    if (promptGuestLoginFromProfilePopup()) return
     if (_profileGiftPrecheck !== null) return
     const token = ++_profileGiftPrecheckToken
     _profileGiftPrecheck = { token, profileId: recipientProfileId }

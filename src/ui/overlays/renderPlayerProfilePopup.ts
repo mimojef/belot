@@ -12,6 +12,12 @@ import type {
 
 export type RenderPlayerProfilePopupOptions = {
   isOpen: boolean
+  /**
+   * Светлата палитра на новото мобилно лоби за гости (само от лобито, когато
+   * е показан светлият екран). Сменя само цветовете на частите, които гост
+   * вижда; съдържанието, бутоните и data-атрибутите са същите.
+   */
+  light?: boolean
   seat: Seat | null
   profile: PlayerPublicProfileSnapshot | null
   isLoading?: boolean
@@ -196,6 +202,21 @@ export type PlayerProfileFriendshipAction = {
   giftBypassProfileId?: string | null
 }
 
+// Активна за времето на един renderPlayerProfilePopup({ light: true }).
+let isLightTheme = false
+
+// Тъмна стойност по подразбиране, светла — само при isLightTheme.
+function themed(dark: string, light: string): string {
+  return isLightTheme ? light : dark
+}
+
+const LIGHT_TEXT = '#17233C'
+const LIGHT_MUTED = '#667085'
+const LIGHT_VIOLET = '#7950E8'
+const LIGHT_BORDER = '#E4E7EC'
+const LIGHT_PRIMARY_BUTTON = 'background:linear-gradient(180deg, #8961F0 0%, #7950E8 55%, #6C43DD 100%);border-color:transparent;color:#FFFFFF;box-shadow:inset 0 1px 0 rgba(255,255,255,0.3), 0 4px 10px rgba(121,80,232,0.24);'
+const LIGHT_SECONDARY_BUTTON = 'background:#FFFFFF;border-color:#D0D5DD;color:#17233C;'
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -344,11 +365,11 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
   return `
     <div
       style="
-        border-radius:8px;
-        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
-        border:1px solid rgba(212,165,32,0.42);
+        border-radius:${themed('8px', '12px')};
+        background:${themed('linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%)', '#FFFFFF')};
+        border:1px solid ${themed('rgba(212,165,32,0.42)', LIGHT_BORDER)};
         padding:16px;
-        box-shadow:inset 0 0 18px rgba(212,165,32,0.04);
+        box-shadow:${themed('inset 0 0 18px rgba(212,165,32,0.04)', '0 4px 14px rgba(34,30,80,0.06)')};
       "
     >
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">
@@ -358,9 +379,9 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
               width:42px;
               height:42px;
               border-radius:8px;
-              border:1px solid rgba(212,165,32,0.72);
-              background:rgba(212,165,32,0.10);
-              color:#d4a520;
+              border:1px solid ${themed('rgba(212,165,32,0.72)', '#D9CCFA')};
+              background:${themed('rgba(212,165,32,0.10)', '#F4F0FF')};
+              color:${themed('#d4a520', LIGHT_VIOLET)};
               display:flex;
               align-items:center;
               justify-content:center;
@@ -371,32 +392,32 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
             ${rankLevel ?? 'вЂ”'}
           </div>
           <div style="min-width:0;">
-            <div style="font-size:13px;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;color:#d4a520;">
+            <div style="font-size:13px;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;color:${themed('#d4a520', LIGHT_VIOLET)};">
               Ранг
             </div>
-            <div style="margin-top:4px;font-size:18px;font-weight:900;color:#f8fafc;">
+            <div style="margin-top:4px;font-size:18px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">
               ${escapeHtml(profile.rankTitle ?? (rankLevel ? `Ранг ${rankLevel}` : 'Ранг'))}
             </div>
           </div>
         </div>
-        <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;">
+        <div style="font-size:14px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};white-space:nowrap;">
           ${formatInteger(completedGames)} / ${formatInteger(nextRankGames)}
         </div>
       </div>
 
-      <div style="height:12px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+      <div style="height:12px;border-radius:999px;background:${themed('#050505', '#EEF0F6')};border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_BORDER)};overflow:hidden;">
         <div
           style="
             width:${(ratio * 100).toFixed(2)}%;
             height:100%;
             border-radius:999px;
-            background:linear-gradient(90deg, #d4a520 0%, #f4c95b 100%);
-            box-shadow:0 0 12px rgba(212,165,32,0.36);
+            background:${themed('linear-gradient(90deg, #d4a520 0%, #f4c95b 100%)', 'linear-gradient(90deg, #8961F0 0%, #7950E8 100%)')};
+            box-shadow:${themed('0 0 12px rgba(212,165,32,0.36)', 'none')};
           "
         ></div>
       </div>
 
-      <div style="margin-top:9px;font-size:12px;font-weight:800;color:rgba(226,232,240,0.70);">
+      <div style="margin-top:9px;font-size:12px;font-weight:800;color:${themed('rgba(226,232,240,0.70)', LIGHT_MUTED)};">
         Остават ${formatInteger(profile.gamesUntilNextRank)} игри до следващо ниво
       </div>
     </div>
@@ -415,13 +436,13 @@ function renderGameStats(profile: PlayerPublicProfileSnapshot): string {
       ? `${Math.round((wonGames / completedGames) * 100)}%`
       : '—'
 
-  const statItem = (label: string, value: string, accent = '#f8fafc') => `
-    <span style="white-space:nowrap;color:rgba(148,163,184,0.80);font-size:13px;font-weight:400;">
+  const statItem = (label: string, value: string, accent = themed('#f8fafc', LIGHT_TEXT)) => `
+    <span style="white-space:nowrap;color:${themed('rgba(148,163,184,0.80)', LIGHT_MUTED)};font-size:13px;font-weight:400;">
       ${escapeHtml(label)}:&nbsp;<span style="color:${accent};font-weight:500;">${value}</span>
     </span>
   `
 
-  const divider = `<span style="display:inline-block;width:1px;height:13px;background:rgba(212,165,32,0.35);vertical-align:middle;flex:0 0 auto;"></span>`
+  const divider = `<span style="display:inline-block;width:1px;height:13px;background:${themed('rgba(212,165,32,0.35)', '#D0D5DD')};vertical-align:middle;flex:0 0 auto;"></span>`
 
   return `
     <div
@@ -436,9 +457,9 @@ function renderGameStats(profile: PlayerPublicProfileSnapshot): string {
     >
       ${statItem('Игри', formatInteger(completedGames))}
       ${divider}
-      ${statItem('Победи', formatInteger(wonGames), '#fde68a')}
+      ${statItem('Победи', formatInteger(wonGames), themed('#fde68a', LIGHT_VIOLET))}
       ${divider}
-      ${statItem('Успех', escapeHtml(successRate), '#86efac')}
+      ${statItem('Успех', escapeHtml(successRate), themed('#86efac', '#079455'))}
     </div>
   `
 }
@@ -452,7 +473,7 @@ function renderRatingInline(profile: PlayerPublicProfileSnapshot): string {
         align-items:center;
         gap:8px;
         min-width:0;
-        color:rgba(148,163,184,0.80);
+        color:${themed('rgba(148,163,184,0.80)', LIGHT_MUTED)};
         font-size:13px;
         font-weight:400;
         white-space:nowrap;
@@ -460,11 +481,11 @@ function renderRatingInline(profile: PlayerPublicProfileSnapshot): string {
     >
       <span
         data-player-profile-inline-rating-divider="1"
-        style="width:1px;height:18px;background:rgba(212,165,32,0.45);display:inline-block;flex:0 0 auto;"
+        style="width:1px;height:18px;background:${themed('rgba(212,165,32,0.45)', '#D0D5DD')};display:inline-block;flex:0 0 auto;"
       ></span>
       <span style="overflow:hidden;text-overflow:ellipsis;">
-        Оценка: <span style="color:#d4a520;font-weight:400;">${formatAverageRating(profile.averageRating)}</span>
-        от <span style="color:#fde68a;font-weight:400;">${formatNullableText(profile.totalRatingsCount)}</span>
+        Оценка: <span style="color:${themed('#d4a520', LIGHT_TEXT)};font-weight:${themed('400', '700')};">${formatAverageRating(profile.averageRating)}</span>
+        от <span style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:${themed('400', '700')};">${formatNullableText(profile.totalRatingsCount)}</span>
       </span>
     </div>
   `
@@ -524,14 +545,14 @@ function renderGallery(profile: PlayerPublicProfileSnapshot | null): string {
     return `
       <div
         style="
-          border-radius:16px;
-          border:1px dashed rgba(148,163,184,0.30);
-          background:rgba(255,255,255,0.04);
+          border-radius:${themed('16px', '12px')};
+          border:1px dashed ${themed('rgba(148,163,184,0.30)', '#D0D5DD')};
+          background:${themed('rgba(255,255,255,0.04)', '#FFFFFF')};
           min-height:96px;
           display:flex;
           align-items:center;
           justify-content:center;
-          color:rgba(226,232,240,0.72);
+          color:${themed('rgba(226,232,240,0.72)', LIGHT_MUTED)};
           font-size:14px;
           font-weight:700;
           text-align:center;
@@ -564,11 +585,11 @@ function renderGallery(profile: PlayerPublicProfileSnapshot | null): string {
               data-gallery-image-url="${escapeHtml(safeUrl)}"
               style="
                 position:relative;
-                border-radius:16px;
+                border-radius:${themed('16px', '12px')};
                 overflow:hidden;
                 aspect-ratio:1/1;
-                background:rgba(255,255,255,0.06);
-                border:1px solid rgba(255,255,255,0.08);
+                background:${themed('rgba(255,255,255,0.06)', '#F2F4F7')};
+                border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_BORDER)};
                 cursor:pointer;
               "
             >
@@ -604,7 +625,7 @@ function renderLoadingContent(seat: Seat | null): string {
         gap:14px;
         min-height:260px;
         text-align:center;
-        color:#f8fafc;
+        color:${themed('#f8fafc', LIGHT_TEXT)};
       "
     >
       <div
@@ -612,8 +633,8 @@ function renderLoadingContent(seat: Seat | null): string {
           width:52px;
           height:52px;
           border-radius:999px;
-          border:4px solid rgba(255,255,255,0.16);
-          border-top-color:rgba(245,187,55,0.96);
+          border:4px solid ${themed('rgba(255,255,255,0.16)', '#EAECF0')};
+          border-top-color:${themed('rgba(245,187,55,0.96)', LIGHT_VIOLET)};
           animation: belot-player-profile-spin 900ms linear infinite;
         "
       ></div>
@@ -631,7 +652,7 @@ function renderLoadingContent(seat: Seat | null): string {
         style="
           font-size:15px;
           line-height:1.5;
-          color:rgba(226,232,240,0.80);
+          color:${themed('rgba(226,232,240,0.80)', LIGHT_MUTED)};
         "
       >
         ${escapeHtml(formatSeatLabel(seat))}
@@ -652,14 +673,14 @@ function renderEmptyContent(seat: Seat | null, emptyMessage: string | null): str
           gap:14px;
           min-height:260px;
           text-align:center;
-          color:#f8fafc;
+          color:${themed('#f8fafc', LIGHT_TEXT)};
         "
       >
         <div
           style="
             font-size:15px;
             line-height:1.5;
-            color:rgba(226,232,240,0.92);
+            color:${themed('rgba(226,232,240,0.92)', LIGHT_TEXT)};
             max-width:360px;
           "
         >
@@ -679,7 +700,7 @@ function renderEmptyContent(seat: Seat | null, emptyMessage: string | null): str
         gap:14px;
         min-height:260px;
         text-align:center;
-        color:#f8fafc;
+        color:${themed('#f8fafc', LIGHT_TEXT)};
       "
     >
       <div
@@ -695,7 +716,7 @@ function renderEmptyContent(seat: Seat | null, emptyMessage: string | null): str
         style="
           font-size:15px;
           line-height:1.5;
-          color:rgba(226,232,240,0.80);
+          color:${themed('rgba(226,232,240,0.80)', LIGHT_MUTED)};
           max-width:360px;
         "
       >
@@ -774,18 +795,18 @@ function renderForeignVipRow(profile: PlayerPublicProfileSnapshot, viewerIsFullA
           align-items:center;
           padding:3px 10px;
           border-radius:999px;
-          background:rgba(212,165,32,0.16);
-          border:1px solid rgba(212,165,32,0.58);
-          color:#d4a520;
+          background:${themed('rgba(212,165,32,0.16)', '#F4F0FF')};
+          border:1px solid ${themed('rgba(212,165,32,0.58)', '#D9CCFA')};
+          color:${themed('#d4a520', '#6941C6')};
           font-size:11px;
           font-weight:900;
           letter-spacing:0.04em;
           text-transform:uppercase;
           white-space:nowrap;
-          text-shadow:0 0 8px rgba(212,165,32,0.32);
+          text-shadow:${themed('0 0 8px rgba(212,165,32,0.32)', 'none')};
         "
       >VIP</span>
-      ${viewerIsFullAdmin ? `<span style="font-size:13px;font-weight:400;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(formatVipDaysWords(vipDays))}</span>` : ''}
+      ${viewerIsFullAdmin ? `<span style="font-size:13px;font-weight:400;color:${themed('#f8fafc', LIGHT_TEXT)};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(formatVipDaysWords(vipDays))}</span>` : ''}
     </div>
   `
 }
@@ -903,7 +924,7 @@ function renderForeignProfileSummary(profile: PlayerPublicProfileSnapshot, viewe
             align-items:center;
             gap:7px;
             min-width:0;
-            color:#d4a520;
+            color:${themed('#d4a520', '#B7791F')};
             font-size:20px;
             line-height:1;
             font-weight:900;
@@ -2027,39 +2048,39 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
     ? `<span data-player-profile-campaign-all-collected="1" style="color:#86efac;white-space:nowrap;">Всички награди са получени!</span>`
     : `
       ${renderCampaignTierRewardsCompactHtml(nextTier)}
-      <span data-player-profile-campaign-progress="1" style="flex:0 0 auto;white-space:nowrap;color:#f8fafc;">${format(active.unitsTotal)}/${format(progressThreshold)}</span>
+      <span data-player-profile-campaign-progress="1" style="flex:0 0 auto;white-space:nowrap;color:${themed('#f8fafc', LIGHT_TEXT)};">${format(active.unitsTotal)}/${format(progressThreshold)}</span>
     `
 
   return `
     <div
       data-player-profile-campaign-card="1"
       style="
-        border-radius:8px;
-        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
-        border:1px solid rgba(212,165,32,0.42);
+        border-radius:${themed('8px', '12px')};
+        background:${themed('linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%)', '#FFFFFF')};
+        border:1px solid ${themed('rgba(212,165,32,0.42)', LIGHT_BORDER)};
         padding:10px 12px;
-        box-shadow:inset 0 0 18px rgba(212,165,32,0.04);
+        box-shadow:${themed('inset 0 0 18px rgba(212,165,32,0.04)', '0 4px 14px rgba(34,30,80,0.06)')};
       "
     >
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;min-width:0;">
-        <span data-player-profile-campaign-title="1" style="flex:1 1 auto;min-width:0;display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:900;color:#f8fafc;">
+        <span data-player-profile-campaign-title="1" style="flex:1 1 auto;min-width:0;display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">
           <span title="${escapeHtml(active.campaignName)}" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Събирай</span>
           ${unitIconHtml(36)}
           ${allCollected ? `<span data-player-profile-campaign-total="1" style="flex:0 0 auto;white-space:nowrap;">${format(active.unitsTotal)}</span>` : ''}
         </span>
-        <span style="display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;font-size:13px;font-weight:900;color:#f8fafc;">
+        <span style="display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;font-size:13px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">
           ${rightSideHtml}
         </span>
       </div>
 
-      <div style="height:12px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+      <div style="height:12px;border-radius:999px;background:${themed('#050505', '#EEF0F6')};border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_BORDER)};overflow:hidden;">
         <div
           style="
             width:${(ratio * 100).toFixed(2)}%;
             height:100%;
             border-radius:999px;
-            background:linear-gradient(90deg, #d4a520 0%, #f4c95b 100%);
-            box-shadow:0 0 12px rgba(212,165,32,0.36);
+            background:${themed('linear-gradient(90deg, #d4a520 0%, #f4c95b 100%)', 'linear-gradient(90deg, #8961F0 0%, #7950E8 100%)')};
+            box-shadow:${themed('0 0 12px rgba(212,165,32,0.36)', 'none')};
           "
         ></div>
       </div>
@@ -2073,17 +2094,17 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
               flex:0 0 auto;
               min-height:30px;
               padding:0 12px;
-              border:1px solid rgba(212,165,32,0.45);
+              border:1px solid ${themed('rgba(212,165,32,0.45)', '#D9CCFA')};
               border-radius:8px;
-              background:rgba(212,165,32,0.08);
-              color:#d4a520;
+              background:${themed('rgba(212,165,32,0.08)', '#F4F0FF')};
+              color:${themed('#d4a520', LIGHT_VIOLET)};
               font-size:12px;
               font-weight:900;
               cursor:pointer;
             "
           >${allRewardsExpanded ? 'Скрий наградите' : allCollected ? 'Всички събрани награди' : 'Виж всички награди'}</button>
         ` : ''}
-        <span data-player-profile-campaign-hint="1" style="margin-left:auto;max-width:100%;min-width:0;font-size:12px;font-weight:800;line-height:1.25;color:rgba(226,232,240,0.78);text-align:right;">${hintText}</span>
+        <span data-player-profile-campaign-hint="1" style="margin-left:auto;max-width:100%;min-width:0;font-size:12px;font-weight:800;line-height:1.25;color:${themed('rgba(226,232,240,0.78)', LIGHT_MUTED)};text-align:right;">${hintText}</span>
       </div>
 
       ${renderCampaignAllRewardsPanelHtml(active, allRewardsExpanded)}
@@ -2111,10 +2132,10 @@ function renderCampaignNavBarHtml(campaignSummary: PlayerCampaignProfileSummary 
         style="
           min-height:32px;
           padding:0 14px;
-          border:1px solid rgba(212,165,32,0.45);
+          border:1px solid ${themed('rgba(212,165,32,0.45)', '#D9CCFA')};
           border-radius:999px;
-          background:rgba(212,165,32,0.10);
-          color:#d4a520;
+          background:${themed('rgba(212,165,32,0.10)', '#F4F0FF')};
+          color:${themed('#d4a520', LIGHT_VIOLET)};
           font-size:12px;
           font-weight:900;
           cursor:pointer;
@@ -2135,10 +2156,10 @@ function renderLastFinishedCampaignPanelHtml(
   const lastFinished = campaignSummary.lastFinished
 
   const bodyHtml = lastFinished === null
-    ? `<div style="font-size:13px;font-weight:700;color:rgba(226,232,240,0.70);">Няма предишна приключила кампания.</div>`
+    ? `<div style="font-size:13px;font-weight:700;color:${themed('rgba(226,232,240,0.70)', LIGHT_MUTED)};">Няма предишна приключила кампания.</div>`
     : `
-      <div style="font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(lastFinished.campaignName)}</div>
-      <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(226,232,240,0.80);">
+      <div style="font-size:15px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">${escapeHtml(lastFinished.campaignName)}</div>
+      <div style="margin-top:6px;font-size:13px;font-weight:700;color:${themed('rgba(226,232,240,0.80)', LIGHT_MUTED)};">
         Общо събрани: ${formatCampaignUnitsLabel(lastFinished.unitsTotal, lastFinished.unitNameSingular, lastFinished.unitNamePlural)}
       </div>
     `
@@ -2147,9 +2168,9 @@ function renderLastFinishedCampaignPanelHtml(
     <div
       data-player-profile-campaign-history-panel="1"
       style="
-        border-radius:10px;
-        background:rgba(255,255,255,0.04);
-        border:1px solid rgba(255,255,255,0.08);
+        border-radius:${themed('10px', '12px')};
+        background:${themed('rgba(255,255,255,0.04)', '#FFFFFF')};
+        border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_BORDER)};
         padding:14px;
         margin-bottom:14px;
       "
@@ -2225,9 +2246,9 @@ function renderProfileContent(
               height:100%;
               border-radius:20px;
               overflow:hidden;
-              background:rgba(255,255,255,0.06);
-              border:1px solid rgba(255,255,255,0.10);
-              box-shadow:0 14px 28px rgba(0,0,0,0.22);
+              background:${themed('rgba(255,255,255,0.06)', '#FFFFFF')};
+              border:1px solid ${themed('rgba(255,255,255,0.10)', LIGHT_BORDER)};
+              box-shadow:${themed('0 14px 28px rgba(0,0,0,0.22)', '0 6px 18px rgba(34,30,80,0.10)')};
             "
           >
             ${renderAvatar(profile, seat)}
@@ -2247,7 +2268,7 @@ function renderProfileContent(
               white-space:nowrap;
               padding:3px 10px;
               border-radius:999px;
-              border:2px solid #0a0a0a;
+              border:2px solid ${themed('#0a0a0a', '#FFFFFF')};
               letter-spacing:0.3px;
             ">✓ Приятел</div>
           ` : ''}
@@ -2269,7 +2290,7 @@ function renderProfileContent(
                 font-size:22px;
                 line-height:1.05;
                 font-weight:900;
-                color:#22c55e;
+                color:${themed('#22c55e', LIGHT_TEXT)};
                 word-break:break-word;
               "
             >
@@ -2308,8 +2329,8 @@ function renderProfileContent(
           ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil, canSelfDelete) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
 
           <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
-            <div style="font-size:13px;font-weight:400;color:rgba(148,163,184,0.80);">Рейтинг:</div>
-            <div style="font-size:13px;font-weight:400;color:#d4a520;">${formatNullableText(profile.skillRating)}</div>
+            <div style="font-size:13px;font-weight:400;color:${themed('rgba(148,163,184,0.80)', LIGHT_MUTED)};">Рейтинг:</div>
+            <div style="font-size:13px;font-weight:${themed('400', '700')};color:${themed('#d4a520', LIGHT_TEXT)};">${formatNullableText(profile.skillRating)}</div>
             ${renderRatingInline(profile)}
           </div>
 
@@ -2380,6 +2401,7 @@ function renderProfileContent(
                       display:flex;
                       align-items:center;
                       gap:5px;
+                      ${isLightTheme ? (profile.hasLikedByMe ? 'background:#F4F0FF;border-color:#D9CCFA;color:#6941C6;' : LIGHT_SECONDARY_BUTTON) : ''}
                     "
                   >
                     ${renderHeartIcon(14)}${profile.hasLikedByMe ? 'Харесан' : 'Харесай'}
@@ -2400,6 +2422,7 @@ function renderProfileContent(
                       font-size:13px;
                       font-weight:900;
                       cursor:${friendshipAction.disabled ? 'default' : 'pointer'};
+                      ${isLightTheme ? (friendshipAction.disabled ? 'background:#F2F4F7;border-color:#E4E7EC;color:#98A2B3;' : LIGHT_PRIMARY_BUTTON) : ''}
                     "
                   >
                     ${escapeHtml(friendshipAction.label)}
@@ -2419,6 +2442,7 @@ function renderProfileContent(
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_SECONDARY_BUTTON : ''}
                       "
                     >
                       Подари жълтици
@@ -2438,6 +2462,7 @@ function renderProfileContent(
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_SECONDARY_BUTTON : ''}
                       "
                     >
                       Подари жълтици
@@ -2457,6 +2482,7 @@ function renderProfileContent(
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_SECONDARY_BUTTON : ''}
                         display:inline-flex;
                         align-items:center;
                         gap:6px;
@@ -2479,6 +2505,7 @@ function renderProfileContent(
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_PRIMARY_BUTTON : ''}
                         display:inline-flex;
                         align-items:center;
                         gap:6px;
@@ -2512,7 +2539,7 @@ function renderProfileContent(
                 ${renderModerationControls(profile.profileId, isOwnProfile, viewerIsFullAdmin, activeBan)}
               </div>
               ${friendshipAction?.message ? `
-                <div style="font-size:12px;font-weight:800;color:#fde68a;line-height:1.35;">
+                <div style="font-size:12px;font-weight:800;color:${themed('#fde68a', LIGHT_MUTED)};line-height:1.35;">
                   ${escapeHtml(friendshipAction.message)}
                 </div>
               ` : ''}
@@ -2520,17 +2547,17 @@ function renderProfileContent(
           ` : ''}
 
           <div data-player-profile-stats="1" style="display:flex;align-items:center;margin-top:auto;padding-bottom:2px;">
-            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding-right:12px;">
-              Ниво: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${formatNullableText(profile.level)}</span>
+            <div data-player-profile-stat="1" style="font-size:13px;color:${themed('rgba(255,255,255,0.55)', LIGHT_MUTED)};padding-right:12px;">
+              Ниво: <span data-player-profile-stat-value="1" style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:700;">${formatNullableText(profile.level)}</span>
             </div>
-            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
-            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              Ранг: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${formatNullableText(profile.rankTitle)}</span>
+            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:${themed('rgba(212,165,32,0.45)', '#D0D5DD')};"></div>
+            <div data-player-profile-stat="1" style="font-size:13px;color:${themed('rgba(255,255,255,0.55)', LIGHT_MUTED)};padding:0 12px;">
+              Ранг: <span data-player-profile-stat-value="1" style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:700;">${formatNullableText(profile.rankTitle)}</span>
             </div>
             ${typeof profile.likesCount === 'number' ? `
-            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
-            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              ${renderHeartIcon(14)} Харесан: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
+            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:${themed('rgba(212,165,32,0.45)', '#D0D5DD')};"></div>
+            <div data-player-profile-stat="1" style="font-size:13px;color:${themed('rgba(255,255,255,0.55)', LIGHT_MUTED)};padding:0 12px;">
+              ${renderHeartIcon(14)} Харесан: <span data-player-profile-stat-value="1" style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
             </div>
             ` : ''}
           </div>
@@ -2661,7 +2688,7 @@ function renderProfileContent(
             font-weight:900;
             letter-spacing:0.12em;
             text-transform:uppercase;
-            color:rgba(148,163,184,0.92);
+            color:${themed('rgba(148,163,184,0.92)', LIGHT_MUTED)};
           "
         >
           Галерия
@@ -2685,6 +2712,17 @@ export function renderPlayerProfilePopup(
     return ''
   }
 
+  isLightTheme = options.light === true
+  try {
+    return renderPlayerProfilePopupHtml(options)
+  } finally {
+    isLightTheme = false
+  }
+}
+
+function renderPlayerProfilePopupHtml(
+  options: RenderPlayerProfilePopupOptions
+): string {
   const popupBody = options.isLoading
     ? renderLoadingContent(options.seat)
     : options.profile
@@ -3001,8 +3039,17 @@ export function renderPlayerProfilePopup(
       }
     </style>
 
+    ${isLightTheme ? `
+      <style>
+        [data-player-profile-light="1"] [data-player-profile-gift-coins]:hover,
+        [data-player-profile-light="1"] [data-player-profile-gift-coins-bypass]:hover,
+        [data-player-profile-light="1"] [data-player-profile-gift-item]:hover {
+          background: #F4F0FF !important;
+        }
+      </style>
+    ` : ''}
     <div
-      data-player-profile-popup-root="1"
+      data-player-profile-popup-root="1"${isLightTheme ? '\n      data-player-profile-light="1"' : ''}
       style="
         position:fixed;
         inset:0;
@@ -3015,7 +3062,7 @@ export function renderPlayerProfilePopup(
         style="
           position:absolute;
           inset:0;
-          background:rgba(0, 0, 0, 0.72);
+          background:${themed('rgba(0, 0, 0, 0.72)', 'rgba(20,20,43,0.45)')};
           -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
           animation:${options.skipAnimation ? 'none' : 'belot-player-profile-backdrop-in 140ms ease both'};
         "
@@ -3043,10 +3090,11 @@ export function renderPlayerProfilePopup(
             width:min(92vw, 760px);
             max-height:min(88vh, 860px);
             overflow:auto;
-            border-radius:8px;
-            background:linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%);
-            border:2px solid rgba(212,165,32,0.72);
-            box-shadow:0 34px 80px rgba(0,0,0,0.42);
+            border-radius:${themed('8px', '12px')};
+            background:${themed('linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%)', '#F5F7FC')};
+            border:${themed('2px solid rgba(212,165,32,0.72)', '1px solid #E4E7EC')};
+            box-shadow:${themed('0 34px 80px rgba(0,0,0,0.42)', '0 20px 48px rgba(23,35,60,0.18)')};
+            ${isLightTheme ? "font-family:system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;color:#17233C;" : ''}
             padding:24px 24px 22px;
             animation:${options.skipAnimation ? 'none' : 'belot-player-profile-fade-in 160ms ease both'};
           "
@@ -3076,7 +3124,7 @@ export function renderPlayerProfilePopup(
                   font-weight:800;
                   letter-spacing:0.14em;
                   text-transform:uppercase;
-                  color:rgba(148,163,184,0.92);
+                  color:${themed('rgba(148,163,184,0.92)', LIGHT_MUTED)};
                 "
               >
                 Профил на играч
@@ -3092,9 +3140,10 @@ export function renderPlayerProfilePopup(
                 width:42px;
                 height:42px;
                 border:none;
-                border-radius:999px;
-                background:rgba(255,255,255,0.08);
-                color:#f8fafc;
+                border-radius:${themed('999px', '8px')};
+                background:${themed('rgba(255,255,255,0.08)', '#FFFFFF')};
+                color:${themed('#f8fafc', '#475467')};
+                ${isLightTheme ? 'box-shadow:0 0 0 1px #E4E7EC;' : ''}
                 font-size:22px;
                 font-weight:900;
                 cursor:pointer;

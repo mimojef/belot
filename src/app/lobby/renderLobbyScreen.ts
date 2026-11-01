@@ -1628,7 +1628,7 @@ export type RenderLobbyScreenOptions = {
   onRulesOpen: () => void
   onStrategyOpen: () => void
   // Вътрешна навигация между информационните екрани (само светлия гост интерфейс).
-  onInfoPageOpen?: (screen: 'rules' | 'strategy' | 'learn' | 'fair-play' | 'faq') => void
+  onInfoPageOpen?: (screen: 'rules' | 'strategy' | 'learn' | 'fair-play' | 'faq' | 'about' | 'terms' | 'privacy' | 'contact') => void
 }
 
 
@@ -2119,6 +2119,8 @@ export function syncProfilePopup(
   const el = popupRootEl!
   el.innerHTML = renderPlayerProfilePopup({
     isOpen: true,
+    // Светъл върху светлите екрани на гост на телефон ("Играчите" и др.).
+    light: document.querySelector('[data-lobby-guest-mobile-light="1"]') !== null,
     seat: 'bottom',
     profile: popupState.profile,
     canEdit: popupState.canEdit,
@@ -6159,10 +6161,11 @@ const GUEST_LOBBY_ICON_DIR = '/assets/lobby-mobile/icons'
 // се отварят в същата светла рамка (header, долна навигация, footer) със
 // светлата палитра на страниците (render*Page(isMobile, light)). Магазинът
 // ("Меню" → "Магазин") — също, със светлия renderGuestMobileShopPanel. "Игри"
-// (долна навигация) — със светлия вариант на renderMoreGamesScreen. "Контакти"
-// (/contact) — със светлия renderPublicLegalPage (Общи условия и Поверителност
-// остават тъмни).
-const GUEST_MOBILE_LIGHT_INFO_VIEWS = new Set<string>(['rules', 'strategy', 'learn', 'fair-play', 'faq', 'shop', 'more-games', 'contact'])
+// (долна навигация) — със светлия вариант на renderMoreGamesScreen. "Контакти",
+// "Общи условия" и "Поверителност" — със светлия renderPublicLegalPage; "За
+// Pika.bg" — с renderAboutPage(…, light). "Играчите" и "Класация" — с renderGuestMobilePlayersDirectory
+// и renderGuestMobileLeaderboardsDirectory.
+const GUEST_MOBILE_LIGHT_INFO_VIEWS = new Set<string>(['rules', 'strategy', 'learn', 'fair-play', 'faq', 'shop', 'more-games', 'contact', 'players', 'leaderboards', 'about', 'terms', 'privacy'])
 // Изображенията в секциите. Белот: ЕДНО общо универсално изображение за
 // всички случайни маси (без надписи/суми), 640×320 (2:1). "Не се сърди
 // човече": един широк банер, 1200×320 (15:4).
@@ -6677,11 +6680,12 @@ function renderGuestMobileLobbyMain(state: LobbyScreenState, canStartSearch: boo
   `
 }
 
-function renderMobilePageTitle(title: string, subtitle = ''): string {
+// light — светлата палитра на новото мобилно лоби за гости ("Играчите").
+function renderMobilePageTitle(title: string, subtitle = '', light = false): string {
   return `
-    <section style="padding:14px 12px 10px;border-bottom:1px solid rgba(212,165,32,0.20);">
-      <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:900;line-height:1.05;">${escapeHtml(title)}</h1>
-      ${subtitle ? `<div style="margin-top:6px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:700;line-height:1.4;">${escapeHtml(subtitle)}</div>` : ''}
+    <section style="padding:${light ? '6px 2px 0' : '14px 12px 10px'};border-bottom:${light ? '0' : '1px solid rgba(212,165,32,0.20)'};">
+      <h1 style="margin:0;color:${light ? '#17233C' : '#ffffff'};font-size:22px;font-weight:${light ? '800' : '900'};line-height:1.05;">${escapeHtml(title)}</h1>
+      ${subtitle ? `<div style="margin-top:6px;color:${light ? '#667085' : 'rgba(255,255,255,0.58)'};font-size:13px;font-weight:${light ? '600' : '700'};line-height:1.4;">${escapeHtml(subtitle)}</div>` : ''}
     </section>
   `
 }
@@ -6709,7 +6713,18 @@ function renderMobileShopGiftModeTitle(state: LobbyScreenState, normalTitle: str
   `
 }
 
-function renderMobileStateMessage(text: string, tone: 'normal' | 'error' = 'normal'): string {
+function renderMobileStateMessage(text: string, tone: 'normal' | 'error' = 'normal', light = false): string {
+  if (light) {
+    return `
+      <div style="
+        margin:0;border:1px ${tone === 'error' ? 'solid #FECDCA' : 'dashed #D0D5DD'};
+        border-radius:12px;background:${tone === 'error' ? '#FEF3F2' : '#FFFFFF'};
+        color:${tone === 'error' ? '#B42318' : '#667085'};
+        min-height:132px;display:flex;align-items:center;justify-content:center;
+        text-align:center;padding:18px;font-size:14px;font-weight:700;line-height:1.45;
+      ">${escapeHtml(text)}</div>
+    `
+  }
   return `
     <div style="
       margin:12px;border:1px ${tone === 'error' ? 'solid rgba(248,113,113,0.34)' : 'dashed rgba(255,255,255,0.14)'};
@@ -6721,10 +6736,36 @@ function renderMobileStateMessage(text: string, tone: 'normal' | 'error' = 'norm
   `
 }
 
-export function renderMobilePlayerListCard(player: PlayerPublicProfileSnapshot, attrName: string, showOnlineStatus: boolean): string {
+export function renderMobilePlayerListCard(player: PlayerPublicProfileSnapshot, attrName: string, showOnlineStatus: boolean, light = false): string {
   const displayName = player.displayName?.trim() || 'Играч'
   const avatarUrl = player.avatarUrl?.trim() ?? ''
   const profileId = player.profileId ?? ''
+
+  if (light) {
+    return `
+      <button type="button" ${attrName}="${escapeHtml(profileId)}" style="
+        width:100%;border:1px solid #E4E7EC;border-radius:12px;background:#FFFFFF;box-shadow:0 4px 14px rgba(34,30,80,0.06);
+        padding:10px;display:flex;align-items:center;gap:12px;color:#17233C;text-align:left;cursor:pointer;font-family:inherit;
+      ">
+        <div style="position:relative;width:56px;height:56px;flex:0 0 auto;">
+          <div style="width:100%;height:100%;border-radius:10px;border:1px solid #E4E7EC;background:#F4F0FF;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#7950E8;font-size:22px;font-weight:800;">
+            ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}
+          </div>
+          ${renderLevelBadge(player.level, 'sm')}
+        </div>
+        <div style="min-width:0;flex:1;">
+          <div style="font-size:15px;font-weight:800;color:#17233C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+          <div style="margin-top:3px;color:#7950E8;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
+          <div style="margin-top:6px;display:flex;gap:12px;color:#667085;font-size:12px;font-weight:600;">
+            <span>Игри ${formatAmount(player.completedGamesCount ?? 0)}</span>
+            <span>Оценка ${typeof player.averageRating === 'number' ? player.averageRating.toFixed(2) : '-'}</span>
+          </div>
+        </div>
+        ${showOnlineStatus && player.isOnline !== undefined ? `<div style="color:${player.isOnline ? '#079455' : '#D92D20'};font-size:11px;font-weight:800;flex:0 0 auto;">${player.isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#98A2B3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:0 0 auto;"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+    `
+  }
 
   return `
     <button type="button" ${attrName}="${escapeHtml(profileId)}" style="
@@ -6791,7 +6832,7 @@ function computePlayersDirectoryLists(
  * Pagination navigация `< 1 2 3 4 … >` — рендира се еднакво над и под
  * grid-а (desktop и mobile), скрита докато search резултати са активни.
  */
-function renderPlayersPager(state: LobbyScreenState): string {
+function renderPlayersPager(state: LobbyScreenState, light = false): string {
   const totalPages = state.playersTotalPages
   if (totalPages <= 1) return ''
 
@@ -6799,6 +6840,21 @@ function renderPlayersPager(state: LobbyScreenState): string {
   const items = computePaginationItems(currentPage, totalPages)
   const isFirst = currentPage <= 1
   const isLast = currentPage >= totalPages
+
+  if (light) {
+    const lightArrowStyle = (disabled: boolean): string =>
+      `min-width:36px;height:36px;padding:0 10px;border-radius:8px;border:1px solid #D0D5DD;background:#FFFFFF;color:${disabled ? '#D0D5DD' : '#7950E8'};font-family:inherit;font-size:16px;font-weight:800;cursor:${disabled ? 'default' : 'pointer'};`
+    return `
+      <nav data-lobby-players-pager="1" aria-label="Странициране на играчите" style="display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;padding:2px 0;">
+        <button type="button" data-lobby-players-page="prev" ${isFirst ? 'disabled' : ''} aria-label="Предишна страница" style="${lightArrowStyle(isFirst)}">‹</button>
+        ${items.map((item) => item === 'ellipsis'
+          ? `<span aria-hidden="true" style="min-width:24px;height:36px;display:flex;align-items:center;justify-content:center;color:#98A2B3;font-weight:800;">…</span>`
+          : `<button type="button" data-lobby-players-page="${item}" ${item === currentPage ? 'aria-current="page"' : ''} style="min-width:36px;height:36px;padding:0 8px;border-radius:8px;border:1px solid ${item === currentPage ? '#7950E8' : '#D0D5DD'};background:${item === currentPage ? '#7950E8' : '#FFFFFF'};color:${item === currentPage ? '#FFFFFF' : '#344054'};font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;">${item}</button>`
+        ).join('')}
+        <button type="button" data-lobby-players-page="next" ${isLast ? 'disabled' : ''} aria-label="Следваща страница" style="${lightArrowStyle(isLast)}">›</button>
+      </nav>
+    `
+  }
 
   const arrowStyle = (disabled: boolean): string =>
     `min-width:34px;height:34px;padding:0 10px;border-radius:6px;border:1px solid rgba(212,165,32,0.4);background:${disabled ? 'rgba(255,255,255,0.04)' : '#0d0d0d'};color:${disabled ? 'rgba(255,255,255,0.28)' : '#d4a520'};font-size:15px;font-weight:900;cursor:${disabled ? 'default' : 'pointer'};`
@@ -6815,7 +6871,8 @@ function renderPlayersPager(state: LobbyScreenState): string {
   `
 }
 
-function renderMobilePlayersDirectory(state: LobbyScreenState): string {
+function renderMobilePlayersDirectory(state: LobbyScreenState, light = false): string {
+  if (light) return renderGuestMobilePlayersDirectory(state)
   if (state.playersLoading) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage('Зареждане на играчи...')}`
   if (state.playersErrorText) return `${renderMobilePageTitle('Играчите')}${renderMobileStateMessage(state.playersErrorText, 'error')}`
 
@@ -6861,7 +6918,110 @@ function renderMobilePlayersDirectory(state: LobbyScreenState): string {
   `
 }
 
-function renderMobileLeaderboardsDirectory(state: LobbyScreenState): string {
+// "Играчите" за гост на телефон — същото съдържание, търсене, странициране
+// и data-атрибути като renderMobilePlayersDirectory, в светлата палитра.
+function renderGuestMobilePlayersDirectory(state: LobbyScreenState): string {
+  if (state.playersLoading) return `<div style="display:grid;gap:12px;">${renderMobilePageTitle('Играчите', '', true)}${renderMobileStateMessage('Зареждане на играчи...', 'normal', true)}</div>`
+  if (state.playersErrorText) return `<div style="display:grid;gap:12px;">${renderMobilePageTitle('Играчите', '', true)}${renderMobileStateMessage(state.playersErrorText, 'error', true)}</div>`
+
+  const { players, isSearchActive } = computePlayersDirectoryLists(state, {
+    isAdmin: state.isAdminOrSubadmin,
+    ownProfileId: state.profile.profileId,
+  })
+  const applied = state.playersSearchQuery.trim()
+
+  return `
+    <div data-lobby-guest-players="1" style="display:grid;gap:12px;padding-bottom:8px;">
+      ${renderMobilePageTitle('Играчите', `${formatAmount(state.playersTotalCount)} профила`, true)}
+      <form data-lobby-players-search-form="1" style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;">
+        <label style="display:flex;align-items:center;gap:10px;min-width:0;background:#FFFFFF;border:1px solid #D0D5DD;border-radius:8px;padding:0 12px;height:46px;box-sizing:border-box;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7950E8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input
+            data-lobby-players-search-mobile="1"
+            type="search"
+            placeholder="Намери играч"
+            aria-label="Намери играч"
+            value="${escapeHtml(state.playersSearchDraft)}"
+            autocomplete="off"
+            spellcheck="false"
+            enterkeyhint="search"
+            style="flex:1;min-width:0;background:transparent;border:0;outline:none;color:#17233C;font-size:16px;font-weight:500;font-family:inherit;"
+          >
+        </label>
+        <button
+          type="submit"
+          class="lobby-violet-btn"
+          style="height:46px;padding:0 18px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;"
+        >Намери</button>
+      </form>
+      ${!isSearchActive ? renderPlayersPager(state, true) : ''}
+      <section style="display:grid;gap:10px;">
+        ${state.playersTotalCount === 0
+          ? renderMobileStateMessage('Все още няма регистрирани играчи.', 'normal', true)
+          : players.length === 0 && applied !== ''
+            ? renderMobileStateMessage('Няма намерени играчи.', 'normal', true)
+            : players.map((player) => renderMobilePlayerListCard(player, 'data-lobby-player-card', state.isAdminOrSubadmin, true)).join('')}
+      </section>
+      ${!isSearchActive ? renderPlayersPager(state, true) : ''}
+    </div>
+  `
+}
+
+// "Класация" за гост на телефон — същите категории, позиции, данни и
+// data-атрибути като renderMobileLeaderboardsDirectory, в светлата палитра.
+function renderGuestMobileLeaderboardsDirectory(state: LobbyScreenState): string {
+  const title = renderMobilePageTitle('Класация', 'Топ играчи по баланс, ранг, победи и оценка', true)
+  if (state.leaderboardsLoading) return `<div style="display:grid;gap:12px;">${title}${renderMobileStateMessage('Зареждане на класации...', 'normal', true)}</div>`
+  if (state.leaderboardsErrorText) return `<div style="display:grid;gap:12px;">${title}${renderMobileStateMessage(state.leaderboardsErrorText, 'error', true)}</div>`
+
+  const category = state.activeLeaderboardCategory
+  const activeTab = LEADERBOARD_TABS.find((tab) => tab.category === category) ?? LEADERBOARD_TABS[0]
+  const players = state.leaderboards?.[category] ?? []
+  const medalColor = (position: number) => position === 1 ? '#C27C0E' : position === 2 ? '#667085' : position === 3 ? '#A15C2E' : '#98A2B3'
+  const medalBg = (position: number) => position === 1 ? '#FEF6E0' : position === 2 ? '#F2F4F7' : position === 3 ? '#FBEEE6' : 'transparent'
+
+  return `
+    <div data-lobby-guest-leaderboards="1" style="display:grid;gap:12px;padding-bottom:8px;">
+      ${title}
+      <div style="display:flex;gap:8px;overflow-x:auto;margin:0 -12px;padding:2px 12px 4px;scrollbar-width:none;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;">
+        ${LEADERBOARD_TABS.map((tab) => {
+          const isActive = tab.category === category
+          return `<button type="button" data-lobby-leaderboard-tab="${tab.category}" ${isActive ? 'aria-current="true" ' : ''}style="flex:0 0 auto;height:38px;padding:0 14px;border:1px solid ${isActive ? '#7950E8' : '#D0D5DD'};border-radius:8px;background:${isActive ? '#7950E8' : '#FFFFFF'};color:${isActive ? '#FFFFFF' : '#344054'};font-family:inherit;font-size:13px;font-weight:800;white-space:nowrap;cursor:pointer;">${escapeHtml(tab.label)}</button>`
+        }).join('')}
+      </div>
+      <section style="display:grid;gap:10px;">
+        ${players.length === 0 ? renderMobileStateMessage('Все още няма данни за тази класация.', 'normal', true) : players.map((player, index) => {
+          const position = index + 1
+          const displayName = player.displayName?.trim() || 'Играч'
+          const avatarUrl = player.avatarUrl?.trim() ?? ''
+
+          return `
+            <button type="button" data-lobby-leaderboard-player="${escapeHtml(player.profileId ?? '')}" style="
+              width:100%;border:1px solid #E4E7EC;border-radius:12px;background:#FFFFFF;box-shadow:0 4px 14px rgba(34,30,80,0.06);
+              padding:10px;display:grid;grid-template-columns:36px 48px minmax(0,1fr) auto;align-items:center;gap:10px;color:#17233C;text-align:left;cursor:pointer;font-family:inherit;
+            ">
+              <div style="width:36px;height:36px;border-radius:999px;background:${medalBg(position)};display:flex;align-items:center;justify-content:center;font-size:${position > 99 ? '12px' : '15px'};font-weight:800;color:${medalColor(position)};">${position}</div>
+              <div style="width:48px;height:48px;border-radius:10px;border:1px solid #E4E7EC;background:#F4F0FF;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#7950E8;font-size:19px;font-weight:800;">
+                ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}
+              </div>
+              <div style="min-width:0;">
+                <div style="font-size:15px;font-weight:800;color:#17233C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+                <div style="margin-top:3px;font-size:12px;font-weight:700;color:#7950E8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(player.rankTitle ?? 'Ранг 1')}</div>
+              </div>
+              <div style="text-align:right;min-width:0;">
+                <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;color:#667085;">${escapeHtml(activeTab.metricLabel)}</div>
+                <div style="margin-top:3px;font-size:15px;font-weight:800;color:#17233C;white-space:nowrap;">${escapeHtml(getLeaderboardMetric(category, player))}</div>
+              </div>
+            </button>
+          `
+        }).join('')}
+      </section>
+    </div>
+  `
+}
+
+function renderMobileLeaderboardsDirectory(state: LobbyScreenState, light = false): string {
+  if (light) return renderGuestMobileLeaderboardsDirectory(state)
   if (state.leaderboardsLoading) return `${renderMobilePageTitle('Класация')}${renderMobileStateMessage('Зареждане на класации...')}`
   if (state.leaderboardsErrorText) return `${renderMobilePageTitle('Класация')}${renderMobileStateMessage(state.leaderboardsErrorText, 'error')}`
 
@@ -7415,8 +7575,8 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
   `
 }
 
-// light — "Контакти" за гост на телефон (GUEST_MOBILE_LIGHT_INFO_VIEWS);
-// останалите правни страници и тъмната палитра са непроменени.
+// light — за гост на телефон (GUEST_MOBILE_LIGHT_INFO_VIEWS); тъмната палитра
+// е непроменена.
 function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false, light = false): string {
   const page = PUBLIC_LEGAL_PAGES[pageKey]
   const contentHtml = renderPublicLegalBodyHtml(pageKey, isMobile, true, light)
@@ -7514,9 +7674,9 @@ function renderMobileLobbyScreenContent(
           : state.view === 'private-rooms'
           ? renderPrivateRoomsPage(state)
           : state.view === 'players'
-          ? renderMobilePlayersDirectory(state)
+          ? renderMobilePlayersDirectory(state, isGuestLightInfoView)
           : state.view === 'leaderboards'
-            ? renderMobileLeaderboardsDirectory(state)
+            ? renderMobileLeaderboardsDirectory(state, isGuestLightInfoView)
           : state.view === 'shop'
             ? (isGuestLightInfoView ? renderGuestMobileShopPanel(state) : renderMobileShopPanel(state))
           : state.view === 'admin'
@@ -7621,7 +7781,7 @@ function renderMobileLobbyScreenContent(
           : state.view === 'faq'
             ? renderFaqPage(true, isGuestLightInfoView)
           : state.view === 'about'
-            ? renderAboutPage(true)
+            ? renderAboutPage(true, isGuestLightInfoView)
           : state.view === 'fair-play'
             ? renderFairPlayPage(true, isGuestLightInfoView)
           : ''}
@@ -15486,14 +15646,16 @@ export function renderLobbyScreen(
     })
   })
 
-  // Светлият гост интерфейс: връзките към петте информационни екрана (карти
-  // в лобито, връзки в съдържанието, footer) сменят екрана вътре в
-  // приложението, а не презареждат страницата. Картите "Правила" и "Съвети"
+  // Светлият гост интерфейс: връзките към информационните екрани (карти в
+  // лобито, връзки в съдържанието, footer) сменят екрана вътре в
+  // приложението, а не презареждат страницата (пълното презареждане
+  // показваше началния екран за зареждане). Картите "Правила" и "Съвети"
   // имат собствен handler по-долу (общ с desktop) — тук се пропускат.
   const onInfoPageOpen = options.onInfoPageOpen
   if (guestLightRoot && onInfoPageOpen) {
-    const infoScreenByPath: Record<string, 'rules' | 'strategy' | 'learn' | 'fair-play' | 'faq'> = {
+    const infoScreenByPath: Record<string, Parameters<typeof onInfoPageOpen>[0]> = {
       '/rules': 'rules', '/strategy': 'strategy', '/learn': 'learn', '/fair-play': 'fair-play', '/faq': 'faq',
+      '/about': 'about', '/terms': 'terms', '/privacy': 'privacy', '/contact': 'contact',
     }
     guestLightRoot.querySelectorAll<HTMLAnchorElement>('a[href^="/"]').forEach((link) => {
       if (link.dataset.lobbyRulesCard === '1' || link.dataset.lobbyStrategyCard === '1') return
