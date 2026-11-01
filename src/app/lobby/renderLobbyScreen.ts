@@ -1627,6 +1627,8 @@ export type RenderLobbyScreenOptions = {
   onAdCampaignPopupClick?: () => void
   onRulesOpen: () => void
   onStrategyOpen: () => void
+  // Вътрешна навигация между информационните екрани (само светлия гост интерфейс).
+  onInfoPageOpen?: (screen: 'rules' | 'strategy' | 'learn' | 'fair-play' | 'faq') => void
 }
 
 
@@ -2573,7 +2575,8 @@ function formatPackagePrice(priceCents: number, currency: string): string {
 // изцяло presentation-only промяна.
 
 // withAnchors — само в пълната страница (/terms#…); прегледът при покупка е без id.
-function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false, withAnchors = false): string {
+// light — светлата палитра на новото мобилно лоби за гости ("Контакти").
+function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false, withAnchors = false, light = false): string {
   const page = PUBLIC_LEGAL_PAGES[pageKey]
   const blocks = page.body
     .split(/\n{2,}/)
@@ -2584,10 +2587,10 @@ function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false
     const isDocumentTitle = index === 0
     const isSectionTitle = /^\d+\.\s/.test(block)
     const style = isDocumentTitle
-      ? `margin:0 0 18px;color:#f8fafc;font-size:${isMobile ? '18px' : '22px'};line-height:1.22;font-weight:900;`
+      ? `margin:0 0 18px;color:${light ? '#17233C' : '#f8fafc'};font-size:${isMobile ? '18px' : '22px'};line-height:1.22;font-weight:${light ? '800' : '900'};`
       : isSectionTitle
-        ? `margin:${isMobile ? '22px' : '28px'} 0 8px;color:#d4a520;font-size:${isMobile ? '15px' : '17px'};line-height:1.35;font-weight:900;`
-        : `margin:0 0 12px;color:rgba(255,255,255,0.72);font-size:${isMobile ? '13px' : '15px'};line-height:${isMobile ? '1.58' : '1.68'};font-weight:600;`
+        ? `margin:${isMobile ? '22px' : '28px'} 0 8px;color:${light ? '#17233C' : '#d4a520'};font-size:${isMobile ? '15px' : '17px'};line-height:1.35;font-weight:${light ? '800' : '900'};`
+        : `margin:0 0 12px;color:${light ? '#475467' : 'rgba(255,255,255,0.72)'};font-size:${isMobile ? '13px' : '15px'};line-height:${isMobile ? '1.58' : '1.68'};font-weight:${light ? '500' : '600'};`
 
     const anchorId = withAnchors && isSectionTitle ? page.sectionAnchors?.[block] : undefined
     const anchorAttr = anchorId !== undefined ? ` id="${escapeHtml(anchorId)}"` : ''
@@ -2774,12 +2777,66 @@ function getPurchaseStatusColor(status: CoinPurchaseSnapshot['status']): string 
   }
 }
 
-function renderAuthModal(state: LobbyScreenState): string {
+// Цветовете на auth modal-а (вход/регистрация/забравена парола/cta). Тъмната
+// тема е досегашният markup буквално (desktop/таблет/други екрани остават
+// байт-идентични); светлата е само за новото мобилно лоби за гости — root-ът
+// носи data-lobby-guest-auth-modal (CSS placeholder/фокус/шрифт в style.css и
+// JS състоянията — пол, око за паролата, подсказка за име, съобщение при
+// забравена парола — се ориентират по него).
+const AUTH_MODAL_DARK_THEME = {
+  root: 'style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;"',
+  backdrop: 'style="position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"',
+  dialog: 'style="position:relative;width:min(92vw,480px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;"',
+  close: '<button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>',
+  error: 'border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;',
+  primary: 'style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;"',
+  ctaPrimary: 'style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;"',
+  ctaSecondary: 'style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;"',
+  field: 'border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;',
+  genderBox: 'border:1px solid rgba(212,165,32,0.34);background:#050505;',
+  genderText: 'color:rgba(255,255,255,0.72);',
+  title: 'color:#f8fafc;',
+  muted: 'color:rgba(255,255,255,0.72);',
+  label: 'color:#d4a520;',
+  helper: 'color:#ffffff;',
+  eye: 'color:rgba(255,255,255,0.4);',
+  check: 'color:rgba(255,255,255,0.78);',
+  link: 'color:rgba(212,165,32,0.72);',
+}
+
+function guestAuthModalLightTheme(): typeof AUTH_MODAL_DARK_THEME {
+  return {
+    root: `data-lobby-guest-auth-modal="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:${GUEST_MOBILE_LOBBY_FONT_FAMILY};"`,
+    backdrop: 'style="position:absolute;inset:0;background:rgba(20,20,43,0.45);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"',
+    dialog: 'style="position:relative;width:min(100%,400px);box-sizing:border-box;max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;border-radius:12px;border:1px solid #E4E7EC;background:#FFFFFF;box-shadow:0 20px 48px rgba(23,35,60,0.18);padding:28px 20px 20px;"',
+    close: '<button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:8px;top:8px;width:36px;height:36px;border:0;border-radius:8px;background:#F2F4F7;color:#475467;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true" style="display:block;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>',
+    error: 'border-radius:8px;border:1px solid #FECDCA;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:700;text-align:center;',
+    primary: 'class="lobby-violet-btn" style="height:46px;border:0;border-radius:8px;color:#FFFFFF;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;"',
+    ctaPrimary: 'class="lobby-violet-btn" style="height:46px;min-width:150px;border:0;border-radius:8px;color:#FFFFFF;font-size:15px;font-weight:800;cursor:pointer;"',
+    ctaSecondary: 'style="height:46px;min-width:130px;border:1px solid #D0D5DD;border-radius:8px;background:#FFFFFF;color:#17233C;font-size:15px;font-weight:800;cursor:pointer;"',
+    field: 'border:1px solid #D0D5DD;background:#FFFFFF;color:#17233C;',
+    genderBox: 'border:1px solid #D0D5DD;background:#FFFFFF;',
+    genderText: 'color:#667085;',
+    title: 'color:#17233C;',
+    muted: 'color:#667085;',
+    label: 'color:#344054;',
+    helper: 'color:#667085;',
+    eye: 'color:#98A2B3;',
+    check: 'color:#344054;',
+    link: 'color:#7950E8;',
+  }
+}
+
+function renderAuthModal(state: LobbyScreenState, isGuestMobileLobby = false): string {
   if (state.authModalMode === 'closed') {
     return ''
   }
 
   const bonusText = formatAmount(state.signupBonusYellowCoins)
+  if (isGuestMobileLobby && state.authModalMode === 'cta') {
+    return renderGuestMobileLobbyAuthCtaModal(state, bonusText)
+  }
+  const th = isGuestMobileLobby ? guestAuthModalLightTheme() : AUTH_MODAL_DARK_THEME
   const isLogin = state.authModalMode === 'login'
   const isRegister = state.authModalMode === 'register'
   const isForgotPassword = state.authModalMode === 'forgot-password'
@@ -2787,19 +2844,19 @@ function renderAuthModal(state: LobbyScreenState): string {
   const body = isForgotPassword
     ? `
       <form data-lobby-forgot-form="1" style="display:grid;gap:12px;" novalidate>
-        <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;text-align:center;">Забравена парола</div>
-        <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);text-align:center;">
+        <div style="font-size:25px;line-height:1.1;font-weight:900;${th.title}text-align:center;">Забравена парола</div>
+        <div style="font-size:14px;line-height:1.55;${th.muted}text-align:center;">
           Въведете имейл адреса, с който сте регистрирани.
         </div>
-        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;${th.label}">
           Имейл адрес
-          <input name="email" type="email" autocomplete="email" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+          <input name="email" type="email" autocomplete="email" style="height:42px;border-radius:8px;${th.field}padding:0 12px;font-size:15px;font-weight:700;outline:none;">
         </label>
         <div data-lobby-forgot-message="1" style="display:none;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:800;text-align:center;"></div>
-        <button type="submit" data-lobby-forgot-submit="1" style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;">
+        <button type="submit" data-lobby-forgot-submit="1" ${th.primary}>
           Изпрати линк
         </button>
-        <button type="button" data-lobby-auth-mode="login" style="height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">
+        <button type="button" data-lobby-auth-mode="login" style="height:34px;border:0;background:transparent;${th.muted}font-size:13px;font-weight:800;cursor:pointer;">
           Назад към вход
         </button>
       </form>
@@ -2807,66 +2864,66 @@ function renderAuthModal(state: LobbyScreenState): string {
     : state.authModalMode === 'cta'
     ? `
       <div style="display:grid;gap:16px;text-align:center;">
-        <div style="font-size:28px;line-height:1.12;font-weight:900;color:#f8fafc;">
-          Регистрирай се и вземи <span style="white-space:nowrap"><img src="/assets/lobby/icon-coin.png" alt="" style="width:28px;height:28px;vertical-align:middle;margin:0 2px 3px 0;"><span style="color:#d4a520;">${escapeHtml(bonusText)}</span></span> жълтици
+        <div style="font-size:28px;line-height:1.12;font-weight:900;${th.title}">
+          Регистрирай се и вземи <span style="white-space:nowrap"><img src="/assets/lobby/icon-coin.png" alt="" style="width:28px;height:28px;vertical-align:middle;margin:0 2px 3px 0;"><span style="${th.label}">${escapeHtml(bonusText)}</span></span> жълтици
         </div>
-        <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">
+        <div style="font-size:15px;line-height:1.5;${th.muted}font-weight:700;">
           Създай профил, избери име и отключи всички маси. Използвай чат с приятели, изпращай подаръци, печели жълтици и трупай рейтинг.
         </div>
         <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
-          <button type="button" data-lobby-auth-register-button="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Регистрация</button>
-          <button type="button" data-lobby-auth-login-button="1" style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;">Вход</button>
+          <button type="button" data-lobby-auth-register-button="1" ${th.ctaPrimary}>Регистрация</button>
+          <button type="button" data-lobby-auth-login-button="1" ${th.ctaSecondary}>Вход</button>
         </div>
       </div>
     `
     : state.authModalMode === 'lobby-chat-guest'
     ? `
       <div style="display:grid;gap:16px;text-align:center;">
-        <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;">
+        <div style="font-size:22px;line-height:1.25;font-weight:900;${th.title}">
           Общ чат само за регистрирани потребители
         </div>
         <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
-          <button type="button" data-lobby-auth-register-button="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Регистрация</button>
-          <button type="button" data-lobby-auth-login-button="1" style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;">Вход</button>
+          <button type="button" data-lobby-auth-register-button="1" ${th.ctaPrimary}>Регистрация</button>
+          <button type="button" data-lobby-auth-login-button="1" ${th.ctaSecondary}>Вход</button>
         </div>
       </div>
     `
     : `
       <form id="${isLogin ? 'lobby-login-form' : 'lobby-register-form'}" data-lobby-auth-form="${isLogin ? 'login' : 'register'}" style="display:grid;gap:12px;">
-        <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;text-align:center;">
+        <div style="font-size:25px;line-height:1.1;font-weight:900;${th.title}text-align:center;">
           ${isLogin ? 'Вход в профила' : 'Създай профил'}
         </div>
         ${isRegister ? `
-          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+          <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;${th.label}">
             Име в играта
             <span style="position:relative;display:block;">
-              <input id="register-display-name" name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+              <input id="register-display-name" name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;${th.field}padding:0 12px;font-size:15px;font-weight:700;outline:none;">
             </span>
             <span data-name-hint="register" style="min-height:14px;display:block;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;line-height:1.25;letter-spacing:0;text-transform:none;pointer-events:none;white-space:nowrap;"></span>
-            <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
+            <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;${th.helper}">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
           </label>
           <div style="display:grid;gap:6px;">
-            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">Пол</div>
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;${th.label}">Пол</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
               <label style="cursor:pointer;">
                 <input type="radio" name="gender" value="male" style="display:none;" class="belot-gender-radio">
-                <div data-gender-option="male" style="display:flex;align-items:center;gap:8px;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;padding:0 14px;font-size:14px;font-weight:700;color:rgba(255,255,255,0.72);transition:border-color 0.15s,background 0.15s;">
+                <div data-gender-option="male" style="display:flex;align-items:center;gap:8px;height:42px;border-radius:8px;${th.genderBox}padding:0 14px;font-size:14px;font-weight:700;${th.genderText}transition:border-color 0.15s,background 0.15s;">
                   <span style="font-size:18px;">♂</span> Мъж
                 </div>
               </label>
               <label style="cursor:pointer;">
                 <input type="radio" name="gender" value="female" style="display:none;" class="belot-gender-radio">
-                <div data-gender-option="female" style="display:flex;align-items:center;gap:8px;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;padding:0 14px;font-size:14px;font-weight:700;color:rgba(255,255,255,0.72);transition:border-color 0.15s,background 0.15s;">
+                <div data-gender-option="female" style="display:flex;align-items:center;gap:8px;height:42px;border-radius:8px;${th.genderBox}padding:0 14px;font-size:14px;font-weight:700;${th.genderText}transition:border-color 0.15s,background 0.15s;">
                   <span style="font-size:18px;">♀</span> Жена
                 </div>
               </label>
             </div>
           </div>
         ` : ''}
-        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;${th.label}">
           Email
           ${isLogin
-            ? `<input id="login-email" name="email" type="email" autocomplete="username" placeholder="Реален e-mail" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;" placeholder-color="rgba(255,255,255,0.35)">`
+            ? `<input id="login-email" name="email" type="email" autocomplete="username" placeholder="Реален e-mail" style="height:42px;border-radius:8px;${th.field}padding:0 12px;font-size:15px;font-weight:700;outline:none;" placeholder-color="rgba(255,255,255,0.35)">`
             : // Registration-only — НЕ е <input> изобщо (name/id/autocomplete
               // workaround-ите не спряха Chrome-овия saved-address dropdown,
               // виж task-а). contenteditable="plaintext-only" div — Chrome
@@ -2882,17 +2939,17 @@ function renderAuthModal(state: LobbyScreenState): string {
               // text-transform живеят в .registration-contact-editor (виж
               // src/style.css) — не дублирани тук inline, за да останат
               // single source of truth.
-              `<div id="register-profile-contact" class="registration-contact-editor" contenteditable="plaintext-only" role="textbox" aria-label="Имейл" aria-multiline="false" tabindex="0" inputmode="email" spellcheck="false" autocapitalize="none" autocorrect="off" data-placeholder="Реален e-mail" style="border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;font-size:15px;font-weight:700;outline:none;"></div>`}
+              `<div id="register-profile-contact" class="registration-contact-editor" contenteditable="plaintext-only" role="textbox" aria-label="Имейл" aria-multiline="false" tabindex="0" inputmode="email" spellcheck="false" autocapitalize="none" autocorrect="off" data-placeholder="Реален e-mail" style="border-radius:8px;${th.field}font-size:15px;font-weight:700;outline:none;"></div>`}
         </label>
-        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;${th.label}">
           <span style="display:flex;align-items:baseline;gap:6px;">
             Парола
-            ${isRegister ? `<span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 6 символа</span>` : ''}
+            ${isRegister ? `<span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;${th.helper}">Мин. 6 символа</span>` : ''}
           </span>
           <span style="position:relative;display:block;">
             ${isLogin
-              ? `<input id="login-password" name="password" type="password" autocomplete="current-password" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
-                 <button type="button" data-toggle-password="password" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+              ? `<input id="login-password" name="password" type="password" autocomplete="current-password" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;${th.field}padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+                 <button type="button" data-toggle-password="password" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;${th.eye}padding:4px;display:flex;align-items:center;justify-content:center;">
                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                  </button>`
               : // Registration-only — type="text" (НЕ type="password"), за да
@@ -2904,51 +2961,80 @@ function renderAuthModal(state: LobbyScreenState): string {
                 // src/style.css) — идентичен визуален ефект на type="password"
                 // (disc символи), стойността остава directno value на ТОЗИ
                 // input (без второ копие/hidden поле/JS mirror state).
-                `<input id="register-profile-secret" name="profileSecret" type="text" class="registration-secret-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
-                 <button type="button" data-toggle-password="profileSecret" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+                `<input id="register-profile-secret" name="profileSecret" type="text" class="registration-secret-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;${th.field}padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+                 <button type="button" data-toggle-password="profileSecret" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;${th.eye}padding:4px;display:flex;align-items:center;justify-content:center;">
                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                  </button>`}
           </span>
         </label>
         ${isRegister ? `
-        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+        <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;${th.label}">
           Повтори паролата
           <span style="position:relative;display:block;">
-            <input id="register-profile-secret-confirm" name="profileSecretConfirm" type="text" class="registration-secret-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
-            <button type="button" data-toggle-password="profileSecretConfirm" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+            <input id="register-profile-secret-confirm" name="profileSecretConfirm" type="text" class="registration-secret-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;${th.field}padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+            <button type="button" data-toggle-password="profileSecretConfirm" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;${th.eye}padding:4px;display:flex;align-items:center;justify-content:center;">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
           </span>
         </label>
         ` : ''}
         ${isLogin ? `
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.78);cursor:pointer;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;${th.check}cursor:pointer;">
           <input type="checkbox" name="rememberMe" checked style="width:16px;height:16px;cursor:pointer;">
           Запомни ме на това устройство
         </label>
         ` : ''}
-        <button type="submit" style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;">
+        <button type="submit" ${th.primary}>
           ${isLogin ? 'Влез' : 'Регистрирай се'}
         </button>
         ${isLogin ? `
-        <button type="button" data-lobby-auth-mode="forgot-password" style="height:28px;border:0;background:transparent;color:rgba(212,165,32,0.72);font-size:12px;font-weight:700;cursor:pointer;text-decoration:underline;text-underline-offset:2px;">
+        <button type="button" data-lobby-auth-mode="forgot-password" style="height:28px;border:0;background:transparent;${th.link}font-size:12px;font-weight:700;cursor:pointer;text-decoration:underline;text-underline-offset:2px;">
           Забравена парола?
         </button>
         ` : ''}
-        <button type="button" data-lobby-auth-mode="${isLogin ? 'register' : 'login'}" style="height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;">
+        <button type="button" data-lobby-auth-mode="${isLogin ? 'register' : 'login'}" style="height:34px;border:0;background:transparent;${th.muted}font-size:13px;font-weight:800;cursor:pointer;">
           ${isLogin ? 'Нямаш профил? Регистрирай се' : 'Имаш профил? Влез'}
         </button>
       </form>
     `
 
   return `
-    <div data-lobby-auth-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-lobby-auth-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
-      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,480px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
-        <button type="button" data-lobby-auth-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+    <div data-lobby-auth-modal-root="1" ${th.root}>
+      <div data-lobby-auth-modal-backdrop="1" ${th.backdrop}></div>
+      <div role="dialog" aria-modal="true" ${th.dialog}>
+        ${th.close}
         <div style="display:grid;gap:14px;">
           ${body}
-          <div data-lobby-auth-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;${state.authErrorText ? '' : 'display:none;'}">${state.authErrorText ? escapeHtml(state.authErrorText) : ''}</div>
+          <div data-lobby-auth-error="1" style="${th.error}${state.authErrorText ? '' : 'display:none;'}">${state.authErrorText ? escapeHtml(state.authErrorText) : ''}</div>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+// Светлата версия на 'cta' popup-а — само в новото мобилно лоби за гости
+// (renderAuthModal(state, isGuestMobileLobby)). Същите текстове и data-*
+// атрибути (root/backdrop/close/register/login/error) → същите действия,
+// затваряне и блокиране на лобито; рамката е guestAuthModalLightTheme().
+function renderGuestMobileLobbyAuthCtaModal(state: LobbyScreenState, bonusText: string): string {
+  const th = guestAuthModalLightTheme()
+  return `
+    <div data-lobby-auth-modal-root="1" ${th.root}>
+      <div data-lobby-auth-modal-backdrop="1" ${th.backdrop}></div>
+      <div role="dialog" aria-modal="true" ${th.dialog}>
+        ${th.close}
+        <div style="display:grid;gap:14px;text-align:center;">
+          <div style="font-size:24px;line-height:1.2;font-weight:900;color:#17233C;padding:0 18px;">
+            Регистрирай се и вземи <span style="white-space:nowrap;color:#7950E8;">${escapeHtml(bonusText)} жълтици</span>
+          </div>
+          <div style="font-size:15px;line-height:1.5;color:#667085;font-weight:600;">
+            Създай профил, избери име и отключи всички маси. Използвай чат с приятели, изпращай подаръци, печели жълтици и трупай рейтинг.
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px;">
+            <button type="button" class="lobby-violet-btn" data-lobby-auth-register-button="1" style="height:46px;min-width:0;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;">Регистрация</button>
+            <button type="button" data-lobby-auth-login-button="1" style="height:46px;min-width:0;border:1px solid #D0D5DD;border-radius:8px;background:#FFFFFF;color:#17233C;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;">Вход</button>
+          </div>
+          <div data-lobby-auth-error="1" style="${th.error}${state.authErrorText ? '' : 'display:none;'}">${state.authErrorText ? escapeHtml(state.authErrorText) : ''}</div>
         </div>
       </div>
     </div>
@@ -4634,8 +4720,75 @@ type MissionsPopupState = {
   isLoggedIn: boolean
 }
 
-function renderMissionsPopup(state: MissionsPopupState): string {
+// Светлата версия на "Дневни мисии" — само в новото мобилно лоби за гости.
+// Същите текстове, състояния (вкл. "Влез в профила си…" за гост) и data-*
+// атрибути (root/backdrop/close/claim) → същите действия; заявките и
+// логиката на мисиите не се пипат.
+function renderGuestMobileLobbyMissionsPopup(state: MissionsPopupState): string {
+  const missions = state.dailyMissions
+  const message = (text: string) => `<div style="color:#667085;font-size:14px;line-height:1.5;padding:20px 0;text-align:center;">${text}</div>`
+  const missionsHtml = state.dailyMissionsLoading
+    ? message('Зареждане...')
+    : state.dailyMissionsErrorText
+      ? `<div style="border-radius:8px;border:1px solid #FECDCA;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:700;text-align:center;">${escapeHtml(state.dailyMissionsErrorText)}</div>`
+      : !state.isLoggedIn
+        ? message('Влез в профила си, за да виждаш мисиите.')
+        : missions.length === 0
+          ? message('Няма активни мисии за днес.')
+          : missions.map((mission) => {
+              const progressPct = Math.round(Math.min(1, mission.targetCount > 0 ? mission.progressCount / mission.targetCount : 0) * 100)
+              const isComplete = mission.isCompleted
+              const isClaiming = state.missionClaimingId === mission.missionId
+              const isClaimed = mission.isClaimed
+              const chip = 'height:32px;padding:0 12px;border-radius:8px;display:flex;align-items:center;font-size:12px;font-weight:800;'
+              return `
+                <div style="border-radius:10px;border:1px solid ${isComplete && !isClaimed ? '#ABEFC6' : '#EAECF0'};background:${isComplete && !isClaimed ? '#F6FEF9' : '#FFFFFF'};padding:14px 16px;display:grid;gap:10px;">
+                  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
+                    <div style="flex:1;min-width:0;">
+                      <div style="font-size:14px;font-weight:800;color:${isClaimed ? '#98A2B3' : '#17233C'};${isClaimed ? 'text-decoration:line-through;' : ''}">${escapeHtml(mission.title)}</div>
+                      <div style="font-size:12px;color:#667085;margin-top:2px;">${mission.progressCount} / ${mission.targetCount}</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+                      <div style="display:flex;align-items:center;gap:4px;">
+                        <img src="${guestLobbyIcon('icon-balance-coin')}" alt="" style="width:18px;height:18px;object-fit:contain;">
+                        <span style="font-size:13px;font-weight:800;color:#17233C;">${formatAmount(mission.rewardYellowCoins)}</span>
+                      </div>
+                      ${isClaimed
+                        ? `<div style="${chip}border:1px solid #ABEFC6;background:#ECFDF3;color:#067647;">Взето ✓</div>`
+                        : isComplete
+                          ? `<button type="button" class="lobby-violet-btn" data-mission-claim="${escapeHtml(mission.missionId)}" ${isClaiming ? 'disabled' : ''} style="${chip}border:0;color:#FFFFFF;font-family:inherit;cursor:${isClaiming ? 'not-allowed' : 'pointer'};">${isClaiming ? 'Зареждане...' : 'Вземи награда'}</button>`
+                          : `<div style="${chip}border:1px solid #EAECF0;background:#F9FAFB;color:#667085;">В прогрес</div>`
+                      }
+                    </div>
+                  </div>
+                  <div style="height:6px;border-radius:99px;background:#EAECF0;overflow:hidden;">
+                    <div style="height:100%;width:${progressPct}%;border-radius:99px;background:${isComplete || isClaimed ? '#17B26A' : '#7950E8'};transition:width 0.4s ease;"></div>
+                  </div>
+                </div>
+              `
+            }).join('')
+
+  return `
+    <div data-missions-popup-root="1" data-missions-popup-light="1" style="position:fixed;inset:0;z-index:14000;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:${GUEST_MOBILE_LOBBY_FONT_FAMILY};">
+      <div data-missions-popup-backdrop="1" style="position:absolute;inset:0;background:rgba(20,20,43,0.45);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(100%,440px);box-sizing:border-box;max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;border-radius:12px;border:1px solid #E4E7EC;background:#FFFFFF;box-shadow:0 20px 48px rgba(23,35,60,0.18);padding:20px;">
+        <button type="button" data-missions-popup-close="1" aria-label="Затвори" style="position:absolute;right:8px;top:8px;width:36px;height:36px;border:0;border-radius:8px;background:#F2F4F7;color:#475467;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true" style="display:block;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+        <div style="display:flex;align-items:center;gap:12px;margin:0 40px 16px 0;">
+          <img src="${guestLobbyIcon('icon-missions')}" alt="" width="36" height="36" style="width:36px;height:36px;object-fit:contain;flex-shrink:0;">
+          <div style="font-size:20px;font-weight:900;color:#17233C;">Дневни мисии</div>
+        </div>
+        ${state.missionClaimErrorText ? `<div style="border-radius:8px;border:1px solid #FECDCA;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:700;margin-bottom:12px;">${escapeHtml(state.missionClaimErrorText)}</div>` : ''}
+        <div style="display:grid;gap:10px;">
+          ${missionsHtml}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderMissionsPopup(state: MissionsPopupState, isGuestMobileLobby = false): string {
   if (!state.missionsPopupOpen) return ''
+  if (isGuestMobileLobby) return renderGuestMobileLobbyMissionsPopup(state)
 
   const missions = state.dailyMissions
   const isLoggedIn = state.isLoggedIn
@@ -5122,7 +5275,10 @@ export function syncMissionsPopup(
     document.body.appendChild(missionsPopupRootEl)
   }
 
-  missionsPopupRootEl.innerHTML = renderMissionsPopup(state)
+  // Модалът е извън root-а на лобито — светлата версия се включва, когато
+  // под него е новото мобилно лоби за гости.
+  const isGuestMobileLobby = document.querySelector('[data-lobby-guest-mobile-light="1"]') !== null
+  missionsPopupRootEl.innerHTML = renderMissionsPopup(state, isGuestMobileLobby)
 
   missionsPopupRootEl.querySelector('[data-missions-popup-close="1"]')
     ?.addEventListener('click', callbacks.onClose)
@@ -5626,8 +5782,9 @@ function mobileMenuSvgItemContent(
   icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'games' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support' | 'tournaments' | 'topics',
   label: string,
   badgeCount = 0,
+  strokeOverride: string | null = null,
 ): string {
-  const stroke = icon === 'logout' ? '#fecaca' : '#d4a520'
+  const stroke = strokeOverride ?? (icon === 'logout' ? '#fecaca' : '#d4a520')
   const badge = formatNotificationBadgeCount(badgeCount)
   const path = icon === 'support'
     ? '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>'
@@ -5985,6 +6142,538 @@ function renderMobileSectionTitle(label: string): string {
     <div style="padding:0 12px 9px;display:flex;align-items:center;justify-content:space-between;">
       <h2 style="margin:0;color:#d4a520;font-size:15px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;">${label}</h2>
     </div>
+  `
+}
+
+// ─── Мобилно лоби за гости — светъл редизайн ────────────────────────────────
+// Само визуален слой върху СЪЩЕСТВУВАЩИТЕ действия: всеки бутон носи същите
+// data-* атрибути като досегашното мобилно лоби (data-lobby-auth-login,
+// data-lobby-stake-card, data-lobby-private-rooms-card, ...), затова wiring-ът
+// и controller логиката (гост-пробна маса 5000, заключени маси, auth попъпи,
+// частни маси, награди, мисии) остават непроменени. Активира се само при
+// телефон + гост + изглед "tables" (виж isGuestMobileLobby в renderLobbyScreen);
+// логнатите потребители и desktop/таблет не минават оттук.
+
+const GUEST_LOBBY_ICON_DIR = '/assets/lobby-mobile/icons'
+// Информационните екрани от долната част на гост лобито — на телефон за гост
+// се отварят в същата светла рамка (header, долна навигация, footer) със
+// светлата палитра на страниците (render*Page(isMobile, light)). Магазинът
+// ("Меню" → "Магазин") — също, със светлия renderGuestMobileShopPanel. "Игри"
+// (долна навигация) — със светлия вариант на renderMoreGamesScreen. "Контакти"
+// (/contact) — със светлия renderPublicLegalPage (Общи условия и Поверителност
+// остават тъмни).
+const GUEST_MOBILE_LIGHT_INFO_VIEWS = new Set<string>(['rules', 'strategy', 'learn', 'fair-play', 'faq', 'shop', 'more-games', 'contact'])
+// Изображенията в секциите. Белот: ЕДНО общо универсално изображение за
+// всички случайни маси (без надписи/суми), 640×320 (2:1). "Не се сърди
+// човече": един широк банер, 1200×320 (15:4).
+const GUEST_LOBBY_BELOT_TABLE_IMAGE_URL = '/assets/lobby-mobile/belot-table.webp'
+const GUEST_LOBBY_LUDO_BANNER_IMAGE_URL = '/assets/lobby-mobile/ludo-banner.webp'
+// Без двойни кавички — стойността влиза в inline style="..." атрибут.
+export const GUEST_MOBILE_LOBBY_FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif"
+export const GUEST_MOBILE_LOBBY_BOTTOM_NAV_CLEARANCE = 'calc(84px + env(safe-area-inset-bottom, 0px))'
+const GUEST_LOBBY_TEXT = '#14142B'
+const GUEST_LOBBY_MUTED = '#6B7090'
+const GUEST_LOBBY_VIOLET = '#7950E8'
+const GUEST_LOBBY_CARD_SHADOW = '0 6px 18px rgba(34,30,80,0.07)'
+
+function guestLobbyIcon(name: string): string {
+  return `${GUEST_LOBBY_ICON_DIR}/${name}.webp`
+}
+
+function guestLobbyChevron(color = '#A3A6C2'): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block;flex:0 0 auto;"><polyline points="9 6 15 12 9 18"/></svg>`
+}
+
+function guestLobbyCountPill(count: number, tone: 'red' | 'violet' = 'red'): string {
+  const displayCount = formatNotificationBadgeCount(count)
+  if (displayCount === null) return ''
+  const colors = tone === 'red'
+    ? 'background:#FDE8EC;color:#E5484D;'
+    : 'background:#EEE9FF;color:#7950E8;'
+  return `<span aria-hidden="true" style="${colors}min-width:28px;height:26px;border-radius:6px;padding:0 8px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;flex:0 0 auto;">${escapeHtml(displayCount)}</span>`
+}
+
+function guestLobbyMenuItemStyle(background = '#F5F7FC', color = GUEST_LOBBY_TEXT): string {
+  return `
+    width:100%;min-height:44px;border:0;border-radius:8px;
+    background:${background};color:${color};font-family:inherit;font-size:14px;font-weight:800;text-align:left;
+    padding:0 12px;cursor:pointer;display:flex;align-items:center;gap:10px;
+  `
+}
+
+// Header: вляво логото (logo-pika-text), вдясно само "Гост" — същият auth
+// попъп ('cta': Регистрация/Вход) като останалите гост-gate-ове.
+function renderGuestMobileLobbyHeader(): string {
+  return `
+    <header data-lobby-guest-mobile-header="1" style="
+      position:sticky;top:0;z-index:120;background:#F5F7FC;
+      padding:calc(8px + env(safe-area-inset-top, 0px)) 12px 8px;display:flex;align-items:center;gap:10px;
+    ">
+      <a href="/lobby" data-lobby-nav-lobby="1" aria-label="Pika.bg" style="border:0;background:transparent;padding:0;display:flex;align-items:center;text-decoration:none;flex:0 0 auto;">
+        <img src="/assets/lobby-mobile/logo-pika-text.webp" alt="Pika.bg" width="120" height="40" style="width:120px;height:40px;display:block;object-fit:contain;">
+      </a>
+      <button type="button" data-lobby-guest-auth-gate="1" data-lobby-guest-profile-button="1" aria-label="Гост — вход или регистрация" style="
+        margin-left:auto;height:44px;padding:0 16px 0 6px;border:0;border-radius:12px;
+        background:#FFFFFF;box-shadow:0 4px 14px rgba(34,30,80,0.08);
+        display:flex;align-items:center;gap:8px;cursor:pointer;
+        color:${GUEST_LOBBY_TEXT};font-family:inherit;font-size:15px;font-weight:800;
+      ">
+        <span aria-hidden="true" style="width:32px;height:32px;border-radius:50%;background:linear-gradient(180deg,#8961F0 0%,#6C43DD 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.3);display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF" style="display:block;"><circle cx="12" cy="8" r="4.2"/><path d="M3.8 20.4c0-4.1 3.7-6.9 8.2-6.9s8.2 2.8 8.2 6.9c0 .6-.4.9-1 .9H4.8c-.6 0-1-.3-1-.9z"/></svg>
+        </span>
+        Гост
+      </button>
+    </header>
+  `
+}
+
+// Менюто на мобилното лоби за гости — отваря се САМО от "Меню" в долната
+// навигация. Същият <details data-lobby-mobile-menu> и атрибути като в
+// renderMobileMenu (open/close wiring, syncCachedMobileMenuOpenState marker
+// 'data-lobby-mobile-menu="1"  style=', badge patch-ът на
+// data-mobile-menu-item-badge); summary-то е скрито, панелът се закотвя над
+// долната навигация. Общата значка (data-mobile-menu-total-badge) е върху
+// "Меню" в долната навигация. Елементите са гост-клонът на renderMobileMenu
+// в същия ред.
+function renderGuestMobileLobbyMenu(): string {
+  return `
+    <div data-lobby-guest-menu-host="1" style="position:fixed;right:10px;bottom:${GUEST_MOBILE_LOBBY_BOTTOM_NAV_CLEARANCE};width:0;height:0;z-index:140;">
+      <style>
+        @keyframes mobile-menu-backdrop-in { from { opacity:0; } to { opacity:1; } }
+        @keyframes mobile-menu-backdrop-out { from { opacity:1; } to { opacity:0; } }
+        @keyframes mobile-menu-shade-in {
+          from { opacity:0; transform:translateY(8px) scaleY(0.88); }
+          to { opacity:1; transform:translateY(0) scaleY(1); }
+        }
+        @keyframes mobile-menu-shade-out {
+          from { opacity:1; transform:translateY(0) scaleY(1); }
+          to { opacity:0; transform:translateY(8px) scaleY(0.88); }
+        }
+      </style>
+      <details data-lobby-mobile-menu="1" ${mobileMenuOpen ? 'open' : ''} style="position:absolute;right:0;bottom:0;">
+        <summary data-lobby-mobile-menu-summary="1" aria-hidden="true" tabindex="-1" style="display:none;">
+          Меню
+        </summary>
+        <button type="button" data-lobby-mobile-menu-backdrop="1" aria-label="Затвори менюто" style="
+          position:fixed;inset:0;z-index:1;border:0;background:rgba(20,20,43,0.08);
+          padding:0;margin:0;cursor:default;
+        "></button>
+        <div data-lobby-mobile-menu-panel="1" style="
+          position:absolute;right:0;bottom:6px;width:min(82vw,280px);
+          max-height:calc(100dvh - 120px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+          overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;
+          background:#FFFFFF;border:1px solid rgba(20,20,43,0.06);border-radius:12px;
+          box-shadow:0 18px 44px rgba(34,30,80,0.18);
+          padding:8px;box-sizing:border-box;
+          display:grid;gap:6px;
+          z-index:2;transform-origin:bottom right;
+        ">
+          <button type="button" data-lobby-nav-lobby="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('lobby', 'Лоби', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-nav-shop="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('shop', 'Магазин', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-nav-games="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('games', 'Игри', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-guest-auth-gate="1" data-lobby-guest-tournaments="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('tournaments', 'Турнири', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-nav-players="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('players', 'Играчите', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-nav-leaderboards="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('leaderboards', 'Класация', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-nav-guest-contact="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('support', 'Контакти', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-auth-login="1" style="${guestLobbyMenuItemStyle()}">${mobileMenuSvgItemContent('login', 'Вход', 0, GUEST_LOBBY_VIOLET)}</button>
+          <button type="button" data-lobby-auth-register="1" style="${guestLobbyMenuItemStyle('linear-gradient(180deg,#FFD66B 0%,#F2B62C 100%)', '#3B2A00')}">${mobileMenuSvgItemContent('login', 'Регистрация', 0, '#3B2A00')}</button>
+        </div>
+      </details>
+    </div>
+  `
+}
+
+function renderGuestMobileLobbyAuthCard(signupBonus: number): string {
+  const buttonBase = `
+    height:48px;border-radius:8px;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:8px;padding:0 8px;min-width:0;white-space:nowrap;
+  `
+  return `
+    <section data-lobby-guest-auth-card="1" style="
+      margin:4px 12px 12px;position:relative;overflow:hidden;border-radius:12px;
+      background:linear-gradient(135deg,#FFFCF2 0%,#FFF4D9 55%,#FFE8B3 100%);
+      border:1px solid rgba(233,160,27,0.22);box-shadow:0 8px 22px rgba(201,143,19,0.12);
+      padding:14px;
+    ">
+      <div data-lobby-guest-auth-card-text="1" style="font-size:15px;line-height:1.4;color:#3D3F5C;font-weight:600;">
+        Влез или създай профил и започни със <span style="color:#C98500;font-weight:900;white-space:nowrap;">${formatAmount(signupBonus)} жълтици</span>.
+      </div>
+      <div style="position:relative;margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <button type="button" data-lobby-auth-login="1" style="${buttonBase}border:1px solid rgba(20,20,43,0.08);background:#FFFFFF;color:${GUEST_LOBBY_TEXT};box-shadow:0 4px 12px rgba(34,30,80,0.08);">
+          <img src="${guestLobbyIcon('icon-menu-login')}" alt="" width="24" height="24" style="width:24px;height:24px;display:block;object-fit:contain;">
+          Вход
+        </button>
+        <button type="button" data-lobby-auth-register="1" style="${buttonBase}border:0;background:linear-gradient(180deg,#FFD66B 0%,#F2B62C 100%);color:#3B2A00;box-shadow:inset 0 1px 0 rgba(255,255,255,0.55),0 6px 14px rgba(242,182,44,0.32);">
+          <img src="${guestLobbyIcon('icon-menu-register')}" alt="" width="24" height="24" style="width:24px;height:24px;display:block;object-fit:contain;">
+          Регистрация
+        </button>
+      </div>
+    </section>
+  `
+}
+
+// "Публикации от Pika.bg" — свит банер (последната реална публикация като
+// подзаглавие). Клик = СЪЩИЯТ data-lobby-livechat-fullscreen-toggle като в
+// досегашната лента → отваря пълноекранния панел (renderMobileLobbyChatSection,
+// непроменен) със съобщенията, guest gate-а на полето и бутона за свиване.
+function renderGuestMobileLobbyPostsBanner(state: LobbyScreenState): string {
+  const latest = state.lobbyChatMessages.length > 0 ? state.lobbyChatMessages[state.lobbyChatMessages.length - 1] : null
+  const subtitle = latest ? latest.body.replace(/\s+/g, ' ').trim() : 'Все още няма съобщения.'
+  return `
+    <button type="button" data-lobby-livechat-fullscreen-toggle="1" data-lobby-guest-posts-banner="1" aria-label="Отвори публикациите от Pika.bg" style="
+      margin:0 12px 18px;width:calc(100% - 24px);box-sizing:border-box;
+      display:flex;align-items:center;gap:12px;padding:12px 12px 12px 12px;
+      border:0;border-radius:12px;background:linear-gradient(135deg,#232750 0%,#161935 100%);
+      color:#FFFFFF;font-family:inherit;text-align:left;cursor:pointer;
+      box-shadow:0 10px 24px rgba(22,25,53,0.22);position:relative;overflow:hidden;
+    ">
+      <img src="${guestLobbyIcon('logo-spade')}" alt="" aria-hidden="true" style="position:absolute;right:34px;top:50%;width:84px;height:84px;transform:translateY(-50%);opacity:0.07;filter:grayscale(1) brightness(2.2);pointer-events:none;">
+      <span style="width:48px;height:48px;border-radius:8px;background:rgba(121,80,232,0.24);display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
+        <svg data-lobby-guest-posts-icon="1" xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="${GUEST_LOBBY_VIOLET}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block;">${GUEST_LOBBY_NAV_ICON_PATHS.topics.replaceAll('<path ', '<path vector-effect="non-scaling-stroke" ')}</svg>
+      </span>
+      <span style="position:relative;min-width:0;flex:1;display:grid;gap:3px;">
+        <span style="font-size:16px;line-height:1.2;font-weight:800;">Публикации от Pika.bg</span>
+        <span style="font-size:12.5px;line-height:1.3;color:rgba(255,255,255,0.68);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(subtitle)}</span>
+        ${!state.isConnected ? '<span style="font-size:11px;font-weight:800;color:#FCA5A5;">Няма връзка</span>' : ''}
+      </span>
+      ${guestLobbyChevron('rgba(255,255,255,0.78)')}
+    </button>
+  `
+}
+
+function renderGuestMobileLobbySectionTitle(iconName: string, title: string, aside = ''): string {
+  return `
+    <div style="padding:0 12px 10px;display:flex;align-items:center;gap:8px;">
+      <img src="${guestLobbyIcon(iconName)}" alt="" width="34" height="34" style="width:34px;height:34px;display:block;object-fit:contain;flex:0 0 auto;">
+      <h2 style="margin:0;color:${GUEST_LOBBY_TEXT};font-size:22px;line-height:1.1;font-weight:900;letter-spacing:-0.01em;min-width:0;">${escapeHtml(title)}</h2>
+      ${aside ? `<span style="margin-left:auto;color:${GUEST_LOBBY_MUTED};font-size:13px;font-weight:700;white-space:nowrap;">${aside}</span>` : ''}
+    </div>
+  `
+}
+
+// Контейнер за изображение — снимката запълва контейнера с object-fit:cover
+// (без деформиране), overflow:hidden пази заоблените ъгли.
+function renderGuestLobbyMediaSlot(slot: 'belot-table' | 'ludo-banner', aspectRatio: string, imageUrl: string): string {
+  return `
+    <div data-lobby-media-slot="${slot}" aria-hidden="true" style="aspect-ratio:${aspectRatio};border-radius:8px;overflow:hidden;background:#E7EDFB;">
+      <img src="${escapeHtml(imageUrl)}" alt="" style="width:100%;height:100%;display:block;object-fit:cover;">
+    </div>
+  `
+}
+
+function renderGuestLobbyTableStat(iconName: string, label: string, valueHtml: string): string {
+  return `
+    <div style="display:flex;align-items:center;gap:5px;min-width:0;">
+      <img src="${guestLobbyIcon(iconName)}" alt="" width="17" height="17" style="width:17px;height:17px;display:block;object-fit:contain;flex:0 0 auto;">
+      <dt style="margin:0;min-width:0;font-size:11.5px;font-weight:600;color:${GUEST_LOBBY_MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</dt>
+      <dd style="margin:0 0 0 auto;display:flex;align-items:center;gap:3px;font-size:13px;font-weight:800;color:${GUEST_LOBBY_TEXT};white-space:nowrap;">${valueHtml}</dd>
+    </div>
+  `
+}
+
+function renderGuestLobbyCoinAmount(amount: number): string {
+  return `${formatAmount(amount)}<img src="${guestLobbyIcon('icon-balance-coin')}" alt="" width="14" height="14" style="width:14px;height:14px;display:block;object-fit:contain;">`
+}
+
+// "Белот" — РЕАЛНИТЕ state.matchRooms (GET /api/rooms → admin-управляваната
+// match_rooms таблица; същият източник/филтър/ред като renderMobileStakeSection:
+// isEnabled, в реда от сървъра). Награда/вход = room.prizeAmount/stakeAmount
+// директно, без локални суми или изчисления; брой играчи не се показва —
+// сървърът не подава текуща заетост по маса. Две карти на екран,
+// хоризонтален scroll с пръст през всички маси. Бутонът е същият
+// data-lobby-stake-card(+guest-locked) → controller-ът решава: гост-пробна маса
+// (5000) или попъп за заключена маса.
+function renderGuestMobileLobbyBelotSection(
+  selectedStake: MatchStake,
+  canStartSearch: boolean,
+  isSearching: boolean,
+  matchRooms: MatchRoomSnapshot[],
+  playerLevel: number,
+  matchRoomsLoading: boolean,
+  guestTrialStake: MatchStake = 5000,
+): string {
+  const rooms = matchRooms.filter((room) => room.isEnabled)
+
+  if (matchRoomsLoading) {
+    return `
+      <section style="margin-top:4px;">
+        ${renderGuestMobileLobbySectionTitle('icon-belot-section', 'Белот')}
+        <div style="padding:14px 12px 18px;color:${GUEST_LOBBY_MUTED};font-size:14px;font-weight:700;">Зареждане на масите...</div>
+      </section>
+    `
+  }
+
+  const cards = rooms.map((room) => {
+    const isLockedForGuest = room.stakeAmount !== guestTrialStake
+    const isLocked = playerLevel < room.minLevel || isLockedForGuest
+    const isSelected = isSearching && room.stakeAmount === selectedStake
+    const isDisabled = !canStartSearch || (isLocked && !isLockedForGuest)
+    const lockIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block;flex:0 0 auto;"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'
+
+    const action = isLockedForGuest
+      ? `<button type="button" class="lobby-violet-btn" data-lobby-stake-card="${room.stakeAmount}" data-lobby-stake-card-guest-locked="1" aria-label="Играй — масата изисква профил" style="${guestLobbyPlayButtonStyle()}">${lockIcon}Играй</button>`
+      : isLocked
+        ? `<div style="height:42px;border-radius:8px;background:#F1F2F8;color:#B42318;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;">Ниво ${room.minLevel}</div>`
+        : `<button type="button" class="lobby-violet-btn" data-lobby-stake-card="${room.stakeAmount}" ${isDisabled ? 'disabled' : ''} style="${guestLobbyPlayButtonStyle()}">Играй</button>`
+
+    return `
+      <article data-lobby-guest-table-card="${room.stakeAmount}" style="
+        flex:0 0 calc((100% - 10px) / 2);min-width:0;box-sizing:border-box;scroll-snap-align:start;
+        background:#FFFFFF;border-radius:12px;padding:8px;
+        border:${isSelected ? `2px solid ${GUEST_LOBBY_VIOLET}` : '1px solid rgba(20,20,43,0.05)'};
+        box-shadow:${GUEST_LOBBY_CARD_SHADOW};display:flex;flex-direction:column;gap:9px;
+      ">
+        ${renderGuestLobbyMediaSlot('belot-table', '2 / 1', GUEST_LOBBY_BELOT_TABLE_IMAGE_URL)}
+        <dl style="margin:0;padding:0 2px;display:grid;gap:6px;">
+          ${renderGuestLobbyTableStat('icon-tournaments', 'Награда', renderGuestLobbyCoinAmount(room.prizeAmount))}
+          ${renderGuestLobbyTableStat('icon-card-entry', 'Вход', renderGuestLobbyCoinAmount(room.stakeAmount))}
+        </dl>
+        ${action}
+      </article>
+    `
+  }).join('')
+
+  const tablesCount = rooms.length === 1 ? '1 маса' : `${rooms.length} маси`
+
+  return `
+    <section data-lobby-guest-belot-section="1" style="margin-top:4px;">
+      ${renderGuestMobileLobbySectionTitle('icon-belot-section', 'Белот', rooms.length > 0 ? tablesCount : '')}
+      <div data-lobby-guest-carousel="1" style="position:relative;">
+        <div data-lobby-stakes-scroll="1" style="
+          position:relative;
+          display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;
+          padding:2px 12px 16px;scroll-padding-left:12px;scroll-padding-right:12px;
+          -webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;
+        ">
+          ${cards || `<div style="color:${GUEST_LOBBY_MUTED};font-size:14px;font-weight:700;padding:12px 0;">Няма активни маси в момента.</div>`}
+        </div>
+        ${rooms.length > 0 ? `${renderGuestCarouselArrow('prev')}${renderGuestCarouselArrow('next')}` : ''}
+      </div>
+    </section>
+  `
+}
+
+// Стрелки на карусела с масите — overlay полукръгове, прилепени към ръба
+// (правата страна е ръбът, заоблената сочи навътре). Скрити по подразбиране;
+// attachGuestTablesCarousel() ги показва според реалния scrollLeft/scrollWidth.
+// Центрирани по реда с картите: padding-ът на scroller-а е 2px горе / 16px
+// долу, затова центърът е 7px над средата на контейнера.
+function renderGuestCarouselArrow(direction: 'prev' | 'next'): string {
+  const isPrev = direction === 'prev'
+  const chevron = isPrev ? '<path d="m15 18-6-6 6-6"/>' : '<path d="m9 18 6-6-6-6"/>'
+  return `
+    <button type="button" data-lobby-guest-carousel-arrow="${direction}" aria-label="${isPrev ? 'Предишни маси' : 'Следващи маси'}" style="
+      position:absolute;${isPrev ? 'left:0;border-radius:0 23px 23px 0;padding:0 2px 0 0;' : 'right:0;border-radius:23px 0 0 23px;padding:0 0 0 2px;'}
+      top:calc(50% - 7px);transform:translateY(-50%);z-index:2;
+      width:24px;height:46px;margin:0;border:0;box-sizing:border-box;
+      display:none;align-items:center;justify-content:center;
+      background:rgba(246,243,255,0.4);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
+      box-shadow:0 1px 4px rgba(34,30,80,0.08);
+      color:${GUEST_LOBBY_VIOLET};cursor:pointer;-webkit-tap-highlight-color:transparent;
+    "><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block;flex:0 0 auto;">${chevron}</svg></button>
+  `
+}
+
+// Ключ за запазване на хоризонталната позиция между рендерите: залогът на
+// първата (поне частично) видима маса. null — няма карусел или маси.
+function readGuestTablesCarouselAnchor(root: ParentNode): { stake: string | null; scrollLeft: number } | null {
+  const scroller = root.querySelector<HTMLElement>('[data-lobby-guest-carousel="1"] [data-lobby-stakes-scroll="1"]')
+  if (!scroller) return null
+  const scrollPaddingLeft = 12
+  const first = Array.from(scroller.querySelectorAll<HTMLElement>('[data-lobby-guest-table-card]'))
+    .find((card) => card.offsetLeft + card.offsetWidth > scroller.scrollLeft + scrollPaddingLeft + 1)
+  return { stake: first?.dataset.lobbyGuestTableCard ?? null, scrollLeft: scroller.scrollLeft }
+}
+
+function attachGuestTablesCarousel(root: ParentNode, anchor: { stake: string | null; scrollLeft: number } | null): void {
+  const carousel = root.querySelector<HTMLElement>('[data-lobby-guest-carousel="1"]')
+  const scroller = carousel?.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
+  if (!carousel || !scroller) return
+  const prev = carousel.querySelector<HTMLButtonElement>('[data-lobby-guest-carousel-arrow="prev"]')
+  const next = carousel.querySelector<HTMLButtonElement>('[data-lobby-guest-carousel-arrow="next"]')
+  const scrollPaddingLeft = 12
+  const getCards = () => Array.from(scroller.querySelectorAll<HTMLElement>('[data-lobby-guest-table-card]'))
+  const maxScroll = () => Math.max(0, scroller.scrollWidth - scroller.clientWidth)
+
+  if (anchor) {
+    const anchorCard = anchor.stake === null ? undefined : getCards().find((card) => card.dataset.lobbyGuestTableCard === anchor.stake)
+    const target = anchorCard ? anchorCard.offsetLeft - scrollPaddingLeft : anchor.scrollLeft
+    scroller.scrollLeft = Math.max(0, Math.min(target, maxScroll()))
+  }
+
+  const sync = () => {
+    const max = maxScroll()
+    if (prev) prev.style.display = scroller.scrollLeft > 1 ? 'flex' : 'none'
+    if (next) next.style.display = scroller.scrollLeft < max - 1 ? 'flex' : 'none'
+  }
+
+  const step = (direction: 1 | -1) => {
+    const current = scroller.scrollLeft
+    const offsets = getCards().map((card) => Math.min(card.offsetLeft - scrollPaddingLeft, maxScroll()))
+    const target = direction === 1
+      ? offsets.find((left) => left > current + 1)
+      : [...offsets].reverse().find((left) => left < current - 1)
+    scroller.scrollTo({ left: target ?? (direction === 1 ? maxScroll() : 0), behavior: 'smooth' })
+  }
+
+  for (const [button, direction] of [[prev, -1], [next, 1]] as const) {
+    button?.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      step(direction)
+    })
+  }
+  scroller.addEventListener('scroll', sync, { passive: true })
+  // Промяна в ширината (ротация, зареждане на шрифт) — ResizeObserver на
+  // самия scroller; при нов брой маси целият карусел се рендира наново.
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(sync).observe(scroller)
+  sync()
+}
+
+function guestLobbyPlayButtonStyle(): string {
+  return `
+    width:100%;height:42px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;
+    font-size:16px;font-weight:800;letter-spacing:0.01em;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:6px;
+  `
+}
+
+// "Не се сърди човече" — един широк банер. Ludo лобито изисква профил
+// (openLudoLobbyOverlay връща гост към "Игри" с "Трябва да влезеш в профила
+// си."), затова за гост "Създай игра" отваря стандартния auth попъп ('cta'),
+// както останалите само-за-регистрирани действия. Без публични маси —
+// сървърът не ги подава към лобито. Скрит изцяло при изключен Ludo flag.
+function renderGuestMobileLobbyLudoSection(): string {
+  if (!isLudoFeatureEnabled()) return ''
+  return `
+    <section data-lobby-guest-ludo-section="1" style="margin-top:6px;">
+      ${renderGuestMobileLobbySectionTitle('icon-ludo-section', 'Не се сърди човече')}
+      <article style="
+        margin:0 12px 18px;background:#FFFFFF;border-radius:12px;padding:8px;box-sizing:border-box;
+        border:1px solid rgba(20,20,43,0.05);box-shadow:${GUEST_LOBBY_CARD_SHADOW};
+      ">
+        ${renderGuestLobbyMediaSlot('ludo-banner', '15 / 4', GUEST_LOBBY_LUDO_BANNER_IMAGE_URL)}
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 2px 2px;">
+          <span style="flex:1;min-width:0;color:${GUEST_LOBBY_MUTED};font-size:13px;line-height:1.35;font-weight:600;">Създай маса за 2 или 4 играчи.</span>
+          <button type="button" class="lobby-violet-btn" data-lobby-guest-auth-gate="1" data-lobby-guest-ludo-create="1" style="${guestLobbyPlayButtonStyle()}width:auto;flex:0 0 auto;padding:0 18px;font-size:15px;">Създай игра</button>
+        </div>
+      </article>
+    </section>
+  `
+}
+
+function renderGuestLobbyRow(options: {
+  tag: 'button' | 'a'
+  attributes: string
+  iconName: string
+  iconTint: string
+  title: string
+  subtitle: string
+  badgeHtml?: string
+}): string {
+  const style = `
+    width:100%;min-height:66px;box-sizing:border-box;padding:8px 10px 8px 8px;
+    border:0;border-radius:12px;background:#FFFFFF;box-shadow:0 4px 14px rgba(34,30,80,0.06);
+    color:${GUEST_LOBBY_TEXT};font-family:inherit;text-align:left;text-decoration:none;cursor:pointer;
+    display:flex;align-items:center;gap:12px;
+  `
+  const tagOpen = options.tag === 'a' ? `<a ${options.attributes} style="${style}">` : `<button type="button" ${options.attributes} style="${style}">`
+  return `
+    ${tagOpen}
+      <span style="width:50px;height:50px;border-radius:8px;background:${options.iconTint};display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
+        <img src="${guestLobbyIcon(options.iconName)}" alt="" width="38" height="38" style="width:38px;height:38px;display:block;object-fit:contain;">
+      </span>
+      <span style="min-width:0;flex:1;display:grid;gap:2px;">
+        <span style="font-size:15px;line-height:1.25;font-weight:800;">${escapeHtml(options.title)}</span>
+        <span style="font-size:12.5px;line-height:1.3;font-weight:500;color:${GUEST_LOBBY_MUTED};">${escapeHtml(options.subtitle)}</span>
+      </span>
+      ${options.badgeHtml ?? ''}
+      ${guestLobbyChevron()}
+    ${options.tag === 'a' ? '</a>' : '</button>'}
+  `
+}
+
+// Частни маси + информационни редове — същите действия/атрибути/броячи като
+// renderMobileQuickActions (броячите: private_rooms_list, ежедневни награди,
+// мисии). Двата реда "Частни маси" (Белот и Не се сърди човече) изискват
+// профил → за гост auth попъп ('cta'), а не екранът с частните маси; Белот
+// пази брояча от private_rooms_list, Ludo е без брояч — лобито не получава
+// Ludo маси.
+function renderGuestMobileLobbyRows(unclaimedMissionsCount: number, hasUnclaimedDailyReward: boolean, privateRoomsCount: number): string {
+  return `
+    <section data-lobby-guest-rows="1" style="margin:0 12px;display:grid;gap:9px;">
+      ${renderGuestLobbyRow({ tag: 'button', attributes: 'data-lobby-guest-auth-gate="1" data-lobby-guest-belot-private-row="1"', iconName: 'icon-private-tables-belot', iconTint: '#F1ECFF', title: 'Частни маси – Белот', subtitle: 'Създай маса и играй с приятели.', badgeHtml: guestLobbyCountPill(privateRoomsCount, 'violet') })}
+      ${isLudoFeatureEnabled() ? renderGuestLobbyRow({ tag: 'button', attributes: 'data-lobby-guest-auth-gate="1" data-lobby-guest-ludo-private-row="1"', iconName: 'icon-private-tables-ludo', iconTint: '#E7F7EE', title: 'Частни маси – Не се сърди човече', subtitle: 'Създай маса за 2 или 4 играчи.' }) : ''}
+      ${renderGuestLobbyRow({ tag: 'button', attributes: 'data-lobby-daily-rewards-card="1"', iconName: 'icon-rewards', iconTint: '#FFF0F0', title: 'Ежедневни награди', subtitle: 'Влизай всеки ден и вземи своите награди.', badgeHtml: guestLobbyCountPill(hasUnclaimedDailyReward ? 1 : 0) })}
+      ${renderGuestLobbyRow({ tag: 'button', attributes: 'data-lobby-missions-card="1"', iconName: 'icon-missions', iconTint: '#EEF3FF', title: 'Дневни мисии', subtitle: 'Изпълнявай дневни мисии и печели жълтици.', badgeHtml: guestLobbyCountPill(unclaimedMissionsCount) })}
+      ${renderGuestLobbyRow({ tag: 'a', attributes: 'href="/rules" data-lobby-rules-card="1"', iconName: 'icon-rules', iconTint: '#FFF3E6', title: 'Правила на белота', subtitle: 'Виж правилата, анонсите и точкуването.' })}
+      ${renderGuestLobbyRow({ tag: 'a', attributes: 'href="/strategy" data-lobby-strategy-card="1"', iconName: 'icon-tips-strategies', iconTint: '#FFF8DD', title: 'Съвети и стратегии', subtitle: 'Научи полезни тактики и стани по-добър.' })}
+      ${renderGuestLobbyRow({ tag: 'a', attributes: 'href="/learn" data-lobby-learn-card="1"', iconName: 'icon-learn-belot', iconTint: '#F1ECFF', title: 'Научи белот', subtitle: 'Основите на играта за нови играчи.' })}
+      ${renderGuestLobbyRow({ tag: 'a', attributes: 'href="/fair-play" data-lobby-fair-play-card="1"', iconName: 'icon-fair-play', iconTint: '#EAF4FF', title: 'Честна игра', subtitle: 'Случайно раздаване и роля на ботовете.' })}
+      ${renderGuestLobbyRow({ tag: 'a', attributes: 'href="/faq" data-lobby-faq-card="1"', iconName: 'icon-faq', iconTint: '#F1ECFF', title: 'Често задавани въпроси', subtitle: 'Отговори на чести въпроси за играта.' })}
+    </section>
+  `
+}
+
+// Долна навигация (само гост + телефон + "tables"). Начало/Игри/Чат са
+// същите data-lobby-nav-* като в менюто/desktop nav-а; "Чат" за гост минава
+// през съществуващия guest клон на showChatPanel (auth попъп). "Теми" не се
+// зарежда за гост (refreshTopicsDirectoryMetadata изисква профил), затова тук
+// е data-lobby-guest-auth-gate — същият auth попъп ('cta') вместо празен екран. "Меню" отваря
+// <details data-lobby-mobile-menu> от renderGuestMobileLobbyMenu.
+// Иконите: Lucide (ISC лиценз) — house, gamepad-2, messages-square,
+// message-circle, menu; 24px, stroke 2, currentColor.
+const GUEST_LOBBY_NAV_ICON_PATHS = {
+  home: '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  games: '<line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/>',
+  topics: '<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/>',
+  chat: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  menu: '<line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/>',
+} as const
+
+// Значката за известия върху "Меню" е data-mobile-menu-total-badge — същият
+// единствен persistent node, който refreshTopicsUnreadDom patch-ва
+// (display:flex/none + текст); в гост лобито живее тук, не в скритото
+// summary на менюто.
+function renderGuestMobileLobbyBottomNav(state: LobbyScreenState, isHomeActive = true): string {
+  const mobileMenuBadge = formatNotificationBadgeCount(getMobileMenuNotificationRaw(state))
+  const isGamesActive = state.view === 'more-games'
+  const item = (active: boolean) => `
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+    min-width:0;height:58px;padding:0;border:0;border-radius:10px;font-family:inherit;
+    background:${active ? '#EEE9FF' : 'transparent'};color:${active ? GUEST_LOBBY_VIOLET : '#7A7F9E'};
+    font-size:11.5px;font-weight:800;text-decoration:none;cursor:pointer;
+  `
+  const svg = (name: keyof typeof GUEST_LOBBY_NAV_ICON_PATHS) => `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block;">${GUEST_LOBBY_NAV_ICON_PATHS[name]}</svg>`
+  const icon = (name: keyof typeof GUEST_LOBBY_NAV_ICON_PATHS) => `<span data-lobby-guest-nav-icon="${name}" style="position:relative;display:block;width:24px;height:24px;">${svg(name)}${name === 'menu'
+    ? `<span data-mobile-menu-total-badge="1" style="position:absolute;right:-9px;top:-6px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:2px solid #FFFFFF;font-size:10px;font-weight:900;line-height:1;display:${mobileMenuBadge !== null ? 'flex' : 'none'};align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;">${mobileMenuBadge !== null ? escapeHtml(mobileMenuBadge) : ''}</span>`
+    : ''}</span>`
+  return `
+    <nav data-lobby-guest-bottom-nav="1" aria-label="Основна навигация" style="
+      position:fixed;left:0;right:0;bottom:0;z-index:110;
+      padding:6px 8px calc(6px + env(safe-area-inset-bottom, 0px));box-sizing:border-box;
+      background:rgba(255,255,255,0.96);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+      border-top:1px solid rgba(20,20,43,0.06);box-shadow:0 -6px 20px rgba(34,30,80,0.08);
+      display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;
+    ">
+      <a href="/lobby" data-lobby-nav-lobby="1" ${isHomeActive ? 'aria-current="page" ' : ''}style="${item(isHomeActive)}">${icon('home')}Начало</a>
+      <button type="button" data-lobby-nav-games="1" ${isGamesActive ? 'aria-current="page" ' : ''}style="${item(isGamesActive)}">${icon('games')}Игри</button>
+      <button type="button" data-lobby-guest-auth-gate="1" style="${item(false)}">${icon('topics')}Теми</button>
+      <button type="button" data-lobby-nav-chat="1" style="${item(false)}">${icon('chat')}Чат</button>
+      <button type="button" data-lobby-guest-bottom-menu="1" aria-label="Меню" style="${item(false)}">${icon('menu')}Меню</button>
+    </nav>
+  `
+}
+
+function renderGuestMobileLobbyMain(state: LobbyScreenState, canStartSearch: boolean): string {
+  return `
+    <main data-lobby-guest-mobile-main="1">
+      ${renderGuestMobileLobbyAuthCard(state.signupBonusYellowCoins ?? 0)}
+      ${state.lobbyChatFullscreen ? renderMobileLobbyChatSection(state) : renderGuestMobileLobbyPostsBanner(state)}
+      ${renderGuestMobileLobbyBelotSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading)}
+      ${renderGuestMobileLobbyLudoSection()}
+      ${renderGuestMobileLobbyRows(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0, getPrivateRoomsBadgeCount(state.privateRooms))}
+    </main>
   `
 }
 
@@ -6411,6 +7100,139 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
   `
 }
 
+// Магазин — светлата версия за гост на телефон (рамката: общият header и
+// долна навигация). Същите данни като renderMobileShopPanel (пакети, цени,
+// изображения, кампании, ТОП оферта, табове Жълтици/VIP/Пакети), но гостът
+// няма профил: без баланс и без история, а бутоните за покупка са
+// data-lobby-guest-auth-gate — общата подкана за вход/регистрация ('cta').
+// Покупка (Stripe/поръчка) не може да започне от тук.
+const GUEST_SHOP_TITLE = '#17233C'
+const GUEST_SHOP_MUTED = '#667085'
+
+function renderGuestShopMessage(text: string, tone: 'normal' | 'error' = 'normal'): string {
+  return `
+    <div data-lobby-guest-shop-message="${tone}" style="
+      margin-top:12px;border:1px solid ${tone === 'error' ? '#FECDCA' : '#E4E7EC'};border-radius:12px;
+      background:${tone === 'error' ? '#FEF3F2' : '#FFFFFF'};color:${tone === 'error' ? '#B42318' : GUEST_SHOP_MUTED};
+      padding:16px;text-align:center;font-size:14px;font-weight:700;line-height:1.45;
+    ">${escapeHtml(text)}</div>
+  `
+}
+
+function renderGuestShopTabBar(activeTab: 'coins' | 'vip' | 'bundle'): string {
+  const tab = (key: 'coins' | 'vip' | 'bundle', icon: string, label: string): string => {
+    const isActive = key === activeTab
+    return `
+      <button type="button" data-shop-tab="${key}" aria-pressed="${isActive}" style="
+        flex:1;min-width:0;height:56px;border-radius:8px;cursor:pointer;font-family:inherit;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+        border:1px solid ${isActive ? GUEST_LOBBY_VIOLET : 'transparent'};background:${isActive ? '#F1ECFF' : 'transparent'};
+        color:${isActive ? GUEST_LOBBY_VIOLET : GUEST_SHOP_MUTED};font-size:12px;font-weight:800;
+      "><img src="/assets/lobby/${icon}" alt="" draggable="false" style="width:24px;height:24px;object-fit:contain;display:block;">${label}</button>
+    `
+  }
+  return `
+    <div data-lobby-guest-shop-tabs="1" style="display:flex;gap:6px;margin-top:12px;padding:4px;border-radius:12px;background:#FFFFFF;border:1px solid #E4E7EC;box-shadow:${GUEST_LOBBY_CARD_SHADOW};">
+      ${tab('coins', 'shop-tab-coins.webp', 'Жълтици')}
+      ${tab('vip', 'shop-tab-vip.webp', 'VIP')}
+      ${tab('bundle', 'shop-tab-bundles.webp', 'Пакети')}
+    </div>
+  `
+}
+
+// Ред "цена + бутон" в дъното на всяка карта — бутонът е auth gate.
+function renderGuestShopPriceRow(priceCents: number, currency: string, kind: 'coins' | 'vip' | 'bundle', packageId: string): string {
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;">
+      <span style="color:${GUEST_LOBBY_VIOLET};font-size:17px;font-weight:900;white-space:nowrap;">${escapeHtml(formatPackagePrice(priceCents, currency))}</span>
+      <button type="button" class="lobby-violet-btn" data-lobby-guest-auth-gate="1" data-lobby-guest-shop-buy="${kind}" data-lobby-guest-shop-package="${escapeHtml(packageId)}" style="${guestLobbyPlayButtonStyle()}width:auto;height:38px;flex:0 0 auto;padding:0 16px;font-size:14px;">Влез за покупка</button>
+    </div>
+  `
+}
+
+function guestShopCardStyle(isHighlighted: boolean): string {
+  return `
+    position:relative;background:#FFFFFF;border-radius:12px;box-sizing:border-box;min-width:0;
+    border:1px solid ${isHighlighted ? GUEST_LOBBY_VIOLET : 'rgba(20,20,43,0.06)'};box-shadow:${GUEST_LOBBY_CARD_SHADOW};
+    padding:12px;display:grid;grid-template-columns:72px minmax(0,1fr);gap:12px;align-items:center;
+  `
+}
+
+function renderGuestShopCoinsAmount(amount: number, packageKey: string): string {
+  return `
+    <div style="display:flex;align-items:center;flex-wrap:wrap;row-gap:4px;gap:6px;color:${GUEST_SHOP_TITLE};font-size:20px;font-weight:900;line-height:1.1;">
+      <img src="/assets/lobby/icon-coin.png" alt="" style="width:18px;height:18px;object-fit:contain;flex-shrink:0;">${formatAmount(amount)}${renderCampaignPackageUnitsBadge(packageKey, 20, 16, GUEST_SHOP_TITLE)}
+    </div>
+  `
+}
+
+function renderGuestMobileShopPanel(state: LobbyScreenState): string {
+  const tabTitle = state.shopActiveTab === 'vip' ? 'Магазин VIP' : state.shopActiveTab === 'bundle' ? 'Магазин Пакети' : 'Магазин Жълтици'
+  const giftLabel = state.shopGiftRecipientProfileId == null ? null : (state.shopGiftRecipientDisplayName?.trim() || 'играча')
+  const header = `
+    <section data-lobby-guest-shop-title="1" style="padding:4px 2px 0;">
+      <h1 style="margin:0;color:${GUEST_SHOP_TITLE};font-size:22px;font-weight:900;line-height:1.15;">${escapeHtml(giftLabel ? `Подари на ${giftLabel}` : tabTitle)}</h1>
+      <div style="margin-top:5px;color:${GUEST_SHOP_MUTED};font-size:13px;font-weight:600;line-height:1.4;">${escapeHtml(giftLabel ? `Можете да подарите на ${giftLabel} жълтици, VIP или комбиниран пакет.` : 'Влез или се регистрирай, за да купуваш.')}</div>
+    </section>
+    ${giftLabel && state.shopGiftRecipientErrorText ? renderGuestShopMessage(state.shopGiftRecipientErrorText, 'error') : ''}
+    ${renderGuestShopTabBar(state.shopActiveTab)}
+  `
+  const notice = (text: string | null): string => text ? renderGuestShopMessage(text) : ''
+  const list = (cards: string): string => `<section data-lobby-guest-shop-list="${state.shopActiveTab}" style="padding:14px 0 4px;display:grid;gap:12px;">${cards}</section>`
+
+  if (state.shopActiveTab === 'vip') {
+    if (state.vipPackagesLoading) return `${header}${renderGuestShopMessage('Зареждане на VIP офертите...')}`
+    if (state.vipPackagesErrorText) return `${header}${renderGuestShopMessage(state.vipPackagesErrorText, 'error')}`
+    const maxDays = state.vipPackages.reduce((max, current) => Math.max(max, current.days), 0)
+    return `${header}${notice(state.vipPurchaseMessageText)}${list(state.vipPackages.map((vipPackage) => {
+      const units = renderCampaignPackageUnitsBadge(vipPackage.packageId, 20, 16, GUEST_SHOP_TITLE)
+      return `
+        <article data-lobby-guest-shop-card="vip" style="${guestShopCardStyle(maxDays > 0 && vipPackage.days === maxDays)}">
+          <img src="${getVipPackageImage(vipPackage.packageId)}" alt="VIP пакет за ${vipPackage.days} дни" loading="lazy" style="width:72px;height:72px;object-fit:contain;display:block;">
+          <div style="min-width:0;">
+            <div style="color:${GUEST_SHOP_TITLE};font-size:16px;font-weight:900;line-height:1.2;">${escapeHtml(vipPackage.title)}</div>
+            ${units ? `<div data-shop-campaign-units-row="1" style="margin-top:6px;display:flex;margin-left:-6px;">${units}</div>` : ''}
+            ${renderGuestShopPriceRow(vipPackage.priceCents, vipPackage.currency, 'vip', vipPackage.packageId)}
+          </div>
+        </article>
+      `
+    }).join(''))}`
+  }
+
+  if (state.shopActiveTab === 'bundle') {
+    if (state.bundlePackagesLoading) return `${header}${renderGuestShopMessage('Зареждане на пакетите...')}`
+    if (state.bundlePackagesErrorText) return `${header}${renderGuestShopMessage(state.bundlePackagesErrorText, 'error')}`
+    if (state.bundlePackages.length === 0) return `${header}${notice(state.bundlePurchaseMessageText)}${renderGuestShopMessage('Няма активни пакети в момента.')}`
+    return `${header}${notice(state.bundlePurchaseMessageText)}${list(state.bundlePackages.map((bundlePackage) => `
+      <article data-lobby-guest-shop-card="bundle" style="${guestShopCardStyle(false)}align-items:start;">
+        <img src="${escapeHtml(resolveBundlePackageVisual(bundlePackage.visualKey).artworkUrl)}" alt="" loading="lazy" style="width:72px;height:72px;object-fit:contain;display:block;">
+        <div style="min-width:0;">
+          <div style="color:${GUEST_SHOP_TITLE};font-size:16px;font-weight:900;line-height:1.2;">${escapeHtml(bundlePackage.title)}</div>
+          <div style="margin-top:6px;">${renderGuestShopCoinsAmount(bundlePackage.yellowCoinsAmount, bundlePackage.packageKey)}</div>
+          <span style="display:inline-block;margin-top:6px;border-radius:999px;background:#F1ECFF;color:${GUEST_LOBBY_VIOLET};padding:4px 10px;font-size:12px;font-weight:800;">+ ${bundlePackage.vipDays} дни VIP</span>
+          ${bundlePackage.description ? `<div style="margin-top:8px;color:${GUEST_SHOP_MUTED};font-size:12px;font-weight:600;line-height:1.4;">${escapeHtml(bundlePackage.description)}</div>` : ''}
+          ${renderGuestShopPriceRow(bundlePackage.priceCents, bundlePackage.currency, 'bundle', bundlePackage.packageId)}
+        </div>
+      </article>
+    `).join(''))}`
+  }
+
+  if (state.shopPackagesLoading) return `${header}${renderGuestShopMessage('Зареждане на магазина...')}`
+  if (state.shopPackagesErrorText) return `${header}${renderGuestShopMessage(state.shopPackagesErrorText, 'error')}`
+  if (state.shopPackages.length === 0) return `${header}${notice(state.shopPurchaseMessageText)}${renderGuestShopMessage('Няма активни пакети в магазина.')}`
+  return `${header}${notice(state.shopPurchaseMessageText)}${list(state.shopPackages.map((coinPackage) => `
+    <article data-lobby-guest-shop-card="coins" style="${guestShopCardStyle(coinPackage.isTopOffer)}${coinPackage.isTopOffer ? 'margin-top:8px;' : ''}">
+      ${coinPackage.isTopOffer ? `<div data-lobby-guest-shop-top-offer="1" style="position:absolute;top:-10px;left:12px;z-index:1;background:${GUEST_LOBBY_VIOLET};color:#FFFFFF;font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;white-space:nowrap;pointer-events:none;">✦ ТОП ОФЕРТА</div>` : ''}
+      <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="width:72px;height:72px;object-fit:contain;display:block;">
+      <div style="min-width:0;">
+        <div style="color:${GUEST_SHOP_MUTED};font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:0.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(coinPackage.title)}</div>
+        <div style="margin-top:4px;">${renderGuestShopCoinsAmount(coinPackage.yellowCoinsAmount, coinPackage.packageKey)}</div>
+        ${renderGuestShopPriceRow(coinPackage.priceCents, coinPackage.currency, 'coins', coinPackage.packageId)}
+      </div>
+    </article>
+  `).join(''))}`
+}
+
 function renderMobileFriendsDirectory(state: LobbyScreenState): string {
   if (state.friendsLoading) return `${renderMobilePageTitle('Приятели')}${renderMobileStateMessage('Зареждане на приятели...')}`
   if (state.friendsErrorText) return `${renderMobilePageTitle('Приятели')}${renderMobileStateMessage(state.friendsErrorText, 'error')}`
@@ -6593,10 +7415,23 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
   `
 }
 
-function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false): string {
+// light — "Контакти" за гост на телефон (GUEST_MOBILE_LIGHT_INFO_VIEWS);
+// останалите правни страници и тъмната палитра са непроменени.
+function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false, light = false): string {
   const page = PUBLIC_LEGAL_PAGES[pageKey]
-  const contentHtml = renderPublicLegalBodyHtml(pageKey, isMobile, true)
-  const contactActionHtml = pageKey === 'contact'
+  const contentHtml = renderPublicLegalBodyHtml(pageKey, isMobile, true, light)
+  const contactActionHtml = pageKey === 'contact' && light
+    ? `
+      <button type="button" class="lobby-violet-btn" data-public-contact-mail="1" style="
+        margin-top:12px;min-height:46px;padding:0 18px;border:0;border-radius:8px;
+        color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;
+        display:inline-flex;align-items:center;justify-content:center;gap:10px;
+      ">
+        <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+        Пиши на екипа
+      </button>
+    `
+    : pageKey === 'contact'
     ? `
       <button type="button" data-public-contact-mail="1" style="
         margin-top:${isMobile ? '12px' : '18px'};
@@ -6633,18 +7468,18 @@ function renderPublicLegalPage(pageKey: PublicLegalPageKey, isMobile = false): s
     : ''
 
   return `
-    <section style="
+    <section${light ? ' data-public-legal-light="1"' : ''} style="
       min-height:${isMobile ? 'auto' : '560px'};
-      border:1px solid rgba(212,165,32,0.26);
-      border-radius:8px;
-      background:linear-gradient(180deg,#0b0b0b 0%,#050505 100%);
+      border:1px solid ${light ? '#E4E7EC' : 'rgba(212,165,32,0.26)'};
+      border-radius:${light ? '12px' : '8px'};
+      background:${light ? '#FFFFFF;box-shadow:0 4px 14px rgba(34,30,80,0.06)' : 'linear-gradient(180deg,#0b0b0b 0%,#050505 100%)'};
       padding:${isMobile ? '18px 14px' : '34px 42px'};
       box-sizing:border-box;
     ">
       <div style="max-width:980px;margin:0 auto;">
-        <div style="border-bottom:1px solid rgba(212,165,32,0.22);padding-bottom:${isMobile ? '14px' : '18px'};margin-bottom:${isMobile ? '18px' : '26px'};">
-          <h1 style="margin:0;color:#ffffff;font-size:${isMobile ? '24px' : '34px'};line-height:1.05;font-weight:900;">${escapeHtml(page.title)}</h1>
-          <div style="margin-top:8px;color:rgba(255,255,255,0.48);font-size:${isMobile ? '12px' : '13px'};font-weight:800;">Pika.bg</div>
+        <div style="border-bottom:1px solid ${light ? '#EAECF0' : 'rgba(212,165,32,0.22)'};padding-bottom:${isMobile ? '14px' : '18px'};margin-bottom:${isMobile ? '18px' : '26px'};">
+          <h1 style="margin:0;color:${light ? '#17233C' : '#ffffff'};font-size:${isMobile ? '24px' : '34px'};line-height:1.05;font-weight:${light ? '800' : '900'};">${escapeHtml(page.title)}</h1>
+          <div style="margin-top:8px;color:${light ? '#667085' : 'rgba(255,255,255,0.48)'};font-size:${isMobile ? '12px' : '13px'};font-weight:${light ? '700' : '800'};">Pika.bg</div>
         </div>
         <article style="overflow-wrap:anywhere;">
           ${contentHtml}
@@ -6659,6 +7494,7 @@ function renderMobileLobbyScreenContent(
   state: LobbyScreenState,
   profileName: string,
   canStartSearch: boolean,
+  isGuestLightInfoView = false,
 ): string {
   if (state.view !== 'tables') {
     // Topics view се нуждае от <main>, участващ в flex height chain-a
@@ -6682,7 +7518,7 @@ function renderMobileLobbyScreenContent(
           : state.view === 'leaderboards'
             ? renderMobileLeaderboardsDirectory(state)
           : state.view === 'shop'
-            ? renderMobileShopPanel(state)
+            ? (isGuestLightInfoView ? renderGuestMobileShopPanel(state) : renderMobileShopPanel(state))
           : state.view === 'admin'
             ? renderAdminPanel(state, true)
           : state.view === 'admin-info'
@@ -6769,28 +7605,32 @@ function renderMobileLobbyScreenContent(
           : state.view === 'chat'
             ? renderMobileChatPanel(state)
           : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
-            ? renderPublicLegalPage(state.view, true)
+            ? renderPublicLegalPage(state.view, true, isGuestLightInfoView)
           : state.view === 'more-games'
-            ? renderMoreGamesScreen(true, isLudoFeatureEnabled(), state.canShowSvaraEntry)
+            ? renderMoreGamesScreen(true, isLudoFeatureEnabled(), state.canShowSvaraEntry, isGuestLightInfoView)
           : state.view === 'ludo-lobby'
             ? '<div data-ludo-lobby-mount="1"></div>'
           : state.view === 'svara'
             ? renderSvaraPage(state.svaraPageStatus, true, state.svaraViewMode)
           : state.view === 'rules'
-            ? renderRulesPage(true)
+            ? renderRulesPage(true, isGuestLightInfoView)
           : state.view === 'strategy'
-            ? renderStrategyPage(true)
+            ? renderStrategyPage(true, isGuestLightInfoView)
           : state.view === 'learn'
-            ? renderLearnPage(true)
+            ? renderLearnPage(true, isGuestLightInfoView)
           : state.view === 'faq'
-            ? renderFaqPage(true)
+            ? renderFaqPage(true, isGuestLightInfoView)
           : state.view === 'about'
             ? renderAboutPage(true)
           : state.view === 'fair-play'
-            ? renderFairPlayPage(true)
+            ? renderFairPlayPage(true, isGuestLightInfoView)
           : ''}
       </main>
     `
+  }
+
+  if (state.profile.profileId === null) {
+    return renderGuestMobileLobbyMain(state, canStartSearch)
   }
 
   return `
@@ -6852,12 +7692,43 @@ function renderFooter(): string {
   `
 }
 
-function renderMobileFooter(): string {
+// Footer-ът на мобилното лоби за гости: правила/съвети/научи/честна игра/ЧЗВ
+// вече са големите информационни карти над него, затова тук остават само
+// връзките за сайта — малки бели бутончета на един ред с хоризонтално
+// прелистване (scrollbar-ът е скрит, скролването остава). Редът излиза до
+// ръбовете на екрана (margin -12px), за да се вижда частично следващият бутон.
+const GUEST_MOBILE_LOBBY_FOOTER_LINKS: ReadonlyArray<{ label: string; href: string; attributes?: string }> = [
+  { label: 'За Pika.bg', href: '/about' },
+  { label: 'Общи условия', href: '/terms' },
+  { label: 'Политика за поверителност', href: '/privacy' },
+  { label: 'Контакти', href: '/contact' },
+  { label: 'Настройки на бисквитките', href: '#', attributes: 'data-consent-open-settings="1"' },
+]
+
+function renderGuestMobileLobbyFooterNav(): string {
+  return `
+      <style>
+        [data-lobby-guest-footer-links="1"]::-webkit-scrollbar { display:none; }
+        [data-lobby-guest-footer-links="1"] a:hover { text-decoration:none !important; border-color:#C9B8F5 !important; }
+      </style>
+      <nav aria-label="Правни връзки" data-lobby-guest-footer-links="1" style="flex:1 1 auto;min-width:0;display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0 -12px;padding:0 12px;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;scrollbar-width:none;">
+        ${GUEST_MOBILE_LOBBY_FOOTER_LINKS.map((link) => `<a data-lobby-mobile-footer-legal-link="1"${link.attributes ? ` ${link.attributes}` : ''} href="${link.href}" style="flex:0 0 auto;display:inline-flex;align-items:center;height:30px;padding:0 12px;box-sizing:border-box;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:8px;color:#475467;font-size:12px;font-weight:700;line-height:1;text-decoration:none;white-space:nowrap;transition:color 0.15s ease,border-color 0.15s ease;">${link.label}</a>`).join('')}
+      </nav>`
+}
+
+// theme 'light' — светлият редизайн за гости (лоби и информационни екрани);
+// 'dark' (по подразбиране) остава байт-идентичен с досегашния markup.
+// isGuestLobby — само лобито ('tables'): компактните връзки без дублиращите
+// се информационни страници; информационните екрани пазят пълния списък.
+function renderMobileFooter(theme: 'dark' | 'light' = 'dark', isGuestLobby = false): string {
+  const isLight = theme === 'light'
+  const linkColor = isLight ? '#6B7090' : 'rgba(255,255,255,0.52)'
+  const separatorColor = isLight ? 'rgba(121,80,232,0.35)' : 'rgba(212,165,32,0.72)'
   return `
     <footer style="
-      margin:18px 12px 24px;
-      border-top:1px solid rgba(255,255,255,0.07);
-      padding-top:14px;
+      margin:${isGuestLobby ? '10px 12px calc(92px + env(safe-area-inset-bottom, 0px))' : isLight ? '18px 12px calc(92px + env(safe-area-inset-bottom, 0px))' : '18px 12px 24px'};
+      border-top:1px solid ${isLight ? 'rgba(20,20,43,0.08)' : 'rgba(255,255,255,0.07)'};
+      padding-top:${isGuestLobby ? '10px' : '14px'};
       display:flex;
       align-items:center;
       justify-content:center;
@@ -6865,32 +7736,32 @@ function renderMobileFooter(): string {
     ">
       <style>
         [data-lobby-mobile-footer-legal-link="1"]:hover {
-          color:#f4c95b !important;
+          color:${isLight ? '#7950E8' : '#f4c95b'} !important;
           text-decoration:underline !important;
           text-underline-offset:3px;
         }
-      </style>
+      </style>${isGuestLobby ? renderGuestMobileLobbyFooterNav() : `
       <nav aria-label="Правни връзки" style="display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;">
-        <a data-lobby-mobile-footer-legal-link="1" href="/rules" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Правила</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/strategy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Съвети и стратегии</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/learn" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Научи белот</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/fair-play" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Честна игра</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/faq" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Често задавани въпроси</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/about" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">За Pika.bg</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/terms" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/privacy" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" href="/contact" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Контакти</a>
-        <span aria-hidden="true" style="width:1px;height:13px;background:rgba(212,165,32,0.72);display:block;"></span>
-        <a data-lobby-mobile-footer-legal-link="1" data-consent-open-settings="1" href="#" style="color:rgba(255,255,255,0.52);font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Настройки на бисквитките</a>
-      </nav>
+        <a data-lobby-mobile-footer-legal-link="1" href="/rules" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Правила</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/strategy" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Съвети и стратегии</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/learn" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Научи белот</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/fair-play" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Честна игра</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/faq" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Често задавани въпроси</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/about" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">За Pika.bg</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/terms" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Общи условия</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/privacy" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Политика за поверителност</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" href="/contact" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Контакти</a>
+        <span aria-hidden="true" style="width:1px;height:13px;background:${separatorColor};display:block;"></span>
+        <a data-lobby-mobile-footer-legal-link="1" data-consent-open-settings="1" href="#" style="color:${linkColor};font-size:11px;font-weight:700;text-decoration:none;padding:0 12px;transition:color 0.15s ease,text-decoration-color 0.15s ease;">Настройки на бисквитките</a>
+      </nav>`}
     </footer>
   `
 }
@@ -10772,8 +11643,11 @@ function renderSupportPopup(state: LobbyScreenState): string {
   `
 }
 
-function renderGuestContactPopup(state: LobbyScreenState): string {
+// light — светлият прозорец на новото мобилно лоби за гости (като
+// guestAuthModalLightTheme); полетата, текстовете и handler-ите са същите.
+function renderGuestContactPopup(state: LobbyScreenState, light = false): string {
   if (!state.guestContactPopupOpen) return ''
+  if (light) return renderGuestContactPopupLight(state)
 
   const inputStyle = `
     width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(255,255,255,0.14);
@@ -10859,6 +11733,88 @@ function renderGuestContactPopup(state: LobbyScreenState): string {
                 color:#080808;font-size:14px;font-weight:900;cursor:pointer;
                 opacity:${state.guestContactSending ? '0.62' : '1'};
               ">${state.guestContactSending ? 'Изпращане...' : 'Изпрати съобщение'}</button>
+            </form>
+          `}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderGuestContactPopupLight(state: LobbyScreenState): string {
+  const inputStyle = `
+    width:100%;box-sizing:border-box;border-radius:8px;border:1px solid #D0D5DD;
+    background:#FFFFFF;color:#17233C;padding:11px 12px;font-size:16px;font-weight:500;
+    outline:none;font-family:inherit;
+  `
+  const labelStyle = 'display:grid;gap:6px;font-size:13px;font-weight:700;color:#344054;'
+  const primaryStyle = 'height:46px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;'
+
+  return `
+    <div data-guest-contact-popup-backdrop="1" data-guest-contact-light="1" style="
+      position:fixed;inset:0;z-index:12000;
+      background:rgba(20,20,43,0.45);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
+      display:flex;align-items:center;justify-content:center;
+      padding:16px;box-sizing:border-box;font-family:${GUEST_MOBILE_LOBBY_FONT_FAMILY};
+    ">
+      <div role="dialog" aria-modal="true" aria-label="Контакти" style="
+        position:relative;width:min(100%,440px);box-sizing:border-box;
+        max-height:calc(100dvh - 32px);overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;
+        background:#FFFFFF;border:1px solid #E4E7EC;border-radius:12px;
+        box-shadow:0 20px 48px rgba(23,35,60,0.18);
+      " onclick="event.stopPropagation()">
+        <div style="
+          display:flex;align-items:center;justify-content:space-between;gap:12px;
+          padding:16px 16px 14px;border-bottom:1px solid #EAECF0;
+        ">
+          <div style="min-width:0;">
+            <div style="font-size:18px;font-weight:800;color:#17233C;">Контакти</div>
+            <div style="font-size:13px;color:#667085;font-weight:500;margin-top:2px;">Пиши до екипа на Pika.bg</div>
+          </div>
+          <button type="button" data-guest-contact-popup-close="1" aria-label="Затвори" style="
+            flex:0 0 auto;width:36px;height:36px;border:0;border-radius:8px;background:#F2F4F7;color:#475467;
+            cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true" style="display:block;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+
+        <div style="padding:16px;display:grid;gap:14px;">
+          ${state.guestContactSuccessText ? `
+            <div style="border:1px solid #ABEFC6;border-radius:8px;background:#ECFDF3;padding:14px;color:#067647;font-size:14px;font-weight:700;line-height:1.45;text-align:center;">
+              ${escapeHtml(state.guestContactSuccessText)}
+            </div>
+            <button type="button" class="lobby-violet-btn" data-guest-contact-popup-close="1" style="${primaryStyle}">Затвори</button>
+          ` : `
+            <div style="font-size:14px;line-height:1.45;color:#667085;font-weight:500;">
+              Опиши накратко въпроса или проблема. Ще използваме имейла само за обратна връзка.
+            </div>
+
+            ${state.guestContactErrorText ? `
+              <div style="border:1px solid #FECDCA;border-radius:8px;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:700;">
+                ${escapeHtml(state.guestContactErrorText)}
+              </div>
+            ` : ''}
+
+            <form data-guest-contact-form="1" style="display:grid;gap:12px;">
+              <input name="website" tabindex="-1" autocomplete="off" style="display:none;position:absolute;left:-9999px;">
+              <label style="${labelStyle}">
+                Име
+                <input name="name" type="text" maxlength="80" required autocomplete="name" style="${inputStyle}">
+              </label>
+              <label style="${labelStyle}">
+                Имейл за отговор
+                <input name="email" type="email" maxlength="160" required autocomplete="email" style="${inputStyle}">
+              </label>
+              <label style="${labelStyle}">
+                Тема
+                <input name="subject" type="text" maxlength="120" autocomplete="off" style="${inputStyle}">
+              </label>
+              <label style="${labelStyle}">
+                Съобщение
+                <textarea name="message" rows="5" minlength="10" maxlength="3000" required style="${inputStyle}resize:vertical;min-height:118px;line-height:1.45;"></textarea>
+              </label>
+              <button type="submit" class="lobby-violet-btn" ${state.guestContactSending ? 'disabled' : ''} style="${primaryStyle}">${state.guestContactSending ? 'Изпращане...' : 'Изпрати съобщение'}</button>
             </form>
           `}
         </div>
@@ -12495,8 +13451,88 @@ export function renderMarketingActionToast(state: LobbyScreenState): string {
   `
 }
 
-function renderDailyRewardsPopup(state: LobbyScreenState): string {
+// Светлата версия на "Ежедневни награди" — само в новото мобилно лоби за
+// гости. Същите текстове, състояния и data-* атрибути (backdrop/close/claim)
+// → същите действия; данните/заявките не се пипат.
+function renderGuestMobileLobbyDailyRewardsPopup(state: LobbyScreenState): string {
+  const tiers = state.dailyRewardTiers
+  const errorBox = (text: string) => `<div style="border-radius:8px;border:1px solid #FECDCA;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:700;">${escapeHtml(text)}</div>`
+
+  return `
+    <div data-daily-rewards-backdrop="1" data-daily-rewards-light="1" style="
+      position:fixed;inset:0;z-index:8000;padding:16px;box-sizing:border-box;
+      background:rgba(20,20,43,0.45);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
+      display:flex;align-items:center;justify-content:center;
+      font-family:${GUEST_MOBILE_LOBBY_FONT_FAMILY};
+    ">
+      <div role="dialog" aria-modal="true" style="
+        position:relative;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:12px;
+        width:400px;max-width:100%;max-height:calc(100dvh - 32px);box-sizing:border-box;
+        display:flex;flex-direction:column;overflow:hidden;
+        box-shadow:0 20px 48px rgba(23,35,60,0.18);
+      ">
+        <div style="display:flex;align-items:center;gap:12px;padding:18px 56px 14px 20px;border-bottom:1px solid #EAECF0;flex-shrink:0;">
+          <img src="${guestLobbyIcon('icon-rewards')}" alt="" width="36" height="36" style="width:36px;height:36px;object-fit:contain;flex-shrink:0;">
+          <div>
+            <div style="font-size:20px;font-weight:900;color:#17233C;">Ежедневни награди</div>
+            <div style="font-size:13px;color:#667085;margin-top:2px;">Рестартира се в полунощ.</div>
+          </div>
+          <button type="button" data-daily-rewards-close="1" aria-label="Затвори" style="position:absolute;right:8px;top:8px;width:36px;height:36px;border:0;border-radius:8px;background:#F2F4F7;color:#475467;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true" style="display:block;"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+        </div>
+
+        <div style="overflow-y:auto;overscroll-behavior:contain;padding:16px 20px 20px;display:flex;flex-direction:column;gap:10px;">
+          ${state.dailyRewardsLoading ? `
+            <div style="text-align:center;padding:32px 0;color:#667085;font-size:14px;font-weight:800;">Зареждане...</div>
+          ` : state.dailyRewardsErrorText ? errorBox(state.dailyRewardsErrorText) : tiers.length === 0 ? `
+            <div style="text-align:center;padding:32px 0;color:#667085;font-size:14px;">Все още няма добавени награди.</div>
+          ` : tiers.map((tier) => {
+            const claimed = tier.claimedToday === true
+            const isClaiming = state.dailyRewardClaimingId === tier.tierId
+            return `
+              <div style="
+                display:flex;align-items:center;gap:12px;
+                background:${claimed ? '#F9FAFB' : '#FFFFFF'};border:1px solid #EAECF0;
+                border-radius:10px;padding:12px 14px;
+                opacity:${claimed ? '0.6' : '1'};
+              ">
+                <img src="${guestLobbyIcon('icon-balance-coin')}" alt="" style="width:36px;height:36px;object-fit:contain;flex-shrink:0;${claimed ? 'filter:grayscale(1);' : ''}">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:17px;font-weight:900;color:${claimed ? '#98A2B3' : '#17233C'};">${formatAmount(tier.yellowCoinsAmount)}</div>
+                  <div style="font-size:12px;color:#667085;margin-top:2px;">жълтици</div>
+                </div>
+                ${claimed ? `
+                  <div style="font-size:12px;font-weight:800;color:#667085;letter-spacing:0.03em;">✓ Взета</div>
+                ` : `
+                  <button type="button" class="lobby-violet-btn" data-daily-reward-claim="${escapeHtml(tier.tierId)}" ${isClaiming ? 'disabled' : ''} style="
+                    height:38px;padding:0 18px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;
+                    font-size:14px;font-weight:900;cursor:${isClaiming ? 'default' : 'pointer'};
+                    white-space:nowrap;flex-shrink:0;
+                  ">${isClaiming ? 'Вземане...' : 'Вземи'}</button>
+                `}
+              </div>
+            `
+          }).join('')}
+
+          ${state.dailyRewardLastAwarded !== null ? `
+            <div style="margin-top:4px;border-radius:10px;border:1px solid #ABEFC6;background:#ECFDF3;padding:12px 14px;display:flex;align-items:center;gap:10px;">
+              <span style="font-size:20px;">🎉</span>
+              <div>
+                <div style="font-size:14px;font-weight:900;color:#067647;">Получихте наградата!</div>
+                <div style="font-size:12px;color:#344054;margin-top:2px;">+${formatAmount(state.dailyRewardLastAwarded)} жълтици са добавени към вашия портфейл.</div>
+              </div>
+            </div>
+          ` : ''}
+
+          ${state.dailyRewardClaimErrorText ? errorBox(state.dailyRewardClaimErrorText) : ''}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderDailyRewardsPopup(state: LobbyScreenState, isGuestMobileLobby = false): string {
   if (!state.dailyRewardsPopupOpen) return ''
+  if (isGuestMobileLobby) return renderGuestMobileLobbyDailyRewardsPopup(state)
 
   const tiers = state.dailyRewardTiers
 
@@ -13830,29 +14866,39 @@ export function renderLobbyScreen(
     ? true
     : prevAdminSupportMessagesScrollEl.scrollHeight - prevAdminSupportMessagesScrollEl.scrollTop - prevAdminSupportMessagesScrollEl.clientHeight < 48
   const savedAdminSupportMessagesScrollTop = prevAdminSupportMessagesScrollEl?.scrollTop ?? 0
+  const savedGuestTablesCarouselAnchor = readGuestTablesCarouselAnchor(root)
+
+  // Мобилно лоби за гости — светъл редизайн (само телефон + гост + 'tables');
+  // информационните екрани, отворени от него (правила/съвети/научи/честна
+  // игра/ЧЗВ), са в същата светла рамка. Всичко останало остава на
+  // досегашния тъмен mobile layout.
+  const isGuestMobileLobby = isPhoneLayout && state.view === 'tables' && state.profile.profileId === null
+  const isGuestMobileInfoView = isPhoneLayout && state.profile.profileId === null && GUEST_MOBILE_LIGHT_INFO_VIEWS.has(state.view)
+  const isGuestMobileLight = isGuestMobileLobby || isGuestMobileInfoView
+  const mobileFixedToastBottom = isGuestMobileLight ? GUEST_MOBILE_LOBBY_BOTTOM_NAV_CLEARANCE : '12px'
 
   const nextRootHtml = isPhoneLayout ? `
     <div
       ${mobileLayoutAttribute}
-      data-lobby-screen-root="1"
+      data-lobby-screen-root="1"${isGuestMobileLight ? ' data-lobby-guest-mobile-light="1"' : ''}
       style="
         position:fixed;inset:0;
-        background:#000000;color:#ffffff;
-        font-family:Arial, Helvetica, sans-serif;
+        background:${isGuestMobileLight ? '#F5F7FC' : '#000000'};color:${isGuestMobileLight ? '#14142B' : '#ffffff'};
+        font-family:${isGuestMobileLight ? GUEST_MOBILE_LOBBY_FONT_FAMILY : 'Arial, Helvetica, sans-serif'};
         ${state.view === 'topics'
           ? 'overflow:hidden;display:flex;flex-direction:column;'
           : 'overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;'}
         z-index:50;
       "
     >
-      ${renderMobileMenu(state)}
+      ${isGuestMobileLight ? renderGuestMobileLobbyHeader() : renderMobileMenu(state)}
       ${state.view === 'topics'
         ? `<div style="flex:1;min-height:0;display:flex;flex-direction:column;">${renderMobileLobbyScreenContent(state, profileName, canStartSearch)}</div>`
-        : `${renderMobileLobbyScreenContent(state, profileName, canStartSearch)}${renderMobileFooter()}`}
+        : `${renderMobileLobbyScreenContent(state, profileName, canStartSearch, isGuestMobileInfoView)}${renderMobileFooter(isGuestMobileLight ? 'light' : 'dark', isGuestMobileLobby)}${isGuestMobileLight ? `${renderGuestMobileLobbyBottomNav(state, isGuestMobileLobby)}${renderGuestMobileLobbyMenu()}` : ''}`}
 
       ${state.isSearching ? `
         <div style="
-          position:fixed;left:12px;right:12px;bottom:12px;z-index:200;
+          position:fixed;left:12px;right:12px;bottom:${mobileFixedToastBottom};z-index:200;
           background:#080808;border:1px solid rgba(212,165,32,0.44);border-radius:8px;
           padding:10px;display:flex;align-items:center;gap:10px;box-shadow:0 12px 36px rgba(0,0,0,0.62);
         ">
@@ -13865,7 +14911,7 @@ export function renderLobbyScreen(
 
       ${state.errorText ? `
         <div style="
-          position:fixed;left:12px;right:12px;bottom:12px;z-index:210;
+          position:fixed;left:12px;right:12px;bottom:${mobileFixedToastBottom};z-index:210;
           background:rgba(127,29,29,0.96);border:1px solid rgba(248,113,113,0.34);
           border-radius:8px;padding:10px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;
         ">${escapeHtml(state.errorText)}</div>
@@ -13874,17 +14920,17 @@ export function renderLobbyScreen(
       ${renderLowCoinsModal(state)}
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
-      ${renderAuthModal(state)}
+      ${renderAuthModal(state, isGuestMobileLight)}
       ${renderLobbyChatWriteLockedPopup(state)}
-      ${renderGuestTrialPopup(state.guestTrialPopup)}
+      ${renderGuestTrialPopup(state.guestTrialPopup, state.signupBonusYellowCoins, isGuestMobileLight)}
       ${renderRegistrationVerificationPopup(state.registrationVerification)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderCampaignRewardCongratulationsPopup(state.campaignRewardCongratulationsModal)}
-      ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
+      ${renderGuestLockedStakePopup(state.guestLockedStakePopup, isGuestMobileLight)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
       ${renderTournamentBetaAccessModal(state.tournamentBetaAccessModal)}
       ${renderShopPurchaseConfirmModal(state)}
-      ${renderDailyRewardsPopup(state)}
+      ${renderDailyRewardsPopup(state, isGuestMobileLight)}
       ${renderPrivateRoomInvitePopup(state)}
       ${renderPrivateRoomInviteFriendsPopup({
         isOpen: state.inviteFriendsPopupOpen,
@@ -13909,7 +14955,7 @@ export function renderLobbyScreen(
       ${renderProfileAccessBlockPopup(state.profileAccessBlockPopup)}
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
-      ${renderGuestContactPopup(state)}
+      ${renderGuestContactPopup(state, isGuestMobileLight)}
       ${renderAdCampaignPopup(state.activeAdCampaignPopup)}
     </div>
     ${renderGiftCoinsModal(state)}
@@ -14184,7 +15230,7 @@ export function renderLobbyScreen(
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
       ${renderLobbyChatWriteLockedPopup(state)}
-      ${renderGuestTrialPopup(state.guestTrialPopup)}
+      ${renderGuestTrialPopup(state.guestTrialPopup, state.signupBonusYellowCoins)}
       ${renderRegistrationVerificationPopup(state.registrationVerification)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderCampaignRewardCongratulationsPopup(state.campaignRewardCongratulationsModal)}
@@ -14392,6 +15438,74 @@ export function renderLobbyScreen(
     event.stopPropagation()
     closeMobileMenuAnimated()
   })
+
+  // Мобилно лоби за гости: "Меню" в долната навигация отваря/затваря СЪЩОТО
+  // <details data-lobby-mobile-menu> като бутона в header-а.
+  root.querySelector<HTMLButtonElement>('[data-lobby-guest-bottom-menu="1"]')?.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (mobileMenuEl?.open) {
+      closeMobileMenuAnimated()
+      return
+    }
+    openMobileMenu()
+  })
+
+  // Мобилно лоби за гости: "Теми" (долна навигация), "Турнири" (менюто),
+  // частните маси и "Създай игра" изискват профил — същият auth попъп като
+  // останалите само-за-регистрирани действия (authModalMode 'cta').
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-guest-auth-gate="1"]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault()
+      // Бутон от менюто ("Турнири"): затвори менюто ПРЕДИ re-render-а на
+      // попъпа — общият close handler на менюто е закачен по-късно и би
+      // сварил вече сменения DOM (менюто оставаше отворено под попъпа).
+      if (button.closest('[data-lobby-mobile-menu="1"]')) {
+        clearMobileMenuCloseTimer()
+        mobileMenuOpen = false
+        if (mobileMenuEl) mobileMenuEl.open = false
+      }
+      options.onAuthModeChange('cta')
+    })
+  })
+
+  // Светлите информационни екрани за гост: вътрешните котви ("Съдържание" →
+  // href="#раздел") превъртат до раздела в същата страница, без навигация по
+  // hash. Иначе браузърът пуска popstate, а route handler-ът на контролера го
+  // приема за смяна на страница (navigateFromPath → показва страницата
+  // наново от началото, или лобито при непознат път). scroll-margin-top
+  // (style.css) държи заглавието под sticky header-а.
+  const guestLightRoot = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"][data-lobby-guest-mobile-light="1"]')
+  guestLightRoot?.querySelectorAll<HTMLAnchorElement>('main a[href^="#"]').forEach((link) => {
+    link.addEventListener('click', (event) => {
+      const id = decodeURIComponent(link.getAttribute('href')!.slice(1))
+      const target = id ? document.getElementById(id) : null
+      if (!target || !guestLightRoot.contains(target)) return
+      event.preventDefault()
+      target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    })
+  })
+
+  // Светлият гост интерфейс: връзките към петте информационни екрана (карти
+  // в лобито, връзки в съдържанието, footer) сменят екрана вътре в
+  // приложението, а не презареждат страницата. Картите "Правила" и "Съвети"
+  // имат собствен handler по-долу (общ с desktop) — тук се пропускат.
+  const onInfoPageOpen = options.onInfoPageOpen
+  if (guestLightRoot && onInfoPageOpen) {
+    const infoScreenByPath: Record<string, 'rules' | 'strategy' | 'learn' | 'fair-play' | 'faq'> = {
+      '/rules': 'rules', '/strategy': 'strategy', '/learn': 'learn', '/fair-play': 'fair-play', '/faq': 'faq',
+    }
+    guestLightRoot.querySelectorAll<HTMLAnchorElement>('a[href^="/"]').forEach((link) => {
+      if (link.dataset.lobbyRulesCard === '1' || link.dataset.lobbyStrategyCard === '1') return
+      const screen = infoScreenByPath[link.getAttribute('href')!]
+      if (!screen) return
+      link.addEventListener('click', (event) => {
+        if (!shouldHandleSpaLinkClick(event)) return
+        event.preventDefault()
+        onInfoPageOpen(screen)
+      })
+    })
+  }
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-mobile-menu="1"] button').forEach((button) => {
     if (button.dataset.lobbyMobileMenuBackdrop === '1') return
@@ -17087,10 +18201,14 @@ export function renderLobbyScreen(
     let timer: ReturnType<typeof setTimeout> | null = null
     let lastChecked = ''
 
+    // Светлата тема (мобилното лоби за гости): по-тъмни червено/зелено за
+    // четимост върху бял фон.
+    const lightHintColors: Record<string, string> = { '#f87171': '#B42318', '#4ade80': '#067647' }
+    const isLightAuthModal = hintEl.closest('[data-lobby-guest-auth-modal="1"]') !== null
     const setHint = (text: string, color = ''): void => {
       hintEl.textContent = text
       hintEl.title = text
-      hintEl.style.color = color
+      hintEl.style.color = isLightAuthModal ? (lightHintColors[color] ?? color) : color
     }
 
     input.addEventListener('blur', () => {
@@ -17261,6 +18379,8 @@ export function renderLobbyScreen(
   })
 
   root.querySelectorAll<HTMLFormElement>('[data-lobby-auth-form]').forEach((form) => {
+    // Светлата тема (само мобилното лоби за гости) — виж guestAuthModalLightTheme().
+    const isLightAuthModal = form.closest('[data-lobby-guest-auth-modal="1"]') !== null
     const emailInput = form.querySelector<HTMLInputElement>('input[type="email"]')
     if (emailInput) {
       emailInput.addEventListener('invalid', () => {
@@ -17368,12 +18488,16 @@ export function renderLobbyScreen(
         if (input.classList.contains('registration-secret-input')) {
           const isHidden = !input.classList.contains('registration-secret-input--revealed')
           input.classList.toggle('registration-secret-input--revealed', isHidden)
-          btn.style.color = isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)'
+          btn.style.color = isLightAuthModal
+            ? (isHidden ? '#7950E8' : '#98A2B3')
+            : (isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)')
           return
         }
         const isHidden = input.type === 'password'
         input.type = isHidden ? 'text' : 'password'
-        btn.style.color = isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)'
+        btn.style.color = isLightAuthModal
+          ? (isHidden ? '#7950E8' : '#98A2B3')
+          : (isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)')
       })
     })
 
@@ -17381,6 +18505,12 @@ export function renderLobbyScreen(
       radio.addEventListener('change', () => {
         form.querySelectorAll<HTMLElement>('[data-gender-option]').forEach((opt) => {
           const isSelected = opt.dataset.genderOption === radio.value && radio.checked
+          if (isLightAuthModal) {
+            opt.style.borderColor = isSelected ? '#7950E8' : '#D0D5DD'
+            opt.style.background = isSelected ? '#F4F0FF' : '#FFFFFF'
+            opt.style.color = isSelected ? '#17233C' : '#667085'
+            return
+          }
           opt.style.borderColor = isSelected ? '#d4a520' : 'rgba(212,165,32,0.34)'
           opt.style.background = isSelected ? 'rgba(212,165,32,0.10)' : '#050505'
           opt.style.color = isSelected ? '#f8fafc' : 'rgba(255,255,255,0.72)'
@@ -18203,7 +19333,11 @@ export function renderLobbyScreen(
   const stakesScrollEl = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
   if (stakesScrollEl) {
     const allStakeCards = Array.from(stakesScrollEl.querySelectorAll<HTMLElement>('[data-lobby-stake-card]'))
-    if (allStakeCards.length > 0) {
+    if (stakesScrollEl.closest('[data-lobby-guest-carousel="1"]')) {
+      // Мобилно лоби за гости: позицията се пази по първата видима маса
+      // (не се връща към първата карта); стрелките следят скрола.
+      attachGuestTablesCarousel(root, savedGuestTablesCarouselAnchor)
+    } else if (allStakeCards.length > 0) {
       if (isPhoneLayout) {
         stakesScrollEl.scrollLeft = 0
       } else {

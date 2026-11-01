@@ -1,25 +1,28 @@
-﻿export function renderRulesPage(isMobile = false): string {
+﻿// light = светлата визия на новото мобилно лоби за гости (само там);
+// тъмната палитра е непроменена.
+export function renderRulesPage(isMobile = false, light = false): string {
   const padding = isMobile ? '14px 12px 40px' : '28px 40px 60px'
   const titleSize = isMobile ? '26px' : '34px'
   const h2Size = isMobile ? '18px' : '22px'
   const h3Size = isMobile ? '15px' : '17px'
   const maxWidth = '860px'
-  const gold = '#c9a84c'
-  const goldDim = 'rgba(201,168,76,0.35)'
-  const white = '#ffffff'
-  const dimText = 'rgba(255,255,255,0.55)'
-  const cardBg = 'rgba(255,255,255,0.04)'
-  const borderColor = 'rgba(201,168,76,0.25)'
+  const gold = light ? '#7950E8' : '#c9a84c'
+  const goldDim = light ? '#EAECF0' : 'rgba(201,168,76,0.35)'
+  const white = light ? '#17233C' : '#ffffff'
+  const dimText = light ? '#667085' : 'rgba(255,255,255,0.55)'
+  const cardBg = light ? '#FFFFFF' : 'rgba(255,255,255,0.04)'
+  const borderColor = light ? '#E4E7EC' : 'rgba(201,168,76,0.25)'
+  const headingColor = light ? '#17233C' : gold
 
   const sectionStyle = `
     background:${cardBg};
     border:1px solid ${borderColor};
-    border-radius:10px;
+    border-radius:${light ? '12px;box-shadow:0 4px 14px rgba(34,30,80,0.06)' : '10px'};
     padding:${isMobile ? '16px 14px' : '24px 28px'};
     margin-bottom:${isMobile ? '16px' : '22px'};
   `.replace(/\s+/g, ' ').trim()
 
-  const h2Style = `margin:0 0 14px;color:${gold};font-size:${h2Size};font-weight:800;line-height:1.2;letter-spacing:0.01em;padding-bottom:10px;border-bottom:1px solid ${goldDim};`
+  const h2Style = `margin:0 0 14px;color:${headingColor};font-size:${h2Size};font-weight:800;line-height:1.2;letter-spacing:0.01em;padding-bottom:10px;border-bottom:1px solid ${goldDim};`
   const h3Style = `margin:18px 0 8px;color:${white};font-size:${h3Size};font-weight:700;`
   const pStyle = `margin:0 0 10px;color:${white};font-size:${isMobile ? '14px' : '15px'};line-height:1.65;`
   const pDimStyle = `margin:0 0 10px;color:${dimText};font-size:${isMobile ? '13px' : '14px'};line-height:1.6;`
@@ -28,11 +31,11 @@
 
   const tableWrapStyle = `overflow-x:auto;-webkit-overflow-scrolling:touch;margin:10px 0 14px;border-radius:6px;`
   const tableStyle = `border-collapse:collapse;min-width:${isMobile ? '280px' : '340px'};width:100%;font-size:${isMobile ? '13px' : '14px'};`
-  const thStyle = `background:rgba(201,168,76,0.12);color:${gold};font-weight:700;padding:8px 12px;text-align:left;border-bottom:1px solid ${goldDim};white-space:nowrap;`
-  const tdStyle = `padding:7px 12px;color:${white};border-bottom:1px solid rgba(255,255,255,0.06);vertical-align:middle;`
-  const tdNumStyle = `padding:7px 12px;color:${white};border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;vertical-align:middle;`
-  const tdCenterStyle = `padding:7px 12px;color:${white};border-bottom:1px solid rgba(255,255,255,0.06);text-align:center;vertical-align:middle;`
-  const tdDimStyle = `padding:7px 12px;color:${dimText};border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;vertical-align:middle;`
+  const thStyle = `background:${light ? '#F4F0FF' : 'rgba(201,168,76,0.12)'};color:${gold};font-weight:700;padding:8px 12px;text-align:left;border-bottom:1px solid ${goldDim};white-space:nowrap;`
+  const tdStyle = `padding:7px 12px;color:${white};border-bottom:1px solid ${light ? '#EAECF0' : 'rgba(255,255,255,0.06)'};vertical-align:middle;`
+  const tdNumStyle = `padding:7px 12px;color:${white};border-bottom:1px solid ${light ? '#EAECF0' : 'rgba(255,255,255,0.06)'};text-align:right;vertical-align:middle;`
+  const tdCenterStyle = `padding:7px 12px;color:${white};border-bottom:1px solid ${light ? '#EAECF0' : 'rgba(255,255,255,0.06)'};text-align:center;vertical-align:middle;`
+  const tdDimStyle = `padding:7px 12px;color:${dimText};border-bottom:1px solid ${light ? '#EAECF0' : 'rgba(255,255,255,0.06)'};text-align:right;vertical-align:middle;`
 
   const anchorLinkStyle = `color:${gold};text-decoration:none;font-size:${isMobile ? '13px' : '14px'};line-height:1.9;`
 
@@ -396,7 +399,7 @@
     </ul>
   </section>
 
-  <section style="${sectionStyle}border-color:${goldDim};background:rgba(201,168,76,0.06);">
+  <section style="${sectionStyle}border-color:${goldDim};background:${light ? '#F4F0FF' : 'rgba(201,168,76,0.06)'};">
     <h2 style="${h2Style}">Кратко обобщение</h2>
     <p style="${pStyle}">За начинаещия най-важните правила са:</p>
     <ol style="${olStyle}">

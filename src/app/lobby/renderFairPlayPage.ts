@@ -1,25 +1,28 @@
-export function renderFairPlayPage(isMobile = false): string {
+// light = светлата визия на новото мобилно лоби за гости (само там);
+// тъмната палитра е непроменена.
+export function renderFairPlayPage(isMobile = false, light = false): string {
   const padding = isMobile ? '14px 12px 40px' : '28px 40px 60px'
   const titleSize = isMobile ? '26px' : '34px'
   const h2Size = isMobile ? '18px' : '22px'
   const h3Size = isMobile ? '15px' : '17px'
   const maxWidth = '860px'
-  const gold = '#c9a84c'
-  const goldDim = 'rgba(201,168,76,0.35)'
-  const white = '#ffffff'
-  const dimText = 'rgba(255,255,255,0.55)'
-  const cardBg = 'rgba(255,255,255,0.04)'
-  const borderColor = 'rgba(201,168,76,0.25)'
+  const gold = light ? '#7950E8' : '#c9a84c'
+  const goldDim = light ? '#EAECF0' : 'rgba(201,168,76,0.35)'
+  const white = light ? '#17233C' : '#ffffff'
+  const dimText = light ? '#667085' : 'rgba(255,255,255,0.55)'
+  const cardBg = light ? '#FFFFFF' : 'rgba(255,255,255,0.04)'
+  const borderColor = light ? '#E4E7EC' : 'rgba(201,168,76,0.25)'
+  const headingColor = light ? '#17233C' : gold
 
   const sectionStyle = `
     background:${cardBg};
     border:1px solid ${borderColor};
-    border-radius:10px;
+    border-radius:${light ? '12px;box-shadow:0 4px 14px rgba(34,30,80,0.06)' : '10px'};
     padding:${isMobile ? '16px 14px' : '24px 28px'};
     margin-bottom:${isMobile ? '16px' : '22px'};
   `.replace(/\s+/g, ' ').trim()
 
-  const h2Style = `margin:0 0 14px;color:${gold};font-size:${h2Size};font-weight:800;line-height:1.2;letter-spacing:0.01em;padding-bottom:10px;border-bottom:1px solid ${goldDim};`
+  const h2Style = `margin:0 0 14px;color:${headingColor};font-size:${h2Size};font-weight:800;line-height:1.2;letter-spacing:0.01em;padding-bottom:10px;border-bottom:1px solid ${goldDim};`
   const h3Style = `margin:18px 0 8px;color:${white};font-size:${h3Size};font-weight:700;`
   const pStyle = `margin:0 0 10px;color:${white};font-size:${isMobile ? '14px' : '15px'};line-height:1.65;`
   const pDimStyle = `margin:0 0 10px;color:${dimText};font-size:${isMobile ? '13px' : '14px'};line-height:1.6;`
@@ -99,7 +102,7 @@ export function renderFairPlayPage(isMobile = false): string {
     <p style="${pStyle}margin-bottom:0;">Нарушенията по-горе, както и съзнателното често напускане на започнати игри, могат да доведат до игрови санкции — отнемане на виртуални жълтици или ограничения на профила, съгласно <a href="/terms" style="${linkStyle}">Общите условия</a> на платформата.</p>
   </section>
 
-  <section id="nauchi-poveche" style="${sectionStyle}border-color:${goldDim};background:rgba(201,168,76,0.06);">
+  <section id="nauchi-poveche" style="${sectionStyle}border-color:${goldDim};background:${light ? '#F4F0FF' : 'rgba(201,168,76,0.06)'};">
     <h2 style="${h2Style}">Научи повече</h2>
     <p style="${pStyle}">За пълните правила на играта, включително точкуване и специални случаи, виж <a href="/rules" style="${linkStyle}">Правила на белота</a>.</p>
     <p style="${pStyle}margin-bottom:0;">За практически съвети как да играеш по-добре, независимо какви карти ти се паднат, виж <a href="/strategy" style="${linkStyle}">Съвети и стратегии</a>.</p>

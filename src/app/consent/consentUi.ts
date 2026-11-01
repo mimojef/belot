@@ -11,6 +11,9 @@
 // top:50%), така че при активна игра без направен избор banner-ът остава
 // нисък и компактен, за да минимизира евентуално припокриване с долния seat
 // панел — при съмнение направи ръчна визуална проверка на активния геймплей.
+//
+// В новото светло мобилно лоби за гости banner-ът и modal-ът получават светъл
+// вид от style.css (по data-consent-* маркерите по-долу); тук стилът е общият.
 
 import {
   acceptAllConsent,
@@ -75,8 +78,8 @@ function renderBannerHtml(): string {
     >
       <div class="pika-consent-banner-inner" style="display:flex;align-items:center;gap:18px;">
         <div style="flex:1;min-width:0;">
-          <div style="font-size:15px;font-weight:900;color:#ffffff;margin-bottom:4px;">Този сайт използва бисквитки</div>
-          <div style="font-size:13px;line-height:1.4;font-weight:600;color:rgba(255,255,255,0.72);">Използваме бисквитки, за да улесним работата на сайта и да показваме по-подходящо съдържание и функционалности.</div>
+          <div data-consent-banner-title="1" style="font-size:15px;font-weight:900;color:#ffffff;margin-bottom:4px;">Този сайт използва бисквитки</div>
+          <div data-consent-banner-text="1" style="font-size:13px;line-height:1.4;font-weight:600;color:rgba(255,255,255,0.72);">Използваме бисквитки, за да улесним работата на сайта и да показваме по-подходящо съдържание и функционалности.</div>
         </div>
         <div class="pika-consent-banner-actions" style="display:flex;gap:10px;flex-shrink:0;">
           <button type="button" data-consent-accept-all="1" style="height:42px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;white-space:nowrap;">Приеми всички</button>
@@ -106,7 +109,7 @@ function renderCheckboxCardHtml(options: {
 }): string {
   const { title, description, checked, disabled, dataAttribute } = options
   return `
-    <div style="display:flex;align-items:flex-start;gap:12px;border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:12px 14px;background:rgba(255,255,255,0.03);">
+    <div data-consent-category-card="1" style="display:flex;align-items:flex-start;gap:12px;border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:12px 14px;background:rgba(255,255,255,0.03);">
       <input
         type="checkbox"
         ${dataAttribute}="1"
@@ -117,10 +120,10 @@ function renderCheckboxCardHtml(options: {
       >
       <div style="min-width:0;">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <div style="font-size:14px;font-weight:900;color:#ffffff;">${escapeHtml(title)}</div>
-          ${disabled ? '<span style="font-size:10px;font-weight:900;letter-spacing:0.02em;color:#080808;background:rgba(212,165,32,0.85);border-radius:999px;padding:2px 8px;">ВИНАГИ АКТИВНО</span>' : ''}
+          <div data-consent-category-title="1" style="font-size:14px;font-weight:900;color:#ffffff;">${escapeHtml(title)}</div>
+          ${disabled ? '<span data-consent-always-active="1" style="font-size:10px;font-weight:900;letter-spacing:0.02em;color:#080808;background:rgba(212,165,32,0.85);border-radius:999px;padding:2px 8px;">ВИНАГИ АКТИВНО</span>' : ''}
         </div>
-        <div id="${dataAttribute}-desc" style="margin-top:3px;font-size:13px;line-height:1.4;font-weight:600;color:rgba(255,255,255,0.68);">${escapeHtml(description)}</div>
+        <div id="${dataAttribute}-desc" data-consent-category-desc="1" style="margin-top:3px;font-size:13px;line-height:1.4;font-weight:600;color:rgba(255,255,255,0.68);">${escapeHtml(description)}</div>
       </div>
     </div>
   `
@@ -167,7 +170,7 @@ function renderModalHtml(): string {
               dataAttribute: 'data-consent-marketing-checkbox',
             })}
           </div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;">
+          <div data-consent-modal-actions="1" style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;">
             <button type="button" data-consent-save-choice="1" style="height:44px;padding:0 18px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;cursor:pointer;">Запази избора</button>
             <button type="button" data-consent-accept-all-modal="1" style="height:44px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">Приеми всички</button>
           </div>

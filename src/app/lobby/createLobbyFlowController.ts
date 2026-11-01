@@ -7535,6 +7535,15 @@ export function createLobbyFlowController(
       onStrategyOpen: () => {
         showStrategyPage()
       },
+      onInfoPageOpen: (screen) => {
+        switch (screen) {
+          case 'rules': showRulesPage(); break
+          case 'strategy': showStrategyPage(); break
+          case 'learn': showLearnPage(); break
+          case 'fair-play': showFairPlayPage(); break
+          case 'faq': showFaqPage(); break
+        }
+      },
       onPrivateRoomsClose: () => {
         state.currentScreen = 'lobby'
         state.privateRoomInfoText = null
@@ -18829,7 +18838,12 @@ export function createLobbyFlowController(
     if (msgEl) {
       msgEl.textContent = message
       msgEl.style.display = ''
-      if (isSuccess) {
+      // Светлата тема на auth modal-а (само мобилното лоби за гости).
+      if (msgEl.closest('[data-lobby-guest-auth-modal="1"]') !== null) {
+        msgEl.style.border = isSuccess ? '1px solid #ABEFC6' : '1px solid #FECDCA'
+        msgEl.style.background = isSuccess ? '#ECFDF3' : '#FEF3F2'
+        msgEl.style.color = isSuccess ? '#067647' : '#B42318'
+      } else if (isSuccess) {
         msgEl.style.cssText = msgEl.style.cssText.replace(/border:[^;]+;?/g, '')
         msgEl.style.border = '1px solid rgba(74,222,128,0.28)'
         msgEl.style.background = 'rgba(20,83,45,0.42)'
