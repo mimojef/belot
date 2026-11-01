@@ -2226,7 +2226,7 @@ type InternalLobbyFlowState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
-  adminCampaignLiveTop10: { campaignId: string; entries: AdminCampaignLiveTop10Entry[] } | null
+  adminCampaignLiveTop10: { campaignId: string; isArchive: boolean; entries: AdminCampaignLiveTop10Entry[] } | null
   adminCampaignArchiveList: AdminCampaignArchiveListRow[]
   adminCampaignArchiveLoading: boolean
   adminCampaignArchiveErrorText: string | null
@@ -14474,7 +14474,32 @@ export function createLobbyFlowController(
 
   // "Топ 10" бутон за АКТИВНА кампания (admin-campaigns екрана, не архива) —
   // текущо (не замразено) класиране, read-only, без да се чака архивиране.
+  // Приключила (архивирана) кампания -> замразеният Топ 10 от архива
+  // (запазени имена/позиции/единици), не живото класиране.
   async function loadAdminCampaignLiveTop10(campaignId: string): Promise<void> {
+    const campaign = state.adminCampaigns.find((row) => row.campaignId === campaignId)
+    if (campaign && campaign.status !== 'active') {
+      if (!options.onAdminCampaignArchiveDetailLoad) return
+      const archive = await options.onAdminCampaignArchiveDetailLoad(campaignId)
+      if (state.currentScreen !== 'admin-campaigns') return
+      if (!archive.ok || !archive.archived) {
+        state.adminCampaignsErrorText = archive.ok ? 'Кампанията все още не е архивирана.' : (archive.message ?? 'Грешка при зареждане на Топ 10.')
+        render()
+        return
+      }
+      state.adminCampaignLiveTop10 = {
+        campaignId,
+        isArchive: true,
+        entries: archive.detail.top10.map((entry) => ({
+          rank: entry.rank,
+          profileId: entry.profileId ?? '',
+          displayName: entry.displayNameAtArchive,
+          unitsTotal: entry.unitsTotal,
+        })),
+      }
+      render()
+      return
+    }
     if (!options.onAdminCampaignLiveTop10Request) return
     const result = await options.onAdminCampaignLiveTop10Request(campaignId)
     if (state.currentScreen !== 'admin-campaigns') return
@@ -14483,7 +14508,7 @@ export function createLobbyFlowController(
       render()
       return
     }
-    state.adminCampaignLiveTop10 = { campaignId, entries: result.entries }
+    state.adminCampaignLiveTop10 = { campaignId, isArchive: false, entries: result.entries }
     render()
   }
 

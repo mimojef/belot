@@ -22,8 +22,8 @@ export type AdminCampaignsPanelState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
-  /** "Топ 10" бутон на активна кампания — само последният заявен campaignId/резултат се пази. */
-  adminCampaignLiveTop10: { campaignId: string; entries: AdminCampaignLiveTop10Entry[] } | null
+  /** "Топ 10" бутон — живо класиране (активна) или архивно (isArchive); само последният заявен campaignId/резултат се пази. */
+  adminCampaignLiveTop10: { campaignId: string; isArchive: boolean; entries: AdminCampaignLiveTop10Entry[] } | null
 }
 
 export type AdminCampaignsPanelHandlers = {
@@ -299,7 +299,7 @@ export function renderAdminCampaignsPanel(state: AdminCampaignsPanelState, isMob
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:${isMobile ? 'flex-start' : 'flex-end'};">
             <button type="button" data-admin-campaign-edit="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(147,197,253,0.35);border-radius:6px;background:rgba(30,64,175,0.22);color:#bfdbfe;font-size:11px;font-weight:900;cursor:pointer;">Преглед</button>
-            ${campaign.status === 'active' ? `<button type="button" data-admin-campaign-top10="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(212,165,32,0.4);border-radius:6px;background:rgba(120,90,10,0.26);color:#fde68a;font-size:11px;font-weight:900;cursor:pointer;">Топ 10</button>` : ''}
+            ${campaign.status === 'active' || campaign.archivedAt !== null ? `<button type="button" data-admin-campaign-top10="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(212,165,32,0.4);border-radius:6px;background:rgba(120,90,10,0.26);color:#fde68a;font-size:11px;font-weight:900;cursor:pointer;">Топ 10</button>` : ''}
             ${canSchedule ? `<button type="button" data-admin-campaign-action="schedule" data-campaign-id="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(251,191,36,0.35);border-radius:6px;background:rgba(120,53,15,0.28);color:#fde68a;font-size:11px;font-weight:900;cursor:pointer;">Планирай</button>` : ''}
             ${canActivate ? `<button type="button" data-admin-campaign-action="activate" data-campaign-id="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(52,211,153,0.35);border-radius:6px;background:rgba(6,78,59,0.28);color:#bbf7d0;font-size:11px;font-weight:900;cursor:pointer;">Активирай</button>` : ''}
             ${canStop ? `<button type="button" data-admin-campaign-action="stop" data-campaign-id="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.30);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Спри</button>` : ''}
@@ -309,9 +309,9 @@ export function renderAdminCampaignsPanel(state: AdminCampaignsPanelState, isMob
         </article>
         ${state.adminCampaignLiveTop10?.campaignId === campaign.campaignId ? `
           <div data-admin-campaign-top10-panel="${esc(campaign.campaignId)}" style="border:1px solid rgba(212,165,32,0.3);border-radius:8px;background:rgba(0,0,0,0.3);padding:12px;">
-            <div style="color:#fde68a;font-size:12px;font-weight:950;margin-bottom:8px;">Топ 10 (текущо, живо класиране)</div>
+            <div style="color:#fde68a;font-size:12px;font-weight:950;margin-bottom:8px;">${state.adminCampaignLiveTop10.isArchive ? 'Топ 10 (окончателно, архивно класиране)' : 'Топ 10 (текущо, живо класиране)'}</div>
             ${state.adminCampaignLiveTop10.entries.length === 0
-              ? '<div style="color:rgba(255,255,255,0.45);font-size:12px;font-weight:800;">Все още няма записани единици.</div>'
+              ? `<div style="color:rgba(255,255,255,0.45);font-size:12px;font-weight:800;">${state.adminCampaignLiveTop10.isArchive ? 'Архивът няма класирани участници.' : 'Все още няма записани единици.'}</div>`
               : `<div style="display:flex;flex-direction:column;gap:4px;">${state.adminCampaignLiveTop10.entries.map((entry) => `
                   <div style="display:flex;justify-content:space-between;color:rgba(255,255,255,0.78);font-size:12px;font-weight:800;">
                     <span>${entry.rank}. ${esc(entry.displayName)}</span>

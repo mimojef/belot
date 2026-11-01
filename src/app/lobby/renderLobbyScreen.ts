@@ -833,7 +833,7 @@ export type LobbyScreenState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
-  adminCampaignLiveTop10: { campaignId: string; entries: AdminCampaignLiveTop10Entry[] } | null
+  adminCampaignLiveTop10: { campaignId: string; isArchive: boolean; entries: AdminCampaignLiveTop10Entry[] } | null
   adminCampaignArchiveList: AdminCampaignArchiveListRow[]
   adminCampaignArchiveLoading: boolean
   adminCampaignArchiveErrorText: string | null
