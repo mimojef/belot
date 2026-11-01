@@ -8,12 +8,13 @@
 // HTML-ът изобщо не съдържа картата.
 
 //
-// light — новото светло мобилно лоби за гости (renderLobbyScreen.ts,
-// GUEST_MOBILE_LIGHT_INFO_VIEWS). Ludo лобито изисква профил, затова там
-// картата е data-lobby-guest-auth-gate (подканата за вход), както "Създай
-// игра" в гост лобито, вместо data-ludo-play-button.
-export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, showSvara = false, light = false): string {
-  if (light) return renderLightMoreGamesScreen(showLudo, showSvara)
+// light — светлият мобилен дизайн (renderLobbyScreen.ts,
+// GUEST_MOBILE_LIGHT_INFO_VIEWS), общ за гост и регистриран. Ludo лобито
+// изисква профил, затова за гост картата е data-lobby-guest-auth-gate
+// (подканата за вход), както "Създай игра" в гост лобито; за регистриран
+// (isMember) — data-ludo-play-button.
+export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, showSvara = false, light = false, isMember = false): string {
+  if (light) return renderLightMoreGamesScreen(showLudo, showSvara, isMember)
   const padding = useMobileLayout ? '14px 12px 40px' : '28px 40px 60px'
 
   return `
@@ -83,7 +84,7 @@ export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, 
   `
 }
 
-function renderLightMoreGamesScreen(showLudo: boolean, showSvara: boolean): string {
+function renderLightMoreGamesScreen(showLudo: boolean, showSvara: boolean, isMember: boolean): string {
   const card = 'background:#FFFFFF;border:1px solid rgba(20,20,43,0.05);border-radius:12px;box-shadow:0 6px 18px rgba(34,30,80,0.07);box-sizing:border-box;'
   return `
     <article data-more-games-light="1" style="padding:2px 0 8px;box-sizing:border-box;">
@@ -98,7 +99,7 @@ function renderLightMoreGamesScreen(showLudo: boolean, showSvara: boolean): stri
       ${showLudo ? `<button
         type="button"
         data-ludo-play-card="1"
-        data-lobby-guest-auth-gate="1"
+        ${isMember ? 'data-ludo-play-button="1"' : 'data-lobby-guest-auth-gate="1"'}
         aria-label="Играй Не се сърди човече"
         style="${card}display:block;width:100%;margin-top:14px;padding:8px;cursor:pointer;line-height:0;font:inherit;text-align:left;"
       ><img

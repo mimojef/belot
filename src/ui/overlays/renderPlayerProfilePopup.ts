@@ -507,7 +507,7 @@ function renderAvatar(profile: PlayerPublicProfileSnapshot | null, seat: Seat | 
           height:100%;
           object-fit:cover;
           display:block;
-          border-radius:20px;
+          border-radius:${themed('20px', '8px')};
           user-select:none;
           -webkit-user-drag:none;
         "
@@ -523,7 +523,7 @@ function renderAvatar(profile: PlayerPublicProfileSnapshot | null, seat: Seat | 
         display:flex;
         align-items:center;
         justify-content:center;
-        border-radius:20px;
+        border-radius:${themed('20px', '8px')};
         background:linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(226,232,240,0.96) 100%);
         color:#16314f;
         font-size:42px;
@@ -839,7 +839,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
             align-items:center;
             gap:7px;
             min-width:0;
-            color:#d4a520;
+            color:${themed('#d4a520', '#B7791F')};
             font-size:20px;
             line-height:1;
             font-weight:900;
@@ -853,7 +853,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
         data-player-profile-own-vip-days="1"
         data-vip-status-loading="${isVipStatusLoading ? '1' : '0'}"
         style="font-size:13px;letter-spacing:0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-      ><span style="color:#d4a520;font-weight:800;">VIP · </span><span style="color:#f8fafc;font-weight:400;">${escapeHtml(vipDaysText)}</span></div>
+      ><span style="color:${themed('#d4a520', '#6941C6')};font-weight:800;">VIP · </span><span style="color:${themed('#f8fafc', LIGHT_TEXT)};font-weight:400;">${escapeHtml(vipDaysText)}</span></div>
       <div data-player-profile-own-actions="1" style="display:flex;align-items:center;flex-wrap:wrap;column-gap:18px;row-gap:6px;margin-top:6px;">
         <span
           data-player-profile-edit="1"
@@ -861,7 +861,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
             display:inline-flex;
             align-items:center;
             gap:7px;
-            color:#f8fafc;
+            color:${themed('#f8fafc', '#6941C6')};
             font-size:15px;
             font-weight:400;
             cursor:pointer;
@@ -882,7 +882,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
               display:inline-flex;
               align-items:center;
               gap:7px;
-              color:#fca5a5;
+              color:${themed('#fca5a5', '#B42318')};
               font-size:15px;
               font-weight:400;
               cursor:pointer;
@@ -1582,7 +1582,7 @@ function renderRiskSection(
       data-player-profile-risk-section="1"
       style="
         display:flex;flex-direction:column;gap:8px;
-        border-radius:10px;border:1px solid rgba(239,68,68,0.3);
+        border-radius:${themed('10px', '12px')};border:1px solid rgba(239,68,68,0.3);
         background:rgba(239,68,68,0.05);padding:12px 14px;
       "
     >
@@ -1596,7 +1596,7 @@ function renderRiskSection(
           ${riskRecheckSubmitting ? 'disabled' : ''}
           style="
             min-height:28px;padding:0 10px;border:1px solid rgba(212,165,32,0.5);
-            border-radius:6px;background:#111;color:#d4a520;font-size:11px;font-weight:800;
+            border-radius:${themed('6px', '8px')};background:#111;color:#d4a520;font-size:11px;font-weight:800;
             cursor:${riskRecheckSubmitting ? 'default' : 'pointer'};opacity:${riskRecheckSubmitting ? '0.6' : '1'};
           "
         >${riskRecheckSubmitting ? 'Изчакай…' : 'Провери отново'}</button>
@@ -2244,7 +2244,7 @@ function renderProfileContent(
             style="
               width:100%;
               height:100%;
-              border-radius:20px;
+              border-radius:${themed('20px', '8px')};
               overflow:hidden;
               background:${themed('rgba(255,255,255,0.06)', '#FFFFFF')};
               border:1px solid ${themed('rgba(255,255,255,0.10)', LIGHT_BORDER)};

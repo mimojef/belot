@@ -34,7 +34,7 @@ export function renderStrategyPage(isMobile = false, light = false): string {
     background:${light ? '#F4F0FF' : 'rgba(201,168,76,0.08)'};
     border:1px solid ${light ? '#D9CCFB' : 'rgba(201,168,76,0.5)'};
     border-left:4px solid ${gold};
-    border-radius:6px;
+    border-radius:${light ? '12px' : '6px'};
     padding:${isMobile ? '12px 14px' : '14px 18px'};
     margin:14px 0 10px;
   `.replace(/\s+/g, ' ').trim()

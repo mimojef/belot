@@ -22,6 +22,7 @@
 // extractAndClearVerificationLocator() doc коментара по-долу за защо
 // security НЕ зависи от това).
 import { applyRouteSeo } from '../seo/applyRouteSeo'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 // ─── Locator extraction ─────────────────────────────────────────────────────────
 
@@ -132,20 +133,43 @@ function escapeHtml(value: string): string {
 
 // ─── Render helpers ───────────────────────────────────────────────────────────
 
-const SHARED_INPUT_STYLE =
-  'width:100%;box-sizing:border-box;height:52px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:28px;font-weight:900;letter-spacing:10px;text-align:center;outline:none;'
+// Тъмната палитра (desktop/таблет) — непроменена. Светлата — телефон, в
+// стила на новото мобилно лоби; избира се при всеки render (isPhoneLayoutViewport).
+const DARK_THEME = {
+  title: '#f8fafc',
+  text: 'rgba(255,255,255,0.72)',
+  accent: '#d4a520',
+  hint: 'rgba(255,255,255,0.5)',
+  check: 'rgba(255,255,255,0.78)',
+  helper: '#ffffff',
+  codeInput: 'width:100%;box-sizing:border-box;height:52px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:28px;font-weight:900;letter-spacing:10px;text-align:center;outline:none;',
+  textInput: 'width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;',
+  primary: 'width:100%;height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;',
+  disabled: 'width:100%;height:46px;border:0;border-radius:8px;background:rgba(100,80,0,0.4);color:rgba(255,255,255,0.4);font-size:15px;font-weight:900;cursor:not-allowed;margin-top:4px;',
+  secondary: 'width:100%;height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;',
+  error: 'border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;',
+  resend: 'rgba(212,165,32,0.85)',
+  resendDisabled: 'rgba(255,255,255,0.4)',
+}
 
-const TEXT_INPUT_STYLE =
-  'width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;'
+const LIGHT_THEME: typeof DARK_THEME = {
+  title: '#17233C',
+  text: '#667085',
+  accent: '#7950E8',
+  hint: '#98A2B3',
+  check: '#344054',
+  helper: '#667085',
+  codeInput: "width:100%;box-sizing:border-box;height:56px;border-radius:8px;border:1px solid #D0D5DD;background:#FFFFFF;color:#17233C;padding:0 12px;font-family:inherit;font-size:28px;font-weight:800;letter-spacing:10px;text-align:center;outline:none;",
+  textInput: 'width:100%;box-sizing:border-box;height:46px;border-radius:8px;border:1px solid #D0D5DD;background:#FFFFFF;color:#17233C;padding:0 12px;font-size:16px;font-weight:500;outline:none;font-family:inherit;',
+  primary: 'width:100%;height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#8961F0 0%,#7950E8 55%,#6C43DD 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.3),0 6px 14px rgba(121,80,232,0.28);color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;margin-top:4px;',
+  disabled: 'width:100%;height:46px;border:0;border-radius:8px;background:#E4E7EC;color:#98A2B3;font-family:inherit;font-size:15px;font-weight:800;cursor:not-allowed;margin-top:4px;',
+  secondary: 'width:100%;height:40px;border:0;background:transparent;color:#475467;font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;',
+  error: 'border-radius:8px;border:1px solid #FECDCA;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:700;text-align:center;',
+  resend: '#7950E8',
+  resendDisabled: '#98A2B3',
+}
 
-const PRIMARY_BTN_STYLE =
-  'width:100%;height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;'
-
-const DISABLED_BTN_STYLE =
-  'width:100%;height:46px;border:0;border-radius:8px;background:rgba(100,80,0,0.4);color:rgba(255,255,255,0.4);font-size:15px;font-weight:900;cursor:not-allowed;margin-top:4px;'
-
-const SECONDARY_BTN_STYLE =
-  'width:100%;height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;'
+let T = DARK_THEME
 
 function formatSecondsRemaining(resendAvailableAtMs: number, nowMs: number): number {
   return Math.max(0, Math.ceil((resendAvailableAtMs - nowMs) / 1000))
@@ -167,7 +191,7 @@ function formatExpiresAtLabel(expiresAt: string): string {
 function buildLoadingHtml(): string {
   return `
     <div style="text-align:center;display:grid;gap:16px;">
-      <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;">Зареждане...</div>
+      <div style="font-size:25px;line-height:1.1;font-weight:900;color:${T.title};">Зареждане...</div>
     </div>
   `
 }
@@ -175,12 +199,12 @@ function buildLoadingHtml(): string {
 function buildInvalidHtml(): string {
   return `
     <div style="text-align:center;display:grid;gap:16px;">
-      <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;">Невалиден линк</div>
-      <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);">
+      <div style="font-size:25px;line-height:1.1;font-weight:900;color:${T.title};">Невалиден линк</div>
+      <div style="font-size:14px;line-height:1.55;color:${T.text};">
         Този линк за потвърждение не е валиден.
       </div>
-      <button type="button" data-verify-page-go-to-login="1" style="${PRIMARY_BTN_STYLE}">Към вход</button>
-      <button type="button" data-verify-page-go-to-register="1" style="${SECONDARY_BTN_STYLE}">Нова регистрация</button>
+      <button type="button" data-verify-page-go-to-login="1" style="${T.primary}">Към вход</button>
+      <button type="button" data-verify-page-go-to-register="1" style="${T.secondary}">Нова регистрация</button>
     </div>
   `
 }
@@ -189,15 +213,15 @@ function buildExpiredHtml(): string {
   return `
     <div style="text-align:center;display:grid;gap:16px;">
       <div style="font-size:40px;">⏳</div>
-      <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;">
+      <div style="font-size:22px;line-height:1.25;font-weight:900;color:${T.title};">
         Времето за потвърждение на регистрацията е изтекло
       </div>
-      <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);">
+      <div style="font-size:14px;line-height:1.55;color:${T.text};">
         Регистрацията не е била потвърдена в рамките на 24 часа и вече не е активна.<br><br>
         Можете да създадете нова регистрация.<br><br>
-        <strong style="color:#f8fafc;">Важно:</strong> можете да използвате същия имейл адрес, който сте използвали преди. След изтичането на регистрацията той вече е освободен и може да бъде използван отново.
+        <strong style="color:${T.title};">Важно:</strong> можете да използвате същия имейл адрес, който сте използвали преди. След изтичането на регистрацията той вече е освободен и може да бъде използван отново.
       </div>
-      <button type="button" data-verify-page-go-to-register="1" style="${PRIMARY_BTN_STYLE}">Създай нова регистрация</button>
+      <button type="button" data-verify-page-go-to-register="1" style="${T.primary}">Създай нова регистрация</button>
     </div>
   `
 }
@@ -207,14 +231,14 @@ function buildInactiveHtml(): string {
   // 'inactive' phase doc коментара по-горе за пълния rationale).
   return `
     <div style="text-align:center;display:grid;gap:16px;">
-      <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;">
+      <div style="font-size:22px;line-height:1.25;font-weight:900;color:${T.title};">
         Тази заявка за регистрация вече не е активна.
       </div>
-      <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);">
+      <div style="font-size:14px;line-height:1.55;color:${T.text};">
         Ако вече сте потвърдили регистрацията си, можете да влезете в профила си.
       </div>
-      <button type="button" data-verify-page-go-to-login="1" style="${PRIMARY_BTN_STYLE}">Вход</button>
-      <button type="button" data-verify-page-go-to-register="1" style="${SECONDARY_BTN_STYLE}">Нова регистрация</button>
+      <button type="button" data-verify-page-go-to-login="1" style="${T.primary}">Вход</button>
+      <button type="button" data-verify-page-go-to-register="1" style="${T.secondary}">Нова регистрация</button>
     </div>
   `
 }
@@ -229,21 +253,21 @@ function buildFormHtml(state: Extract<RegistrationVerificationPageState, { phase
     : 'Изпрати отново'
 
   const errorBlock = state.errorText
-    ? `<div data-verify-page-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.errorText)}</div>`
-    : `<div data-verify-page-error="1" style="display:none;border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;"></div>`
+    ? `<div data-verify-page-error="1" style="${T.error}">${escapeHtml(state.errorText)}</div>`
+    : `<div data-verify-page-error="1" style="display:none;${T.error}"></div>`
 
   return `
     <form data-verify-page-form="1" style="display:grid;gap:14px;" novalidate>
-      <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;text-align:center;">
+      <div style="font-size:22px;line-height:1.25;font-weight:900;color:${T.title};text-align:center;">
         Потвърдете регистрацията си
       </div>
-      <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);font-weight:600;text-align:center;">
+      <div style="font-size:14px;line-height:1.55;color:${T.text};font-weight:600;text-align:center;">
         Въведете кода, който изпратихме на вашия имейл.
       </div>
-      <div style="text-align:center;font-size:14px;font-weight:800;color:#d4a520;">
+      <div style="text-align:center;font-size:14px;font-weight:800;color:${T.accent};">
         ${escapeHtml(state.maskedEmail)}
       </div>
-      <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;text-align:center;">
+      <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:${T.accent};text-align:center;">
         Код за потвърждение
         <input
           name="code"
@@ -254,23 +278,23 @@ function buildFormHtml(state: Extract<RegistrationVerificationPageState, { phase
           autocomplete="one-time-code"
           maxlength="6"
           value="${escapeHtml(state.code)}"
-          style="${SHARED_INPUT_STYLE}"
+          style="${T.codeInput}"
           ${state.submitting ? 'disabled' : ''}
         >
       </label>
-      <div style="text-align:center;font-size:12px;font-weight:600;color:rgba(255,255,255,0.5);margin-top:-6px;">
+      <div style="text-align:center;font-size:12px;font-weight:600;color:${T.hint};margin-top:-6px;">
         Кодът е валиден до ${escapeHtml(formatExpiresAtLabel(state.expiresAt))}.
       </div>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.78);cursor:pointer;justify-content:center;">
-        <input type="checkbox" name="rememberMe" data-verify-page-remember-me="1" ${state.rememberMe ? 'checked' : ''} style="width:16px;height:16px;cursor:pointer;">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:${T.check};cursor:pointer;justify-content:center;">
+        <input type="checkbox" name="rememberMe" data-verify-page-remember-me="1" ${state.rememberMe ? 'checked' : ''} style="width:16px;height:16px;cursor:pointer;accent-color:${T.accent};">
         Запомни ме на това устройство
       </label>
       ${errorBlock}
-      <button type="submit" data-verify-page-submit="1" style="${state.submitting ? DISABLED_BTN_STYLE : PRIMARY_BTN_STYLE}" ${state.submitting ? 'disabled' : ''}>
+      <button type="submit" data-verify-page-submit="1" style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
         ${state.submitting ? 'Проверка...' : 'Потвърди'}
       </button>
       <div style="display:flex;justify-content:center;gap:16px;flex-wrap:wrap;">
-        <button type="button" data-verify-page-resend="1" ${resendDisabled ? 'disabled' : ''} style="border:0;background:transparent;color:${resendDisabled ? 'rgba(255,255,255,0.4)' : 'rgba(212,165,32,0.85)'};font-size:13px;font-weight:800;cursor:${resendDisabled ? 'default' : 'pointer'};text-decoration:${resendDisabled ? 'none' : 'underline'};text-underline-offset:2px;">
+        <button type="button" data-verify-page-resend="1" ${resendDisabled ? 'disabled' : ''} style="border:0;background:transparent;color:${resendDisabled ? T.resendDisabled : T.resend};font-size:13px;font-weight:800;cursor:${resendDisabled ? 'default' : 'pointer'};text-decoration:${resendDisabled ? 'none' : 'underline'};text-underline-offset:2px;">
           Не получихте код? ${escapeHtml(resendLabel)}
         </button>
       </div>
@@ -280,19 +304,19 @@ function buildFormHtml(state: Extract<RegistrationVerificationPageState, { phase
 
 function buildDisplayNameHtml(state: Extract<RegistrationVerificationPageState, { phase: 'displayName' }>): string {
   const errorBlock = state.errorText
-    ? `<div data-verify-page-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.errorText)}</div>`
-    : `<div data-verify-page-error="1" style="display:none;border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;"></div>`
+    ? `<div data-verify-page-error="1" style="${T.error}">${escapeHtml(state.errorText)}</div>`
+    : `<div data-verify-page-error="1" style="display:none;${T.error}"></div>`
 
   return `
     <form data-verify-page-display-name-form="1" style="display:grid;gap:14px;" novalidate>
-      <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;text-align:center;">
+      <div style="font-size:22px;line-height:1.25;font-weight:900;color:${T.title};text-align:center;">
         Изберете друго име
       </div>
-      <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);font-weight:600;text-align:center;">
+      <div style="font-size:14px;line-height:1.55;color:${T.text};font-weight:600;text-align:center;">
         Избраното от вас потребителско име вече е заето.<br>
         Изберете друго — имейлът, паролата и кодът за потвърждение остават непроменени.
       </div>
-      <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+      <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:${T.accent};">
         Ново потребителско име
         <input
           name="displayName"
@@ -300,16 +324,16 @@ function buildDisplayNameHtml(state: Extract<RegistrationVerificationPageState, 
           type="text"
           autocomplete="nickname"
           value="${escapeHtml(state.displayNameDraft)}"
-          style="${TEXT_INPUT_STYLE}"
+          style="${T.textInput}"
           ${state.submitting ? 'disabled' : ''}
         >
-        <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
+        <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:${T.helper};">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
       </label>
       ${errorBlock}
-      <button type="submit" data-verify-page-display-name-submit="1" style="${state.submitting ? DISABLED_BTN_STYLE : PRIMARY_BTN_STYLE}" ${state.submitting ? 'disabled' : ''}>
+      <button type="submit" data-verify-page-display-name-submit="1" style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
         ${state.submitting ? 'Запазване...' : 'Запази и продължи'}
       </button>
-      <button type="button" data-verify-page-display-name-cancel="1" style="${SECONDARY_BTN_STYLE}">
+      <button type="button" data-verify-page-display-name-cancel="1" style="${T.secondary}">
         Назад към кода за потвърждение
       </button>
     </form>
@@ -318,18 +342,18 @@ function buildDisplayNameHtml(state: Extract<RegistrationVerificationPageState, 
 
 function buildResendConfirmHtml(state: Extract<RegistrationVerificationPageState, { phase: 'resendConfirmEmail' }>): string {
   const errorBlock = state.errorText
-    ? `<div data-verify-page-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.errorText)}</div>`
-    : `<div data-verify-page-error="1" style="display:none;border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;"></div>`
+    ? `<div data-verify-page-error="1" style="${T.error}">${escapeHtml(state.errorText)}</div>`
+    : `<div data-verify-page-error="1" style="display:none;${T.error}"></div>`
 
   return `
     <form data-verify-page-resend-confirm-form="1" style="display:grid;gap:14px;" novalidate>
-      <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;text-align:center;">
+      <div style="font-size:22px;line-height:1.25;font-weight:900;color:${T.title};text-align:center;">
         Изпращане на нов код
       </div>
-      <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);font-weight:600;text-align:center;">
+      <div style="font-size:14px;line-height:1.55;color:${T.text};font-weight:600;text-align:center;">
         За да изпратим нов код, потвърдете имейла, с който сте се регистрирали.
       </div>
-      <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+      <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:${T.accent};">
         Имейл
         <input
           name="email"
@@ -338,15 +362,15 @@ function buildResendConfirmHtml(state: Extract<RegistrationVerificationPageState
           inputmode="email"
           autocomplete="email"
           value="${escapeHtml(state.emailDraft)}"
-          style="${TEXT_INPUT_STYLE}"
+          style="${T.textInput}"
           ${state.submitting ? 'disabled' : ''}
         >
       </label>
       ${errorBlock}
-      <button type="submit" data-verify-page-resend-confirm-submit="1" style="${state.submitting ? DISABLED_BTN_STYLE : PRIMARY_BTN_STYLE}" ${state.submitting ? 'disabled' : ''}>
+      <button type="submit" data-verify-page-resend-confirm-submit="1" style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
         ${state.submitting ? 'Изпращане...' : 'Изпрати нов код'}
       </button>
-      <button type="button" data-verify-page-resend-confirm-cancel="1" style="${SECONDARY_BTN_STYLE}">
+      <button type="button" data-verify-page-resend-confirm-cancel="1" style="${T.secondary}">
         Назад към кода за потвърждение
       </button>
     </form>
@@ -356,7 +380,7 @@ function buildResendConfirmHtml(state: Extract<RegistrationVerificationPageState
 function buildSuccessHtml(state: Extract<RegistrationVerificationPageState, { phase: 'success' }>): string {
   const loginButton = state.autoLoginConfirmed
     ? ''
-    : `<button type="button" data-verify-page-go-to-login="1" style="${PRIMARY_BTN_STYLE}">Вход</button>`
+    : `<button type="button" data-verify-page-go-to-login="1" style="${T.primary}">Вход</button>`
   const message = state.autoLoginConfirmed
     ? 'Регистрацията е активирана успешно. Влизате в профила си...'
     : 'Регистрацията е активирана успешно.<br>Можете да влезете в профила си.'
@@ -364,7 +388,7 @@ function buildSuccessHtml(state: Extract<RegistrationVerificationPageState, { ph
   return `
     <div style="text-align:center;display:grid;gap:16px;">
       <div style="font-size:40px;">✅</div>
-      <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;">
+      <div style="font-size:22px;line-height:1.25;font-weight:900;color:${T.title};">
         ${message}
       </div>
       ${loginButton}
@@ -380,6 +404,8 @@ export function renderRegistrationVerificationPage(
   callbacks: RegistrationVerificationPageCallbacks,
 ): void {
   applyRouteSeo('/verify-registration')
+  const isPhone = isPhoneLayoutViewport()
+  T = isPhone ? LIGHT_THEME : DARK_THEME
 
   const body =
     state.phase === 'loading'
@@ -398,7 +424,27 @@ export function renderRegistrationVerificationPage(
                   ? buildResendConfirmHtml(state)
                   : buildFormHtml(state)
 
-  root.innerHTML = `
+  root.innerHTML = isPhone ? `
+    <div data-standalone-light="1" style="
+      position:fixed;inset:0;
+      background:#F5F7FC;color:#17233C;
+      display:flex;flex-direction:column;align-items:center;
+      padding:24px 16px;box-sizing:border-box;overflow-y:auto;
+      font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;
+    ">
+      <div style="margin:auto 0;width:100%;max-width:440px;display:flex;flex-direction:column;align-items:center;gap:20px;">
+        <img src="/assets/lobby-mobile/logo-pika-text.webp" alt="Pika.bg" width="144" height="48" style="width:144px;height:48px;display:block;object-fit:contain;">
+        <div style="
+          width:100%;box-sizing:border-box;
+          border-radius:12px;border:1px solid #E4E7EC;background:#FFFFFF;
+          box-shadow:0 12px 32px rgba(23,35,60,0.10);
+          padding:24px 18px;
+        ">
+          ${body}
+        </div>
+      </div>
+    </div>
+  ` : `
     <div style="
       position:fixed;inset:0;
       background:#0a0a0a;

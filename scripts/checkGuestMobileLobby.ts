@@ -84,10 +84,10 @@ const PHONE_VIEWPORTS: Viewport[] = [
 // Сценарии, които трябва да останат байт-идентични с кода преди редизайна.
 type BaselineScenario = { name: string; width: number; height: number; touch: boolean; query: string; clickSelector?: string }
 const BASELINE_SCENARIOS: BaselineScenario[] = [
-  { name: 'phone-logged-in-390x844', width: 390, height: 844, touch: true, query: 'auth=1' },
-  // Гост на телефон в "Правила" вече е светъл (виж [I1]); влязъл потребител
-  // в същия екран остава непроменен.
-  { name: 'phone-logged-in-rules-390x844', width: 390, height: 844, touch: true, query: 'auth=1', clickSelector: '[data-lobby-rules-card="1"]' },
+  // Влязъл потребител на телефон в лобито вече е в светлата рамка
+  // (data-lobby-member-mobile-light — header, долна навигация, меню, footer),
+  // както и в светлите екрани (GUEST_MOBILE_LIGHT_INFO_VIEWS, напр.
+  // "Правила") — същият дизайн като за гост, затова тук няма такъв сценарий.
   // Гост на телефон в "Игри" вече е светъл (GUEST_MOBILE_LIGHT_INFO_VIEWS) —
   // навигацията до екрана се проверява в [B1].
   { name: 'tablet-guest-820x1180', width: 820, height: 1180, touch: true, query: '' },
@@ -171,7 +171,7 @@ try {
           header: (() => {
             const h = document.querySelector('[data-lobby-guest-mobile-header="1"]')
             if (!h) return null
-            const logo = h.querySelector<HTMLImageElement>('img')
+            const logo = h.querySelector<HTMLImageElement>('img[alt="Pika.bg"]')
             const buttons = Array.from(h.querySelectorAll('button'))
             return {
               logoSrc: logo?.getAttribute('src') ?? '', logoLoaded: !!logo && logo.complete && logo.naturalWidth > 0,
@@ -534,7 +534,7 @@ try {
               return {
                 light: root.hasAttribute('data-lobby-guest-mobile-light'),
                 bg: getComputedStyle(root).backgroundColor,
-                header: header ? `${header.querySelector('img')?.getAttribute('src')}|${header.textContent!.trim()}` : null,
+                header: header ? `${header.querySelector('img[alt="Pika.bg"]')?.getAttribute('src')}|${header.textContent!.trim()}` : null,
                 darkMenu: root.querySelector('[data-lobby-mobile-menu-summary="1"]') ? getComputedStyle(root.querySelector('[data-lobby-mobile-menu-summary="1"]')!).display : 'none',
                 nav: nav ? Array.from(nav.children).map((el) => `${el.textContent!.trim()}:${el.hasAttribute('aria-current')}`).join(',') : null,
                 h1: `${article.querySelector('h1')!.textContent!.trim()}|${getComputedStyle(article.querySelector('h1')!).color}`,

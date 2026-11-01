@@ -329,6 +329,7 @@ body::before {
  */
 [data-lobby-guest-auth-modal="1"] button,
 [data-lobby-guest-auth-modal="1"] input,
+[data-standalone-light="1"] button,
 [data-lobby-guest-auth-modal="1"] .registration-contact-editor {
   font-family: inherit;
 }
@@ -341,7 +342,8 @@ body::before {
 [data-lobby-guest-auth-modal="1"] input:not([type="checkbox"]):not([type="radio"]):focus,
 [data-lobby-guest-auth-modal="1"] .registration-contact-editor:focus,
 [data-guest-contact-light="1"] input:focus,
-[data-guest-contact-light="1"] textarea:focus {
+[data-guest-contact-light="1"] textarea:focus,
+[data-standalone-light="1"] input:not([type="checkbox"]):focus {
   border-color: #7950E8 !important;
   box-shadow: 0 0 0 3px rgba(121, 80, 232, 0.16);
 }
@@ -354,19 +356,21 @@ body::before {
  * Банерът и прозорецът "Настройки на бисквитките" (consentUi.ts) — светъл
  * вариант на всички мобилни страници за гости, и на още черните: телефонният
  * root (data-mobile-layout) с бутона "Контакти" за гости в менюто
- * (data-lobby-nav-guest-contact — рендира се само без профил). Елементите са
+ * (data-lobby-nav-guest-contact — рендира се само без профил), както и
+ * самостоятелните /reset-password и /verify-registration на телефон
+ * (data-standalone-light). Елементите са
  * с inline стил, затова правилата са с !important. Desktop, таблет и
  * влезлите потребители остават със стария стил от consentUi.ts.
  */
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root {
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root button {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root button {
   font-family: inherit !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root .pika-consent-banner {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner {
   left: 12px !important;
   right: 12px !important;
   bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important;
@@ -387,33 +391,33 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"][data-lobby-guest-m
   bottom: calc(79px + env(safe-area-inset-bottom, 0px)) !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root .pika-consent-banner-inner {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner-inner {
   flex-direction: column !important;
   align-items: stretch !important;
   gap: 10px !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-banner-title="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-banner-title="1"] {
   margin-bottom: 2px !important;
   color: #17233C !important;
   font-size: 14px !important;
   font-weight: 800 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-banner-text="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-banner-text="1"] {
   color: #667085 !important;
   font-size: 12.5px !important;
   font-weight: 500 !important;
   line-height: 1.4 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root .pika-consent-banner-actions {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner-actions {
   flex-direction: row !important;
   gap: 8px !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root .pika-consent-banner-actions button,
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-modal-actions="1"] button {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner-actions button,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-actions="1"] button {
   flex: 1 1 0;
   min-width: 0;
   width: auto !important;
@@ -424,8 +428,8 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
   font-weight: 800 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-accept-all="1"],
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-accept-all-modal="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all="1"],
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all-modal="1"] {
   position: relative;
   overflow: hidden;
   border: 1px solid transparent !important;
@@ -439,8 +443,8 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
   text-shadow: 0 1px 1px rgba(40, 14, 110, 0.3);
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-accept-all="1"]::before,
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-accept-all-modal="1"]::before {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all="1"]::before,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all-modal="1"]::before {
   content: '';
   position: absolute;
   top: 0;
@@ -451,33 +455,33 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
   pointer-events: none;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-accept-all="1"]:active,
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-accept-all-modal="1"]:active {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all="1"]:active,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all-modal="1"]:active {
   translate: 0 1px;
   filter: brightness(0.97);
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-open-settings="1"],
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-save-choice="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-open-settings="1"],
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-save-choice="1"] {
   border: 1px solid #D0D5DD !important;
   background: #FFFFFF !important;
   color: #17233C !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-open-settings="1"]:hover,
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-save-choice="1"]:hover {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-open-settings="1"]:hover,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-save-choice="1"]:hover {
   border-color: #C9B8F5 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-modal-root="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-root="1"] {
   padding: 12px !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-modal-backdrop="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-backdrop="1"] {
   background: rgba(20, 20, 43, 0.45) !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-modal-dialog="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-dialog="1"] {
   box-sizing: border-box;
   width: min(100%, 440px) !important;
   max-height: calc(100dvh - 24px) !important;
@@ -491,7 +495,7 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
   color: #17233C !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-modal-close="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-close="1"] {
   right: 8px !important;
   top: 8px !important;
   border-radius: 8px !important;
@@ -500,48 +504,48 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
   line-height: 1;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root #pika-consent-modal-title {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root #pika-consent-modal-title {
   padding-right: 40px;
   color: #17233C !important;
   font-size: 18px !important;
   font-weight: 800 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root #pika-consent-modal-subtitle {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root #pika-consent-modal-subtitle {
   color: #667085 !important;
   font-weight: 500 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-category-card="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-card="1"] {
   padding: 12px !important;
   border: 1px solid #E4E7EC !important;
   background: #F9FAFB !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-category-card="1"] input[type="checkbox"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-card="1"] input[type="checkbox"] {
   width: 22px !important;
   height: 22px !important;
   margin-top: 0 !important;
   accent-color: #7950E8 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-category-title="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-title="1"] {
   color: #17233C !important;
   font-weight: 800 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-category-desc="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-desc="1"] {
   color: #667085 !important;
   font-size: 12.5px !important;
   font-weight: 500 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-always-active="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-always-active="1"] {
   background: #F1ECFD !important;
   color: #6941C6 !important;
 }
 
-body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"]) #pika-consent-root [data-consent-modal-actions="1"] {
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-actions="1"] {
   flex-wrap: nowrap !important;
   gap: 8px !important;
 }
@@ -549,9 +553,10 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
 /*
  * Светлите информационни екрани на гост лобито (правила, съвети, ...):
  * при скок към секция от "Съдържание" заглавието ѝ не остава под sticky
- * header-а.
+ * header-а. Същото за регистриран (data-lobby-member-mobile-light).
  */
-[data-lobby-guest-mobile-light="1"] main [id] {
+[data-lobby-guest-mobile-light="1"] main [id],
+[data-lobby-member-mobile-light="1"] main [id] {
   scroll-margin-top: 72px;
 }
 

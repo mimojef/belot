@@ -29,7 +29,7 @@ export function renderRulesPage(isMobile = false, light = false): string {
   const ulStyle = `margin:6px 0 10px;padding-left:${isMobile ? '18px' : '22px'};color:${white};font-size:${isMobile ? '14px' : '15px'};line-height:1.75;`
   const olStyle = `margin:6px 0 10px;padding-left:${isMobile ? '18px' : '22px'};color:${white};font-size:${isMobile ? '14px' : '15px'};line-height:1.85;`
 
-  const tableWrapStyle = `overflow-x:auto;-webkit-overflow-scrolling:touch;margin:10px 0 14px;border-radius:6px;`
+  const tableWrapStyle = `overflow-x:auto;-webkit-overflow-scrolling:touch;margin:10px 0 14px;border-radius:${light ? '12px' : '6px'};`
   const tableStyle = `border-collapse:collapse;min-width:${isMobile ? '280px' : '340px'};width:100%;font-size:${isMobile ? '13px' : '14px'};`
   const thStyle = `background:${light ? '#F4F0FF' : 'rgba(201,168,76,0.12)'};color:${gold};font-weight:700;padding:8px 12px;text-align:left;border-bottom:1px solid ${goldDim};white-space:nowrap;`
   const tdStyle = `padding:7px 12px;color:${white};border-bottom:1px solid ${light ? '#EAECF0' : 'rgba(255,255,255,0.06)'};vertical-align:middle;`
