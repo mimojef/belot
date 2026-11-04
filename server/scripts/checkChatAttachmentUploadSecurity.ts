@@ -721,6 +721,11 @@ async function runFileAtomicityUnitChecks(): Promise<void> {
       profile_id TEXT NOT NULL, friendship_id TEXT NOT NULL, last_read_at TEXT NOT NULL,
       PRIMARY KEY (profile_id, friendship_id)
     );
+    CREATE TABLE friend_chat_conversation_clears (
+      friendship_id TEXT PRIMARY KEY REFERENCES profile_friendships(friendship_id) ON DELETE CASCADE,
+      cleared_by_profile_id TEXT NOT NULL,
+      cleared_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `)
   database.prepare(`INSERT INTO profiles (profile_id, display_name, normalized_display_name) VALUES ('p1','P1','p1'), ('p2','P2','p2')`).run()
   database.prepare(`

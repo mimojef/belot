@@ -1,3 +1,4 @@
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 // "Подари и ти" — общи бутони ("OK" + "Подари и ти") за received-gift
 // UI-ите: lobby модала (offline опашка, renderLobbyScreen.ts), live push
 // popup-а (main.ts::showGiftItemReceivedPopup) и in-game top банера
@@ -76,14 +77,23 @@ export function renderGiftItemReceivedActionsHtml(options: {
   errorText?: string | null
   /** Компактен вариант (36px) за in-game top банера. */
   compact?: boolean
+  /** Светлият мобилен дизайн: виолетов "OK", бял "Подари и ти" с виолетова рамка. */
+  light?: boolean
 }): string {
   const baseStyle = buttonBaseStyle(options.compact === true)
-  const okButton = `<button type="button" ${options.okAttribute}="1" style="${baseStyle};border:0;padding:0 12px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;">OK</button>`
+  const light = options.light === true
+  const okButton = light
+    ? `<button type="button" ${options.okAttribute}="1" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="${baseStyle};border:0;padding:0 12px;color:#FFFFFF;font-weight:800;">OK</button>`
+    : `<button type="button" ${options.okAttribute}="1" style="${baseStyle};border:0;padding:0 12px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;">OK</button>`
   const giftBackButton = options.showGiftBack
-    ? `<button type="button" ${options.giftBackAttribute}="1" ${options.isGiftBackPending ? 'disabled aria-busy="true"' : ''} style="${baseStyle};border:2px solid rgba(244,201,91,0.85);padding:0 12px;background:rgba(244,201,91,0.08);color:#f4c95b;${options.isGiftBackPending ? 'opacity:0.6;cursor:default;' : ''}">${options.isGiftBackPending ? 'Зареждане…' : 'Подари и ти'}</button>`
+    ? light
+      ? `<button type="button" ${options.giftBackAttribute}="1" ${options.isGiftBackPending ? 'disabled aria-busy="true"' : ''} style="${baseStyle};border:1.5px solid #7950E8;padding:0 12px;background:#FFFFFF;color:#7950E8;font-weight:800;${options.isGiftBackPending ? 'opacity:0.6;cursor:default;' : ''}">${options.isGiftBackPending ? 'Зареждане…' : 'Подари и ти'}</button>`
+      : `<button type="button" ${options.giftBackAttribute}="1" ${options.isGiftBackPending ? 'disabled aria-busy="true"' : ''} style="${baseStyle};border:2px solid rgba(244,201,91,0.85);padding:0 12px;background:rgba(244,201,91,0.08);color:#f4c95b;${options.isGiftBackPending ? 'opacity:0.6;cursor:default;' : ''}">${options.isGiftBackPending ? 'Зареждане…' : 'Подари и ти'}</button>`
     : ''
   const errorHtml = options.errorText
-    ? `<div data-gift-item-received-error="1" style="width:100%;border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;box-sizing:border-box;">${escapeHtml(options.errorText)}</div>`
+    ? light
+      ? `<div data-gift-item-received-error="1" style="width:100%;border-radius:8px;border:1px solid #FECDCA;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:800;text-align:center;box-sizing:border-box;">${escapeHtml(options.errorText)}</div>`
+      : `<div data-gift-item-received-error="1" style="width:100%;border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;box-sizing:border-box;">${escapeHtml(options.errorText)}</div>`
     : ''
 
   return `

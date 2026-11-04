@@ -22,10 +22,11 @@ export function getCampaignPackageUnits(packageKey: string): number {
   return typeof units === 'number' && Number.isInteger(units) && units > 0 ? units : 0
 }
 
-export function renderCampaignPackageUnitsBadge(packageKey: string, iconSizePx: number, fontSizePx?: number): string {
+// textColor: светлият магазин за гост (бял фон) подава тъмен цвят.
+export function renderCampaignPackageUnitsBadge(packageKey: string, iconSizePx: number, fontSizePx?: number, textColor = '#f8fafc'): string {
   const theme = getActiveCampaignTheme()
   const units = getCampaignPackageUnits(packageKey)
   if (units === 0 || !theme?.unitIconUrl) return ''
   const amount = new Intl.NumberFormat('bg-BG', { useGrouping: 'always' }).format(units)
-  return `<span data-shop-campaign-units="${escapeHtml(packageKey)}" style="display:inline-flex;align-items:center;gap:2px;margin-left:6px;flex:0 0 auto;white-space:nowrap;font-size:${fontSizePx ? `${fontSizePx}px` : '0.82em'};font-weight:900;line-height:1;color:#f8fafc;">+${amount}<img src="${escapeHtml(theme.unitIconUrl)}" alt="" style="width:${iconSizePx}px;height:${iconSizePx}px;margin:-4px 0;object-fit:contain;display:block;flex:0 0 auto;" onerror="this.parentElement.style.display='none'" /></span>`
+  return `<span data-shop-campaign-units="${escapeHtml(packageKey)}" style="display:inline-flex;align-items:center;gap:2px;margin-left:6px;flex:0 0 auto;white-space:nowrap;font-size:${fontSizePx ? `${fontSizePx}px` : '0.82em'};font-weight:900;line-height:1;color:${textColor};">+${amount}<img src="${escapeHtml(theme.unitIconUrl)}" alt="" style="width:${iconSizePx}px;height:${iconSizePx}px;margin:-4px 0;object-fit:contain;display:block;flex:0 0 auto;" onerror="this.parentElement.style.display='none'" /></span>`
 }

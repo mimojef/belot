@@ -25,6 +25,25 @@ type ActionResult =
 const AUTO_DISMISS_MS = 12_000
 const CONFIRMATION_DISMISS_MS = 4_000
 
+// Телефон (тесен екран или нисък хоризонтален тъч екран): картата заема
+// ширината на екрана, а бутоните минават под текста, за да остане място за
+// дългите имена. Desktop изгледът не се променя.
+const PHONE_MEDIA_QUERY = '(max-width: 640px), (hover: none) and (pointer: coarse) and (max-height: 500px)'
+const PHONE_CARD_WIDTH_CSS = `
+  @media ${PHONE_MEDIA_QUERY} {
+    .freq-card { width:calc(100vw - 24px) !important; min-width:0 !important; max-width:420px !important; }
+  }
+`
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
 export function createFriendRequestNotification(options: {
   container: HTMLElement
   onAccept: (friendshipId: string) => Promise<ActionResult>
@@ -92,7 +111,8 @@ export function createFriendRequestNotification(options: {
     if (confirmationName !== null) {
       const name = confirmationName
       options.container.innerHTML = `
-        <div style="
+        <style>${PHONE_CARD_WIDTH_CSS}</style>
+        <div class="freq-card" style="
           position:fixed;top:16px;left:50%;transform:translateX(-50%);
           z-index:99999;
           background:linear-gradient(135deg,rgba(18,14,6,0.98),rgba(10,8,3,0.98));
@@ -103,9 +123,9 @@ export function createFriendRequestNotification(options: {
           box-shadow:0 8px 40px rgba(0,0,0,0.85),0 0 24px rgba(212,175,55,0.08);
           min-width:320px;max-width:90vw;
         ">
-          <div style="font-size:28px;line-height:1;">🤝</div>
-          <div style="font-size:15px;font-weight:700;color:#fff;">
-            Вие станахте приятел на <span style="color:#d4af37;">${name}</span>
+          <div style="font-size:28px;line-height:1;flex-shrink:0;">🤝</div>
+          <div style="flex:1;min-width:0;font-size:15px;font-weight:700;color:#fff;overflow-wrap:anywhere;">
+            Вие станахте приятел на <span style="color:#d4af37;">${escapeHtml(name)}</span>
           </div>
         </div>
       `
@@ -119,7 +139,7 @@ export function createFriendRequestNotification(options: {
 
     const notif = current
     const avatarHtml = notif.fromAvatarUrl
-      ? `<img src="${notif.fromAvatarUrl}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;display:block;border:2px solid rgba(212,175,55,0.4);">`
+      ? `<img src="${escapeHtml(notif.fromAvatarUrl)}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;display:block;border:2px solid rgba(212,175,55,0.4);">`
       : `<div style="width:80px;height:80px;border-radius:10px;background:rgba(212,175,55,0.12);border:2px solid rgba(212,175,55,0.3);display:flex;align-items:center;justify-content:center;font-size:32px;flex-shrink:0;">👤</div>`
 
     const btnDisabled = isProcessing ? 'disabled' : ''
@@ -141,8 +161,16 @@ export function createFriendRequestNotification(options: {
         }
         #freq-accept-btn:not([disabled]):hover { filter:brightness(1.15); transform:translateY(-1px); }
         #freq-reject-btn:not([disabled]):hover { filter:brightness(1.15); transform:translateY(-1px); }
+        ${PHONE_CARD_WIDTH_CSS}
+        @media ${PHONE_MEDIA_QUERY} {
+          .freq-card--request { display:grid !important; grid-template-columns:80px minmax(0,1fr); align-content:center; row-gap:8px; }
+          .freq-card--request > .freq-avatar { grid-row:1 / span 2; align-self:start; }
+          .freq-card--request > .freq-text { grid-column:2; grid-row:1; padding-top:4px; }
+          .freq-card--request > .freq-actions { grid-column:2; grid-row:2; padding-bottom:3px; }
+          .freq-card--request > .freq-actions > button { flex:1; }
+        }
       </style>
-      <div style="
+      <div class="freq-card freq-card--request" style="
         position:fixed;top:16px;left:50%;transform:translateX(-50%);
         z-index:99999;
         background:linear-gradient(135deg,rgba(18,14,6,0.98),rgba(10,8,3,0.98));
@@ -155,17 +183,17 @@ export function createFriendRequestNotification(options: {
         animation:friendReqSlideIn 0.3s ease;
         overflow:hidden;
       ">
-        <div style="flex-shrink:0;">${avatarHtml}</div>
+        <div class="freq-avatar" style="flex-shrink:0;">${avatarHtml}</div>
 
-        <div style="flex:1;min-width:0;">
-          <div style="font-size:15px;font-weight:800;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-            ${notif.fromDisplayName}
+        <div class="freq-text" style="flex:1;min-width:0;">
+          <div style="font-size:15px;font-weight:800;color:#fff;line-height:1.25;overflow-wrap:anywhere;">
+            ${escapeHtml(notif.fromDisplayName)}
           </div>
           <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:2px;">ви кани за приятел</div>
-          ${errorText !== null ? `<div style="font-size:12px;color:#ef4444;margin-top:4px;">${errorText}</div>` : ''}
+          ${errorText !== null ? `<div style="font-size:12px;color:#ef4444;margin-top:4px;overflow-wrap:anywhere;">${escapeHtml(errorText)}</div>` : ''}
         </div>
 
-        <div style="display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0;">
+        <div class="freq-actions" style="display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0;">
           <button id="freq-accept-btn" type="button" ${btnDisabled} style="
             padding:7px 14px;border:none;
             background:linear-gradient(135deg,#14532d,#22c55e);

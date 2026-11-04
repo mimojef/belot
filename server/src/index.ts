@@ -8171,6 +8171,31 @@ function sendChatMessageDeletedToParticipants(input: {
   }
 }
 
+// Целият личен разговор е изтрит — до всички connected връзки на двамата
+// участници. Офлайн участникът вижда уведомлението от conversation snapshot-а
+// при следващото зареждане (маркерът е в базата).
+function sendChatConversationClearedToParticipants(input: {
+  participantProfileIds: readonly string[]
+  friendshipId: string
+  clearedByProfileId: string
+}): void {
+  for (const connection of Object.values(serverState.connections)) {
+    if (
+      connection.profileId === null ||
+      connection.status !== 'connected' ||
+      !input.participantProfileIds.includes(connection.profileId)
+    ) {
+      continue
+    }
+
+    safeSendToConnection(connection.id, {
+      type: 'chat_conversation_cleared',
+      friendshipId: input.friendshipId,
+      clearedByProfileId: input.clearedByProfileId,
+    })
+  }
+}
+
 function getQueueCountsByStake(): Record<string, number> {
   const counts: Record<string, number> = {}
 
@@ -21435,6 +21460,53 @@ async function handleChatRequest(
       ok: true,
       friendshipId: result.friendshipId,
       messageId: result.messageId,
+      conversation: result.conversation,
+    })
+    return true
+  }
+
+  // Окончателно изтриване на ЦЕЛИЯ разговор — и за двамата участници.
+  // Участието и видът се проверяват изцяло в chatStore.deleteConversation от
+  // profileId на СЕСИЯТА; от клиента идва само friendshipId.
+  if (messagesMatch !== null && req.method === 'DELETE') {
+    let friendshipId: string
+    try {
+      friendshipId = decodeURIComponent(messagesMatch[1]).trim()
+    } catch {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request.' })
+      return true
+    }
+
+    let result: ReturnType<typeof chatStore.deleteConversation>
+    try {
+      result = chatStore.deleteConversation(profileId, friendshipId)
+    } catch (error) {
+      // Транзакцията е върната (ROLLBACK) — нищо не е изтрито.
+      console.error('[chat] Изтриването на разговор е неуспешно:', error)
+      sendJsonResponse(res, 500, { ok: false, message: 'Разговорът не беше изтрит. Опитай отново.' })
+      return true
+    }
+
+    if (!result.ok) {
+      const status = result.code === 'invalid_conversation_kind' ? 403 : 404
+      sendJsonResponse(res, status, result)
+      return true
+    }
+
+    if (result.deletedMessageCount > 0) {
+      sendChatConversationClearedToParticipants({
+        participantProfileIds: result.participantProfileIds,
+        friendshipId: result.friendshipId,
+        clearedByProfileId: profileId,
+      })
+      // Файловете — веднага, без да чакаме периодичния цикъл. Неуспешните
+      // остават 'failed' в опашката и периодичният цикъл ги опитва отново.
+      void runChatAttachmentCleanup()
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendshipId: result.friendshipId,
       conversation: result.conversation,
     })
     return true

@@ -142,7 +142,7 @@ export function createTournamentPartnerInvitePopup(options: {
 
     const avatarHtml = invite.inviter.avatarUrl
       ? `<img src="${escapeHtml(invite.inviter.avatarUrl)}" alt="" style="width:56px;height:56px;border-radius:8px;object-fit:cover;border:1px solid rgba(34,197,94,0.35);flex:0 0 auto;">`
-      : `<div style="width:56px;height:56px;border-radius:8px;background:#17231d;border:1px solid rgba(34,197,94,0.30);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#86efac;flex:0 0 auto;">${escapeHtml(invite.inviter.displayName.slice(0, 1).toUpperCase() || '?')}</div>`
+      : `<div data-mobile-notice-part="avatar" style="width:56px;height:56px;border-radius:8px;background:#17231d;border:1px solid rgba(34,197,94,0.30);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#86efac;flex:0 0 auto;">${escapeHtml(invite.inviter.displayName.slice(0, 1).toUpperCase() || '?')}</div>`
     const disabled = isProcessing ? 'disabled' : ''
     const cursor = isProcessing ? 'not-allowed' : 'pointer'
 
@@ -162,7 +162,7 @@ export function createTournamentPartnerInvitePopup(options: {
           }
         }
       </style>
-      <div id="tpi-popup" role="dialog" aria-live="polite" style="
+      <div id="tpi-popup" data-mobile-notice="top" role="dialog" aria-live="polite" style="
         position:fixed;top:18px;right:18px;z-index:100000;
         width:min(420px, calc(100vw - 32px));
         box-sizing:border-box;border:1px solid rgba(34,197,94,0.42);
@@ -171,30 +171,30 @@ export function createTournamentPartnerInvitePopup(options: {
         padding:14px 14px 12px 14px;font-family:Inter,system-ui,sans-serif;
         animation:tournamentPartnerInviteIn 0.18s ease;
       ">
-        <button type="button" data-tpi-dismiss="${escapeHtml(invite.inviteId)}" aria-label="Затвори" ${disabled} style="
+        <button type="button" data-tpi-dismiss="${escapeHtml(invite.inviteId)}" data-mobile-notice-part="icon-button" aria-label="Затвори" ${disabled} style="
           position:absolute;top:8px;right:8px;width:30px;height:30px;border:1px solid rgba(255,255,255,0.16);
           border-radius:8px;background:#182018;color:#d1fae5;font-size:16px;font-weight:900;cursor:${cursor};
         ">X</button>
         <div style="display:flex;gap:12px;align-items:flex-start;padding-right:34px;">
           ${avatarHtml}
           <div style="min-width:0;flex:1;">
-            <div style="font-size:13px;font-weight:900;color:#86efac;margin-bottom:4px;">Покана за партньор</div>
-            <div style="font-size:15px;font-weight:900;line-height:1.25;overflow-wrap:anywhere;">
+            <div data-mobile-notice-part="success" style="font-size:13px;font-weight:900;color:#86efac;margin-bottom:4px;">Покана за партньор</div>
+            <div data-mobile-notice-part="title" style="font-size:15px;font-weight:900;line-height:1.25;overflow-wrap:anywhere;">
               ${escapeHtml(invite.inviter.displayName)} те кани в ${escapeHtml(invite.tournamentName ?? 'турнир')}
             </div>
-            <div style="margin-top:8px;font-size:12px;line-height:1.45;color:rgba(248,250,252,0.72);">
-              Вход: <strong style="color:#facc15;">${formatAmount(invite.entryFee)} жълтици</strong>.
+            <div data-mobile-notice-part="text" style="margin-top:8px;font-size:12px;line-height:1.45;color:rgba(248,250,252,0.72);">
+              Вход: <strong data-mobile-notice-part="warning" style="color:#facc15;">${formatAmount(invite.entryFee)} жълтици</strong>.
               Старт: ${escapeHtml(formatStart(invite))}.
-              Остава: <strong data-tournament-partner-countdown style="color:#86efac;">${formatRemaining(invite.expiresAt)}</strong>.
+              Остава: <strong data-tournament-partner-countdown data-mobile-notice-part="success" style="color:#86efac;">${formatRemaining(invite.expiresAt)}</strong>.
             </div>
-            <div style="margin-top:7px;font-size:12px;line-height:1.45;color:rgba(248,250,252,0.62);">
+            <div data-mobile-notice-part="text" style="margin-top:7px;font-size:12px;line-height:1.45;color:rgba(248,250,252,0.62);">
               Поканата остава в „Покани към теб“, докато я приемеш, откажеш или изтече.
             </div>
-            ${errorText !== null ? `<div style="margin-top:8px;font-size:12px;color:#fecaca;font-weight:800;">${escapeHtml(errorText)}</div>` : ''}
+            ${errorText !== null ? `<div data-mobile-notice-part="danger" style="margin-top:8px;font-size:12px;color:#fecaca;font-weight:800;">${escapeHtml(errorText)}</div>` : ''}
           </div>
         </div>
         <div style="display:flex;justify-content:flex-end;margin-top:12px;">
-          <button type="button" data-tpi-view="${escapeHtml(invite.inviteId)}" ${disabled} style="
+          <button type="button" data-tpi-view="${escapeHtml(invite.inviteId)}" data-mobile-notice-part="primary" ${disabled} style="
             height:38px;padding:0 14px;border:0;border-radius:8px;background:#22c55e;
             color:#052e16;font-size:13px;font-weight:900;cursor:${cursor};
           ">Виж турнира</button>

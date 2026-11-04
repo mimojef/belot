@@ -12,6 +12,8 @@ import {
   COMPOSER_EMOJI_KEY_REPLY,
 } from './renderLobbyScreen'
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 
 // Read-only Етап 1 — root history + navigation. Етап 2 добави real composer
@@ -145,6 +147,33 @@ const TOPIC_MODERATION_REASON_CATEGORY_OPTIONS: Array<{ value: string; label: st
 // без role-based разграничение.
 const TOPIC_AUTHOR_NAME_COLOR = '#C9A84C'
 
+// Телефон (светъл дизайн): текст на публикациите и имена на авторите.
+const TOPIC_LIGHT_BODY_COLOR = '#111827'
+const TOPIC_LIGHT_AUTHOR_COLOR = '#17233C'
+
+// Светъл вариант — класовете се слагат само на телефон (topic-light-scope
+// на карта/отговор/пост в "Лафче"). Вмъква се в края на <style> блока на
+// потока и на нишката, за да надделее над тъмните правила там.
+const TOPICS_LIGHT_CSS = `
+      .topic-root-card.topic-root-card-light {
+        border:1px solid #E4E7EC;
+        border-radius:12px;
+        background:#FFFFFF;
+        box-shadow:0 4px 14px rgba(34,30,80,0.06);
+      }
+      .topic-root-card-light.topic-root-card-clickable:focus-visible { outline-color:#7950E8; }
+      .topic-light-scope .topic-message-action-btn { color:#667085; }
+      .topic-light-scope .topic-message-action-btn:hover { background:#F4F0FF; color:#7950E8; }
+      .topic-light-scope .topic-message-action-btn:active { background:#EEE9FF; }
+      .topic-light-scope .topic-message-action-btn-liked,
+      .topic-light-scope .topic-message-action-btn-liked:hover { color:#7950E8; }
+      .topic-light-scope .topic-message-action-btn::after { background:#17233C; border-color:#17233C; color:#FFFFFF; }
+      .topic-light-scope .topic-root-activity-time { color:#667085; font-weight:600; }
+      .topic-light-scope .topic-message-personal-btn { border-color:#D9CCFF; background:#F4F0FF; color:#6941C6; }
+      .lafche-post.lafche-post-light + .lafche-post.lafche-post-light { border-top-color:#D0D5DD; }
+      [data-topic-replies-section] .topic-reply-light + .topic-reply-light::before { background:#D0D5DD; }
+`
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -200,14 +229,14 @@ export function formatTopicUnreadBadgeCount(count: number): string | null {
 // server-side, виж коментара в TopicMessageSnapshot) — letter fallback само
 // когато профилът действително няма avatar. URL винаги минава през
 // escapeHtml преди инжектиране в src атрибута (без raw/unsafe rendering).
-function renderMessageAvatar(senderDisplayName: string, senderAvatarUrl: string | null): string {
+function renderMessageAvatar(senderDisplayName: string, senderAvatarUrl: string | null, light = false): string {
   const trimmedUrl = senderAvatarUrl?.trim() ?? ''
   const inner = trimmedUrl
     ? `<img src="${escapeHtml(trimmedUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;">`
     : escapeHtml(senderDisplayName.trim().charAt(0).toUpperCase() || '?')
 
   return `
-    <div data-topic-message-avatar="1" style="width:36px;height:36px;border-radius:50%;flex:0 0 auto;background:linear-gradient(180deg,#2a2a2a 0%,#141414 100%);border:1px solid rgba(212,165,32,0.34);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;color:#d4a520;overflow:hidden;">${inner}</div>
+    <div data-topic-message-avatar="1" style="width:36px;height:36px;border-radius:50%;flex:0 0 auto;${light ? 'background:#F4F0FF;border:1px solid #E4E7EC;color:#7950E8;font-weight:800;' : 'background:linear-gradient(180deg,#2a2a2a 0%,#141414 100%);border:1px solid rgba(212,165,32,0.34);color:#d4a520;font-weight:900;'}display:flex;align-items:center;justify-content:center;font-size:14px;overflow:hidden;">${inner}</div>
   `
 }
 
@@ -360,7 +389,7 @@ function renderTopicMessageEditButton(
   `
 }
 
-function renderTopicMessageEditForm(state: LobbyScreenState, messageId: string): string {
+function renderTopicMessageEditForm(state: LobbyScreenState, messageId: string, light = false): string {
   const edit = state.topicMessageEdit
   if (edit === null || edit.messageId !== messageId) return ''
 
@@ -373,23 +402,23 @@ function renderTopicMessageEditForm(state: LobbyScreenState, messageId: string):
         rows="3"
         maxlength="2000"
         ${busy ? 'disabled' : ''}
-        style="box-sizing:border-box;width:100%;min-height:76px;max-height:180px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#f8fafc;padding:9px 10px;font-size:14px;font-weight:600;outline:none;resize:vertical;font-family:inherit;line-height:1.45;"
+        style="box-sizing:border-box;width:100%;min-height:76px;max-height:180px;border-radius:8px;${light ? 'border:1px solid #D0D5DD;background:#FFFFFF;color:#17233C;' : 'border:1px solid rgba(212,165,32,0.34);background:#050505;color:#f8fafc;'}padding:9px 10px;font-size:14px;font-weight:600;outline:none;resize:vertical;font-family:inherit;line-height:1.45;"
       >${escapeHtml(edit.draft)}</textarea>
       <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;">
         <button
           type="button"
           data-topic-message-edit-cancel="${escapeHtml(messageId)}"
           ${busy ? 'disabled' : ''}
-          style="height:34px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:transparent;color:rgba(248,250,252,0.72);font-size:12px;font-weight:800;cursor:${busy ? 'default' : 'pointer'};"
+          style="height:${light ? '38px' : '34px'};padding:0 ${light ? '14px' : '10px'};border-radius:8px;${light ? 'border:1px solid #D0D5DD;background:#FFFFFF;color:#344054;font-family:inherit;font-size:13px;' : 'border:1px solid rgba(255,255,255,0.14);background:transparent;color:rgba(248,250,252,0.72);font-size:12px;'}font-weight:800;cursor:${busy ? 'default' : 'pointer'};"
         >Откажи</button>
         <button
           type="submit"
           data-topic-message-edit-save="${escapeHtml(messageId)}"
           ${busy ? 'disabled' : ''}
-          style="height:34px;padding:0 12px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};"
+          ${light ? `class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" ` : ''}style="height:${light ? '38px' : '34px'};padding:0 ${light ? '16px' : '12px'};border:0;border-radius:8px;${light ? 'color:#FFFFFF;font-family:inherit;font-size:13px;font-weight:800;' : 'background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;'}cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};"
         >Запази</button>
       </div>
-      ${errorText ? `<div style="font-size:11px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
+      ${errorText ? `<div style="font-size:${light ? '12px' : '11px'};color:${light ? '#B42318' : '#f87171'};">${escapeHtml(errorText)}</div>` : ''}
     </form>
   `
 }
@@ -403,6 +432,7 @@ function renderTopicAuthorBlock(
   editedAt: string | null,
   messageContext: { messageId: string; isRoot: boolean } | null = null,
   isTopicsSectionMuted = false,
+  light = false,
 ): string {
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
@@ -440,7 +470,7 @@ function renderTopicAuthorBlock(
         title="Модерация"
         aria-label="Модерация на ${escapeHtml(senderDisplayName)}"
         ${isMuteStatusLoading ? 'disabled' : ''}
-        style="border:0;background:transparent;padding:2px 4px;cursor:${isMuteStatusLoading ? 'default' : 'pointer'};color:rgba(248,250,252,0.38);font-size:14px;line-height:1;flex:0 0 auto;opacity:${isMuteStatusLoading ? '0.5' : '1'};"
+        style="border:0;background:transparent;padding:${light ? '6px' : '2px 4px'};cursor:${isMuteStatusLoading ? 'default' : 'pointer'};color:${light ? '#98A2B3' : 'rgba(248,250,252,0.38)'};font-size:14px;line-height:1;flex:0 0 auto;opacity:${isMuteStatusLoading ? '0.5' : '1'};"
       >${renderTopicActionIcon('moderate')}</button>
     `
     : ''
@@ -452,7 +482,7 @@ function renderTopicAuthorBlock(
       data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
       style="border:0;background:transparent;padding:0;cursor:pointer;flex:0 0 auto;"
       aria-label="Профил на ${escapeHtml(senderDisplayName)}"
-    >${renderMessageAvatar(senderDisplayName, senderAvatarUrl)}</button>
+    >${renderMessageAvatar(senderDisplayName, senderAvatarUrl, light)}</button>
     <div style="flex:1;min-width:0;">
       <div class="topic-message-author-row">
         <div class="topic-message-author-meta">
@@ -460,10 +490,10 @@ function renderTopicAuthorBlock(
             type="button"
             data-topic-message-author="${escapeHtml(senderProfileId)}"
             data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
-            style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:900;color:${TOPIC_AUTHOR_NAME_COLOR};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            style="border:0;background:transparent;padding:0;cursor:pointer;${light ? `font-family:inherit;font-size:15px;font-weight:800;color:${TOPIC_LIGHT_AUTHOR_COLOR};` : `font-size:16px;font-weight:900;color:${TOPIC_AUTHOR_NAME_COLOR};`}min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
           >${escapeHtml(senderDisplayName)}</button>
           ${muteIndicator}
-          <span style="font-size:12px;color:rgba(248,250,252,0.42);white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
+          <span style="font-size:12px;color:${light ? '#667085' : 'rgba(248,250,252,0.42)'};white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
           ${muteControl}
         </div>
       </div>
@@ -520,8 +550,10 @@ function renderTopicsImagePickerControls(options: {
   pending: { previewUrl: string } | null
   isSending: boolean
   isVip: boolean
+  light?: boolean
 }): string {
   const { kind, key, pending, isSending, isVip } = options
+  const light = options.light === true
   const disabled = isSending
   const inputAttr = kind === 'root' ? `data-topics-image-input="${escapeHtml(key)}"` : `data-topics-reply-image-input="${escapeHtml(key)}"`
   const pickAttr = kind === 'root' ? `data-topics-image-pick="${escapeHtml(key)}"` : `data-topics-reply-image-pick="${escapeHtml(key)}"`
@@ -545,13 +577,13 @@ function renderTopicsImagePickerControls(options: {
       title="Добави снимка"
       aria-label="Добави снимка"
       ${disabled ? 'disabled' : ''}
-      style="height:${size}px;width:${size}px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${disabled ? 'default' : 'pointer'};opacity:${disabled ? '0.5' : '1'};"
+      style="height:${size}px;width:${size}px;flex:0 0 auto;${light ? 'border:0;background:#F2F4F7;color:#475467;' : 'border:1px solid rgba(212,165,32,0.34);background:#050505;color:#d4a520;'}border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:${disabled ? 'default' : 'pointer'};opacity:${disabled ? '0.5' : '1'};"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
     </button>
     ${pending ? `
       <div ${previewAttr} style="position:relative;flex:0 0 auto;">
-        <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:${size}px;height:${size}px;object-fit:cover;border-radius:8px;border:1px solid rgba(212,165,32,0.48);display:block;">
+        <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:${size}px;height:${size}px;object-fit:cover;border-radius:8px;border:1px solid ${light ? '#E4E7EC' : 'rgba(212,165,32,0.48)'};display:block;">
         <button
           type="button"
           ${removeAttr}
@@ -565,6 +597,8 @@ function renderTopicsImagePickerControls(options: {
   `
 }
 
+const TOPICS_LIGHT_SEND_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>'
+
 function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: string, options: { variant?: 'inline' | 'thread' } = {}): string {
   const draft = state.topicReplyComposerDraftByRootId[rootMessageId] ?? ''
   const isSending = Boolean(state.topicReplyComposerPendingRequestIdByRootId[rootMessageId])
@@ -572,18 +606,20 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
   const pendingImage = state.topicReplyComposerPendingImageByRootId[rootMessageId] ?? null
   const isVip = state.topicsVipGate?.isActive ?? false
   const isThread = options.variant === 'thread'
+  // Телефон, отворена нишка: светло писало (същото като в "Общи"/"Лафче").
+  const light = isThread && isPhoneLayoutViewport()
 
   return `
     <style>
       .topics-reply-composer-btn { display:inline-flex; align-items:center; justify-content:center; }
       .topics-reply-composer-btn-icon { display:none; font-size:16px; line-height:1; }
       @media (hover: none) and (pointer: coarse) {
-        .topics-reply-composer-btn { width:36px; padding:0 !important; }
+        .topics-reply-composer-btn { width:${light ? '40px' : '36px'}; padding:0 !important; }
         .topics-reply-composer-btn-label { display:none; }
         .topics-reply-composer-btn-icon { display:inline-flex; }
       }
     </style>
-    <div style="${isThread ? 'flex:0 0 auto;padding:10px 12px;border:1px solid rgba(255,255,255,0.10);border-top:1px solid rgba(255,255,255,0.14);border-radius:0 0 12px 12px;background:#0a0a0a;' : `margin:6px 0 10px;padding-left:${REPLY_INDENT_PX}px;`}">
+    <div style="${light ? 'flex:0 0 auto;padding:8px 12px;border-top:1px solid #EAECF0;background:#FFFFFF;' : isThread ? 'flex:0 0 auto;padding:10px 12px;border:1px solid rgba(255,255,255,0.10);border-top:1px solid rgba(255,255,255,0.14);border-radius:0 0 12px 12px;background:#0a0a0a;' : `margin:6px 0 10px;padding-left:${REPLY_INDENT_PX}px;`}">
       <form
         data-topics-reply-composer-form="1"
         data-topics-reply-composer-root-id="${escapeHtml(rootMessageId)}"
@@ -596,6 +632,7 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
           pending: pendingImage,
           isSending,
           isVip,
+          light,
         })}
         ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_REPLY, 36)}
         <textarea
@@ -607,8 +644,8 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
           placeholder="Напиши отговор..."
           style="
             flex:1;min-width:0;max-height:${isThread ? '120px' : '100px'};min-height:${isThread ? '40px' : '36px'};box-sizing:border-box;
-            border-radius:8px;border:1px solid rgba(212,165,32,0.24);background:#050505;
-            color:#f8fafc;padding:${isThread ? '10px 12px' : '8px 10px'};font-size:${isThread ? '14px' : '13px'};font-weight:600;outline:none;
+            border-radius:8px;${light ? 'border:1px solid #E4E7EC;background:#F5F7FC;color:#17233C;' : 'border:1px solid rgba(212,165,32,0.24);background:#050505;color:#f8fafc;'}
+            padding:${isThread ? '10px 12px' : '8px 10px'};font-size:${isThread ? '14px' : '13px'};font-weight:600;outline:none;
             resize:none;font-family:inherit;line-height:1.4;overflow-y:auto;
           "
         >${escapeHtml(draft)}</textarea>
@@ -617,8 +654,8 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
           data-topics-reply-composer-cancel="${escapeHtml(rootMessageId)}"
           class="topics-reply-composer-btn"
           aria-label="Откажи отговора"
-          style="flex:0 0 auto;height:36px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:transparent;color:rgba(248,250,252,0.62);font-size:12px;font-weight:800;cursor:pointer;"
-        ><span class="topics-reply-composer-btn-label">Откажи</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">&#10005;</span></button>
+          style="flex:0 0 auto;height:${light ? '40px' : '36px'};padding:0 10px;border-radius:8px;${light ? 'border:0;background:#F2F4F7;color:#475467;' : 'border:1px solid rgba(255,255,255,0.14);background:transparent;color:rgba(248,250,252,0.62);'}font-size:12px;font-weight:800;cursor:pointer;"
+        ><span class="topics-reply-composer-btn-label">Откажи</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">${light ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>' : '&#10005;'}</span></button>
         <button
           data-topics-reply-composer-send="1"
           type="submit"
@@ -626,30 +663,32 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
           aria-label="Изпрати отговора"
           ${isSending ? 'disabled' : ''}
           style="
-            flex:0 0 auto;height:36px;padding:0 12px;border:0;border-radius:8px;
-            background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;
+            flex:0 0 auto;height:${light ? '40px' : '36px'};padding:0 12px;border:0;border-radius:8px;
+            ${light ? 'background:#7950E8;color:#FFFFFF;' : 'background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;'}
             font-size:12px;font-weight:900;cursor:${isSending ? 'default' : 'pointer'};opacity:${isSending ? '0.6' : '1'};
           "
-        ><span class="topics-reply-composer-btn-label">Изпрати</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">&#10148;</span></button>
+        ><span class="topics-reply-composer-btn-label">Изпрати</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">${light ? TOPICS_LIGHT_SEND_ICON : '&#10148;'}</span></button>
       </form>
-      ${errorText ? `<div data-topics-reply-composer-error="${escapeHtml(rootMessageId)}" style="padding:4px 0 0;font-size:11px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
+      ${errorText ? `<div data-topics-reply-composer-error="${escapeHtml(rootMessageId)}" style="padding:4px 0 0;font-size:${light ? '12px' : '11px'};color:${light ? '#B42318' : '#f87171'};">${escapeHtml(errorText)}</div>` : ''}
     </div>
   `
 }
 
 export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySnapshot): string {
   const isEditing = state.topicMessageEdit?.messageId === reply.messageId
+  // Телефон: светъл текст/имена (пълен render и WS append минават оттук).
+  const light = isPhoneLayoutViewport()
   return `
-    <div data-topic-reply="${escapeHtml(reply.messageId)}" data-topic-thread-seq="${reply.seq}">
+    <div data-topic-reply="${escapeHtml(reply.messageId)}" data-topic-thread-seq="${reply.seq}"${light ? ' class="topic-reply-light topic-light-scope"' : ''}>
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px 12px;">
-        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted)}
+        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted, light)}
       </div>
       <div style="margin:-6px 0 6px 58px;">
         ${isEditing
-          ? renderTopicMessageEditForm(state, reply.messageId)
-          : (reply.body.length > 0 ? `<div style="font-size:16px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body, { emphasizeEmoji: true })}</div>` : '')
+          ? renderTopicMessageEditForm(state, reply.messageId, light)
+          : (reply.body.length > 0 ? `<div style="font-size:16px;line-height:1.4;color:${light ? TOPIC_LIGHT_BODY_COLOR : '#e2e8f0'};word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body, { emphasizeEmoji: true })}</div>` : '')
         }
-        ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl) : ''}
+        ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl, light) : ''}
         <div style="margin-top:2px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
           ${renderTopicLikeButton(state, reply.messageId, reply.likeCount, reply.viewerHasLiked)}
           ${renderTopicMessageDeleteButton(state, reply.messageId, false, reply.senderProfileId, 0)}
@@ -688,7 +727,7 @@ export function renderTopicThreadUnreadDivider(): string {
 // прозореца, видим само докато има още отговори в тази посока.
 export function renderTopicThreadEdgeSentinel(edge: 'older' | 'newer', isVisible: boolean): string {
   const label = edge === 'older' ? 'Зареждане на по-стари отговори…' : 'Зареждане на по-нови отговори…'
-  return `<div data-topic-thread-${edge}-sentinel="1" aria-hidden="${isVisible ? 'false' : 'true'}" style="display:${isVisible ? 'flex' : 'none'};align-items:center;height:32px;padding:0 0 0 ${REPLY_INDENT_PX}px;box-sizing:border-box;color:rgba(248,250,252,0.42);font-size:12px;">${label}</div>`
+  return `<div data-topic-thread-${edge}-sentinel="1" aria-hidden="${isVisible ? 'false' : 'true'}" style="display:${isVisible ? 'flex' : 'none'};align-items:center;height:32px;padding:0 0 0 ${REPLY_INDENT_PX}px;box-sizing:border-box;color:${isPhoneLayoutViewport() ? '#667085' : 'rgba(248,250,252,0.42)'};font-size:12px;">${label}</div>`
 }
 
 // Собствен отговор, публикуван под позицията на четене — sticky в долния
@@ -707,17 +746,18 @@ export function renderTopicThreadOwnReplyNotice(): string {
 }
 
 function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): string {
+  const light = isPhoneLayoutViewport()
   const replies = state.topicRepliesByRootId[rootMessageId]
   const isLoading = Boolean(state.topicRepliesLoadingByRootId[rootMessageId])
   const threadView = state.topicThreadView?.rootMessageId === rootMessageId ? state.topicThreadView : null
 
   let listHtml: string
   if (threadView !== null && threadView.status === 'error' && (replies === null || replies === undefined || replies.length === 0)) {
-    listHtml = `<div data-topic-replies-error="1" style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:#f87171;font-size:12px;">Отговорите не можаха да се заредят.</div>`
+    listHtml = `<div data-topic-replies-error="1" style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:${light ? '#B42318' : '#f87171'};font-size:12px;">Отговорите не можаха да се заредят.</div>`
   } else if (replies === null || replies === undefined || (threadView !== null && threadView.status === 'loading')) {
-    listHtml = isLoading || threadView !== null ? `<div style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.42);font-size:12px;">Зареждане на отговори...</div>` : ''
+    listHtml = isLoading || threadView !== null ? `<div style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:${light ? '#667085' : 'rgba(248,250,252,0.42)'};font-size:12px;">Зареждане на отговори...</div>` : ''
   } else if (replies.length === 0) {
-    listHtml = `<div data-topic-replies-empty="1" style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.36);font-size:12px;">Все още няма отговори.</div>`
+    listHtml = `<div data-topic-replies-empty="1" style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:${light ? '#667085' : 'rgba(248,250,252,0.36)'};font-size:12px;">Все още няма отговори.</div>`
   } else {
     const dividerIndex = threadView === null ? -1 : findTopicThreadDividerIndex(replies, threadView.dividerSeq, threadView.hasMoreBefore)
     listHtml = replies.map((r, index) => `${index === dividerIndex ? renderTopicThreadUnreadDivider() : ''}${renderTopicReplyRow(state, r)}`).join('')
@@ -741,7 +781,7 @@ function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): s
 // rounded corners в Pika.bg стил (Attachment брифа т.9: desktop max
 // ~320-400px, mobile max-width:100%). Click отваря reusable in-app viewer
 // (data-image-viewer-open, wiring в renderLobbyScreen.ts) — НЕ target="_blank".
-export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBaseUrl: string): string {
+export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBaseUrl: string, light = false): string {
   // Reuse на established API origin resolver-а (main.ts getApiBaseUrl, виж
   // resolveAttachmentUrl в renderLobbyScreen.ts) — в local dev frontend-ът
   // тича на отделен Vite origin (:5173), докато сървърът (и protected
@@ -765,10 +805,10 @@ export function renderTopicAttachment(attachment: TopicAttachmentSnapshot, apiBa
           height="${attachment.height}"
           loading="lazy"
           alt=""
-          style="display:block;max-width:100%;width:100%;height:auto;border-radius:10px;background:rgba(255,255,255,0.06);pointer-events:none;"
+          style="display:block;max-width:100%;width:100%;height:auto;border-radius:10px;background:${light ? '#F2F4F7' : 'rgba(255,255,255,0.06)'};pointer-events:none;"
         >
       </button>
-      <a href="${escapeHtml(downloadUrl)}" download style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:900;color:rgba(248,250,252,0.72);text-decoration:none;">
+      <a href="${escapeHtml(downloadUrl)}" download style="display:inline-flex;align-items:center;gap:6px;font-size:${light ? '12px' : '11px'};font-weight:${light ? '700' : '900'};color:${light ? '#667085' : 'rgba(248,250,252,0.72)'};text-decoration:none;">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
         Изтегли
       </a>
@@ -780,22 +820,25 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
   const isEditing = state.topicMessageEdit?.messageId === message.messageId
   const isThread = options.variant === 'thread'
   const threadUnreadBadge = !isThread ? formatTopicUnreadBadgeCount(message.unreadCount) : null
+  // Телефон: светла карта ("Общи" и основната публикация в нишка) — пълен
+  // render и WS append/replace минават оттук.
+  const light = isPhoneLayoutViewport()
   const cardOpenAttrs = isThread
     ? ''
     : `data-topic-card-open="${escapeHtml(message.messageId)}" role="button" tabindex="0" aria-label="Отвори разговора"`
   return `
-    <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs}${isThread ? ` data-topic-thread-seq="${message.seq}"` : ''} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
-      ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px rgba(0,0,0,0.72);z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
+    <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs}${isThread ? ` data-topic-thread-seq="${message.seq}"` : ''} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${light ? ' topic-root-card-light topic-light-scope' : ''}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
+      ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px ${light ? '#FFFFFF' : 'rgba(0,0,0,0.72)'};z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
-        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted)}
+        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted, light)}
       </div>
-      <div style="padding:0 12px 12px 58px;">
+      <div style="padding:0 12px ${light ? '8px' : '12px'} 58px;">
         ${isEditing
-          ? renderTopicMessageEditForm(state, message.messageId)
-          : (message.body.length > 0 ? `<div style="margin-top:4px;font-size:17px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
+          ? renderTopicMessageEditForm(state, message.messageId, light)
+          : (message.body.length > 0 ? `<div style="margin-top:4px;${light ? `font-size:16px;color:${TOPIC_LIGHT_BODY_COLOR};` : 'font-size:17px;color:#e2e8f0;'}line-height:1.45;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
         }
-        ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
-        <div style="margin-top:6px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
+        ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl, light) : ''}
+        <div style="margin-top:6px;margin-left:-8px;display:flex;align-items:center;gap:${light ? '4px' : '10px'};">
           ${renderTopicLikeButton(state, message.messageId, message.likeCount, message.viewerHasLiked)}
           ${renderTopicReplyButton(message.messageId, message.replyCount)}
           ${renderTopicMessageDeleteButton(state, message.messageId, true, message.senderProfileId, message.replyCount)}
@@ -896,8 +939,10 @@ function formatLafchePostTime(value: string, nowMs = Date.now()): string {
 // hover/last-child.
 export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
   const isEditing = state.topicMessageEdit?.messageId === message.messageId
+  // Телефон: светъл текст/имена (пълен render и WS append минават оттук).
+  const light = isPhoneLayoutViewport()
   return `
-    <div data-topic-message="${escapeHtml(message.messageId)}" class="lafche-post">
+    <div data-topic-message="${escapeHtml(message.messageId)}" class="lafche-post${light ? ' lafche-post-light topic-light-scope' : ''}">
       <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 4px;">
         <button
           type="button"
@@ -905,14 +950,14 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
           data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
           style="border:0;background:transparent;padding:0;cursor:pointer;flex:0 0 auto;"
           aria-label="Профил на ${escapeHtml(message.senderDisplayName)}"
-        >${renderMessageAvatar(message.senderDisplayName, message.senderAvatarUrl)}</button>
+        >${renderMessageAvatar(message.senderDisplayName, message.senderAvatarUrl, light)}</button>
         <div style="flex:1;min-width:0;">
           <div class="topic-message-author-meta">
             <button
               type="button"
               data-topic-message-author="${escapeHtml(message.senderProfileId)}"
               data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
-              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:900;color:${TOPIC_AUTHOR_NAME_COLOR};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:${light ? '800' : '900'};color:${light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
             >${escapeHtml(message.senderDisplayName)}</button>
             ${renderTopicAuthorMuteIndicator({
               isMuted: message.isTopicsSectionMuted,
@@ -922,15 +967,15 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
               sourceMessageId: message.messageId,
               sourceKind: 'lafche_post',
             })}
-            <span style="font-size:12px;font-weight:400;color:rgba(248,250,252,0.42);white-space:nowrap;">${escapeHtml(formatLafchePostTime(message.createdAt))}</span>
+            <span style="font-size:12px;font-weight:400;color:${light ? '#667085' : 'rgba(248,250,252,0.42)'};white-space:nowrap;">${escapeHtml(formatLafchePostTime(message.createdAt))}</span>
             ${renderLafcheMuteButton(state, message.senderProfileId, message.senderDisplayName, message.messageId)}
             ${renderLafcheDeleteButton(state, message.messageId, message.senderProfileId)}
           </div>
           ${isEditing
-            ? renderTopicMessageEditForm(state, message.messageId)
-            : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:17px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
+            ? renderTopicMessageEditForm(state, message.messageId, light)
+            : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:17px;line-height:1.45;color:${light ? TOPIC_LIGHT_BODY_COLOR : '#e2e8f0'};word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
           }
-          ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
+          ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl, light) : ''}
         </div>
       </div>
     </div>
@@ -938,9 +983,13 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
 }
 
 function renderTopicMessageStream(state: LobbyScreenState): string {
+  // Телефон: светла зона и състояния ("Общи" и "Лафче"); светлите карти са
+  // само в "Общи" (isLightList) — постовете в "Лафче" са за отделен етап.
+  const isLightStream = isPhoneLayoutViewport()
+  const isLightList = isLightStream && state.activeTopicId !== LAFCHE_TOPIC_ID
   if (state.topicMessagesLoading && (state.topicMessages === null || state.topicMessages.length === 0)) {
     return `
-      <div style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;color:rgba(248,250,252,0.5);font-size:14px;">
+      <div style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;color:${isLightStream ? '#667085' : 'rgba(248,250,252,0.5)'};font-size:14px;">
         Зареждане...
       </div>
     `
@@ -948,7 +997,7 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
 
   if (state.topicMessagesErrorText) {
     return `
-      <div style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;color:#f87171;font-size:14px;text-align:center;padding:0 16px;">
+      <div style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;color:${isLightStream ? '#B42318' : '#f87171'};font-size:14px;text-align:center;padding:0 16px;">
         ${escapeHtml(state.topicMessagesErrorText)}
       </div>
     `
@@ -968,6 +1017,29 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
     ? rawMessages.slice(0, LAFCHE_MESSAGE_HISTORY_LIMIT)
     : rawMessages
 
+  if (messages.length === 0 && isLightList) {
+    return `
+      <div data-topic-messages-empty="1" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:16px 12px;">
+        <div style="width:100%;max-width:340px;box-sizing:border-box;border:1px solid #E4E7EC;border-radius:12px;background:#FFFFFF;box-shadow:0 4px 14px rgba(34,30,80,0.06);padding:22px 18px;display:grid;justify-items:center;gap:6px;text-align:center;">
+          <img src="/assets/lobby-mobile/icon-topics.webp" alt="" width="56" height="56" decoding="async" style="width:56px;height:56px;display:block;object-fit:contain;margin-bottom:4px;">
+          <div style="color:#17233C;font-size:16px;font-weight:800;">Все още няма теми.</div>
+          <div style="color:#667085;font-size:13px;font-weight:600;line-height:1.45;">Започни първия разговор от полето за писане отдолу.</div>
+        </div>
+      </div>
+    `
+  }
+
+  if (messages.length === 0 && isLightStream) {
+    return `
+      <div data-topic-messages-empty="1" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:16px 12px;">
+        <div style="width:100%;max-width:340px;box-sizing:border-box;border:1px solid #E4E7EC;border-radius:12px;background:#FFFFFF;box-shadow:0 4px 14px rgba(34,30,80,0.06);padding:22px 18px;display:grid;justify-items:center;gap:8px;text-align:center;">
+          <img src="/assets/lobby-mobile/icon-topics.webp" alt="" width="56" height="56" decoding="async" style="width:56px;height:56px;display:block;object-fit:contain;">
+          <div style="color:#667085;font-size:15px;font-weight:700;line-height:1.45;">Все още няма съобщения.</div>
+        </div>
+      </div>
+    `
+  }
+
   if (messages.length === 0) {
     return `
       <div data-topic-messages-empty="1" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;color:rgba(248,250,252,0.42);font-size:14px;">
@@ -982,7 +1054,7 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
   // за тази тема, защото клиентът никога не извиква load-older action-а,
   // но explicit isLafche guard тук е defense-in-depth за яснота).
   const loadOlderIndicator = !isLafche && state.topicOlderMessagesLoading
-    ? `<div style="text-align:center;padding:8px 0;color:rgba(248,250,252,0.42);font-size:12px;">Зареждане на по-стари...</div>`
+    ? `<div style="text-align:center;padding:8px 0;color:${isLightList ? '#667085' : 'rgba(248,250,252,0.42)'};font-size:12px;">Зареждане на по-стари...</div>`
     : ''
 
   // flex:1;min-height:0 е ключовото за "само това да scroll-ва вертикално" —
@@ -1219,10 +1291,11 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
         width: 13px;
         height: 13px;
       }
+      ${TOPICS_LIGHT_CSS}
     </style>
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       ${loadOlderIndicator}
-      <div data-topic-messages-list="1" style="display:flex;flex-direction:column;${isLafche ? '' : 'gap:8px;'}padding:6px 6px 10px;box-sizing:border-box;">
+      <div data-topic-messages-list="1" style="display:flex;flex-direction:column;${isLafche ? '' : 'gap:8px;'}padding:${isLightStream ? '8px 8px 10px' : '6px 6px 10px'};box-sizing:border-box;">
         ${isLafche
           // state.topicMessages е поддържан newest-first (sortTopicMessagesByActivity,
           // виж createLobbyFlowController.ts) — General card feed reuse-ва
@@ -1246,7 +1319,7 @@ function renderTopicThreadView(state: LobbyScreenState): string {
 
   if (rootMessageId === null || rootMessage === null) {
     return `
-      <div data-topic-thread-scroll="1" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;color:rgba(248,250,252,0.5);font-size:14px;text-align:center;padding:16px;">
+      <div data-topic-thread-scroll="1" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;color:${isPhoneLayoutViewport() ? '#667085' : 'rgba(248,250,252,0.5)'};font-size:14px;text-align:center;padding:16px;">
         Разговорът вече не е наличен.
       </div>
     `
@@ -1285,6 +1358,7 @@ function renderTopicThreadView(state: LobbyScreenState): string {
         .topic-message-author-meta { flex-wrap:wrap; row-gap:2px; }
         .topic-message-personal-btn { min-height:30px; padding:0 10px; }
       }
+      ${TOPICS_LIGHT_CSS}
     </style>
     <div data-topic-thread-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overflow-anchor:none;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       <div data-topic-thread-list="1" style="display:flex;flex-direction:column;gap:8px;padding:6px 6px 10px;box-sizing:border-box;">
@@ -1319,6 +1393,8 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
   const isSending = Boolean(state.topicComposerPendingRequestIdByTopicId[topicId])
   const errorText = state.topicComposerErrorTextByTopicId[topicId] ?? null
   const pendingImage = state.topicComposerPendingImageByTopicId[topicId] ?? null
+  // Телефон: светло писало ("Общи" и "Лафче"; същото в отворена нишка).
+  const light = isPhoneLayoutViewport()
 
   // Mobile Send бутон става icon-only (СЪЩИЯТ CSS class/media query pattern
   // като inline reply composer-a, виж renderInlineReplyComposer) — desktop
@@ -1344,11 +1420,17 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
         display:flex;
         align-items:flex-end;
         gap:8px;
+        ${light ? `
+        padding:8px 12px;
+        border-top:1px solid #EAECF0;
+        background:#FFFFFF;
+        ` : `
         padding:10px 12px;
         border:1px solid rgba(255,255,255,0.10);
         border-top:1px solid rgba(255,255,255,0.14);
         border-radius:0 0 12px 12px;
         background:#0a0a0a;
+        `}
       "
     >
       ${renderTopicsImagePickerControls({
@@ -1357,6 +1439,7 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
         pending: pendingImage,
         isSending,
         isVip,
+        light,
       })}
       ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_ROOT, 40)}
       <textarea
@@ -1373,9 +1456,7 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
           min-height:40px;
           box-sizing:border-box;
           border-radius:8px;
-          border:1px solid rgba(212,165,32,0.24);
-          background:#050505;
-          color:#f8fafc;
+          ${light ? 'border:1px solid #E4E7EC;background:#F5F7FC;color:#17233C;' : 'border:1px solid rgba(212,165,32,0.24);background:#050505;color:#f8fafc;'}
           padding:10px 12px;
           font-size:14px;
           font-weight:600;
@@ -1398,16 +1479,15 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
           padding:0 16px;
           border:0;
           border-radius:8px;
-          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
-          color:#080808;
+          ${light ? 'background:#7950E8;color:#FFFFFF;' : 'background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;'}
           font-size:13px;
           font-weight:900;
           cursor:${isSending ? 'default' : 'pointer'};
           opacity:${isSending ? '0.6' : '1'};
         "
-      ><span class="topics-reply-composer-btn-label">Изпрати</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">&#10148;</span></button>
+      ><span class="topics-reply-composer-btn-label">Изпрати</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">${light ? TOPICS_LIGHT_SEND_ICON : '&#10148;'}</span></button>
     </form>
-    ${errorText ? `<div data-topics-composer-error="1" style="flex:0 0 auto;padding:4px 12px 0;font-size:12px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
+    ${errorText ? `<div data-topics-composer-error="1" style="flex:0 0 auto;padding:4px 12px ${light ? '6px' : '0'};${light ? 'background:#FFFFFF;' : ''}font-size:12px;color:${light ? '#B42318' : '#f87171'};">${escapeHtml(errorText)}</div>` : ''}
   `
 }
 
@@ -2100,6 +2180,77 @@ function renderTopicsHeader(state: LobbyScreenState): string {
   // "Лични" не се рендира (flex row-ът се свива, без празно място).
   const isPersonalEnabled = isTopicsPersonalEnabled()
 
+  // Телефон: светъл вариант на същия ред — сегментиран превключвател
+  // (Лафче/Общи) и бутон "← Общи" в нишка. Същите data-* атрибути и
+  // display типове на значките (refreshTopicsUnreadDom ги patch-ва на място).
+  if (isPhoneLayoutViewport() && state.topicsMode !== 'personal') {
+    const segmentStyle = (active: boolean) => `
+      position:relative;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:0;
+      height:40px;padding:0 10px;border:0;border-radius:8px;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;
+      ${active ? 'background:#7950E8;color:#FFFFFF;box-shadow:0 4px 10px rgba(121,80,232,0.28);' : 'background:transparent;color:#667085;'}
+    `
+    const srOnly = 'position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;'
+    const personalButton = isPersonalEnabled ? `
+      <button
+        type="button"
+        data-topics-personal-open="1"
+        aria-label="${personalUnreadTotal > 0 ? `Лични разговори, ${personalUnreadTotal} непрочетени съобщения` : 'Лични разговори'}"
+        style="${segmentStyle(false)}"
+      >
+        <span>Лични</span>
+        ${personalUnreadBadge !== null ? `<span data-topics-personal-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(personalUnreadBadge)}</span>` : ''}
+      </button>
+    ` : ''
+
+    if (state.topicsMode === 'thread') {
+      return `
+        <div data-topics-header-row="1" data-topic-thread-header="1" style="display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;">
+          <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+            <button
+              type="button"
+              data-topic-thread-back="1"
+              aria-label="Назад към Общ"
+              style="display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;padding:0 14px 0 10px;border:1px solid #E4E7EC;border-radius:8px;background:#FFFFFF;color:#7950E8;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;flex:0 0 auto;box-shadow:0 2px 6px rgba(23,35,60,0.06);"
+            ><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg><span>Общи</span></button>
+            <h1 style="margin:0;font-size:18px;font-weight:800;color:#17233C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
+          </div>
+          ${personalButton}
+        </div>
+      `
+    }
+
+    return `
+      <div data-topics-header-row="1" style="display:flex;align-items:center;gap:8px;min-width:0;">
+        ${activeTopic !== null ? renderTopicHeaderModerationControls(state, activeTopic) : ''}
+        <div data-topics-header-actions="1" role="group" aria-label="Раздели" style="flex:1;min-width:0;display:grid;grid-template-columns:repeat(${isPersonalEnabled ? 3 : 2},minmax(0,1fr));gap:4px;padding:4px;border:1px solid #E4E7EC;border-radius:12px;background:#FFFFFF;box-shadow:0 2px 8px rgba(23,35,60,0.05);">
+          <button
+            type="button"
+            data-topics-lafche-open="1"
+            aria-label="${lafcheHasUnread ? 'Лафче, има непрочетени публикации' : 'Лафче'}"
+            aria-pressed="${isLafcheActive ? 'true' : 'false'}"
+            style="${segmentStyle(isLafcheActive)}"
+          >
+            <span>Лафче</span>
+            <span data-topics-lafche-badge="1" aria-hidden="true" style="width:9px;height:9px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 2px ${isLafcheActive ? '#7950E8' : '#FFFFFF'};display:${lafcheHasUnread ? 'inline-block' : 'none'};"></span>
+            <span style="${srOnly}">${lafcheHasUnread ? 'Има непрочетени публикации' : ''}</span>
+          </button>
+          <button
+            type="button"
+            data-topics-back-to-general="1"
+            aria-label="Общ чат"
+            aria-pressed="${isGeneralActive ? 'true' : 'false'}"
+            style="${segmentStyle(isGeneralActive)}"
+          >
+            <span>Общи</span>
+            <span data-topics-general-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:${generalUnreadBadge !== null ? 'inline-flex' : 'none'};align-items:center;justify-content:center;padding:0 5px;line-height:1;${isGeneralActive ? 'box-shadow:0 0 0 2px #7950E8;' : ''}">${generalUnreadBadge !== null ? escapeHtml(generalUnreadBadge) : ''}</span>
+            <span style="${srOnly}">${generalUnreadBadge !== null ? escapeHtml(`${generalUnreadTotal} непрочетени в Общ чат`) : ''}</span>
+          </button>
+          ${personalButton}
+        </div>
+      </div>
+    `
+  }
+
   if (state.topicsMode === 'thread') {
     return `
       <div data-topics-header-row="1" data-topic-thread-header="1" style="display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;">
@@ -2323,19 +2474,25 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   // към "Лафче", виж redirectTopicsPersonalToLafche).
   const isPersonalMode = state.topicsMode === 'personal' && isTopicsPersonalEnabled()
   const isThreadMode = state.topicsMode === 'thread'
+  // Телефон: светла зона на потока за "Общи" и "Лафче" (същите размери и граници).
+  // Зоната е на цялата ширина (без външните 4px отстрани) и започва малко
+  // под табовете; вътрешните отстояния са в табовете (8px) и в списъка.
+  // Височината не се пипа — родителската flex верига вече стига точно до
+  // долната навигация (padding-bottom на root-а = височината на навигацията).
+  const isLightStreamContainer = !isPersonalMode && !isThreadMode && isPhoneLayoutViewport()
   return `
-    <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:0 4px;overflow:hidden;">
-      <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;padding:6px 0 10px;">
+    <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:${isLightStreamContainer ? '0' : '0 4px'};overflow:hidden;">
+      <div data-topics-fixed-top="1" style="flex:0 0 auto;display:flex;flex-direction:column;padding:${isLightStreamContainer ? '6px 8px 6px' : '6px 0 10px'};">
         ${renderTopicsHeader(state)}
       </div>
       ${isPersonalMode ? renderTopicsPersonalChatPanel(state) : isThreadMode ? `
-      <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">
+      <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid ${isPhoneLayoutViewport() ? '#E4E7EC' : 'rgba(255,255,255,0.10)'};border-radius:12px 12px 0 0;border-bottom:0;background:${isPhoneLayoutViewport() ? '#F5F7FC' : '#0a0a0a'};display:flex;flex-direction:column;overflow:hidden;">
         ${renderTopicModerationBanners(state)}
         ${renderTopicThreadView(state)}
       </div>
       ${state.topicThreadRootMessageId ? renderInlineReplyComposer(state, state.topicThreadRootMessageId, { variant: 'thread' }) : ''}
       ` : `
-      <div data-topics-stream-container="1" style="flex:1;min-height:0;border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;display:flex;flex-direction:column;overflow:hidden;">
+      <div data-topics-stream-container="1" style="flex:1;min-height:0;${isLightStreamContainer ? 'border:0;background:#F5F7FC;' : 'border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;'}display:flex;flex-direction:column;overflow:hidden;">
         ${renderTopicModerationBanners(state)}
         ${renderTopicMessageStream(state)}
       </div>
@@ -2350,6 +2507,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
       launchGiftDays: state.topicsVipGate ? state.topicsVipGate.launchGiftDays : null,
       claimSubmitting: state.topicsVipClaimSubmitting,
       claimErrorText: state.topicsVipClaimErrorText,
+      light: isPhoneLayoutViewport(),
     })}
     ${renderTopicCreatePopup(state)}
     ${renderTopicsInfoToast(state)}

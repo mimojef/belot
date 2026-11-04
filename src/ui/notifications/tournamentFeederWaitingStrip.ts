@@ -39,9 +39,9 @@ export function createTournamentFeederWaitingStrip(options: {
       ? `${state.scoreA}–${state.scoreB}`
       : 'в ход'
     options.container.innerHTML = `
-      <div style="position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:90000;display:flex;align-items:center;gap:8px;border:1px solid rgba(148,163,253,0.4);border-radius:999px;background:#101625;color:#f8fafc;box-shadow:0 12px 34px rgba(0,0,0,0.5);padding:8px 16px;font-family:Inter,system-ui,sans-serif;font-size:12px;font-weight:800;white-space:nowrap;">
-        <span style="color:#93c5fd;">Очаквате следващия си турнирен мач</span>
-        <span style="color:rgba(248,250,252,0.5);">—</span>
+      <div data-mobile-notice="bottom" style="position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:90000;display:flex;align-items:center;gap:8px;border:1px solid rgba(148,163,253,0.4);border-radius:999px;background:#101625;color:#f8fafc;box-shadow:0 12px 34px rgba(0,0,0,0.5);padding:8px 16px;font-family:Inter,system-ui,sans-serif;font-size:12px;font-weight:800;white-space:nowrap;">
+        <span data-mobile-notice-part="eyebrow" style="color:#93c5fd;">Очаквате следващия си турнирен мач</span>
+        <span data-mobile-notice-part="muted" style="color:rgba(248,250,252,0.5);">—</span>
         <span>${escapeHtml(state.label)}: ${escapeHtml(scoreText)}</span>
       </div>
     `

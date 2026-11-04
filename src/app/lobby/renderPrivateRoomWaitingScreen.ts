@@ -1,5 +1,6 @@
 import type { MatchStake, PrivateRoomPartnerReservationSnapshot, Team } from '../network/createGameServerClient'
 import {
+  PRIVATE_ROOM_POPUP_LIGHT_STYLES,
   PRIVATE_ROOM_POPUP_STYLES,
   renderPrivateRoomBlockedPopup,
   renderPrivateRoomCreatorBlockedPopup,
@@ -12,6 +13,9 @@ import {
   type PrivateRoomPartnerCandidate,
 } from './privateRoomPopupMarkup'
 import { isBelotPrivateBotFillEnabled } from './privateRoomBotFillFeatureFlag'
+import { MOBILE_LIGHT_PAGE_BACKGROUND } from '../../ui/layout/mobileLightPageBackground'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
+import { GUEST_MOBILE_LOBBY_FONT_FAMILY } from './renderLobbyScreen'
 
 export type PrivateRoomWaitingOccupantSnapshot = {
   profileId: string | null
@@ -90,6 +94,8 @@ export type RenderPrivateRoomWaitingScreenParams = {
   partnerEligibilityPopupText?: string | null
   /** Известието за изхода на поканата — вградено под бутоните (не плаващо). */
   noticeHtml?: string
+  /** Светлият мобилен вариант (телефон). Desktop/таблет — тъмният. */
+  light?: boolean
 }
 
 // Pure formatter — exported so it can be unit-tested and reused by the
@@ -424,6 +430,331 @@ function renderChatMessage(message: PrivateRoomWaitingChatMessageSnapshot, local
   `
 }
 
+// Светъл мобилен вариант на чакалнята (телефон) — само под
+// data-private-room-light="1" на самия екран; тъмният/desktop не получава
+// тези правила изобщо (добавят се в <style> само при light). Фонът е отделен
+// fixed слой (::before) — екранът не е fixed scroll container и така
+// скролът/височините остават същите.
+function renderPrivateRoomWaitingLightStyles(): string {
+  return `
+        [data-private-room-light="1"].prw-screen {
+          position:relative;
+          z-index:0;
+          background:transparent;
+          color:#111827;
+          font-family:${GUEST_MOBILE_LOBBY_FONT_FAMILY};
+        }
+
+        [data-private-room-light="1"].prw-screen::before {
+          content:'';
+          position:fixed;
+          inset:0;
+          z-index:-1;
+          pointer-events:none;
+          background:${MOBILE_LIGHT_PAGE_BACKGROUND};
+        }
+
+        [data-private-room-light="1"] .prw-header {
+          padding:12px;
+          border:1px solid #E4E7EC;
+          border-radius:12px;
+          background:#FFFFFF;
+          box-shadow:0 1px 2px rgba(16,24,40,0.05);
+        }
+
+        [data-private-room-light="1"] .prw-title {
+          color:#17233C;
+          font-weight:800;
+          letter-spacing:0;
+        }
+
+        [data-private-room-light="1"] .prw-subtitle {
+          color:#667085;
+          font-weight:600;
+        }
+
+        [data-private-room-light="1"] .prw-subtitle-manual {
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-countdown {
+          background:#F9FAFB;
+          border-color:#E4E7EC;
+        }
+
+        [data-private-room-light="1"] .prw-countdown-label {
+          color:#667085;
+        }
+
+        [data-private-room-light="1"] .prw-countdown-value {
+          color:#111827;
+        }
+
+        [data-private-room-light="1"] .prw-countdown-warning {
+          background:#FFFAEB;
+          border-color:#FEC84B;
+        }
+
+        [data-private-room-light="1"] .prw-countdown-warning .prw-countdown-value {
+          color:#B54708;
+        }
+
+        [data-private-room-light="1"] .prw-countdown-critical {
+          background:#FEF3F2;
+          border-color:#FDA29B;
+        }
+
+        [data-private-room-light="1"] .prw-countdown-critical .prw-countdown-value {
+          color:#D92D20;
+        }
+
+        [data-private-room-light="1"] .prw-wait-in-lobby-button {
+          border-color:#D0D5DD;
+          background:#FFFFFF;
+          color:#344054;
+          font-family:inherit;
+          box-shadow:0 1px 2px rgba(16,24,40,0.05);
+        }
+
+        [data-private-room-light="1"] .prw-wait-in-lobby-button[data-private-room-invite-open] {
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-manual-start-button.lobby-violet-btn {
+          color:#FFFFFF;
+          font-family:inherit;
+        }
+
+        [data-private-room-light="1"] .prw-info-banner {
+          background:#F4F0FF;
+          border-color:#D9CCFF;
+          color:#5B3CC4;
+          overflow-wrap:anywhere;
+        }
+
+        [data-private-room-light="1"] .prw-teams {
+          grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);
+          padding:10px;
+          border:1px solid #E4E7EC;
+          border-radius:12px;
+          background:#FFFFFF;
+          box-shadow:0 1px 2px rgba(16,24,40,0.05);
+        }
+
+        [data-private-room-light="1"] .prw-team-divider {
+          background:#EAECF0;
+        }
+
+        [data-private-room-light="1"] .prw-team-header {
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-slot {
+          background:#F9FAFB;
+          border-color:#E4E7EC;
+        }
+
+        [data-private-room-light="1"] .prw-slot-local {
+          background:#F4F0FF;
+          border-color:#B9A6F3;
+        }
+
+        [data-private-room-light="1"] .prw-slot-empty {
+          border-color:#D0D5DD;
+          background:#FFFFFF;
+        }
+
+        [data-private-room-light="1"] .prw-slot-empty:disabled {
+          opacity:1;
+        }
+
+        [data-private-room-light="1"] .prw-slot-plus {
+          color:#7950E8;
+        }
+
+        [data-private-room-light="1"] .prw-slot-empty:disabled .prw-slot-plus {
+          color:#B9A6F3;
+        }
+
+        [data-private-room-light="1"] .prw-slot-name-empty {
+          color:#667085;
+        }
+
+        [data-private-room-light="1"] .prw-slot-reserved {
+          border-color:#D9CCFF;
+          background:#F4F0FF;
+        }
+
+        [data-private-room-light="1"] .prw-slot-reserved .prw-slot-name-empty {
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-slot-reserved-icon {
+          color:#7950E8;
+        }
+
+        [data-private-room-light="1"] .prw-partner-invite-btn {
+          background:#7950E8;
+          color:#FFFFFF;
+        }
+
+        [data-private-room-light="1"] .prw-partner-invite-btn:disabled {
+          border:1px solid #D9CCFF;
+          background:#FFFFFF;
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-partner-cancel-btn {
+          border-color:#FECDCA;
+          background:#FFFFFF;
+          color:#B42318;
+        }
+
+        [data-private-room-light="1"] .prw-slot-avatar {
+          background:#F4F0FF;
+          border-color:#D9CCFF;
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-slot-avatar-bot {
+          background:#F2F4F7;
+          border-color:#D0D5DD;
+          color:#475467;
+        }
+
+        [data-private-room-light="1"] .prw-leave-badge,
+        [data-private-room-light="1"] .prw-kick-badge {
+          background:#D92D20;
+          border-color:#FFFFFF;
+          box-shadow:0 1px 3px rgba(16,24,40,0.2);
+        }
+
+        [data-private-room-light="1"] .prw-slot-name {
+          color:#111827;
+        }
+
+        [data-private-room-light="1"] .prw-slot-sub {
+          color:#667085;
+        }
+
+        [data-private-room-light="1"] .prw-you-tag {
+          color:#7950E8;
+        }
+
+        [data-private-room-light="1"] .prw-host-badge {
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-bot-badge {
+          color:#475467;
+        }
+
+        [data-private-room-light="1"] .prw-bot-button {
+          border:1px solid #D0D5DD;
+          background:#FFFFFF;
+          color:#344054;
+          font-family:inherit;
+        }
+
+        [data-private-room-light="1"] .prw-bot-button:disabled {
+          opacity:0.55;
+          background:#F9FAFB;
+          color:#667085;
+        }
+
+        [data-private-room-light="1"] .prw-chat-panel {
+          border-color:#E4E7EC;
+          background:#FFFFFF;
+          box-shadow:0 1px 2px rgba(16,24,40,0.05);
+        }
+
+        [data-private-room-light="1"] .prw-chat-header {
+          color:#17233C;
+          border-bottom-color:#EAECF0;
+        }
+
+        [data-private-room-light="1"] .prw-chat-empty {
+          color:#667085;
+          font-weight:600;
+        }
+
+        [data-private-room-light="1"] .prw-chat-bubble {
+          background:#F2F4F7;
+          border-color:#E4E7EC;
+        }
+
+        [data-private-room-light="1"] .prw-chat-row-own .prw-chat-bubble {
+          background:#F4F0FF;
+          border-color:#D9CCFF;
+        }
+
+        [data-private-room-light="1"] .prw-chat-sender {
+          color:#6941C6;
+        }
+
+        [data-private-room-light="1"] .prw-chat-body {
+          color:#111827;
+          font-weight:500;
+        }
+
+        [data-private-room-light="1"] .prw-chat-time {
+          color:#667085;
+          font-weight:600;
+        }
+
+        [data-private-room-light="1"] .prw-chat-form {
+          border-top-color:#EAECF0;
+        }
+
+        [data-private-room-light="1"] .prw-chat-input {
+          border-color:#D0D5DD;
+          background:#FFFFFF;
+          color:#111827;
+          font-family:inherit;
+          color-scheme:light;
+        }
+
+        [data-private-room-light="1"] .prw-chat-input::placeholder {
+          color:#98A2B3;
+        }
+
+        [data-private-room-light="1"] .prw-chat-input:focus {
+          border-color:#7950E8;
+          box-shadow:0 0 0 3px rgba(121,80,232,0.15);
+        }
+
+        [data-private-room-light="1"] .prw-chat-input:disabled {
+          background:#F9FAFB;
+          color:#98A2B3;
+        }
+
+        [data-private-room-light="1"] .prw-chat-send.lobby-violet-btn {
+          border:0;
+          color:#FFFFFF;
+          font-family:inherit;
+          font-weight:800;
+        }
+
+        [data-private-room-light="1"] .prw-chat-error {
+          color:#B42318;
+        }
+
+        @media (max-width: 640px) {
+          [data-private-room-light="1"] .prw-host-badge {
+            background:#F4F0FF;
+            border-color:#D9CCFF;
+          }
+
+          [data-private-room-light="1"] .prw-bot-badge {
+            background:#F2F4F7;
+            border-color:#D0D5DD;
+          }
+        }
+
+        ${PRIVATE_ROOM_POPUP_LIGHT_STYLES}
+  `
+}
+
 export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingScreenParams): string {
   const occupiedCount = params.slots.filter((s) => s.occupant !== null).length
   const localTeam = getLocalTeam(params.slots, params.localProfileId)
@@ -432,9 +763,12 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
     reservation: params.partnerReservation ?? null,
     inviteInFlight: params.partnerInviteInFlight === true,
   }
+  const light = params.light === true
+  // Основните бутони в светлия вариант — .lobby-violet-btn (фонът е от класа).
+  const violetClass = light ? ` lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}` : ''
 
   return `
-    <section data-private-room-waiting-screen="1" class="prw-screen">
+    <section data-private-room-waiting-screen="1" class="prw-screen"${light ? ' data-private-room-light="1"' : ''}>
       <style>
         .prw-screen {
           min-height:100vh;
@@ -481,6 +815,11 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           color:rgba(248,250,252,0.56);
         }
 
+        .prw-subtitle-manual {
+          color:#a78bfa;
+          font-weight:800;
+        }
+
         .prw-waiting-actions {
           display:flex;
           gap:10px;
@@ -504,15 +843,18 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           padding:0 20px;
           border-radius:8px;
           border:0;
-          background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
-          color:#101010;
           font-size:13px;
           font-weight:900;
           letter-spacing:0.03em;
           cursor:pointer;
         }
 
-        .prw-manual-start-button:disabled {
+        .prw-manual-start-button:not(.lobby-violet-btn) {
+          background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
+          color:#101010;
+        }
+
+        .prw-manual-start-button:not(.lobby-violet-btn):disabled {
           opacity:0.5;
           cursor:not-allowed;
           background:rgba(255,255,255,0.10);
@@ -997,11 +1339,14 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           padding:0 16px;
           border-radius:8px;
           border:0;
-          background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
-          color:#101010;
           font-size:13px;
           font-weight:900;
           cursor:pointer;
+        }
+
+        .prw-chat-send:not(.lobby-violet-btn) {
+          background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
+          color:#101010;
         }
 
         .prw-chat-send:disabled {
@@ -1212,6 +1557,8 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             height:38px;
           }
         }
+
+        ${light ? renderPrivateRoomWaitingLightStyles() : ''}
       </style>
 
       <div class="prw-shell">
@@ -1219,7 +1566,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           <div>
             <h1 class="prw-title">Чакалня — частна маса</h1>
             <div class="prw-subtitle">
-              ${params.isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(params.stake)} · ${occupiedCount}/4 заети места${params.manualStart ? ' · <span style="color:#a78bfa;font-weight:800;">Ръчен старт</span>' : ''}
+              ${params.isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(params.stake)} · ${occupiedCount}/4 заети места${params.manualStart ? ' · <span class="prw-subtitle-manual">Ръчен старт</span>' : ''}
             </div>
           </div>
           <div class="prw-header-actions">
@@ -1236,7 +1583,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             ? `<button
                 type="button"
                 data-private-room-manual-start="1"
-                class="prw-manual-start-button"
+                class="prw-manual-start-button${violetClass}"
                 ${params.canManualStart && !params.startInFlight ? '' : 'disabled'}
               >${params.startInFlight ? '...' : 'СТАРТ'}</button>`
             : ''}
@@ -1273,24 +1620,26 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
               value="${escapeHtml(params.chatDraft)}"
               ${params.chatSending || !isMember ? 'disabled' : ''}
             >
-            <button type="submit" class="prw-chat-send" ${params.chatSending || !isMember ? 'disabled' : ''}>Изпрати</button>
+            <button type="submit" class="prw-chat-send${violetClass}" ${params.chatSending || !isMember ? 'disabled' : ''}>Изпрати</button>
           </form>
         </div>
       </div>
 
-      ${renderPrivateRoomJoinConfirmPopup(params.joinSlotPopup)}
+      ${renderPrivateRoomJoinConfirmPopup(params.joinSlotPopup, light)}
 
       ${renderPrivateRoomPartnerPickerPopup({
         isOpen: params.partnerPickerOpen === true && params.isLocalHost && partner.reservation !== null,
         candidates: params.partnerCandidates ?? null,
         query: params.partnerQuery ?? '',
         inviteInFlight: partner.inviteInFlight,
+        light,
       })}
 
       ${renderPrivateRoomInviteFriendsPopup({
         isOpen: params.inviteFriendsPopupOpen,
         freeSeats: 4 - occupiedCount,
         friends: params.inviteFriends,
+        light,
       })}
 
       ${params.leaveConfirmOpen ? `
@@ -1319,8 +1668,8 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
       ` : ''}
 
       ${renderPrivateRoomBlockedPopup(params.blockedPopupText)}
-      ${renderPrivateRoomCreatorBlockedPopup(params.creatorBlockedPopupOpen === true)}
-      ${renderPrivateRoomPartnerEligibilityPopup(params.partnerEligibilityPopupText ?? null)}
+      ${renderPrivateRoomCreatorBlockedPopup(params.creatorBlockedPopupOpen === true, light)}
+      ${renderPrivateRoomPartnerEligibilityPopup(params.partnerEligibilityPopupText ?? null, light)}
     </section>
   `
 }

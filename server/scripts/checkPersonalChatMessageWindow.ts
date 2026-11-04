@@ -162,6 +162,12 @@ async function createStoreFixture() {
       last_read_at TEXT NOT NULL,
       PRIMARY KEY (profile_id, friendship_id)
     );
+
+    CREATE TABLE friend_chat_conversation_clears (
+      friendship_id TEXT PRIMARY KEY REFERENCES profile_friendships(friendship_id) ON DELETE CASCADE,
+      cleared_by_profile_id TEXT NOT NULL,
+      cleared_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `)
   database.prepare(`
     INSERT INTO profile_friendships (

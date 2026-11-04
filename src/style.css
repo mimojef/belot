@@ -215,6 +215,368 @@ body::before {
 }
 
 /*
+ * Mobile landing CTA — лек, модерен 3D вид: фин вертикален градиент около
+ * основния #7950E8, тънка светла линия + мек отблясък горе, по-тъмен долен
+ * ръб (релеф) и мека външна сянка. При натискане бутонът "потъва" с 1px.
+ * Потъването е чрез translate (а не transform), за да не се бие с
+ * pwa-cta-pulse, която анимира transform. Само за телефонния вариант —
+ * desktop бутонът няма този клас.
+ */
+.pwa-cta-3d {
+  background: linear-gradient(180deg, #8961F0 0%, #7950E8 55%, #6C43DD 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 0 rgba(52, 22, 140, 0.28),
+    0 1px 2px rgba(52, 22, 140, 0.22),
+    0 8px 20px rgba(121, 80, 232, 0.32);
+  text-shadow: 0 1px 1px rgba(40, 14, 110, 0.3);
+  transition: box-shadow 0.12s ease, filter 0.12s ease, translate 0.12s ease;
+}
+
+.pwa-cta-3d::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 100%);
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pwa-cta-3d:hover {
+    filter: brightness(1.05);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.3),
+      inset 0 -2px 0 rgba(52, 22, 140, 0.28),
+      0 1px 2px rgba(52, 22, 140, 0.22),
+      0 10px 26px rgba(121, 80, 232, 0.4);
+  }
+}
+
+.pwa-cta-3d:active {
+  translate: 0 1px;
+  filter: brightness(0.97);
+  box-shadow:
+    inset 0 2px 3px rgba(40, 14, 110, 0.28),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
+    0 1px 1px rgba(52, 22, 140, 0.2),
+    0 3px 8px rgba(121, 80, 232, 0.26);
+}
+
+.pwa-cta-3d:active::before {
+  opacity: 0.45;
+}
+
+/*
+ * Мобилно лоби за гости — виолетовите бутони ("Играй", "Създай игра"): същият
+ * лек 3D език като .pwa-cta-3d на лендинга (градиент около #7950E8, светла
+ * горна линия, по-тъмен долен ръб, мека сянка, 1px "потъване" при натискане),
+ * но самостоятелен клас — без пулс/отблясък и с disabled състояние.
+ */
+.lobby-violet-btn {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, #8961F0 0%, #7950E8 55%, #6C43DD 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 0 rgba(52, 22, 140, 0.28),
+    0 1px 2px rgba(52, 22, 140, 0.2),
+    0 6px 14px rgba(121, 80, 232, 0.28);
+  text-shadow: 0 1px 1px rgba(40, 14, 110, 0.3);
+  transition: box-shadow 0.12s ease, filter 0.12s ease, translate 0.12s ease, opacity 0.12s ease;
+}
+
+.lobby-violet-btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 100%);
+  pointer-events: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lobby-violet-btn:not(:disabled):hover {
+    filter: brightness(1.05);
+  }
+}
+
+.lobby-violet-btn:not(:disabled):active {
+  translate: 0 1px;
+  filter: brightness(0.97);
+  box-shadow:
+    inset 0 2px 3px rgba(40, 14, 110, 0.28),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
+    0 1px 1px rgba(52, 22, 140, 0.2),
+    0 3px 8px rgba(121, 80, 232, 0.24);
+}
+
+.lobby-violet-btn:disabled {
+  opacity: 0.55;
+  cursor: default !important;
+}
+
+/*
+ * Светлият auth modal (вход/регистрация/забравена парола) — само в новото
+ * мобилно лоби за гости (root-ът носи data-lobby-guest-auth-modal, виж
+ * guestAuthModalLightTheme() в renderLobbyScreen.ts). Полетата са с inline
+ * рамка, затова фокусът я презаписва с !important.
+ */
+[data-lobby-guest-auth-modal="1"] button,
+[data-lobby-guest-auth-modal="1"] input,
+[data-standalone-light="1"] button,
+[data-lobby-guest-auth-modal="1"] .registration-contact-editor {
+  font-family: inherit;
+}
+
+[data-lobby-guest-auth-modal="1"] input::placeholder,
+[data-lobby-guest-auth-modal="1"] .registration-contact-editor[data-placeholder]:empty::before {
+  color: #98A2B3;
+}
+
+[data-lobby-guest-auth-modal="1"] input:not([type="checkbox"]):not([type="radio"]):focus,
+[data-lobby-guest-auth-modal="1"] .registration-contact-editor:focus,
+[data-guest-contact-light="1"] input:focus,
+[data-guest-contact-light="1"] textarea:focus,
+[data-support-popup-light="1"] textarea:focus,
+[data-profile-editor-light="1"] input:not([disabled]):focus,
+[data-change-password-light="1"] input:focus,
+[data-standalone-light="1"] input:not([type="checkbox"]):focus {
+  border-color: #7950E8 !important;
+  box-shadow: 0 0 0 3px rgba(121, 80, 232, 0.16);
+}
+
+[data-lobby-guest-auth-modal="1"] input[type="checkbox"] {
+  accent-color: #7950E8;
+}
+
+/*
+ * Банерът и прозорецът "Настройки на бисквитките" (consentUi.ts) — светъл
+ * вариант на всички мобилни страници за гости, и на още черните: телефонният
+ * root (data-mobile-layout) с бутона "Контакти" за гости в менюто
+ * (data-lobby-nav-guest-contact — рендира се само без профил), както и
+ * самостоятелните /reset-password и /verify-registration на телефон
+ * (data-standalone-light). Елементите са
+ * с inline стил, затова правилата са с !important. Desktop, таблет и
+ * влезлите потребители остават със стария стил от consentUi.ts.
+ */
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root button {
+  font-family: inherit !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner {
+  left: 12px !important;
+  right: 12px !important;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+  max-width: 520px !important;
+  padding: 12px 14px !important;
+  border: 1px solid #E4E7EC !important;
+  border-radius: 12px !important;
+  background: #FFFFFF !important;
+  box-shadow: 0 12px 32px rgba(23, 35, 60, 0.16) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  color: #17233C !important;
+  font-family: inherit !important;
+}
+
+/* "Теми" и "Чат" на телефон: докато екранната клавиатура е отворена (маркерът от
+   ensureMobileKeyboardWatcher в renderLobbyScreen.ts), долната навигация се
+   скрива и полето за писане слиза до долния ръб; връща се при затварянето ѝ. */
+html[data-mobile-keyboard-open] [data-lobby-topics-shell="1"],
+html[data-mobile-keyboard-open] [data-lobby-chat-shell="1"] {
+  padding-bottom: 0 !important;
+}
+
+html[data-mobile-keyboard-open] [data-lobby-topics-shell="1"] [data-lobby-guest-bottom-nav="1"],
+html[data-mobile-keyboard-open] [data-lobby-chat-shell="1"] [data-lobby-guest-bottom-nav="1"] {
+  display: none !important;
+}
+
+/* Над фиксираната долна навигация (71px), с 8px разстояние. */
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"][data-lobby-guest-mobile-light="1"] [data-lobby-guest-bottom-nav="1"]) #pika-consent-root .pika-consent-banner {
+  bottom: calc(79px + env(safe-area-inset-bottom, 0px)) !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner-inner {
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 10px !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-banner-title="1"] {
+  margin-bottom: 2px !important;
+  color: #17233C !important;
+  font-size: 14px !important;
+  font-weight: 800 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-banner-text="1"] {
+  color: #667085 !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  line-height: 1.4 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner-actions {
+  flex-direction: row !important;
+  gap: 8px !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root .pika-consent-banner-actions button,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-actions="1"] button {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto !important;
+  height: 42px !important;
+  padding: 0 10px !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  font-weight: 800 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all="1"],
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all-modal="1"] {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid transparent !important;
+  background: linear-gradient(180deg, #8961F0 0%, #7950E8 55%, #6C43DD 100%) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 0 rgba(52, 22, 140, 0.28),
+    0 1px 2px rgba(52, 22, 140, 0.2),
+    0 6px 14px rgba(121, 80, 232, 0.28);
+  color: #FFFFFF !important;
+  text-shadow: 0 1px 1px rgba(40, 14, 110, 0.3);
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all="1"]::before,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all-modal="1"]::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 100%);
+  pointer-events: none;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all="1"]:active,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-accept-all-modal="1"]:active {
+  translate: 0 1px;
+  filter: brightness(0.97);
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-open-settings="1"],
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-save-choice="1"] {
+  border: 1px solid #D0D5DD !important;
+  background: #FFFFFF !important;
+  color: #17233C !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-open-settings="1"]:hover,
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-save-choice="1"]:hover {
+  border-color: #C9B8F5 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-root="1"] {
+  padding: 12px !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-backdrop="1"] {
+  background: rgba(20, 20, 43, 0.45) !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-dialog="1"] {
+  box-sizing: border-box;
+  width: min(100%, 440px) !important;
+  max-height: calc(100dvh - 24px) !important;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 20px 16px 16px !important;
+  border: 1px solid #E4E7EC !important;
+  border-radius: 12px !important;
+  background: #FFFFFF !important;
+  box-shadow: 0 20px 48px rgba(23, 35, 60, 0.18) !important;
+  color: #17233C !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-close="1"] {
+  right: 8px !important;
+  top: 8px !important;
+  border-radius: 8px !important;
+  background: #F2F4F7 !important;
+  color: #475467 !important;
+  line-height: 1;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root #pika-consent-modal-title {
+  padding-right: 40px;
+  color: #17233C !important;
+  font-size: 18px !important;
+  font-weight: 800 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root #pika-consent-modal-subtitle {
+  color: #667085 !important;
+  font-weight: 500 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-card="1"] {
+  padding: 12px !important;
+  border: 1px solid #E4E7EC !important;
+  background: #F9FAFB !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-card="1"] input[type="checkbox"] {
+  width: 22px !important;
+  height: 22px !important;
+  margin-top: 0 !important;
+  accent-color: #7950E8 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-title="1"] {
+  color: #17233C !important;
+  font-weight: 800 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-category-desc="1"] {
+  color: #667085 !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-always-active="1"] {
+  background: #F1ECFD !important;
+  color: #6941C6 !important;
+}
+
+body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-guest-contact="1"], [data-standalone-light="1"]) #pika-consent-root [data-consent-modal-actions="1"] {
+  flex-wrap: nowrap !important;
+  gap: 8px !important;
+}
+
+/*
+ * Светлите информационни екрани на гост лобито (правила, съвети, ...):
+ * при скок към секция от "Съдържание" заглавието ѝ не остава под sticky
+ * header-а. Същото за регистриран (data-lobby-member-mobile-light).
+ */
+[data-lobby-guest-mobile-light="1"] main [id],
+[data-lobby-member-mobile-light="1"] main [id] {
+  scroll-margin-top: 72px;
+}
+
+/*
  * Registration-only password/repeat-password inputs (renderLobbyScreen.ts's
  * auth modal, register mode) — реалният <input> е type="text" (НЕ
  * type="password"), за да не се разпознава от Chrome Password Manager като

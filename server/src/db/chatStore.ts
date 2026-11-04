@@ -120,6 +120,10 @@ export type ChatConversationSnapshot = {
   unreadCount: number
   kind: ChatConversationKind
   isArchived: boolean
+  // Другият участник е изтрил целия разговор (deleteConversation) и оттогава
+  // няма нови съобщения — текущото му публично име. null за изпълнителя на
+  // изтриването и когато няма такова събитие.
+  clearedByDisplayName: string | null
 }
 
 // Входни данни за нов attachment — попълва се от sharp обработения буфер
@@ -217,6 +221,22 @@ export type ChatStore = {
         ok: true
         friendshipId: string
         messageId: string
+        participantProfileIds: [ProfileId, ProfileId]
+        conversation: ChatConversationSnapshot | null
+      }
+    | { ok: false; message: string; code: ChatStoreErrorCode }
+  /**
+   * Окончателно изтриване на целия личен разговор за двамата участници (виж
+   * имплементацията). Участието се установява САМО от profileId на сесията.
+   */
+  deleteConversation: (
+    profileId: ProfileId,
+    friendshipId: string,
+  ) =>
+    | {
+        ok: true
+        friendshipId: string
+        deletedMessageCount: number
         participantProfileIds: [ProfileId, ProfileId]
         conversation: ChatConversationSnapshot | null
       }
@@ -842,6 +862,53 @@ export async function createChatStore(
       AND sender_profile_id = ?;
   `)
 
+  // Изтриване на целия разговор (deleteConversation по-долу) — всички
+  // съобщения на friendship_id-то, включително стари soft-deleted редове.
+  // friend_chat_attachments изчезва чрез ON DELETE CASCADE; файловете се
+  // enqueue-ват преди това в същата транзакция.
+  const selectConversationAttachmentFilenamesStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM friend_chat_attachments a
+    JOIN friend_chat_messages m ON m.message_id = a.message_id
+    WHERE m.friendship_id = ?;
+  `)
+
+  const deleteConversationMessagesStatement = database.prepare(`
+    DELETE FROM friend_chat_messages
+    WHERE friendship_id = ?;
+  `)
+
+  // chat_conversation_reads няма FK — маркерите и на двамата участници.
+  const deleteConversationReadsStatement = database.prepare(`
+    DELETE FROM chat_conversation_reads
+    WHERE friendship_id = ?;
+  `)
+
+  // Минималният маркер „X изтри този чат“ (виж миграция
+  // 20261105_001_create_friend_chat_conversation_clears.sql) — само кой и кога.
+  const upsertConversationClearStatement = database.prepare(`
+    INSERT INTO friend_chat_conversation_clears (friendship_id, cleared_by_profile_id, cleared_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT (friendship_id)
+    DO UPDATE SET
+      cleared_by_profile_id = excluded.cleared_by_profile_id,
+      cleared_at = excluded.cleared_at;
+  `)
+
+  const selectConversationClearStatement = database.prepare(`
+    SELECT cleared_by_profile_id
+    FROM friend_chat_conversation_clears
+    WHERE friendship_id = ?
+    LIMIT 1;
+  `)
+
+  // Първото ново съобщение след изтриването „започва нов разговор“ —
+  // уведомлението изчезва (sendMessage, в същата транзакция като INSERT-а).
+  const deleteConversationClearStatement = database.prepare(`
+    DELETE FROM friend_chat_conversation_clears
+    WHERE friendship_id = ?;
+  `)
+
   const pruneOldMessagesStatement = database.prepare(`
     DELETE FROM friend_chat_messages
     WHERE friendship_id = ?
@@ -894,6 +961,23 @@ export async function createChatStore(
     return ageMs > CONVERSATION_ARCHIVE_AFTER_DAYS * 24 * 60 * 60 * 1000
   }
 
+  // Името на участника, изтрил разговора — само за ДРУГИЯ участник и само
+  // докато разговорът е празен (маркерът се трие с първото ново съобщение;
+  // проверката за lastMessage е защитна).
+  function getClearedByDisplayName(
+    friendshipId: string,
+    ownProfileId: ProfileId,
+    hasMessages: boolean,
+  ): string | null {
+    if (hasMessages) return null
+    const row = selectConversationClearStatement.get(friendshipId) as
+      | { cleared_by_profile_id: string }
+      | undefined
+    if (row === undefined || row.cleared_by_profile_id === ownProfileId) return null
+    const clearedBy = playerProgressStore.getVisiblePublicProfile(row.cleared_by_profile_id)
+    return clearedBy?.displayName?.trim() || 'Играч'
+  }
+
   function createConversationSnapshot(
     friendship: FriendshipRow,
     ownProfileId: ProfileId,
@@ -936,6 +1020,11 @@ export async function createChatStore(
       unreadCount: getUnreadCount(ownProfileId, friendship.friendship_id),
       kind,
       isArchived: isConversationArchived(kind, updatedAt),
+      clearedByDisplayName: getClearedByDisplayName(
+        friendship.friendship_id,
+        ownProfileId,
+        lastMessageRow !== undefined,
+      ),
     }
   }
 
@@ -1589,6 +1678,7 @@ export async function createChatStore(
       insertedRow = selectInsertedMessageStatement.get(messageId) as ChatMessageRow | undefined
       touchFriendshipStatement.run(friendshipId)
       upsertReadStatement.run(profileId, friendshipId)
+      deleteConversationClearStatement.run(friendshipId)
 
       // Deletion-intent ПРЕДИ delete-а, в същата транзакция — виж коментара
       // до selectPrunedAttachmentFilenamesStatement по-горе.
@@ -1730,6 +1820,89 @@ export async function createChatStore(
       ok: true,
       friendshipId,
       messageId,
+      participantProfileIds: [friendship.requester_profile_id, friendship.addressee_profile_id],
+      conversation: createConversationSnapshot(friendship, profileId),
+    }
+  }
+
+  /**
+   * Окончателно изтрива целия личен разговор за двамата участници: всички
+   * съобщения (физически DELETE), attachment редовете (ON DELETE CASCADE),
+   * маркерите за прочитане на двамата. Файловете на снимките се enqueue-ват
+   * във friend_chat_attachment_deletions в СЪЩАТА транзакция (същият worker
+   * като при единично изтриване; attachmentExistsForFilename пази файлове,
+   * които все още имат attachment ред). Остава само минималният маркер
+   * „кой и кога“ за уведомлението на другия участник.
+   *
+   * Само за действителен участник в accepted разговор от вид 'friend';
+   * приятелството и профилите не се пипат. BEGIN IMMEDIATE сериализира
+   * спрямо едновременно sendMessage: съобщение, записано след изтриването,
+   * остава като начало на новия разговор. Празен разговор → без промени
+   * (deletedMessageCount 0, без маркер и без събитие). При грешка ROLLBACK —
+   * нищо не е изтрито и нищо не е enqueue-нато.
+   */
+  function deleteConversation(
+    profileId: ProfileId,
+    friendshipId: string,
+  ):
+    | {
+        ok: true
+        friendshipId: string
+        deletedMessageCount: number
+        participantProfileIds: [ProfileId, ProfileId]
+        conversation: ChatConversationSnapshot | null
+      }
+    | { ok: false; message: string; code: ChatStoreErrorCode } {
+    if (typeof friendshipId !== 'string' || friendshipId.length === 0 || friendshipId.length > 128) {
+      return { ok: false, code: 'conversation_not_found', message: 'Разговорът не е намерен.' }
+    }
+
+    const friendship = getAcceptedFriendship(profileId, friendshipId)
+
+    if (friendship === null) {
+      return { ok: false, code: 'conversation_not_found', message: 'Разговорът не е намерен.' }
+    }
+
+    if (toConversationKind(friendship.kind) !== 'friend') {
+      return { ok: false, code: 'invalid_conversation_kind', message: 'Този разговор не може да бъде изтрит.' }
+    }
+
+    let deletedMessageCount = 0
+
+    database.exec('BEGIN IMMEDIATE;')
+
+    try {
+      const attachmentRows = selectConversationAttachmentFilenamesStatement.all(
+        friendshipId,
+      ) as { storage_filename: string }[]
+
+      for (const row of attachmentRows) {
+        insertAttachmentDeletionStatement.run(row.storage_filename)
+      }
+
+      const result = deleteConversationMessagesStatement.run(friendshipId) as { changes?: number }
+      deletedMessageCount = result.changes ?? 0
+
+      if (deletedMessageCount > 0) {
+        deleteConversationReadsStatement.run(friendshipId)
+        upsertConversationClearStatement.run(friendshipId, profileId)
+        database.exec('COMMIT;')
+      } else {
+        database.exec('ROLLBACK;')
+      }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Keep the original write failure visible to the caller.
+      }
+      throw error
+    }
+
+    return {
+      ok: true,
+      friendshipId,
+      deletedMessageCount,
       participantProfileIds: [friendship.requester_profile_id, friendship.addressee_profile_id],
       conversation: createConversationSnapshot(friendship, profileId),
     }
@@ -1914,6 +2087,7 @@ export async function createChatStore(
     listMessages,
     sendMessage,
     deleteOwnMessage,
+    deleteConversation,
     markConversationRead,
     isFirstUnreadMessage,
     isFirstUnreadMessageAfterInsert,

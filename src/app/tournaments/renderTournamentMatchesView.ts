@@ -6,6 +6,7 @@ import type {
 } from '../network/createGameServerClient'
 import { getTournamentRoundLabel } from './tournamentRoundLabels'
 import { getTournamentTeamSlotLetter } from './tournamentTeamLabels'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 
 // ─── "Турнирни срещи" (Виж игрите) ─────────────────────────────────────────
 // Чисто информационен изглед върху вече зареденото TournamentDetailSnapshot
@@ -333,11 +334,21 @@ function renderTeamRow(
   `
 }
 
-function renderLiveCard(card: TournamentLiveMatchCard): string {
-  const scoreText = (value: number | null) => (card.phase === 'playing' ? (value === null ? '—' : String(value)) : '')
-  const scoreAttributes = (team: 'a' | 'b') => card.phase === 'playing'
+// Общи за тъмния и светлия вариант — live резултатът се patch-ва по тези
+// атрибути (patchTournamentMatchLiveScoreDom в контролера).
+function liveScoreText(card: TournamentLiveMatchCard, value: number | null): string {
+  return card.phase === 'playing' ? (value === null ? '—' : String(value)) : ''
+}
+
+function liveScoreAttributes(card: TournamentLiveMatchCard, team: 'a' | 'b'): string {
+  return card.phase === 'playing'
     ? `data-tournament-live-score="${escapeHtml(card.matchId)}" data-tournament-live-score-team="${team}"`
     : ''
+}
+
+function renderLiveCard(card: TournamentLiveMatchCard): string {
+  const scoreText = (value: number | null) => liveScoreText(card, value)
+  const scoreAttributes = (team: 'a' | 'b') => liveScoreAttributes(card, team)
   const statusPill = card.phase === 'playing'
     ? `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:900;color:#4ade80;border:1px solid rgba(74,222,128,0.45);border-radius:999px;padding:3px 9px;white-space:nowrap;"><span style="width:7px;height:7px;border-radius:999px;background:#22c55e;box-shadow:0 0 6px #22c55e;"></span>${escapeHtml(card.statusText)}</span>`
     : `<span style="font-size:11px;font-weight:800;color:rgba(255,255,255,0.6);border:1px solid rgba(255,255,255,0.18);border-radius:999px;padding:3px 9px;white-space:nowrap;">${escapeHtml(card.statusText)}</span>`
@@ -391,9 +402,142 @@ function renderSectionTitle(title: string, count: number): string {
   return `<div style="display:flex;align-items:center;gap:8px;margin:0 0 10px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.6);">${escapeHtml(title)}<span style="font-size:11px;color:#d4a520;">${count}</span></div>`
 }
 
-export function renderTournamentMatchesView(t: TournamentDetailSnapshot): string {
+// ─── Светъл вариант (телефон, регистриран — обща светла мобилна рамка) ──────
+// Същият view model, текстове, data-* атрибути и ред на секциите като
+// тъмния; различна е само визията.
+
+const LIGHT_CARD_STYLE = 'box-sizing:border-box;min-width:0;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:12px;box-shadow:0 1px 2px rgba(16,24,40,0.05);'
+const LIGHT_PILL_STYLE = 'flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;box-sizing:border-box;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap;'
+const LIGHT_GREY_PILL_STYLE = `${LIGHT_PILL_STYLE}background:#F2F4F7;border:1px solid #E4E7EC;color:#475467;`
+const LIGHT_STAGE_LABEL_STYLE = 'min-width:0;font-size:12px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#6941C6;overflow-wrap:anywhere;'
+const LIGHT_EMPTY_BOX_STYLE = 'padding:18px 12px;border:1px dashed #D0D5DD;border-radius:12px;background:#FFFFFF;text-align:center;font-size:14px;font-weight:600;line-height:1.45;color:#667085;'
+// Lucide "eye" — пред "Гледай" (вместо emoji-то в тъмния вариант).
+const LIGHT_WATCH_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:0 0 auto;"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>'
+
+function renderLightTeamRow(
+  team: TournamentMatchCardTeam,
+  score: string,
+  options: { isWinner: boolean; isLoser: boolean; scoreAttributes: string },
+): string {
+  const names = team.playerNames.length > 0 ? team.playerNames.join(' и ') : 'Няма данни за играчите'
+  const letter = team.letter ?? '?'
+  return `
+    <div style="display:flex;align-items:center;gap:10px;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid ${options.isWinner ? '#ABEFC6' : '#EAECF0'};background:${options.isWinner ? '#ECFDF3' : '#F5F7FC'};">
+      <span aria-label="Отбор ${escapeHtml(letter)}" style="
+        width:30px;height:30px;flex-shrink:0;border-radius:8px;display:flex;align-items:center;justify-content:center;
+        background:#F4F0FF;border:1px solid #D9D6FE;color:#6941C6;font-size:14px;font-weight:800;
+      ">${escapeHtml(letter)}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12px;font-weight:700;color:#667085;">Отбор ${escapeHtml(letter)}${options.isWinner ? ' · <span style="color:#067647;font-weight:800;">Победител</span>' : ''}</div>
+        <div title="${escapeHtml(names)}" style="font-size:14px;font-weight:700;color:${options.isLoser ? '#667085' : '#111827'};line-height:1.3;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(names)}</div>
+      </div>
+      <div ${options.scoreAttributes} style="flex-shrink:0;min-width:44px;text-align:right;font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;color:${options.isWinner ? '#067647' : options.isLoser ? '#667085' : '#17233C'};">${escapeHtml(score)}</div>
+    </div>
+  `
+}
+
+function renderLightLiveCard(card: TournamentLiveMatchCard): string {
+  const statusPill = card.phase === 'playing'
+    ? `<span style="${LIGHT_PILL_STYLE}background:#ECFDF3;border:1px solid #ABEFC6;color:#067647;"><span style="width:7px;height:7px;border-radius:999px;background:#12B76A;"></span>${escapeHtml(card.statusText)}</span>`
+    : `<span style="${LIGHT_GREY_PILL_STYLE}">${escapeHtml(card.statusText)}</span>`
+  const watchHtml = card.watch === 'available' && card.roomId !== null
+    ? `<button type="button" data-watch-tournament-match="${escapeHtml(card.roomId)}" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-weight:800;cursor:pointer;width:100%;min-height:44px;font-size:15px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px;">${LIGHT_WATCH_ICON}Гледай</button>`
+    : card.watch === 'participant'
+      ? `<div style="margin-top:10px;font-size:13px;font-weight:600;line-height:1.4;color:#667085;text-align:center;">Участниците в турнира не могат да гледат други турнирни маси.</div>`
+      : ''
+  return `
+    <article data-tournament-live-match="${escapeHtml(card.matchId)}" style="${LIGHT_CARD_STYLE}padding:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+        <span style="${LIGHT_STAGE_LABEL_STYLE}">${escapeHtml(card.stageLabel)}</span>
+        ${statusPill}
+      </div>
+      <div style="display:grid;gap:6px;">
+        ${renderLightTeamRow(card.teamA, liveScoreText(card, card.scoreA), { isWinner: false, isLoser: false, scoreAttributes: liveScoreAttributes(card, 'a') })}
+        ${renderLightTeamRow(card.teamB, liveScoreText(card, card.scoreB), { isWinner: false, isLoser: false, scoreAttributes: liveScoreAttributes(card, 'b') })}
+      </div>
+      ${card.playedWithBots ? '<div style="margin-top:8px;font-size:12px;font-weight:600;color:#667085;">Играе се с участие на бот.</div>' : ''}
+      ${watchHtml}
+    </article>
+  `
+}
+
+function renderLightHistoryCard(card: TournamentHistoryMatchCard): string {
+  const scoreText = (value: number | null) => (value === null ? '—' : String(value))
+  const completedAt = formatDateTime(card.completedAt)
+  return `
+    <article data-tournament-history-match="${escapeHtml(card.matchId)}" style="${LIGHT_CARD_STYLE}padding:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+        <span style="${LIGHT_STAGE_LABEL_STYLE}">${escapeHtml(card.stageLabel)}</span>
+        <span style="${LIGHT_GREY_PILL_STYLE}">Приключила</span>
+      </div>
+      <div style="display:grid;gap:6px;">
+        ${renderLightTeamRow(card.teamA, scoreText(card.scoreA), { isWinner: card.winnerSide === 'A', isLoser: card.winnerSide === 'B', scoreAttributes: '' })}
+        ${renderLightTeamRow(card.teamB, scoreText(card.scoreB), { isWinner: card.winnerSide === 'B', isLoser: card.winnerSide === 'A', scoreAttributes: '' })}
+      </div>
+      ${card.resultNote !== null || completedAt !== '' ? `
+        <div style="margin-top:8px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;font-weight:600;color:#667085;">
+          <span>${card.resultNote !== null ? escapeHtml(card.resultNote) : ''}</span>
+          <span>${completedAt !== '' ? escapeHtml(completedAt) : ''}</span>
+        </div>
+      ` : ''}
+    </article>
+  `
+}
+
+function renderLightSectionTitle(title: string, count: number): string {
+  return `<div style="display:flex;align-items:center;gap:8px;margin:0 0 10px;font-size:16px;font-weight:800;color:#17233C;">${escapeHtml(title)}<span style="min-width:22px;height:22px;padding:0 7px;box-sizing:border-box;border-radius:999px;background:#F4F0FF;color:#6941C6;font-size:12px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;">${count}</span></div>`
+}
+
+function renderLightTournamentMatchesView(t: TournamentDetailSnapshot, model: TournamentMatchesViewModel, historyCount: number): string {
+  const liveHtml = model.live.length > 0
+    ? `<div style="${CARD_GRID_STYLE}">${model.live.map(renderLightLiveCard).join('')}</div>`
+    : `<div style="${LIGHT_EMPTY_BOX_STYLE}">${isTournamentMatchesLiveRelevant(t.status) ? 'В момента не се играят срещи.' : 'Турнирът приключи — няма активни срещи.'}</div>`
+
+  const historyHtml = model.history.length > 0
+    ? `<div style="display:grid;grid-template-columns:minmax(0,1fr);gap:14px;">${model.history.map((group) => `
+        <div style="min-width:0;">
+          <div style="font-size:12px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#475467;margin-bottom:8px;">${escapeHtml(group.title)}</div>
+          <div style="${CARD_GRID_STYLE}">${group.matches.map(renderLightHistoryCard).join('')}</div>
+        </div>
+      `).join('')}</div>`
+    : `<div style="${LIGHT_EMPTY_BOX_STYLE}">Все още няма приключили срещи.</div>`
+
+  return `
+    <section data-tournament-matches-view="1" style="box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr);gap:16px;padding:6px 2px 8px;overflow-x:hidden;">
+      <button
+        type="button"
+        data-tournament-matches-back="1"
+        aria-label="Назад към турнира"
+        style="
+          justify-self:start;display:inline-flex;align-items:center;gap:6px;height:36px;
+          padding:0 14px;border-radius:8px;border:1px solid #D0D5DD;background:#FFFFFF;
+          color:#344054;font-family:inherit;font-size:13px;font-weight:800;cursor:pointer;
+        "
+      >← Назад към турнира</button>
+
+      <div style="min-width:0;">
+        <h2 style="margin:0 0 4px;font-size:22px;font-weight:800;line-height:1.25;color:#17233C;">Турнирни срещи</h2>
+        <div style="font-size:14px;font-weight:600;color:#667085;overflow-wrap:anywhere;">${escapeHtml(t.name)}</div>
+      </div>
+
+      <div style="min-width:0;">
+        ${renderLightSectionTitle('Играят в момента', model.live.length)}
+        ${liveHtml}
+      </div>
+
+      <div style="min-width:0;">
+        ${renderLightSectionTitle('История на срещите', historyCount)}
+        ${historyHtml}
+      </div>
+    </section>
+  `
+}
+
+// light — телефон, регистриран (обща светла мобилна рамка на "Турнири").
+export function renderTournamentMatchesView(t: TournamentDetailSnapshot, light = false): string {
   const model = buildTournamentMatchesViewModel(t)
   const historyCount = model.history.reduce((sum, group) => sum + group.matches.length, 0)
+  if (light) return renderLightTournamentMatchesView(t, model, historyCount)
 
   const liveHtml = model.live.length > 0
     ? `<div style="${CARD_GRID_STYLE}">${model.live.map(renderLiveCard).join('')}</div>`

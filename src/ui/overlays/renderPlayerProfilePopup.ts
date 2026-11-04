@@ -9,9 +9,16 @@ import type {
   Seat,
   TopicMuteSnapshot,
 } from '../../app/network/createGameServerClient'
+import { VIOLET_3D_BUTTON_CLASS } from '../layout/violet3dButton'
 
 export type RenderPlayerProfilePopupOptions = {
   isOpen: boolean
+  /**
+   * Светлата палитра на новото мобилно лоби за гости (само от лобито, когато
+   * е показан светлият екран). Сменя само цветовете на частите, които гост
+   * вижда; съдържанието, бутоните и data-атрибутите са същите.
+   */
+  light?: boolean
   seat: Seat | null
   profile: PlayerPublicProfileSnapshot | null
   isLoading?: boolean
@@ -196,6 +203,55 @@ export type PlayerProfileFriendshipAction = {
   giftBypassProfileId?: string | null
 }
 
+// Активна за времето на един renderPlayerProfilePopup({ light: true }).
+let isLightTheme = false
+
+// Собственият профил в светлата тема (телефон) — декоративен hero, бутони
+// за магазина и карти за ранга/статистиката. Активна за времето на един
+// renderPlayerProfilePopup, само когато собственият профил е зареден.
+let isOwnRichLayout = false
+
+// Чужд профил в светлата тема (телефон) — същият hero, карти и галерия като
+// собствения; вместо "+VIP"/"Редакция"/"Изтрий" — действията за чужд профил.
+let isForeignRichLayout = false
+
+const OWN_PROFILE_ASSETS = '/assets/lobby-mobile/profile'
+
+// Тъмна стойност по подразбиране, светла — само при isLightTheme.
+function themed(dark: string, light: string): string {
+  return isLightTheme ? light : dark
+}
+
+// Lucide икони (stroke) за собствения профил.
+function lucideIcon(paths: string, size: number, strokeWidth = 2): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block;flex:0 0 auto;">${paths}</svg>`
+}
+
+const LUCIDE_X = '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
+const LUCIDE_PLUS = '<path d="M5 12h14"/><path d="M12 5v14"/>'
+const LUCIDE_CROWN = '<path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/>'
+const LUCIDE_SQUARE_PEN = '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>'
+const LUCIDE_TRASH = '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>'
+const LUCIDE_CHART = '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>'
+const LUCIDE_GAMEPAD = '<line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/>'
+const LUCIDE_TROPHY = '<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>'
+const LUCIDE_TARGET = '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>'
+
+const LIGHT_TEXT = '#17233C'
+const LIGHT_MUTED = '#667085'
+const LIGHT_VIOLET = '#7950E8'
+const LIGHT_BORDER = '#E4E7EC'
+// Основните бутони в светлата тема: общият 3D стил (violet3dButton.ts) —
+// класовете носят фона и релефа, затова inline стилът е без background.
+const LIGHT_PRIMARY_3D_CLASS_ATTR = `class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}"`
+const LIGHT_PRIMARY_BUTTON = 'border-color:transparent;color:#FFFFFF;'
+const LIGHT_SECONDARY_BUTTON = 'background:#FFFFFF;border-color:#D0D5DD;color:#17233C;'
+// Фонът на светлия профил (собствен и чужд, както и докато се зарежда):
+// мек градиент — светъл горе, ясно виолетов долу. На телефон картата е на цял
+// екран и е самият scroll контейнер, затова фонът стои неподвижен, докато
+// съдържанието скролва. #F5F7FC остава като основен цвят под градиента.
+const LIGHT_PROFILE_PAGE_BACKGROUND = 'linear-gradient(180deg, #F7F5FD 0%, #EFE9FE 35%, #D3C4FA 64%, #9F82EE 100%), #F5F7FC'
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -281,7 +337,7 @@ function renderProfileAvatarMuteOverlay(targetProfileId: string, targetDisplayNa
         border:0;
         margin:0;
         padding:0;
-        border-radius:20px;
+        border-radius:${themed('20px', '8px')};
         background:rgba(0,0,0,0.46);
         cursor:pointer;
         color:#fef2f2;
@@ -331,7 +387,70 @@ function getRankLevel(profile: PlayerPublicProfileSnapshot): number | null {
   return Math.max(1, Math.trunc(profile.level))
 }
 
+// Собствен профил (светъл, телефон): картата "Ранг" с щита — нивото е HTML
+// текст върху декоративния щит; името, прогресът и оставащите игри вдясно.
+function renderOwnRankCard(profile: PlayerPublicProfileSnapshot): string {
+  const rankLevel = getRankLevel(profile)
+  // По-дългите нива се смаляват, за да останат в лилавата вътрешност на щита.
+  const rankLevelDigits = rankLevel === null ? 1 : String(rankLevel).length
+  const rankLevelFontSize = rankLevelDigits >= 3 ? 16 : rankLevelDigits === 2 ? 20 : 24
+  const ratio =
+    typeof profile.rankProgressRatio === 'number' && Number.isFinite(profile.rankProgressRatio)
+      ? Math.max(0, Math.min(1, profile.rankProgressRatio))
+      : 0
+
+  return `
+    <div data-player-profile-rank-card="1" style="display:flex;align-items:center;gap:12px;border-radius:12px;background:#FFFFFF;border:1px solid ${LIGHT_VIOLET};padding:12px 14px 12px 10px;box-shadow:0 4px 14px rgba(34,30,80,0.06);">
+      <div style="position:relative;width:72px;height:72px;flex:0 0 72px;">
+        <img src="${OWN_PROFILE_ASSETS}/profile-rank-shield.webp" alt="" aria-hidden="true" width="72" height="72" style="width:100%;height:100%;display:block;pointer-events:none;user-select:none;">
+        <span data-player-profile-rank-level="1" style="position:absolute;left:0;right:0;top:45%;transform:translateY(-50%);text-align:center;color:#FFFFFF;font-size:${rankLevelFontSize}px;font-weight:900;line-height:1;white-space:nowrap;text-shadow:0 2px 4px rgba(30,10,80,0.55);">${rankLevel ?? '—'}</span>
+      </div>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;">
+          <div style="min-width:0;">
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:${LIGHT_VIOLET};">Ранг</div>
+            <div style="margin-top:2px;font-size:18px;font-weight:900;color:${LIGHT_TEXT};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(profile.rankTitle ?? (rankLevel ? `Ранг ${rankLevel}` : 'Ранг'))}</div>
+          </div>
+          <div style="font-size:14px;font-weight:900;color:${LIGHT_TEXT};white-space:nowrap;">${formatInteger(profile.completedGamesCount)} / ${formatInteger(profile.nextRankGames)}</div>
+        </div>
+        <div style="margin-top:8px;height:10px;border-radius:999px;background:#EEF0F6;border:1px solid ${LIGHT_BORDER};overflow:hidden;">
+          <div style="width:${(ratio * 100).toFixed(2)}%;height:100%;border-radius:999px;background:linear-gradient(90deg, #8961F0 0%, #7950E8 100%);"></div>
+        </div>
+        <div style="margin-top:6px;font-size:12px;font-weight:700;color:${LIGHT_MUTED};">Остават ${formatInteger(profile.gamesUntilNextRank)} игри до следващо ниво</div>
+      </div>
+    </div>
+  `
+}
+
+// Собствен профил (светъл, телефон): "Статистика" — три еднакви карти.
+function renderOwnGameStatsCards(profile: PlayerPublicProfileSnapshot, successRate: string): string {
+  const card = (icon: string, label: string, value: string, valueColor = LIGHT_TEXT) => `
+    <div data-player-profile-stat-card="1" style="min-width:0;border-radius:12px;background:#FFFFFF;border:1px solid ${LIGHT_VIOLET};box-shadow:0 4px 14px rgba(34,30,80,0.06);padding:12px 10px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;">
+      <span style="display:flex;align-items:center;gap:6px;min-width:0;">
+        <span style="color:${LIGHT_VIOLET};display:flex;">${lucideIcon(icon, 20)}</span>
+        <span style="font-size:13px;line-height:1.2;font-weight:700;color:${LIGHT_MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(label)}</span>
+      </span>
+      <span style="margin-top:auto;font-size:20px;line-height:1;font-weight:900;color:${valueColor};">${value}</span>
+    </div>
+  `
+
+  return `
+    <div data-player-profile-game-stats="1" style="display:flex;flex-direction:column;gap:10px;">
+      <div style="display:flex;align-items:center;gap:8px;font-size:18px;font-weight:900;color:${LIGHT_TEXT};">
+        <span style="color:${LIGHT_VIOLET};display:flex;">${lucideIcon(LUCIDE_CHART, 20, 2.5)}</span>
+        Статистика
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:8px;">
+        ${card(LUCIDE_GAMEPAD, 'Игри', formatInteger(profile.completedGamesCount))}
+        ${card(LUCIDE_TROPHY, 'Победи', formatInteger(profile.wonGamesCount))}
+        ${card(LUCIDE_TARGET, 'Успех', escapeHtml(successRate), '#079455')}
+      </div>
+    </div>
+  `
+}
+
 function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
+  if (isOwnRichLayout || isForeignRichLayout) return renderOwnRankCard(profile)
   const rankLevel = getRankLevel(profile)
   const completedGames = profile.completedGamesCount
   const nextRankGames = profile.nextRankGames
@@ -344,11 +463,11 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
   return `
     <div
       style="
-        border-radius:8px;
-        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
-        border:1px solid rgba(212,165,32,0.42);
+        border-radius:${themed('8px', '12px')};
+        background:${themed('linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%)', '#FFFFFF')};
+        border:1px solid ${themed('rgba(212,165,32,0.42)', LIGHT_VIOLET)};
         padding:16px;
-        box-shadow:inset 0 0 18px rgba(212,165,32,0.04);
+        box-shadow:${themed('inset 0 0 18px rgba(212,165,32,0.04)', '0 4px 14px rgba(34,30,80,0.06)')};
       "
     >
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">
@@ -358,9 +477,9 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
               width:42px;
               height:42px;
               border-radius:8px;
-              border:1px solid rgba(212,165,32,0.72);
-              background:rgba(212,165,32,0.10);
-              color:#d4a520;
+              border:1px solid ${themed('rgba(212,165,32,0.72)', '#D9CCFA')};
+              background:${themed('rgba(212,165,32,0.10)', '#F4F0FF')};
+              color:${themed('#d4a520', LIGHT_VIOLET)};
               display:flex;
               align-items:center;
               justify-content:center;
@@ -371,32 +490,32 @@ function renderRankProgress(profile: PlayerPublicProfileSnapshot): string {
             ${rankLevel ?? 'вЂ”'}
           </div>
           <div style="min-width:0;">
-            <div style="font-size:13px;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;color:#d4a520;">
+            <div style="font-size:13px;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;color:${themed('#d4a520', LIGHT_VIOLET)};">
               Ранг
             </div>
-            <div style="margin-top:4px;font-size:18px;font-weight:900;color:#f8fafc;">
+            <div style="margin-top:4px;font-size:18px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">
               ${escapeHtml(profile.rankTitle ?? (rankLevel ? `Ранг ${rankLevel}` : 'Ранг'))}
             </div>
           </div>
         </div>
-        <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;">
+        <div style="font-size:14px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};white-space:nowrap;">
           ${formatInteger(completedGames)} / ${formatInteger(nextRankGames)}
         </div>
       </div>
 
-      <div style="height:12px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+      <div style="height:12px;border-radius:999px;background:${themed('#050505', '#EEF0F6')};border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_BORDER)};overflow:hidden;">
         <div
           style="
             width:${(ratio * 100).toFixed(2)}%;
             height:100%;
             border-radius:999px;
-            background:linear-gradient(90deg, #d4a520 0%, #f4c95b 100%);
-            box-shadow:0 0 12px rgba(212,165,32,0.36);
+            background:${themed('linear-gradient(90deg, #d4a520 0%, #f4c95b 100%)', 'linear-gradient(90deg, #8961F0 0%, #7950E8 100%)')};
+            box-shadow:${themed('0 0 12px rgba(212,165,32,0.36)', 'none')};
           "
         ></div>
       </div>
 
-      <div style="margin-top:9px;font-size:12px;font-weight:800;color:rgba(226,232,240,0.70);">
+      <div style="margin-top:9px;font-size:12px;font-weight:800;color:${themed('rgba(226,232,240,0.70)', LIGHT_MUTED)};">
         Остават ${formatInteger(profile.gamesUntilNextRank)} игри до следващо ниво
       </div>
     </div>
@@ -415,13 +534,15 @@ function renderGameStats(profile: PlayerPublicProfileSnapshot): string {
       ? `${Math.round((wonGames / completedGames) * 100)}%`
       : '—'
 
-  const statItem = (label: string, value: string, accent = '#f8fafc') => `
-    <span style="white-space:nowrap;color:rgba(148,163,184,0.80);font-size:13px;font-weight:400;">
+  if (isOwnRichLayout || isForeignRichLayout) return renderOwnGameStatsCards(profile, successRate)
+
+  const statItem = (label: string, value: string, accent = themed('#f8fafc', LIGHT_TEXT)) => `
+    <span style="white-space:nowrap;color:${themed('rgba(148,163,184,0.80)', LIGHT_MUTED)};font-size:13px;font-weight:400;">
       ${escapeHtml(label)}:&nbsp;<span style="color:${accent};font-weight:500;">${value}</span>
     </span>
   `
 
-  const divider = `<span style="display:inline-block;width:1px;height:13px;background:rgba(212,165,32,0.35);vertical-align:middle;flex:0 0 auto;"></span>`
+  const divider = `<span style="display:inline-block;width:1px;height:13px;background:${themed('rgba(212,165,32,0.35)', '#D0D5DD')};vertical-align:middle;flex:0 0 auto;"></span>`
 
   return `
     <div
@@ -436,9 +557,9 @@ function renderGameStats(profile: PlayerPublicProfileSnapshot): string {
     >
       ${statItem('Игри', formatInteger(completedGames))}
       ${divider}
-      ${statItem('Победи', formatInteger(wonGames), '#fde68a')}
+      ${statItem('Победи', formatInteger(wonGames), themed('#fde68a', LIGHT_VIOLET))}
       ${divider}
-      ${statItem('Успех', escapeHtml(successRate), '#86efac')}
+      ${statItem('Успех', escapeHtml(successRate), themed('#86efac', '#079455'))}
     </div>
   `
 }
@@ -452,7 +573,7 @@ function renderRatingInline(profile: PlayerPublicProfileSnapshot): string {
         align-items:center;
         gap:8px;
         min-width:0;
-        color:rgba(148,163,184,0.80);
+        color:${themed('rgba(148,163,184,0.80)', LIGHT_MUTED)};
         font-size:13px;
         font-weight:400;
         white-space:nowrap;
@@ -460,11 +581,11 @@ function renderRatingInline(profile: PlayerPublicProfileSnapshot): string {
     >
       <span
         data-player-profile-inline-rating-divider="1"
-        style="width:1px;height:18px;background:rgba(212,165,32,0.45);display:inline-block;flex:0 0 auto;"
+        style="width:1px;height:18px;background:${themed('rgba(212,165,32,0.45)', '#D0D5DD')};display:inline-block;flex:0 0 auto;"
       ></span>
       <span style="overflow:hidden;text-overflow:ellipsis;">
-        Оценка: <span style="color:#d4a520;font-weight:400;">${formatAverageRating(profile.averageRating)}</span>
-        от <span style="color:#fde68a;font-weight:400;">${formatNullableText(profile.totalRatingsCount)}</span>
+        Оценка: <span style="color:${themed('#d4a520', LIGHT_TEXT)};font-weight:${themed('400', '700')};">${formatAverageRating(profile.averageRating)}</span>
+        от <span style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:${themed('400', '700')};">${formatNullableText(profile.totalRatingsCount)}</span>
       </span>
     </div>
   `
@@ -486,7 +607,7 @@ function renderAvatar(profile: PlayerPublicProfileSnapshot | null, seat: Seat | 
           height:100%;
           object-fit:cover;
           display:block;
-          border-radius:20px;
+          border-radius:${themed('20px', '8px')};
           user-select:none;
           -webkit-user-drag:none;
         "
@@ -502,7 +623,7 @@ function renderAvatar(profile: PlayerPublicProfileSnapshot | null, seat: Seat | 
         display:flex;
         align-items:center;
         justify-content:center;
-        border-radius:20px;
+        border-radius:${themed('20px', '8px')};
         background:linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(226,232,240,0.96) 100%);
         color:#16314f;
         font-size:42px;
@@ -524,14 +645,14 @@ function renderGallery(profile: PlayerPublicProfileSnapshot | null): string {
     return `
       <div
         style="
-          border-radius:16px;
-          border:1px dashed rgba(148,163,184,0.30);
-          background:rgba(255,255,255,0.04);
+          border-radius:${themed('16px', '12px')};
+          border:1px dashed ${themed('rgba(148,163,184,0.30)', '#D0D5DD')};
+          background:${themed('rgba(255,255,255,0.04)', '#FFFFFF')};
           min-height:96px;
           display:flex;
           align-items:center;
           justify-content:center;
-          color:rgba(226,232,240,0.72);
+          color:${themed('rgba(226,232,240,0.72)', LIGHT_MUTED)};
           font-size:14px;
           font-weight:700;
           text-align:center;
@@ -564,11 +685,11 @@ function renderGallery(profile: PlayerPublicProfileSnapshot | null): string {
               data-gallery-image-url="${escapeHtml(safeUrl)}"
               style="
                 position:relative;
-                border-radius:16px;
+                border-radius:${themed('16px', '12px')};
                 overflow:hidden;
                 aspect-ratio:1/1;
-                background:rgba(255,255,255,0.06);
-                border:1px solid rgba(255,255,255,0.08);
+                background:${themed('rgba(255,255,255,0.06)', '#F2F4F7')};
+                border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_BORDER)};
                 cursor:pointer;
               "
             >
@@ -604,7 +725,7 @@ function renderLoadingContent(seat: Seat | null): string {
         gap:14px;
         min-height:260px;
         text-align:center;
-        color:#f8fafc;
+        color:${themed('#f8fafc', LIGHT_TEXT)};
       "
     >
       <div
@@ -612,8 +733,8 @@ function renderLoadingContent(seat: Seat | null): string {
           width:52px;
           height:52px;
           border-radius:999px;
-          border:4px solid rgba(255,255,255,0.16);
-          border-top-color:rgba(245,187,55,0.96);
+          border:4px solid ${themed('rgba(255,255,255,0.16)', '#EAECF0')};
+          border-top-color:${themed('rgba(245,187,55,0.96)', LIGHT_VIOLET)};
           animation: belot-player-profile-spin 900ms linear infinite;
         "
       ></div>
@@ -631,7 +752,7 @@ function renderLoadingContent(seat: Seat | null): string {
         style="
           font-size:15px;
           line-height:1.5;
-          color:rgba(226,232,240,0.80);
+          color:${themed('rgba(226,232,240,0.80)', LIGHT_MUTED)};
         "
       >
         ${escapeHtml(formatSeatLabel(seat))}
@@ -652,14 +773,14 @@ function renderEmptyContent(seat: Seat | null, emptyMessage: string | null): str
           gap:14px;
           min-height:260px;
           text-align:center;
-          color:#f8fafc;
+          color:${themed('#f8fafc', LIGHT_TEXT)};
         "
       >
         <div
           style="
             font-size:15px;
             line-height:1.5;
-            color:rgba(226,232,240,0.92);
+            color:${themed('rgba(226,232,240,0.92)', LIGHT_TEXT)};
             max-width:360px;
           "
         >
@@ -679,7 +800,7 @@ function renderEmptyContent(seat: Seat | null, emptyMessage: string | null): str
         gap:14px;
         min-height:260px;
         text-align:center;
-        color:#f8fafc;
+        color:${themed('#f8fafc', LIGHT_TEXT)};
       "
     >
       <div
@@ -695,7 +816,7 @@ function renderEmptyContent(seat: Seat | null, emptyMessage: string | null): str
         style="
           font-size:15px;
           line-height:1.5;
-          color:rgba(226,232,240,0.80);
+          color:${themed('rgba(226,232,240,0.80)', LIGHT_MUTED)};
           max-width:360px;
         "
       >
@@ -774,18 +895,18 @@ function renderForeignVipRow(profile: PlayerPublicProfileSnapshot, viewerIsFullA
           align-items:center;
           padding:3px 10px;
           border-radius:999px;
-          background:rgba(212,165,32,0.16);
-          border:1px solid rgba(212,165,32,0.58);
-          color:#d4a520;
+          background:${themed('rgba(212,165,32,0.16)', '#F4F0FF')};
+          border:1px solid ${themed('rgba(212,165,32,0.58)', '#D9CCFA')};
+          color:${themed('#d4a520', '#6941C6')};
           font-size:11px;
           font-weight:900;
           letter-spacing:0.04em;
           text-transform:uppercase;
           white-space:nowrap;
-          text-shadow:0 0 8px rgba(212,165,32,0.32);
+          text-shadow:${themed('0 0 8px rgba(212,165,32,0.32)', 'none')};
         "
       >VIP</span>
-      ${viewerIsFullAdmin ? `<span style="font-size:13px;font-weight:400;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(formatVipDaysWords(vipDays))}</span>` : ''}
+      ${viewerIsFullAdmin ? `<span style="font-size:13px;font-weight:400;color:${themed('#f8fafc', LIGHT_TEXT)};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(formatVipDaysWords(vipDays))}</span>` : ''}
     </div>
   `
 }
@@ -818,7 +939,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
             align-items:center;
             gap:7px;
             min-width:0;
-            color:#d4a520;
+            color:${themed('#d4a520', '#B7791F')};
             font-size:20px;
             line-height:1;
             font-weight:900;
@@ -832,7 +953,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
         data-player-profile-own-vip-days="1"
         data-vip-status-loading="${isVipStatusLoading ? '1' : '0'}"
         style="font-size:13px;letter-spacing:0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-      ><span style="color:#d4a520;font-weight:800;">VIP · </span><span style="color:#f8fafc;font-weight:400;">${escapeHtml(vipDaysText)}</span></div>
+      ><span style="color:${themed('#d4a520', '#6941C6')};font-weight:800;">VIP · </span><span style="color:${themed('#f8fafc', LIGHT_TEXT)};font-weight:400;">${escapeHtml(vipDaysText)}</span></div>
       <div data-player-profile-own-actions="1" style="display:flex;align-items:center;flex-wrap:wrap;column-gap:18px;row-gap:6px;margin-top:6px;">
         <span
           data-player-profile-edit="1"
@@ -840,7 +961,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
             display:inline-flex;
             align-items:center;
             gap:7px;
-            color:#f8fafc;
+            color:${themed('#f8fafc', '#6941C6')};
             font-size:15px;
             font-weight:400;
             cursor:pointer;
@@ -861,7 +982,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
               display:inline-flex;
               align-items:center;
               gap:7px;
-              color:#fca5a5;
+              color:${themed('#fca5a5', '#B42318')};
               font-size:15px;
               font-weight:400;
               cursor:pointer;
@@ -876,6 +997,174 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
       </div>
     </div>
   `
+}
+
+/**
+ * Профил в светлата тема (телефон): декоративният header фон, лого,
+ * заглавие и ×; аватар със значката за нивото, име, баланс и VIP ред;
+ * отдолу ред с действия и компактен ред с рейтинг, оценка и харесвания.
+ * Заменя заглавния ред и summary grid-а само в този режим. Декорът е под
+ * текста; инфо колоната започва под асата/пиката (cqw = ширината на
+ * hero-то, фонът е 3:1).
+ *
+ * own — собственият профил: зелен "+" (магазин → жълтици) до баланса,
+ * VIP ред винаги видим, "+ВИП" / "Редакция" / "Изтрий" (самоизтриването).
+ * foreign — чужд профил: VIP само при активен VIP (дните само за full
+ * admin, както в renderForeignVipRow), значките "✓ Приятел" и mute върху
+ * аватара, админ контролите и действията за чужд профил (готов HTML).
+ */
+type OwnProfileHeroOptions = {
+  ownVipActiveUntil: string | null | undefined
+  canSelfDelete: boolean
+}
+
+type ForeignProfileHeroOptions = {
+  viewerIsFullAdmin: boolean
+  isFriend: boolean
+  targetMute: TopicMuteSnapshot | null | undefined
+  adminControlsHtml: string
+  actionsHtml: string
+}
+
+function renderProfileHero(
+  profile: PlayerPublicProfileSnapshot,
+  seat: Seat | null,
+  own: OwnProfileHeroOptions | null,
+  foreign: ForeignProfileHeroOptions | null,
+): string {
+  const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
+  const hasBalance = profile.yellowCoinsBalance !== null && profile.yellowCoinsBalance !== undefined
+  const isVipStatusLoading = own !== null && own.ownVipActiveUntil === undefined
+  const foreignVipDays = foreign !== null ? computeVipRemainingDays(profile.vipActiveUntil) : 0
+  const vipDaysText = own !== null
+    ? (isVipStatusLoading ? '…' : formatVipDaysWords(computeVipRemainingDays(own.ownVipActiveUntil)))
+    : (foreign?.viewerIsFullAdmin ? formatVipDaysWords(foreignVipDays) : null)
+  const canSelfDelete = own?.canSelfDelete ?? false
+  const actionButton = 'height:40px;min-width:0;padding:0 6px;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:5px;font-family:inherit;font-size:13px;font-weight:800;cursor:pointer;white-space:nowrap;box-sizing:border-box;'
+  const divider = '<span aria-hidden="true" style="width:1px;height:14px;background:#D0D5DD;flex:0 0 auto;"></span>'
+  const value = (text: string) => `<span style="color:${LIGHT_TEXT};font-weight:800;">${text}</span>`
+  const vipRow = (attributes: string) => `
+            <div ${attributes} style="display:flex;align-items:center;gap:6px;font-size:14px;white-space:nowrap;overflow:hidden;">
+              <span style="color:#B7791F;display:flex;">${lucideIcon(LUCIDE_CROWN, 18, 2.2)}</span>
+              <span${own === null ? ' data-player-profile-vip-badge="1"' : ''} style="color:#B7791F;font-weight:900;">VIP</span>
+              ${vipDaysText !== null ? `<span style="color:${LIGHT_MUTED};overflow:hidden;text-overflow:ellipsis;">· ${escapeHtml(vipDaysText)}</span>` : ''}
+            </div>`
+
+  return `
+    <div ${own !== null ? 'data-player-profile-own-hero="1"' : 'data-player-profile-foreign-hero="1"'} style="position:relative;container-type:inline-size;">
+      <img src="${OWN_PROFILE_ASSETS}/profile-header-bg.webp" alt="" aria-hidden="true" width="1236" height="412" style="position:absolute;top:0;left:0;width:100%;height:auto;display:block;pointer-events:none;user-select:none;">
+
+      <div style="position:relative;display:flex;align-items:center;gap:8px;height:48px;padding:0 10px 0 12px;box-sizing:border-box;">
+        <div aria-hidden="true" style="display:flex;align-items:center;gap:3px;flex:0 0 auto;">
+          <img src="/assets/lobby-mobile/pika-spade-gold-black.webp" alt="" width="25" height="28" style="height:28px;width:auto;display:block;">
+          <img src="/assets/lobby-mobile/logo-pika-text.webp" alt="" width="69" height="23" style="height:23px;width:auto;display:block;">
+        </div>
+        <!-- Вляво до логото: асата във фона започват от средата на ширината. -->
+        <div style="flex:1;min-width:0;padding-left:2px;color:#FFFFFF;font-size:clamp(12px, 3.5cqw, 14px);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px rgba(20,10,60,0.6);">Профил</div>
+        <button type="button" data-player-profile-popup-close="1" aria-label="Затвори" style="width:36px;height:36px;flex:0 0 auto;box-sizing:border-box;border:1px solid #E53935;border-radius:8px;background:#FFF1F1;color:#E53935;box-shadow:0 2px 8px rgba(20,10,60,0.25);display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;">${lucideIcon(LUCIDE_X, 20, 2.6)}</button>
+      </div>
+
+      <div style="position:relative;display:grid;grid-template-columns:88px minmax(0, 1fr);column-gap:12px;align-items:start;padding:0 16px;">
+        <div data-player-profile-avatar="1" style="position:relative;width:88px;height:88px;margin-top:max(8px, calc(16.7cqw - 44px));">
+          <div style="width:100%;height:100%;border-radius:8px;overflow:hidden;background:#FFFFFF;border:2px solid #FFFFFF;box-sizing:border-box;box-shadow:0 0 0 1px #D9CCFA, 0 6px 18px rgba(121,80,232,0.28);">
+            ${renderAvatar(profile, seat)}
+          </div>
+          ${renderLevelBadge(profile.level)}
+          ${foreign?.targetMute?.isMuted ? renderProfileAvatarMuteOverlay(profile.profileId ?? '', displayName) : ''}
+          ${foreign?.isFriend ? `
+            <div data-player-profile-friend-badge="1" style="position:absolute;bottom:-11px;left:50%;transform:translateX(-50%);z-index:2;background:linear-gradient(180deg,#22c55e 0%,#16a34a 100%);color:#fff;font-size:11px;font-weight:900;white-space:nowrap;padding:3px 10px;border-radius:999px;border:2px solid #FFFFFF;letter-spacing:0.3px;">✓ Приятел</div>
+          ` : ''}
+        </div>
+
+        <div style="min-width:0;padding-top:max(0px, calc(29cqw - 48px));display:flex;flex-direction:column;gap:7px;">
+          <div data-player-profile-title="1" style="font-size:22px;line-height:1.15;font-weight:900;color:${LIGHT_TEXT};overflow-wrap:anywhere;">${escapeHtml(displayName)}</div>
+          <div ${own !== null ? 'data-player-profile-own-summary="1"' : 'data-player-profile-foreign-summary="1"'} style="display:flex;flex-direction:column;gap:7px;min-width:0;">
+            ${hasBalance ? `
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+                <div ${own !== null ? 'data-player-profile-balance-own="1"' : 'data-player-profile-balance-foreign="1"'} style="display:inline-flex;align-items:center;gap:6px;min-width:0;color:#B7791F;font-size:20px;line-height:1;font-weight:900;">
+                  <img src="/assets/lobby-mobile/icons/icon-balance-coin.webp" alt="" width="22" height="22" style="width:22px;height:22px;display:block;object-fit:contain;flex:0 0 auto;">
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(Number(profile.yellowCoinsBalance).toLocaleString('bg-BG'))}</span>
+                </div>
+                ${own !== null ? `<button type="button" data-player-profile-shop-coins="1" aria-label="Купи жълтици" style="width:28px;height:28px;flex:0 0 auto;border:0;border-radius:8px;background:linear-gradient(180deg,#3CCB6A 0%,#1FA34A 100%);color:#FFFFFF;box-shadow:inset 0 1px 0 rgba(255,255,255,0.35), 0 3px 8px rgba(23,178,106,0.35);display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;">${lucideIcon(LUCIDE_PLUS, 18, 3)}</button>` : ''}
+              </div>
+            ` : ''}
+            ${own !== null
+              ? vipRow(`data-player-profile-own-vip-days="1" data-vip-status-loading="${isVipStatusLoading ? '1' : '0'}"`)
+              : foreignVipDays > 0 ? vipRow('data-player-profile-foreign-vip-days="1"') : ''}
+          </div>
+        </div>
+      </div>
+
+      ${own !== null ? `
+        <div data-player-profile-own-actions="1" style="position:relative;display:grid;grid-template-columns:repeat(${canSelfDelete ? 3 : 2}, minmax(0, 1fr));gap:8px;padding:14px 16px 0;">
+          <button type="button" ${LIGHT_PRIMARY_3D_CLASS_ATTR} data-player-profile-shop-vip="1" style="${actionButton}border:0;color:#FFFFFF;">
+            <span style="color:#FFD54A;display:flex;">${lucideIcon(LUCIDE_CROWN, 16, 2.4)}</span>+VIP
+          </button>
+          <button type="button" data-player-profile-edit="1" style="${actionButton}border:1px solid #D9CCFA;background:#FFFFFF;color:#6941C6;">
+            ${lucideIcon(LUCIDE_SQUARE_PEN, 15, 2.4)}Редакция
+          </button>
+          ${canSelfDelete ? `
+            <button type="button" data-player-profile-self-delete="1" aria-label="Изтрий профила" style="${actionButton}border:0;background:linear-gradient(180deg,#F04438 0%,#D92D20 100%);color:#FFFFFF;box-shadow:0 4px 10px rgba(217,45,32,0.25);">
+              ${lucideIcon(LUCIDE_TRASH, 15, 2.4)}Изтрий
+            </button>
+          ` : ''}
+        </div>
+      ` : ''}
+      ${foreign !== null && foreign.adminControlsHtml.trim() !== '' ? `
+        <div data-player-profile-foreign-admin-controls="1" style="position:relative;display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:${foreign.isFriend ? '20px' : '12px'} 16px 0;">
+          ${foreign.adminControlsHtml}
+        </div>
+      ` : ''}
+      ${foreign !== null && foreign.actionsHtml.trim() !== '' ? `
+        <div data-player-profile-foreign-actions="1" style="position:relative;padding:${foreign.isFriend && foreign.adminControlsHtml.trim() === '' ? '20px' : '14px'} 16px 0;">
+          ${foreign.actionsHtml}
+        </div>
+      ` : ''}
+
+      <div data-player-profile-own-meta="1" style="position:relative;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px 10px;padding:12px 16px 0;font-size:13px;color:${LIGHT_MUTED};">
+        <span style="white-space:nowrap;">Рейтинг: ${value(formatNullableText(profile.skillRating))}</span>
+        ${divider}
+        <span style="white-space:nowrap;">Оценка: ${value(formatAverageRating(profile.averageRating))} от ${value(formatNullableText(profile.totalRatingsCount))}</span>
+        ${typeof profile.likesCount === 'number' ? `
+          ${divider}
+          <span style="white-space:nowrap;">Харесан: ${value(profile.likesCount.toLocaleString('bg-BG'))}</span>
+        ` : ''}
+      </div>
+    </div>
+  `
+}
+
+// Светлият hero на чужд профил — със същите стойности, които
+// renderProfileContent получава за стария изглед (виж renderPlayerProfilePopupHtml).
+function renderForeignRichProfileHero(profile: PlayerPublicProfileSnapshot, options: RenderPlayerProfilePopupOptions): string {
+  const displayName = profile.displayName?.trim() || formatSeatLabel(options.seat)
+  const canEdit = options.canEdit ?? false
+  const isOwnProfile = options.isOwnProfile ?? false
+  const viewerIsFullAdmin = options.viewerIsFullAdmin ?? false
+  const friendshipAction = options.friendshipAction ?? null
+
+  return renderProfileHero(profile, options.seat, null, {
+    viewerIsFullAdmin,
+    isFriend: Boolean(friendshipAction?.giftFriendshipId),
+    targetMute: options.targetMute ?? null,
+    adminControlsHtml: renderForeignAdminTitleControls(profile.profileId, canEdit, options.isAdmin ?? false, isOwnProfile, viewerIsFullAdmin, options.targetAccountRole ?? null, options.vipGrantOpen ?? false),
+    actionsHtml: !canEdit && !isOwnProfile
+      ? renderForeignProfileActions(
+          profile,
+          displayName,
+          friendshipAction,
+          options.showPikaSupportChatButton ?? false,
+          options.showTopicsPersonalMessageButton ?? false,
+          options.giftItemRecipientProfileId ?? null,
+          options.giftShopRecipientProfileId ?? null,
+          isOwnProfile,
+          options.viewerCanProfileMute ?? false,
+          options.targetMute ?? null,
+          viewerIsFullAdmin,
+          options.activeBan ?? null,
+        )
+      : '',
+  })
 }
 
 /**
@@ -903,7 +1192,7 @@ function renderForeignProfileSummary(profile: PlayerPublicProfileSnapshot, viewe
             align-items:center;
             gap:7px;
             min-width:0;
-            color:#d4a520;
+            color:${themed('#d4a520', '#B7791F')};
             font-size:20px;
             line-height:1;
             font-weight:900;
@@ -1418,6 +1707,7 @@ function renderProfileMuteActionButton(
         font-size:13px;
         font-weight:900;
         cursor:pointer;
+        ${isForeignRichLayout ? 'background:#FEF3F2;border-color:#F04438;color:#B42318;' : ''}
       "
     >
       Мют
@@ -1561,7 +1851,7 @@ function renderRiskSection(
       data-player-profile-risk-section="1"
       style="
         display:flex;flex-direction:column;gap:8px;
-        border-radius:10px;border:1px solid rgba(239,68,68,0.3);
+        border-radius:${themed('10px', '12px')};border:1px solid rgba(239,68,68,0.3);
         background:rgba(239,68,68,0.05);padding:12px 14px;
       "
     >
@@ -1575,7 +1865,7 @@ function renderRiskSection(
           ${riskRecheckSubmitting ? 'disabled' : ''}
           style="
             min-height:28px;padding:0 10px;border:1px solid rgba(212,165,32,0.5);
-            border-radius:6px;background:#111;color:#d4a520;font-size:11px;font-weight:800;
+            border-radius:${themed('6px', '8px')};background:#111;color:#d4a520;font-size:11px;font-weight:800;
             cursor:${riskRecheckSubmitting ? 'default' : 'pointer'};opacity:${riskRecheckSubmitting ? '0.6' : '1'};
           "
         >${riskRecheckSubmitting ? 'Изчакай…' : 'Провери отново'}</button>
@@ -2027,39 +2317,39 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
     ? `<span data-player-profile-campaign-all-collected="1" style="color:#86efac;white-space:nowrap;">Всички награди са получени!</span>`
     : `
       ${renderCampaignTierRewardsCompactHtml(nextTier)}
-      <span data-player-profile-campaign-progress="1" style="flex:0 0 auto;white-space:nowrap;color:#f8fafc;">${format(active.unitsTotal)}/${format(progressThreshold)}</span>
+      <span data-player-profile-campaign-progress="1" style="flex:0 0 auto;white-space:nowrap;color:${themed('#f8fafc', LIGHT_TEXT)};">${format(active.unitsTotal)}/${format(progressThreshold)}</span>
     `
 
   return `
     <div
       data-player-profile-campaign-card="1"
       style="
-        border-radius:8px;
-        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
-        border:1px solid rgba(212,165,32,0.42);
+        border-radius:${themed('8px', '12px')};
+        background:${themed('linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%)', '#FFFFFF')};
+        border:1px solid ${themed('rgba(212,165,32,0.42)', LIGHT_VIOLET)};
         padding:10px 12px;
-        box-shadow:inset 0 0 18px rgba(212,165,32,0.04);
+        box-shadow:${themed('inset 0 0 18px rgba(212,165,32,0.04)', '0 4px 14px rgba(34,30,80,0.06)')};
       "
     >
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;min-width:0;">
-        <span data-player-profile-campaign-title="1" style="flex:1 1 auto;min-width:0;display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:900;color:#f8fafc;">
+        <span data-player-profile-campaign-title="1" style="flex:1 1 auto;min-width:0;display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">
           <span title="${escapeHtml(active.campaignName)}" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Събирай</span>
           ${unitIconHtml(36)}
           ${allCollected ? `<span data-player-profile-campaign-total="1" style="flex:0 0 auto;white-space:nowrap;">${format(active.unitsTotal)}</span>` : ''}
         </span>
-        <span style="display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;font-size:13px;font-weight:900;color:#f8fafc;">
+        <span style="display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;font-size:13px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">
           ${rightSideHtml}
         </span>
       </div>
 
-      <div style="height:12px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+      <div style="height:12px;border-radius:999px;background:${themed('#050505', '#EEF0F6')};border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_BORDER)};overflow:hidden;">
         <div
           style="
             width:${(ratio * 100).toFixed(2)}%;
             height:100%;
             border-radius:999px;
-            background:linear-gradient(90deg, #d4a520 0%, #f4c95b 100%);
-            box-shadow:0 0 12px rgba(212,165,32,0.36);
+            background:${themed('linear-gradient(90deg, #d4a520 0%, #f4c95b 100%)', 'linear-gradient(90deg, #8961F0 0%, #7950E8 100%)')};
+            box-shadow:${themed('0 0 12px rgba(212,165,32,0.36)', 'none')};
           "
         ></div>
       </div>
@@ -2073,17 +2363,17 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
               flex:0 0 auto;
               min-height:30px;
               padding:0 12px;
-              border:1px solid rgba(212,165,32,0.45);
+              border:1px solid ${themed('rgba(212,165,32,0.45)', '#D9CCFA')};
               border-radius:8px;
-              background:rgba(212,165,32,0.08);
-              color:#d4a520;
+              background:${themed('rgba(212,165,32,0.08)', '#F4F0FF')};
+              color:${themed('#d4a520', LIGHT_VIOLET)};
               font-size:12px;
               font-weight:900;
               cursor:pointer;
             "
           >${allRewardsExpanded ? 'Скрий наградите' : allCollected ? 'Всички събрани награди' : 'Виж всички награди'}</button>
         ` : ''}
-        <span data-player-profile-campaign-hint="1" style="margin-left:auto;max-width:100%;min-width:0;font-size:12px;font-weight:800;line-height:1.25;color:rgba(226,232,240,0.78);text-align:right;">${hintText}</span>
+        <span data-player-profile-campaign-hint="1" style="margin-left:auto;max-width:100%;min-width:0;font-size:12px;font-weight:800;line-height:1.25;color:${themed('rgba(226,232,240,0.78)', LIGHT_MUTED)};text-align:right;">${hintText}</span>
       </div>
 
       ${renderCampaignAllRewardsPanelHtml(active, allRewardsExpanded)}
@@ -2111,10 +2401,10 @@ function renderCampaignNavBarHtml(campaignSummary: PlayerCampaignProfileSummary 
         style="
           min-height:32px;
           padding:0 14px;
-          border:1px solid rgba(212,165,32,0.45);
+          border:1px solid ${themed('rgba(212,165,32,0.45)', '#D9CCFA')};
           border-radius:999px;
-          background:rgba(212,165,32,0.10);
-          color:#d4a520;
+          background:${themed('rgba(212,165,32,0.10)', '#F4F0FF')};
+          color:${themed('#d4a520', LIGHT_VIOLET)};
           font-size:12px;
           font-weight:900;
           cursor:pointer;
@@ -2135,10 +2425,10 @@ function renderLastFinishedCampaignPanelHtml(
   const lastFinished = campaignSummary.lastFinished
 
   const bodyHtml = lastFinished === null
-    ? `<div style="font-size:13px;font-weight:700;color:rgba(226,232,240,0.70);">Няма предишна приключила кампания.</div>`
+    ? `<div style="font-size:13px;font-weight:700;color:${themed('rgba(226,232,240,0.70)', LIGHT_MUTED)};">Няма предишна приключила кампания.</div>`
     : `
-      <div style="font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(lastFinished.campaignName)}</div>
-      <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(226,232,240,0.80);">
+      <div style="font-size:15px;font-weight:900;color:${themed('#f8fafc', LIGHT_TEXT)};">${escapeHtml(lastFinished.campaignName)}</div>
+      <div style="margin-top:6px;font-size:13px;font-weight:700;color:${themed('rgba(226,232,240,0.80)', LIGHT_MUTED)};">
         Общо събрани: ${formatCampaignUnitsLabel(lastFinished.unitsTotal, lastFinished.unitNameSingular, lastFinished.unitNamePlural)}
       </div>
     `
@@ -2147,9 +2437,9 @@ function renderLastFinishedCampaignPanelHtml(
     <div
       data-player-profile-campaign-history-panel="1"
       style="
-        border-radius:10px;
-        background:rgba(255,255,255,0.04);
-        border:1px solid rgba(255,255,255,0.08);
+        border-radius:${themed('10px', '12px')};
+        background:${themed('rgba(255,255,255,0.04)', '#FFFFFF')};
+        border:1px solid ${themed('rgba(255,255,255,0.08)', LIGHT_VIOLET)};
         padding:14px;
         margin-bottom:14px;
       "
@@ -2159,123 +2449,18 @@ function renderLastFinishedCampaignPanelHtml(
   `
 }
 
-function renderProfileContent(
-  profile: PlayerPublicProfileSnapshot,
-  seat: Seat | null,
+// Админ контролите до името на чужд профил (Редакция за admin, роли, "Дай
+// VIP") — общи за стария изглед и за светлия hero на чужд профил.
+function renderForeignAdminTitleControls(
+  profileId: string | null,
   canEdit: boolean,
-  isOwnProfile: boolean,
   isAdmin: boolean,
-  friendshipAction: PlayerProfileFriendshipAction | null,
+  isOwnProfile: boolean,
   viewerIsFullAdmin: boolean,
   targetAccountRole: PlayerAccountRole | null,
-  showPikaSupportChatButton: boolean,
-  showTopicsPersonalMessageButton: boolean,
-  ownVipActiveUntil: string | null | undefined,
   vipGrantOpen: boolean,
-  vipGrantSubmitting: boolean,
-  vipGrantErrorText: string | null,
-  activeBan: ActiveProfileBanSnapshot | null | undefined,
-  targetMute: TopicMuteSnapshot | null | undefined,
-  viewerCanProfileMute: boolean,
-  banPopupOpen: boolean,
-  banPopupDaysDraft: string,
-  banPopupReasonDraft: string,
-  banPopupSubmitting: boolean,
-  banPopupErrorText: string | null,
-  unbanConfirmOpen: boolean,
-  unbanSubmitting: boolean,
-  deletePopupOpen: boolean,
-  deletePopupReasonDraft: string,
-  deletePopupSubmitting: boolean,
-  deletePopupErrorText: string | null,
-  deletePopupPendingNotice: string | null,
-  riskDetailLoading: boolean,
-  riskDetailRows: AdminProfileLinkedProfileRow[] | null | undefined,
-  riskDetailErrorText: string | null,
-  riskRecheckSubmitting: boolean,
-  giftItemRecipientProfileId: string | null,
-  giftShopRecipientProfileId: string | null,
-  campaignSummary: PlayerCampaignProfileSummary | null | undefined,
-  campaignAllRewardsExpanded: boolean,
-  canSelfDelete: boolean,
 ): string {
-  const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
-
   return `
-    <div
-      style="
-        display:flex;
-        flex-direction:column;
-        gap:18px;
-      "
-    >
-      <div
-        data-player-profile-summary-grid="1"
-        style="
-          display:grid;
-          grid-template-columns:124px minmax(0, 1fr);
-          gap:18px;
-          align-items:stretch;
-        "
-      >
-        <div data-player-profile-avatar="1" style="position:relative;width:124px;height:124px;flex:0 0 124px;">
-          <div
-            style="
-              width:100%;
-              height:100%;
-              border-radius:20px;
-              overflow:hidden;
-              background:rgba(255,255,255,0.06);
-              border:1px solid rgba(255,255,255,0.10);
-              box-shadow:0 14px 28px rgba(0,0,0,0.22);
-            "
-          >
-            ${renderAvatar(profile, seat)}
-          </div>
-          ${renderLevelBadge(profile.level)}
-          ${targetMute?.isMuted ? renderProfileAvatarMuteOverlay(profile.profileId ?? '', displayName) : ''}
-          ${friendshipAction?.giftFriendshipId ? `
-            <div style="
-              position:absolute;
-              bottom:-11px;
-              left:50%;
-              transform:translateX(-50%);
-              background:linear-gradient(180deg,#22c55e 0%,#16a34a 100%);
-              color:#fff;
-              font-size:11px;
-              font-weight:900;
-              white-space:nowrap;
-              padding:3px 10px;
-              border-radius:999px;
-              border:2px solid #0a0a0a;
-              letter-spacing:0.3px;
-            ">✓ Приятел</div>
-          ` : ''}
-        </div>
-
-        <div
-          data-player-profile-info="1"
-          style="
-            min-width:0;
-            display:flex;
-            flex-direction:column;
-            gap:10px;
-            padding-top:4px;
-          "
-        >
-          <div data-player-profile-title="1" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;width:100%;">
-            <div
-              style="
-                font-size:22px;
-                line-height:1.05;
-                font-weight:900;
-                color:#22c55e;
-                word-break:break-word;
-              "
-            >
-              ${escapeHtml(displayName)}
-            </div>
-
             ${(canEdit || isAdmin) && !isOwnProfile ? `
               <span
                 data-player-profile-edit="1"
@@ -2283,7 +2468,7 @@ function renderProfileContent(
                   display:inline-flex;
                   align-items:center;
                   gap:7px;
-                  color:#f8fafc;
+                  color:${themed('#f8fafc', '#6941C6')};
                   font-size:16px;
                   font-weight:400;
                   cursor:pointer;
@@ -2300,20 +2485,27 @@ function renderProfileContent(
             ${renderPikaTeamRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderTopChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderMarketingRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
-            ${renderVipGrantTrigger(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen)}
-          </div>
+            ${renderVipGrantTrigger(profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen)}
+  `
+}
 
-          ${renderVipGrantForm(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen, vipGrantSubmitting, vipGrantErrorText)}
-
-          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil, canSelfDelete) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
-
-          <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
-            <div style="font-size:13px;font-weight:400;color:rgba(148,163,184,0.80);">Рейтинг:</div>
-            <div style="font-size:13px;font-weight:400;color:#d4a520;">${formatNullableText(profile.skillRating)}</div>
-            ${renderRatingInline(profile)}
-          </div>
-
-          ${!canEdit && !isOwnProfile ? `
+// Действията за чужд профил (харесване, приятелство, подаръци, блокиране,
+// модерация) — общи за стария изглед и за светлия hero на чужд профил.
+function renderForeignProfileActions(
+  profile: PlayerPublicProfileSnapshot,
+  displayName: string,
+  friendshipAction: PlayerProfileFriendshipAction | null,
+  showPikaSupportChatButton: boolean,
+  showTopicsPersonalMessageButton: boolean,
+  giftItemRecipientProfileId: string | null,
+  giftShopRecipientProfileId: string | null,
+  isOwnProfile: boolean,
+  viewerCanProfileMute: boolean,
+  targetMute: TopicMuteSnapshot | null | undefined,
+  viewerIsFullAdmin: boolean,
+  activeBan: ActiveProfileBanSnapshot | null | undefined,
+): string {
+  return `
             <div data-player-profile-actions="1" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 ${showPikaSupportChatButton && profile.profileId ? `
@@ -2380,6 +2572,7 @@ function renderProfileContent(
                       display:flex;
                       align-items:center;
                       gap:5px;
+                      ${isLightTheme ? (profile.hasLikedByMe ? 'background:#F4F0FF;border-color:#D9CCFA;color:#6941C6;' : LIGHT_SECONDARY_BUTTON) : ''}
                     "
                   >
                     ${renderHeartIcon(14)}${profile.hasLikedByMe ? 'Харесан' : 'Харесай'}
@@ -2390,16 +2583,18 @@ function renderProfileContent(
                     type="button"
                     data-player-profile-friend-request="${escapeHtml(friendshipAction.profileId)}"
                     ${friendshipAction.disabled ? 'disabled' : ''}
+                    ${isLightTheme && !friendshipAction.disabled ? LIGHT_PRIMARY_3D_CLASS_ATTR : ''}
                     style="
                       min-height:38px;
                       padding:0 14px;
                       border:1px solid rgba(212,165,32,0.62);
                       border-radius:8px;
-                      background:${friendshipAction.disabled ? 'rgba(255,255,255,0.07)' : 'linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%)'};
+                      ${isLightTheme && !friendshipAction.disabled ? '' : `background:${friendshipAction.disabled ? 'rgba(255,255,255,0.07)' : 'linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%)'};`}
                       color:${friendshipAction.disabled ? 'rgba(255,255,255,0.70)' : '#080808'};
                       font-size:13px;
                       font-weight:900;
                       cursor:${friendshipAction.disabled ? 'default' : 'pointer'};
+                      ${isLightTheme ? (friendshipAction.disabled ? 'background:#F2F4F7;border-color:#E4E7EC;color:#98A2B3;' : LIGHT_PRIMARY_BUTTON) : ''}
                     "
                   >
                     ${escapeHtml(friendshipAction.label)}
@@ -2419,6 +2614,7 @@ function renderProfileContent(
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_SECONDARY_BUTTON : ''}
                       "
                     >
                       Подари жълтици
@@ -2438,6 +2634,7 @@ function renderProfileContent(
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_SECONDARY_BUTTON : ''}
                       "
                     >
                       Подари жълтици
@@ -2457,6 +2654,7 @@ function renderProfileContent(
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_SECONDARY_BUTTON : ''}
                         display:inline-flex;
                         align-items:center;
                         gap:6px;
@@ -2469,16 +2667,18 @@ function renderProfileContent(
                     <button
                       type="button"
                       data-player-profile-gift-shop="${escapeHtml(giftShopRecipientProfileId)}"
+                      ${isLightTheme ? LIGHT_PRIMARY_3D_CLASS_ATTR : ''}
                       style="
                         min-height:38px;
                         padding:0 12px;
                         border:1px solid rgba(212,165,32,0.62);
                         border-radius:8px;
-                        background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+                        ${isLightTheme ? '' : 'background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);'}
                         color:#080808;
                         font-size:13px;
                         font-weight:900;
                         cursor:pointer;
+                        ${isLightTheme ? LIGHT_PRIMARY_BUTTON : ''}
                         display:inline-flex;
                         align-items:center;
                         gap:6px;
@@ -2503,6 +2703,7 @@ function renderProfileContent(
                       font-size:13px;
                       font-weight:900;
                       cursor:pointer;
+                      ${isLightTheme && profile.isBlockedByMe ? 'background:#FFFFFF;border-color:#FDA29B;color:#B42318;' : ''}
                     "
                   >
                     ${profile.isBlockedByMe ? 'Деблокирай' : 'Блокирай'}
@@ -2512,25 +2713,164 @@ function renderProfileContent(
                 ${renderModerationControls(profile.profileId, isOwnProfile, viewerIsFullAdmin, activeBan)}
               </div>
               ${friendshipAction?.message ? `
-                <div style="font-size:12px;font-weight:800;color:#fde68a;line-height:1.35;">
+                <div style="font-size:12px;font-weight:800;color:${themed('#fde68a', LIGHT_MUTED)};line-height:1.35;">
                   ${escapeHtml(friendshipAction.message)}
                 </div>
               ` : ''}
             </div>
+  `
+}
+
+function renderProfileContent(
+  profile: PlayerPublicProfileSnapshot,
+  seat: Seat | null,
+  canEdit: boolean,
+  isOwnProfile: boolean,
+  isAdmin: boolean,
+  friendshipAction: PlayerProfileFriendshipAction | null,
+  viewerIsFullAdmin: boolean,
+  targetAccountRole: PlayerAccountRole | null,
+  showPikaSupportChatButton: boolean,
+  showTopicsPersonalMessageButton: boolean,
+  ownVipActiveUntil: string | null | undefined,
+  vipGrantOpen: boolean,
+  vipGrantSubmitting: boolean,
+  vipGrantErrorText: string | null,
+  activeBan: ActiveProfileBanSnapshot | null | undefined,
+  targetMute: TopicMuteSnapshot | null | undefined,
+  viewerCanProfileMute: boolean,
+  banPopupOpen: boolean,
+  banPopupDaysDraft: string,
+  banPopupReasonDraft: string,
+  banPopupSubmitting: boolean,
+  banPopupErrorText: string | null,
+  unbanConfirmOpen: boolean,
+  unbanSubmitting: boolean,
+  deletePopupOpen: boolean,
+  deletePopupReasonDraft: string,
+  deletePopupSubmitting: boolean,
+  deletePopupErrorText: string | null,
+  deletePopupPendingNotice: string | null,
+  riskDetailLoading: boolean,
+  riskDetailRows: AdminProfileLinkedProfileRow[] | null | undefined,
+  riskDetailErrorText: string | null,
+  riskRecheckSubmitting: boolean,
+  giftItemRecipientProfileId: string | null,
+  giftShopRecipientProfileId: string | null,
+  campaignSummary: PlayerCampaignProfileSummary | null | undefined,
+  campaignAllRewardsExpanded: boolean,
+  canSelfDelete: boolean,
+): string {
+  const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
+
+  return `
+    <div
+      style="
+        display:flex;
+        flex-direction:column;
+        gap:18px;
+      "
+    >
+      ${isOwnRichLayout || isForeignRichLayout ? `
+        ${isForeignRichLayout ? renderVipGrantForm(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen, vipGrantSubmitting, vipGrantErrorText) : ''}
+        ${renderRankProgress(profile)}
+        ${renderGameStats(profile)}
+        ${campaignSummary?.active ? renderActiveCampaignCard(campaignSummary.active, campaignAllRewardsExpanded) : ''}
+      ` : `
+      <div
+        data-player-profile-summary-grid="1"
+        style="
+          display:grid;
+          grid-template-columns:124px minmax(0, 1fr);
+          gap:18px;
+          align-items:stretch;
+        "
+      >
+        <div data-player-profile-avatar="1" style="position:relative;width:124px;height:124px;flex:0 0 124px;">
+          <div
+            style="
+              width:100%;
+              height:100%;
+              border-radius:${themed('20px', '8px')};
+              overflow:hidden;
+              background:${themed('rgba(255,255,255,0.06)', '#FFFFFF')};
+              border:1px solid ${themed('rgba(255,255,255,0.10)', LIGHT_BORDER)};
+              box-shadow:${themed('0 14px 28px rgba(0,0,0,0.22)', '0 6px 18px rgba(34,30,80,0.10)')};
+            "
+          >
+            ${renderAvatar(profile, seat)}
+          </div>
+          ${renderLevelBadge(profile.level)}
+          ${targetMute?.isMuted ? renderProfileAvatarMuteOverlay(profile.profileId ?? '', displayName) : ''}
+          ${friendshipAction?.giftFriendshipId ? `
+            <div style="
+              position:absolute;
+              bottom:-11px;
+              left:50%;
+              transform:translateX(-50%);
+              background:linear-gradient(180deg,#22c55e 0%,#16a34a 100%);
+              color:#fff;
+              font-size:11px;
+              font-weight:900;
+              white-space:nowrap;
+              padding:3px 10px;
+              border-radius:999px;
+              border:2px solid ${themed('#0a0a0a', '#FFFFFF')};
+              letter-spacing:0.3px;
+            ">✓ Приятел</div>
           ` : ''}
+        </div>
+
+        <div
+          data-player-profile-info="1"
+          style="
+            min-width:0;
+            display:flex;
+            flex-direction:column;
+            gap:10px;
+            padding-top:4px;
+          "
+        >
+          <div data-player-profile-title="1" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;width:100%;">
+            <div
+              style="
+                font-size:22px;
+                line-height:1.05;
+                font-weight:900;
+                color:${themed('#22c55e', LIGHT_TEXT)};
+                word-break:break-word;
+              "
+            >
+              ${escapeHtml(displayName)}
+            </div>
+
+            ${renderForeignAdminTitleControls(profile.profileId, canEdit, isAdmin, isOwnProfile, viewerIsFullAdmin, targetAccountRole, vipGrantOpen)}
+          </div>
+
+          ${renderVipGrantForm(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen, vipGrantSubmitting, vipGrantErrorText)}
+
+          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil, canSelfDelete) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
+
+          <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
+            <div style="font-size:13px;font-weight:400;color:${themed('rgba(148,163,184,0.80)', LIGHT_MUTED)};">Рейтинг:</div>
+            <div style="font-size:13px;font-weight:${themed('400', '700')};color:${themed('#d4a520', LIGHT_TEXT)};">${formatNullableText(profile.skillRating)}</div>
+            ${renderRatingInline(profile)}
+          </div>
+
+          ${!canEdit && !isOwnProfile ? renderForeignProfileActions(profile, displayName, friendshipAction, showPikaSupportChatButton, showTopicsPersonalMessageButton, giftItemRecipientProfileId, giftShopRecipientProfileId, isOwnProfile, viewerCanProfileMute, targetMute, viewerIsFullAdmin, activeBan) : ''}
 
           <div data-player-profile-stats="1" style="display:flex;align-items:center;margin-top:auto;padding-bottom:2px;">
-            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding-right:12px;">
-              Ниво: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${formatNullableText(profile.level)}</span>
+            <div data-player-profile-stat="1" style="font-size:13px;color:${themed('rgba(255,255,255,0.55)', LIGHT_MUTED)};padding-right:12px;">
+              Ниво: <span data-player-profile-stat-value="1" style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:700;">${formatNullableText(profile.level)}</span>
             </div>
-            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
-            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              Ранг: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${formatNullableText(profile.rankTitle)}</span>
+            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:${themed('rgba(212,165,32,0.45)', '#D0D5DD')};"></div>
+            <div data-player-profile-stat="1" style="font-size:13px;color:${themed('rgba(255,255,255,0.55)', LIGHT_MUTED)};padding:0 12px;">
+              Ранг: <span data-player-profile-stat-value="1" style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:700;">${formatNullableText(profile.rankTitle)}</span>
             </div>
             ${typeof profile.likesCount === 'number' ? `
-            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:rgba(212,165,32,0.45);"></div>
-            <div data-player-profile-stat="1" style="font-size:13px;color:rgba(255,255,255,0.55);padding:0 12px;">
-              ${renderHeartIcon(14)} Харесан: <span data-player-profile-stat-value="1" style="color:#fde68a;font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
+            <div data-player-profile-stat-divider="1" style="width:1px;align-self:stretch;background:${themed('rgba(212,165,32,0.45)', '#D0D5DD')};"></div>
+            <div data-player-profile-stat="1" style="font-size:13px;color:${themed('rgba(255,255,255,0.55)', LIGHT_MUTED)};padding:0 12px;">
+              ${renderHeartIcon(14)} Харесан: <span data-player-profile-stat-value="1" style="color:${themed('#fde68a', LIGHT_TEXT)};font-weight:700;">${profile.likesCount.toLocaleString('bg-BG')}</span>
             </div>
             ` : ''}
           </div>
@@ -2542,6 +2882,7 @@ function renderProfileContent(
       ${campaignSummary?.active ? renderActiveCampaignCard(campaignSummary.active, campaignAllRewardsExpanded) : ''}
 
       ${renderGameStats(profile)}
+      `}
 
       <div
         data-player-profile-metric-grid="1"
@@ -2661,7 +3002,7 @@ function renderProfileContent(
             font-weight:900;
             letter-spacing:0.12em;
             text-transform:uppercase;
-            color:rgba(148,163,184,0.92);
+            color:${themed('rgba(148,163,184,0.92)', LIGHT_MUTED)};
           "
         >
           Галерия
@@ -2685,6 +3026,21 @@ export function renderPlayerProfilePopup(
     return ''
   }
 
+  isLightTheme = options.light === true
+  isOwnRichLayout = isLightTheme && (options.isOwnProfile ?? false) && !options.isLoading && options.profile !== null
+  isForeignRichLayout = isLightTheme && !(options.isOwnProfile ?? false) && !options.isLoading && options.profile !== null
+  try {
+    return renderPlayerProfilePopupHtml(options)
+  } finally {
+    isLightTheme = false
+    isOwnRichLayout = false
+    isForeignRichLayout = false
+  }
+}
+
+function renderPlayerProfilePopupHtml(
+  options: RenderPlayerProfilePopupOptions
+): string {
   const popupBody = options.isLoading
     ? renderLoadingContent(options.seat)
     : options.profile
@@ -3001,8 +3357,54 @@ export function renderPlayerProfilePopup(
       }
     </style>
 
+    ${isLightTheme ? `
+      <style>
+        [data-player-profile-light="1"] [data-player-profile-gift-coins]:hover,
+        [data-player-profile-light="1"] [data-player-profile-gift-coins-bypass]:hover,
+        [data-player-profile-light="1"] [data-player-profile-gift-item]:hover {
+          background: #F4F0FF !important;
+        }
+        /* Чужд профил (светъл hero): бутоните са с размерите на тези от
+           собствения профил и се подреждат на редове според ширината си. */
+        [data-player-profile-foreign-actions="1"] [data-player-profile-actions="1"] {
+          align-items:stretch !important;
+        }
+        [data-player-profile-foreign-actions="1"] [data-player-profile-actions="1"] > div:first-child {
+          display:flex !important;
+          flex-wrap:wrap !important;
+          justify-content:center;
+          gap:8px !important;
+          width:100%;
+        }
+        /* "Блокирай" не се разтяга — сам на ред остава компактен и центриран. */
+        [data-player-profile-foreign-actions="1"] [data-player-profile-actions="1"] button[data-player-profile-block] {
+          flex:0 0 auto;
+        }
+        [data-player-profile-foreign-actions="1"] [data-player-profile-actions="1"] button {
+          flex:1 1 auto;
+          width:auto !important;
+          height:40px;
+          min-height:40px !important;
+          padding:0 10px !important;
+          border-radius:8px !important;
+          display:inline-flex !important;
+          align-items:center;
+          justify-content:center;
+          gap:5px !important;
+          font-family:inherit;
+          font-size:13px !important;
+          font-weight:800 !important;
+          white-space:nowrap;
+          box-sizing:border-box;
+        }
+        [data-player-profile-foreign-actions="1"] [data-player-profile-actions="1"] button svg {
+          width:15px !important;
+          height:15px !important;
+        }
+      </style>
+    ` : ''}
     <div
-      data-player-profile-popup-root="1"
+      data-player-profile-popup-root="1"${isLightTheme ? '\n      data-player-profile-light="1"' : ''}
       style="
         position:fixed;
         inset:0;
@@ -3015,7 +3417,7 @@ export function renderPlayerProfilePopup(
         style="
           position:absolute;
           inset:0;
-          background:rgba(0, 0, 0, 0.72);
+          background:${themed('rgba(0, 0, 0, 0.72)', 'rgba(20,20,43,0.45)')};
           -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
           animation:${options.skipAnimation ? 'none' : 'belot-player-profile-backdrop-in 140ms ease both'};
         "
@@ -3043,14 +3445,28 @@ export function renderPlayerProfilePopup(
             width:min(92vw, 760px);
             max-height:min(88vh, 860px);
             overflow:auto;
-            border-radius:8px;
-            background:linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%);
-            border:2px solid rgba(212,165,32,0.72);
-            box-shadow:0 34px 80px rgba(0,0,0,0.42);
-            padding:24px 24px 22px;
+            border-radius:${themed('8px', '12px')};
+            background:${themed('linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%)', LIGHT_PROFILE_PAGE_BACKGROUND)};
+            border:${themed('2px solid rgba(212,165,32,0.72)', '1px solid #E4E7EC')};
+            box-shadow:${themed('0 34px 80px rgba(0,0,0,0.42)', '0 20px 48px rgba(23,35,60,0.18)')};
+            ${isLightTheme ? "font-family:system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;color:#17233C;" : ''}
+            padding:${isOwnRichLayout || isForeignRichLayout ? '0' : '24px 24px 22px'};
             animation:${options.skipAnimation ? 'none' : 'belot-player-profile-fade-in 160ms ease both'};
           "
         >
+          ${(isOwnRichLayout || isForeignRichLayout) && options.profile ? `
+            <div ${isOwnRichLayout ? 'data-player-profile-own-layout="1"' : 'data-player-profile-foreign-layout="1"'} style="display:flex;flex-direction:column;min-height:100%;">
+              ${isOwnRichLayout
+                ? renderProfileHero(options.profile, options.seat, { ownVipActiveUntil: options.ownVipActiveUntil, canSelfDelete: (options.isOwnProfile ?? false) && (options.canSelfDelete ?? false) }, null)
+                : renderForeignRichProfileHero(options.profile, options)}
+              <div style="padding:16px 16px 20px;">
+                ${renderCampaignNavBarHtml(options.campaignSummary)}
+                ${renderLastFinishedCampaignPanelHtml(options.campaignSummary, options.campaignHistoryOpen ?? false)}
+                ${popupBody}
+              </div>
+              <img data-player-profile-own-footer="1" src="${OWN_PROFILE_ASSETS}/profile-footer-waves.webp" alt="" aria-hidden="true" width="1236" height="156" style="display:block;width:100%;height:auto;margin-top:auto;flex:0 0 auto;pointer-events:none;user-select:none;">
+            </div>
+          ` : `
           ${renderCampaignNavBarHtml(options.campaignSummary)}
 
           <div
@@ -3076,7 +3492,7 @@ export function renderPlayerProfilePopup(
                   font-weight:800;
                   letter-spacing:0.14em;
                   text-transform:uppercase;
-                  color:rgba(148,163,184,0.92);
+                  color:${themed('rgba(148,163,184,0.92)', LIGHT_MUTED)};
                 "
               >
                 Профил на играч
@@ -3091,10 +3507,11 @@ export function renderPlayerProfilePopup(
               style="
                 width:42px;
                 height:42px;
-                border:none;
-                border-radius:999px;
-                background:rgba(255,255,255,0.08);
-                color:#f8fafc;
+                border:${themed('none', '1px solid #E53935')};
+                ${isLightTheme ? 'box-sizing:border-box;' : ''}
+                border-radius:${themed('999px', '8px')};
+                background:${themed('rgba(255,255,255,0.08)', '#FFF1F1')};
+                color:${themed('#f8fafc', '#E53935')};
                 font-size:22px;
                 font-weight:900;
                 cursor:pointer;
@@ -3108,6 +3525,7 @@ export function renderPlayerProfilePopup(
           ${renderLastFinishedCampaignPanelHtml(options.campaignSummary, options.campaignHistoryOpen ?? false)}
 
           ${popupBody}
+          `}
         </div>
       </div>
     </div>

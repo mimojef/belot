@@ -1833,6 +1833,16 @@ export type ChatMessageDeletedMessage = {
   messageId: string
 }
 
+// --- Личен чат — целият разговор е изтрит окончателно от участник ---
+// До ВСИЧКИ връзки на двамата участници. Без съдържание — клиентът изчиства
+// разговора и презарежда списъка (уведомлението „X изтри този чат.“ идва
+// като clearedByDisplayName в conversation snapshot-а).
+export type ChatConversationClearedMessage = {
+  type: 'chat_conversation_cleared'
+  friendshipId: string
+  clearedByProfileId: string
+}
+
 // --- Client messages for private rooms ---
 // (extends ClientMessage union below)
 
@@ -1937,6 +1947,7 @@ export type ServerMessage =
   | LobbyChatErrorMessage
   | ChatMessageReceivedMessage
   | ChatMessageDeletedMessage
+  | ChatConversationClearedMessage
   | TopicMessageCatchupMessage
   | TopicMessageReceivedMessage
   | TopicMessageErrorMessage

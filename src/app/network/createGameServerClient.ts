@@ -412,6 +412,9 @@ export type ChatConversationSnapshot = {
   unreadCount: number
   kind: ChatConversationKind
   isArchived: boolean
+  // Другият участник е изтрил целия разговор и оттогава няма нови съобщения —
+  // неговото име за уведомлението „X изтри този чат.“. null/липсва иначе.
+  clearedByDisplayName?: string | null
 }
 
 export type LeaderboardCategory = 'balance' | 'rank' | 'wins' | 'rating'
@@ -2076,6 +2079,13 @@ export type ChatMessageDeletedMessage = {
   messageId: string
 }
 
+/** Целият личен разговор е изтрит окончателно от участник (за двамата). */
+export type ChatConversationClearedMessage = {
+  type: 'chat_conversation_cleared'
+  friendshipId: string
+  clearedByProfileId: string
+}
+
 export type MatchmakingQueuedPlayerPreview = {
   id: string
   name: string
@@ -3420,6 +3430,7 @@ export type ServerMessage =
   | PlayerProfileMessage
   | ChatMessageReceivedMessage
   | ChatMessageDeletedMessage
+  | ChatConversationClearedMessage
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage
   | MatchmakingLeftMessage

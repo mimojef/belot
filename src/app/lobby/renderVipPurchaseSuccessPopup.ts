@@ -1,4 +1,5 @@
 import { escapeHtml } from './renderLobbyScreen.js'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 
 // Единен modal за целия VIP/bundle Stripe success-redirect UX преход:
 // 'loading' (веднага при redirect landing, докато чакаме webhook) ->
@@ -57,19 +58,34 @@ function renderSpinnerStyleTagOnce(): string {
   `
 }
 
-function renderSpinner(): string {
+function renderSpinner(light = false): string {
   return `
     <div aria-hidden="true" style="
       width:44px;height:44px;margin:0 auto;
-      border:4px solid rgba(212,165,32,0.24);
-      border-top-color:#d4a520;
+      border:4px solid ${light ? '#E9E3FC' : 'rgba(212,165,32,0.24)'};
+      border-top-color:${light ? '#7950E8' : '#d4a520'};
       border-radius:50%;
       animation:vipPurchaseSuccessPopupSpin 0.9s linear infinite;
     "></div>
   `
 }
 
-function renderModalShell(bodyHtml: string): string {
+// light — светлият мобилен интерфейс (телефон): бяла карта с вътрешен скрол
+// при малка височина; същите data-* атрибути, z-index и затваряне.
+function renderModalShell(bodyHtml: string, light = false): string {
+  if (light) {
+    return `
+    ${renderSpinnerStyleTagOnce()}
+    <div data-vip-purchase-success-popup-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;">
+      <div data-vip-purchase-success-popup-backdrop="1" style="position:absolute;inset:0;background:rgba(16,24,40,0.45);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;box-sizing:border-box;width:min(100%,400px);max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;border-radius:12px;border:1px solid #E4E7EC;background:#FFFFFF;box-shadow:0 20px 48px rgba(16,24,40,0.18);padding:24px 20px;">
+        <div style="display:grid;gap:14px;text-align:center;">
+          ${bodyHtml}
+        </div>
+      </div>
+    </div>
+  `
+  }
   return `
     ${renderSpinnerStyleTagOnce()}
     <div data-vip-purchase-success-popup-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
@@ -83,12 +99,26 @@ function renderModalShell(bodyHtml: string): string {
   `
 }
 
-export function renderVipPurchaseSuccessPopup(state: VipPurchaseSuccessPopupState): string {
+// Светлият вариант на текстовете и бутона OK (телефон, светъл интерфейс).
+const LIGHT_TITLE_STYLE = 'font-size:22px;line-height:1.25;font-weight:800;color:#17233C;'
+const LIGHT_BODY_STYLE = 'font-size:15px;line-height:1.5;color:#111827;font-weight:600;overflow-wrap:anywhere;'
+const LIGHT_MUTED_STYLE = 'font-size:13px;line-height:1.5;color:#667085;font-weight:600;'
+const LIGHT_OK_BUTTON_HTML = `<button type="button" data-vip-purchase-success-popup-ok="1" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="height:46px;width:100%;max-width:220px;border:0;border-radius:10px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;">OK</button>`
+
+export function renderVipPurchaseSuccessPopup(state: VipPurchaseSuccessPopupState, light = false): string {
   if (!state.isOpen) {
     return ''
   }
 
   if (state.phase === 'loading') {
+    if (light) {
+      return renderModalShell(`
+      ${renderSpinner(true)}
+      <div style="${LIGHT_TITLE_STYLE}">Плащането се обработва</div>
+      <div style="${LIGHT_BODY_STYLE}">Изчакваме потвърждение на плащането...</div>
+      <div style="${LIGHT_MUTED_STYLE}">Не затваряйте страницата.</div>
+    `, true)
+    }
     return renderModalShell(`
       ${renderSpinner()}
       <div style="font-size:22px;line-height:1.2;font-weight:900;color:#f8fafc;">Плащането се обработва</div>
@@ -98,6 +128,15 @@ export function renderVipPurchaseSuccessPopup(state: VipPurchaseSuccessPopupStat
   }
 
   if (state.phase === 'delayed') {
+    if (light) {
+      return renderModalShell(`
+      <div style="${LIGHT_TITLE_STYLE}">Плащането се обработва</div>
+      <div style="${LIGHT_BODY_STYLE}">Потвърждението от платежната система се забавя. VIP ще бъде активиран автоматично след потвърждението.</div>
+      <div style="display:flex;justify-content:center;margin-top:6px;">
+        ${LIGHT_OK_BUTTON_HTML}
+      </div>
+    `, true)
+    }
     return renderModalShell(`
       <div style="font-size:22px;line-height:1.2;font-weight:900;color:#f8fafc;">Плащането се обработва</div>
       <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.85);font-weight:800;">Потвърждението от платежната система се забавя. VIP ще бъде активиран автоматично след потвърждението.</div>
@@ -119,7 +158,7 @@ export function renderVipPurchaseSuccessPopup(state: VipPurchaseSuccessPopupStat
   // реално достигана след fix-а — normal bundle покупки остават единствения
   // path, стигащ до isBundle тук.
   const activeUntilLine = !isGift && !isBundle && state.activeUntilLabel
-    ? `<div style="font-size:14px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">Вашият VIP е активен до ${escapeHtml(state.activeUntilLabel)} г.</div>`
+    ? `<div style="${light ? 'font-size:14px;line-height:1.5;color:#667085;font-weight:600;' : 'font-size:14px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;'}">Вашият VIP е активен до ${escapeHtml(state.activeUntilLabel)} г.</div>`
     : ''
 
   // Bundle snapshot данни (titleSnapshot/yellowCoinsAmount/vipDays) идват от
@@ -137,6 +176,17 @@ export function renderVipPurchaseSuccessPopup(state: VipPurchaseSuccessPopupStat
   // получава explicit "Успешна покупка!" заглавие (заявеният copy за
   // нов bundle popup), gift остава established "Подаръкът е изпратен".
   const successTitle = isGift ? 'Подаръкът е изпратен' : isBundle ? 'Успешна покупка!' : 'Успешно плащане'
+
+  if (light) {
+    return renderModalShell(`
+    <div style="${LIGHT_TITLE_STYLE}">${successTitle}</div>
+    <div style="${LIGHT_BODY_STYLE}">${successBodyText}</div>
+    ${activeUntilLine}
+    <div style="display:flex;justify-content:center;margin-top:6px;">
+      ${LIGHT_OK_BUTTON_HTML}
+    </div>
+  `, true)
+  }
 
   return renderModalShell(`
     <div style="font-size:22px;line-height:1.2;font-weight:900;color:#f8fafc;">${successTitle}</div>

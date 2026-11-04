@@ -66,10 +66,10 @@ export function createTournamentMatchStartPopup(options: {
     // countdown и бутон за влизане.
     if (minimizedMatchId === assignment.matchId) {
       options.container.innerHTML = `
-        <div id="tms-popup-mini" role="dialog" aria-live="polite" style="position:fixed;top:18px;right:18px;z-index:100000;display:flex;align-items:center;gap:10px;border:1px solid rgba(148,163,253,0.42);border-radius:8px;background:#101625;color:#f8fafc;box-shadow:0 18px 54px rgba(0,0,0,0.55);padding:8px 12px;font-family:Inter,system-ui,sans-serif;">
-          <span style="font-size:12px;font-weight:900;color:#facc15;">${deadlineText}</span>
-          <span style="font-size:12px;font-weight:700;">Турнирен мач</span>
-          <button type="button" data-tms-expand="1" style="height:28px;padding:0 10px;border:0;border-radius:6px;background:#facc15;color:#1c1400;font-size:12px;font-weight:900;cursor:pointer;">Влез</button>
+        <div id="tms-popup-mini" data-mobile-notice="top" role="dialog" aria-live="polite" style="position:fixed;top:18px;right:18px;z-index:100000;display:flex;align-items:center;gap:10px;border:1px solid rgba(148,163,253,0.42);border-radius:8px;background:#101625;color:#f8fafc;box-shadow:0 18px 54px rgba(0,0,0,0.55);padding:8px 12px;font-family:Inter,system-ui,sans-serif;">
+          <span data-mobile-notice-part="eyebrow" style="font-size:12px;font-weight:900;color:#facc15;">${deadlineText}</span>
+          <span data-mobile-notice-part="title" style="font-size:12px;font-weight:700;">Турнирен мач</span>
+          <button type="button" data-tms-expand="1" data-mobile-notice-part="primary" style="height:28px;padding:0 10px;border:0;border-radius:6px;background:#facc15;color:#1c1400;font-size:12px;font-weight:900;cursor:pointer;">Влез</button>
         </div>
       `
       options.container.querySelector('[data-tms-expand]')?.addEventListener('click', () => {
@@ -94,13 +94,13 @@ export function createTournamentMatchStartPopup(options: {
           ? 'Вашият мач вече е започнал.'
           : 'Вашият мач вече е започнал.'
       options.container.innerHTML = `
-        <div id="tms-popup" role="dialog" aria-live="polite" style="${popupShellStyle()}">
-          <button type="button" data-tms-minimize="1" aria-label="Минимизирай" style="${minimizeButtonStyle()}">—</button>
-          <div style="font-size:13px;font-weight:900;color:#93c5fd;text-transform:uppercase;letter-spacing:0.04em;padding-right:28px;">${escapeHtml(assignment.tournamentName)}</div>
-          <div style="margin-top:8px;font-size:16px;font-weight:900;line-height:1.3;">Участвате в активен турнир</div>
-          <div style="margin-top:6px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">${escapeHtml(introText)}</div>
+        <div id="tms-popup" data-mobile-notice="top" role="dialog" aria-live="polite" style="${popupShellStyle()}">
+          <button type="button" data-tms-minimize="1" data-mobile-notice-part="icon-button" aria-label="Минимизирай" style="${minimizeButtonStyle()}">—</button>
+          <div data-mobile-notice-part="eyebrow" style="font-size:13px;font-weight:900;color:#93c5fd;text-transform:uppercase;letter-spacing:0.04em;padding-right:28px;">${escapeHtml(assignment.tournamentName)}</div>
+          <div data-mobile-notice-part="title" style="margin-top:8px;font-size:16px;font-weight:900;line-height:1.3;">Участвате в активен турнир</div>
+          <div data-mobile-notice-part="text" style="margin-top:6px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">${escapeHtml(introText)}</div>
           <div style="margin-top:14px;display:flex;justify-content:flex-end;">
-            <button type="button" data-tms-enter="1" style="${primaryButtonStyle()}">Продължи играта</button>
+            <button type="button" data-tms-enter="1" data-mobile-notice-part="primary" style="${primaryButtonStyle()}">Продължи играта</button>
           </div>
         </div>
       `
@@ -115,20 +115,20 @@ export function createTournamentMatchStartPopup(options: {
     }
 
     options.container.innerHTML = `
-      <div id="tms-popup" role="dialog" aria-live="polite" style="${popupShellStyle()}">
-        <button type="button" data-tms-minimize="1" aria-label="Минимизирай" style="${minimizeButtonStyle()}">—</button>
-        <div style="font-size:13px;font-weight:900;color:#93c5fd;text-transform:uppercase;letter-spacing:0.04em;padding-right:28px;">${escapeHtml(assignment.tournamentName)}</div>
-        <div style="margin-top:8px;font-size:16px;font-weight:900;line-height:1.3;">Твоят турнирен мач започва след ${deadlineText}</div>
-        <div style="margin-top:6px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">В момента участваш в друг мач.</div>
-        <div style="margin-top:10px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">
-          Можеш да напуснеш текущия мач и да влезеш в турнира. Ще бъде начислена стандартната глоба за напускане: <strong style="color:#fecaca;">${conflict.stakeAmount.toLocaleString('bg-BG')} жълтици</strong>.
+      <div id="tms-popup" data-mobile-notice="top" role="dialog" aria-live="polite" style="${popupShellStyle()}">
+        <button type="button" data-tms-minimize="1" data-mobile-notice-part="icon-button" aria-label="Минимизирай" style="${minimizeButtonStyle()}">—</button>
+        <div data-mobile-notice-part="eyebrow" style="font-size:13px;font-weight:900;color:#93c5fd;text-transform:uppercase;letter-spacing:0.04em;padding-right:28px;">${escapeHtml(assignment.tournamentName)}</div>
+        <div data-mobile-notice-part="title" style="margin-top:8px;font-size:16px;font-weight:900;line-height:1.3;">Твоят турнирен мач започва след ${deadlineText}</div>
+        <div data-mobile-notice-part="text" style="margin-top:6px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">В момента участваш в друг мач.</div>
+        <div data-mobile-notice-part="text" style="margin-top:10px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">
+          Можеш да напуснеш текущия мач и да влезеш в турнира. Ще бъде начислена стандартната глоба за напускане: <strong data-mobile-notice-part="danger" style="color:#fecaca;">${conflict.stakeAmount.toLocaleString('bg-BG')} жълтици</strong>.
         </div>
-        <div style="margin-top:8px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">
+        <div data-mobile-notice-part="text" style="margin-top:8px;font-size:12px;line-height:1.5;color:rgba(248,250,252,0.72);">
           Ако останеш, мястото ти в турнирния мач ще бъде заето от бот. Ще можеш да поемеш мястото си по-късно, ако отборът ти още не е отпаднал.
         </div>
         <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
-          <button type="button" data-tms-stay="1" style="${secondaryButtonStyle()}">Остани в текущия мач</button>
-          <button type="button" data-tms-leave="1" style="${primaryButtonStyle()}">Напусни мача и влез в турнира</button>
+          <button type="button" data-tms-stay="1" data-mobile-notice-part="secondary" style="${secondaryButtonStyle()}">Остани в текущия мач</button>
+          <button type="button" data-tms-leave="1" data-mobile-notice-part="primary" style="${primaryButtonStyle()}">Напусни мача и влез в турнира</button>
         </div>
       </div>
     `
