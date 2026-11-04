@@ -109,6 +109,8 @@ import {
 } from './app/network/socketReconnectPolicy'
 import { createConnectionLivenessMonitor } from './app/network/createConnectionLivenessMonitor'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
+import { MOBILE_LIGHT_PAGE_BACKGROUND } from './ui/layout/mobileLightPageBackground'
+import { MOBILE_LIGHT_FONT_FAMILY, getMobileLightUiContext } from './ui/layout/mobileLightUi'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
@@ -122,6 +124,7 @@ import { createTournamentMatchStartPopup } from './ui/notifications/tournamentMa
 import { createTournamentReclaimModal } from './ui/notifications/tournamentReclaimModal'
 import { isTournamentForceReturnRequired, resolveTournamentReturnDestination } from './app/lobby/resolveTournamentReturnDestination'
 import { createTournamentFeederWaitingStrip, type TournamentFeederWaitingState } from './ui/notifications/tournamentFeederWaitingStrip'
+import { installMobileNoticeLayout } from './ui/notifications/mobileNoticeLayout'
 import { createVisitorPageViewTracker, getAnonymousVisitorId } from './app/visitors/createVisitorPageViewTracker'
 import { mountConsentUi } from './app/consent/consentUi'
 import { initializeAnalytics } from './app/analytics/initializeAnalytics'
@@ -156,6 +159,11 @@ import {
   renderRegistrationVerificationPage,
   type RegistrationVerificationPageState,
 } from './app/registrationVerification/renderRegistrationVerificationPage'
+import { VIOLET_3D_BUTTON_CLASS, ensureViolet3dButtonStyles } from './ui/layout/violet3dButton'
+
+// Общият 3D стил на основните виолетови бутони в светлия мобилен дизайн —
+// веднъж, преди първия рендер (класът се слага само в светлите клонове).
+ensureViolet3dButtonStyles()
 
 const rootElementCandidate = document.querySelector<HTMLDivElement>('#app')
 
@@ -4149,6 +4157,44 @@ async function deleteChatMessage(
   }
 }
 
+/**
+ * Окончателно изтрива целия личен разговор (за двамата участници). Сървърът
+ * сам проверява участието от сесията; подава се само friendshipId. Без
+ * оптимистично локално изчистване — извикващият чисти само при ok: true.
+ */
+async function deleteChatConversation(
+  friendshipId: string,
+): Promise<
+  | { ok: true; conversation: ChatConversationSnapshot | null }
+  | { ok: false; message: string; code?: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/messages`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+      },
+    )
+    const data = await readChatMessagesResponse(response)
+
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: data.message ?? 'Разговорът не беше изтрит.',
+        code: data.code,
+      }
+    }
+
+    return { ok: true, conversation: data.conversation ?? null }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за чат.',
+    }
+  }
+}
+
 type SupportMessagesApiResponse = {
   ok: boolean
   messages?: SupportMessageSnapshot[]
@@ -7360,6 +7406,7 @@ lobby = createLobbyFlowController({
   },
   onChatSend: (friendshipId, body, imageDataUrl) => sendChatMessage(friendshipId, body, imageDataUrl),
   onChatMessageDelete: (friendshipId, messageId) => deleteChatMessage(friendshipId, messageId),
+  onChatConversationDelete: (friendshipId) => deleteChatConversation(friendshipId),
   onLogout: () => submitLogout(),
   onDailyMissionsLoad: () => loadDailyMissions(),
   onMissionClaim: (missionId) => claimMissionReward(missionId),
@@ -7864,6 +7911,14 @@ const tournamentMatchStartPopup = createTournamentMatchStartPopup({
 
 window.setInterval(() => tournamentMatchStartPopup.tick(), 1000)
 
+// Телефон: турнирните известия под светлия хедър / над долната навигация,
+// без застъпване помежду им (desktop — без промяна).
+installMobileNoticeLayout({
+  appRoot: rootElement,
+  topContainers: [tournamentEconomyNotifContainer, tournamentPartnerInviteNotifContainer, tournamentMatchStartNotifContainer],
+  bottomContainers: [tournamentFeederWaitingStripContainer],
+})
+
 const tournamentReclaimModalContainer = document.createElement('div')
 tournamentReclaimModalContainer.id = 'global-tournament-reclaim-modal'
 document.body.appendChild(tournamentReclaimModalContainer)
@@ -8120,6 +8175,45 @@ function showSessionDisplacedOverlay(): void {
 
   const overlay = document.createElement('div')
   overlay.id = 'session-displaced-overlay'
+
+  // Телефон: светъл системен екран (като reset-password) с "Поеми сесията".
+  // Бутонът е обикновено презареждане — същото като ръчен Refresh: новата
+  // страница се удостоверява и свързва наново, а сървърът
+  // (displaceProfileConnections) прекратява другата сесия. Без собствена
+  // логика за поемане; ако сесията е невалидна, презареждането води до
+  // нормалния вход. Само по натискане (без автоматичен цикъл), еднократно.
+  if (isPhoneLayoutViewport()) {
+    overlay.style.cssText =
+      `position:fixed;inset:0;z-index:200000;background:${MOBILE_LIGHT_PAGE_BACKGROUND};color:#17233C;display:flex;flex-direction:column;align-items:center;padding:24px 16px;box-sizing:border-box;overflow-y:auto;font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;`
+    overlay.innerHTML = `
+      <div style="margin:auto 0;width:100%;max-width:400px;display:flex;flex-direction:column;align-items:center;gap:20px;">
+        <img src="/assets/lobby-mobile/logo-pika-text.webp" alt="Pika.bg" width="144" height="48" style="width:144px;height:48px;display:block;object-fit:contain;">
+        <div style="width:100%;box-sizing:border-box;border-radius:12px;border:1px solid #E4E7EC;background:#FFFFFF;box-shadow:0 12px 32px rgba(23,35,60,0.10);padding:24px 18px;display:flex;flex-direction:column;align-items:center;text-align:center;">
+          <span style="width:52px;height:52px;border-radius:50%;background:#F4F0FF;color:#7950E8;display:flex;align-items:center;justify-content:center;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></svg>
+          </span>
+          <h1 style="margin:16px 0 0;font-size:22px;font-weight:800;line-height:1.2;color:#17233C;">Сесията е прекратена</h1>
+          <p style="margin:8px 0 0;font-size:14px;font-weight:500;line-height:1.5;color:#667085;">
+            Профилът ти е отворен на друго устройство или в друг раздел, затова тази сесия беше спряна.
+          </p>
+          <button type="button" data-session-displaced-takeover="1" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="margin-top:20px;width:100%;height:50px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:16px;font-weight:800;cursor:pointer;">Поеми сесията</button>
+          <p style="margin:12px 0 0;font-size:12px;font-weight:500;line-height:1.45;color:#98A2B3;">
+            Сесията на другото устройство ще бъде прекратена.
+          </p>
+        </div>
+      </div>
+    `
+    const takeoverButton = overlay.querySelector<HTMLButtonElement>('[data-session-displaced-takeover="1"]')
+    takeoverButton?.addEventListener('click', () => {
+      if (takeoverButton.disabled) return
+      takeoverButton.disabled = true
+      takeoverButton.textContent = 'Зареждане...'
+      window.location.reload()
+    }, { once: true })
+    document.body.appendChild(overlay)
+    return
+  }
+
   overlay.style.cssText =
     'position:fixed;inset:0;z-index:200000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
   overlay.innerHTML = `
@@ -8223,8 +8317,8 @@ function showCoinsGiftedPopup(amount: number, fromDisplayName: string): void {
 
   host.innerHTML = `
     <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
-      <div style="width:56px;height:56px;border-radius:999px;background:linear-gradient(180deg,rgba(212,165,32,0.18) 0%,rgba(212,165,32,0.08) 100%);border:2px solid rgba(212,165,32,0.50);display:flex;align-items:center;justify-content:center;font-size:28px;">🪙</div>
-      <div>
+      <div style="width:56px;height:56px;border-radius:999px;background:linear-gradient(180deg,rgba(212,165,32,0.18) 0%,rgba(212,165,32,0.08) 100%);border:2px solid rgba(212,165,32,0.50);display:flex;align-items:center;justify-content:center;"><img src="/assets/lobby-mobile/icons/icon-balance-coin.webp" alt="" aria-hidden="true" width="28" height="28" style="width:28px;height:28px;display:block;object-fit:contain;"></div>
+      <div style="width:100%;min-width:0;overflow-wrap:anywhere;">
         <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">${escapeHtmlMain(fromDisplayName)} ви подари</div>
         <div style="font-size:26px;font-weight:900;color:#f4c95b;margin-top:6px;">${amount.toLocaleString('bg-BG')} жълтици</div>
       </div>
@@ -8263,12 +8357,15 @@ function showGiftItemReceivedPopup(itemName: string, imageUrl: string, fromDispl
 
   const host = document.createElement('div')
   host.id = 'gift-item-received-popup'
-  host.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);font-family:Arial,Helvetica,sans-serif;'
+  // Нисък екран: картата (картинка + бутони) може да е по-висока от екрана —
+  // host-ът скролира, а margin:auto на картата я центрира, без да реже горния
+  // ѝ край; картинката не надвишава 40% от височината.
+  host.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px;overflow-y:auto;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);font-family:Arial,Helvetica,sans-serif;'
 
   host.innerHTML = `
-    <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
-      <img src="${escapeHtmlMain(imageUrl)}" alt="${escapeHtmlMain(itemName)}" style="max-width:250px;max-height:250px;object-fit:contain;" />
-      <div>
+    <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);margin:auto;border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+      <img src="${escapeHtmlMain(imageUrl)}" alt="${escapeHtmlMain(itemName)}" style="max-width:min(250px,100%);max-height:min(250px,40vh);object-fit:contain;" />
+      <div style="width:100%;min-width:0;overflow-wrap:anywhere;">
         <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">${escapeHtmlMain(fromDisplayName)} ви подари</div>
         <div style="font-size:20px;font-weight:900;color:#f4c95b;margin-top:6px;">${escapeHtmlMain(itemName)}</div>
       </div>
@@ -8333,17 +8430,22 @@ function showSessionInGameOverlay(roomId: string, reconnectToken: string): void 
   overlay.id = 'session-in-game-overlay'
   overlay.style.cssText =
     'position:fixed;inset:0;z-index:200000;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:Arial,Helvetica,sans-serif;'
+  // data-mobile-notice-part — светла карта в светлата мобилна рамка (виж
+  // ui/notifications/mobileNoticeLayout.ts); иначе визията е непроменена.
+  overlay.setAttribute('data-mobile-notice-part', 'overlay')
   overlay.innerHTML = `
-    <div style="font-size:48px;">🎮</div>
-    <div style="font-size:20px;font-weight:900;color:#ffffff;text-align:center;max-width:420px;line-height:1.4;">
-      В момента се играе игра с този профил.
+    <div data-mobile-notice-part="card" style="display:flex;flex-direction:column;align-items:center;gap:16px;box-sizing:border-box;">
+      <div style="font-size:48px;">🎮</div>
+      <div data-mobile-notice-part="title" style="font-size:20px;font-weight:900;color:#ffffff;text-align:center;max-width:420px;line-height:1.4;">
+        В момента се играе игра с този профил.
+      </div>
+      <div data-mobile-notice-part="text" style="font-size:14px;color:rgba(255,255,255,0.55);text-align:center;max-width:380px;">
+        Можеш да се върнеш в играта от това устройство, но другата сесия ще бъде прекратена.
+      </div>
+      <button data-session-rejoin="1" data-mobile-notice-part="primary" style="margin-top:8px;padding:14px 32px;border:0;border-radius:8px;background:#d4a520;color:#000000;font-size:16px;font-weight:900;cursor:pointer;letter-spacing:0.04em;">
+        Върни ме в играта
+      </button>
     </div>
-    <div style="font-size:14px;color:rgba(255,255,255,0.55);text-align:center;max-width:380px;">
-      Можеш да се върнеш в играта от това устройство, но другата сесия ще бъде прекратена.
-    </div>
-    <button data-session-rejoin="1" style="margin-top:8px;padding:14px 32px;border:0;border-radius:8px;background:#d4a520;color:#000000;font-size:16px;font-weight:900;cursor:pointer;letter-spacing:0.04em;">
-      Върни ме в играта
-    </button>
   `
   document.body.appendChild(overlay)
 
@@ -8441,9 +8543,28 @@ function showLudoInsufficientBalanceModal(): void {
 
   const overlay = document.createElement('div')
   overlay.id = 'ludo-insufficient-balance-modal'
-  overlay.style.cssText =
-    'position:fixed;inset:0;z-index:200001;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Arial,Helvetica,sans-serif;'
-  overlay.innerHTML = `
+  // Светъл мобилен вид — само на телефон в светлия интерфейс (модалът е в
+  // document.body, затова видът се определя по монтирания екран). Текстове,
+  // бутон и затваряне — без промяна.
+  if (getMobileLightUiContext() !== null) {
+    overlay.style.cssText =
+      `position:fixed;inset:0;z-index:200001;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:${MOBILE_LIGHT_FONT_FAMILY};`
+    overlay.innerHTML = `
+    <div data-ludo-insufficient-balance-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(16,24,40,0.45);"></div>
+    <div role="dialog" aria-modal="true" aria-label="Недостатъчно жълтици" style="position:relative;box-sizing:border-box;width:min(100%,400px);border-radius:12px;border:1px solid #E4E7EC;background:#FFFFFF;box-shadow:0 20px 48px rgba(16,24,40,0.18);padding:22px 20px 20px;">
+      <div style="display:grid;gap:12px;text-align:center;">
+        <div style="font-size:20px;line-height:1.3;font-weight:800;color:#17233C;">Недостатъчно жълтици</div>
+        <div style="font-size:15px;line-height:1.5;color:#111827;font-weight:500;overflow-wrap:anywhere;">Вие бяхте изключен от стая в която участвахте поради липса на достатъчно жълтици.</div>
+        <div style="display:flex;justify-content:center;margin-top:6px;">
+          <button type="button" data-ludo-insufficient-balance-modal-ok="1" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="height:46px;width:100%;max-width:220px;border:0;border-radius:10px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;">OK</button>
+        </div>
+      </div>
+    </div>
+  `
+  } else {
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:200001;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Arial,Helvetica,sans-serif;'
+    overlay.innerHTML = `
     <div data-ludo-insufficient-balance-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
     <div role="dialog" aria-modal="true" aria-label="Недостатъчно жълтици" style="position:relative;width:min(92vw,440px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.55);padding:24px;">
       <div style="display:grid;gap:16px;text-align:center;">
@@ -8455,6 +8576,7 @@ function showLudoInsufficientBalanceModal(): void {
       </div>
     </div>
   `
+  }
   document.body.appendChild(overlay)
 
   function onKeydown(event: KeyboardEvent): void {
@@ -8828,7 +8950,7 @@ client = createGameServerClient({
       return
     }
 
-    if (message.type === 'chat_message_deleted') {
+    if (message.type === 'chat_message_deleted' || message.type === 'chat_conversation_cleared') {
       // Като chat_message_received: по време на игра chat GET заявките биха
       // 403-нали, затова само маркираме, че conversation state е остарял.
       // След играта разговорът се зарежда наново при отваряне (openChatConversation).
@@ -9407,6 +9529,8 @@ const _VALID_PATHS = new Set([
   '/games/ludo',
   '/games/svara',
   '/friends',
+  '/blocked',
+  '/settings',
   '/chat',
   '/admin',
   '/admin/server',
@@ -9975,7 +10099,7 @@ void loadGuestTrialStatus().finally(() => {
       // Текстът, бутонът и handler-ът са същите като при тъмния вариант.
       el.style.cssText = [
         'position:fixed;inset:0;z-index:99998;',
-        'background:#F5F7FC;',
+        `background:${MOBILE_LIGHT_PAGE_BACKGROUND};`,
         'color:#17233C;',
         "font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;",
         'display:flex;flex-direction:column;align-items:center;justify-content:center;',
@@ -9988,7 +10112,7 @@ void loadGuestTrialStatus().finally(() => {
           <p style="font-size:15px;font-weight:500;color:#667085;line-height:1.5;margin:0;">
             Белот онлайн изисква активна интернет връзка. Провери свързаността и опитай отново.
           </p>
-          <button id="offline-retry-btn" class="lobby-violet-btn" style="
+          <button id="offline-retry-btn" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="
             margin-top:10px;width:100%;max-width:260px;height:48px;padding:0 28px;border:0;border-radius:8px;
             color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;
           ">Опитай отново</button>

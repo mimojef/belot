@@ -21,6 +21,11 @@ type NotificationController = {
 
 const AUTO_DISMISS_MS = 6_000
 
+// Телефон (тесен екран или нисък хоризонтален тъч екран): картата заема
+// ширината на екрана, а текстът се пренася на няколко реда вместо да се реже.
+// Desktop изгледът не се променя.
+const PHONE_MEDIA_QUERY = '(max-width: 640px), (hover: none) and (pointer: coarse) and (max-height: 500px)'
+
 export function createChatMessageNotification(options: {
   container: HTMLElement
   isInGame: () => boolean
@@ -145,8 +150,11 @@ export function createChatMessageNotification(options: {
         }
         #chat-notif-view-btn:hover { filter:brightness(1.15); transform:translateY(-1px); }
         #chat-notif-close-btn:hover { filter:brightness(1.3); color:rgba(255,255,255,0.9) !important; }
+        @media ${PHONE_MEDIA_QUERY} {
+          .chat-notif-card { width:calc(100vw - 24px) !important; min-width:0 !important; max-width:420px !important; }
+        }
       </style>
-      <div style="
+      <div class="chat-notif-card" style="
         position:fixed;top:calc(16px + env(safe-area-inset-top, 0px));left:50%;transform:translateX(-50%);
         z-index:99999;
         background:linear-gradient(135deg,rgba(18,14,6,0.98),rgba(10,8,3,0.98));
@@ -163,7 +171,7 @@ export function createChatMessageNotification(options: {
         <div style="font-size:24px;line-height:1;flex-shrink:0;">💬</div>
 
         <div style="flex:1;min-width:0;">
-          <div style="font-size:14px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+          <div style="font-size:14px;font-weight:700;color:#fff;line-height:1.3;overflow-wrap:anywhere;">
             Имате входящ чат с <span style="color:#d4af37;">${notif.fromDisplayName}</span>
           </div>
         </div>

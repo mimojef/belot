@@ -4,6 +4,8 @@ import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError, formatMarketin
 import { mergeIncomingAdCampaignDispatches, dequeueNextAdCampaignPopup } from '../adCampaigns/adCampaignPendingQueue'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { MOBILE_LIGHT_PAGE_BACKGROUND } from '../../ui/layout/mobileLightPageBackground'
+import { MOBILE_LIGHT_FONT_FAMILY, getMobileLightUiContext } from '../../ui/layout/mobileLightUi'
 import { decideOpenImageViewer, decideRequestImageViewerClose, decideHandlePopstate, type ImageViewerAction, type ImageViewerHistoryState } from './imageViewerHistoryState'
 import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tournamentEconomyNotificationQueue.js'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
@@ -71,6 +73,8 @@ import {
   refreshTopicMessageContentDom,
   removeTopicMessageDom,
   insertTopicThreadReplyNodes,
+  markLobbyRootHtmlStale,
+  GUEST_MOBILE_LOBBY_BOTTOM_NAV_CLEARANCE,
   syncTopicThreadSentinelsDom,
   syncTopicThreadOwnReplyNoticeDom,
   syncTopicThreadDividerDom,
@@ -220,6 +224,7 @@ export type LobbyFlowScreen =
   | 'more-games'
   | 'ludo-lobby'
   | 'svara'
+  | 'settings'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type { ProfileAccessBlockCode }
@@ -909,6 +914,10 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onChatMarkRead?: (friendshipId: string) => Promise<void>
   onChatMessageDelete?: (friendshipId: string, messageId: string) => Promise<
+    | { ok: true; conversation: ChatConversationSnapshot | null }
+    | { ok: false; message: string; code?: string }
+  >
+  onChatConversationDelete?: (friendshipId: string) => Promise<
     | { ok: true; conversation: ChatConversationSnapshot | null }
     | { ok: false; message: string; code?: string }
   >
@@ -2265,10 +2274,16 @@ type InternalLobbyFlowState = {
   chatMessagesHasMore: boolean
   chatOldestMessageCursor: string | null
   chatOlderMessagesLoading: boolean
+  // Последното „Зареди по-стари“ е неуспешно — светлият мобилен чат показва
+  // ненатрапчиво „Опитай отново“ горе и спира автоматичните опити до него.
+  chatOlderMessagesErrorText: string | null
   /** Потвърждение за изтриване на СОБСТВЕНО лично съобщение (кошчето). */
   chatMessageDeleteConfirm: { friendshipId: string; messageId: string } | null
   chatMessageDeleteBusy: boolean
   chatMessageDeleteErrorText: string | null
+  chatConversationDeleteConfirm: { friendshipId: string; displayName: string } | null
+  chatConversationDeleteBusy: boolean
+  chatConversationDeleteErrorText: string | null
   chatErrorText: string | null
   chatDraftByFriendshipId: Record<string, string>
   // Избрана-но-неизпратена снимка per разговор (за да оцелее при
@@ -2287,6 +2302,8 @@ type InternalLobbyFlowState = {
   lobbyChatPendingRequestId: string | null
   lobbyChatErrorText: string | null
   lobbyChatFullscreen: boolean
+  /** Попъпът: публикацията, чакаща потвърждение за изтриване. */
+  lobbyPostsDeleteConfirmId: string | null
   lobbyChatWriteLockedPopupOpen: boolean
   notificationsOpen: boolean
   privateRoomInGameNotificationsEnabled: boolean
@@ -3070,9 +3087,13 @@ function createInitialState(): InternalLobbyFlowState {
     chatMessagesHasMore: false,
     chatOldestMessageCursor: null,
     chatOlderMessagesLoading: false,
+    chatOlderMessagesErrorText: null,
     chatMessageDeleteConfirm: null,
     chatMessageDeleteBusy: false,
     chatMessageDeleteErrorText: null,
+    chatConversationDeleteConfirm: null,
+    chatConversationDeleteBusy: false,
+    chatConversationDeleteErrorText: null,
     chatErrorText: null,
     chatDraftByFriendshipId: {},
     chatPendingImageByFriendshipId: {},
@@ -3084,6 +3105,7 @@ function createInitialState(): InternalLobbyFlowState {
     lobbyChatPendingRequestId: null,
     lobbyChatErrorText: null,
     lobbyChatFullscreen: false,
+    lobbyPostsDeleteConfirmId: null,
     lobbyChatWriteLockedPopupOpen: false,
     notificationsOpen: false,
     privateRoomInGameNotificationsEnabled: true,
@@ -3507,6 +3529,10 @@ function findRelationshipByProfileId(
   }) ?? null
 }
 
+// "Блокирани" на телефон (регистриран) — страница над текущия екран, не
+// отделен LobbySocialScreen; на desktop/таблет остава попъп без адрес.
+const BLOCKED_PLAYERS_PATH = '/blocked'
+
 const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/lobby': 'lobby',
   '/players': 'players',
@@ -3615,6 +3641,9 @@ export function createLobbyFlowController(
   let privateRoomInfoToastTimerText: string | null = null
   // Keep late HTTP history responses from restoring a confirmed deletion.
   const deletedChatMessageIds = new Set<string>()
+  // Брояч на изтрити цели разговори — отговор на изпращане, започнато преди
+  // изтриването, не бива да върне старата история (виж sendChatMessage).
+  let chatConversationClearSeq = 0
   // „Теми“ — прозорецът на отворената нишка (виж startTopicThreadWindow).
   // Тук, преди първия render(), за да няма TDZ в buildLobbyScreenState.
   let topicThreadWindow: TopicThreadWindow | null = null
@@ -3793,7 +3822,7 @@ export function createLobbyFlowController(
       playing: import('../network/createGameServerClient').LudoRoomMatchSnapshot[],
       finished: import('../network/createGameServerClient').LudoRoomMatchSnapshot[],
     ) => void
-    showMessage: (message: string) => void
+    showMessage: (message: string, kind?: 'info' | 'warning' | 'error') => void
     requestExit: () => void
   } | null = null
   // TOCTOU guard за openLudoLobbyOverlay() (виж task-а "Ludo games-list
@@ -4389,7 +4418,7 @@ export function createLobbyFlowController(
     // условията за скриване са общи; desktop/таблет — старият вид.
     const isPhone = isPhoneLayoutViewport()
     const overlay = document.createElement('div')
-    overlay.style.cssText = `position:fixed;inset:0;z-index:99999;background:${isPhone ? '#F5F7FC' : '#242424'};transition:opacity 0.3s ease;`
+    overlay.style.cssText = `position:fixed;inset:0;z-index:99999;background:${isPhone ? MOBILE_LIGHT_PAGE_BACKGROUND : '#242424'};transition:opacity 0.3s ease;`
     const track = document.createElement('div')
     track.style.cssText = isPhone
       ? 'width:220px;height:8px;background:#E9E3FC;border-radius:4px;overflow:hidden;'
@@ -5558,6 +5587,70 @@ export function createLobbyFlowController(
   // страничните ефекти на renderLobby() (ensureProfilePopupTargetRoleLoaded/
   // ensureOwnVipStatusLoaded остават САМО в renderLobby(), не тук — targeted
   // patch не трябва да тригерва нови network заявки).
+  // "Публикации от Pika.bg" — прочетени са само реално отворените публикации;
+  // пазят се в localStorage отделно за всеки профил (без backend). Отварянето
+  // на камбанката или на списъка не маркира нищо. Непрочетените се броят от
+  // заредения поток (без собствените публикации); извън лобито, без абонамент,
+  // се показва последно известният брой за профила.
+  const LOBBY_POSTS_READ_STORAGE_PREFIX = 'pika.lobbyPostsRead.v1.'
+  const LOBBY_POSTS_READ_LIMIT = 500
+  let lobbyPostsReadProfileId: string | null = null
+  let lobbyPostsReadIds = new Set<string>()
+  const lobbyPostsLastUnreadCountByProfile = new Map<string, number>()
+
+  function getLobbyPostsReadIds(profileId: string | null): Set<string> {
+    if (profileId === null) return new Set()
+    if (lobbyPostsReadProfileId !== profileId) {
+      lobbyPostsReadProfileId = profileId
+      lobbyPostsReadIds = new Set()
+      try {
+        const parsed: unknown = JSON.parse(localStorage.getItem(LOBBY_POSTS_READ_STORAGE_PREFIX + profileId) ?? '[]')
+        if (Array.isArray(parsed)) {
+          lobbyPostsReadIds = new Set(parsed.filter((value): value is string => typeof value === 'string'))
+        }
+      } catch {
+        // Повредено/недостъпно хранилище — всички се броят за непрочетени.
+      }
+    }
+    return lobbyPostsReadIds
+  }
+
+  function markLobbyPostRead(profileId: string | null, messageId: string): void {
+    if (profileId === null) return
+    const ids = getLobbyPostsReadIds(profileId)
+    if (ids.has(messageId)) return
+    ids.add(messageId)
+    // Най-старите записи отпадат първи (Set пази реда на добавяне).
+    while (ids.size > LOBBY_POSTS_READ_LIMIT) {
+      const oldest = ids.values().next().value
+      if (oldest === undefined) break
+      ids.delete(oldest)
+    }
+    try {
+      localStorage.setItem(LOBBY_POSTS_READ_STORAGE_PREFIX + profileId, JSON.stringify([...ids]))
+    } catch {
+      // Без хранилище — прочитането важи само за този раздел.
+    }
+  }
+
+  function computeLobbyPostsUnreadCount(profileId: string | null): number {
+    if (profileId === null) return 0
+    if (state.lobbyChatSubscribed) {
+      const read = getLobbyPostsReadIds(profileId)
+      const count = state.lobbyChatMessages.filter((m) => m.senderProfileId !== profileId && !read.has(m.messageId)).length
+      if (state.lobbyChatMessages.length > 0) lobbyPostsLastUnreadCountByProfile.set(profileId, count)
+      return count
+    }
+    return lobbyPostsLastUnreadCountByProfile.get(profileId) ?? 0
+  }
+
+  function openLobbyPostsPopupFromNotifications(): void {
+    state.notificationsOpen = false
+    renderNotificationsDropdownOnly()
+    state.lobbyPostsDeleteConfirmId = null
+    setLobbyChatFullscreen(true)
+  }
+
   function buildLobbyScreenState(): LobbyScreenState {
     const authSession = options.getAuthSession?.() ?? null
     const friendshipAction = createProfileFriendshipAction(authSession)
@@ -5643,6 +5736,8 @@ export function createLobbyFlowController(
               ? 'ludo-lobby'
             : state.currentScreen === 'svara'
               ? 'svara'
+          : state.currentScreen === 'settings'
+            ? 'settings'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -5865,9 +5960,13 @@ export function createLobbyFlowController(
       chatMessagesLoading: state.chatMessagesLoading,
       chatMessagesHasMore: state.chatMessagesHasMore,
       chatOlderMessagesLoading: state.chatOlderMessagesLoading,
+      chatOlderMessagesErrorText: state.chatOlderMessagesErrorText,
       chatMessageDeleteConfirm: state.chatMessageDeleteConfirm,
       chatMessageDeleteBusy: state.chatMessageDeleteBusy,
       chatMessageDeleteErrorText: state.chatMessageDeleteErrorText,
+      chatConversationDeleteConfirm: state.chatConversationDeleteConfirm,
+      chatConversationDeleteBusy: state.chatConversationDeleteBusy,
+      chatConversationDeleteErrorText: state.chatConversationDeleteErrorText,
       chatErrorText: state.chatErrorText,
       chatDraftByFriendshipId: state.chatDraftByFriendshipId,
       chatPendingImageByFriendshipId: state.chatPendingImageByFriendshipId,
@@ -5878,6 +5977,9 @@ export function createLobbyFlowController(
       lobbyChatSending: state.lobbyChatSending,
       lobbyChatErrorText: state.lobbyChatErrorText,
       lobbyChatFullscreen: state.lobbyChatFullscreen,
+      lobbyPostsDeleteConfirmId: state.lobbyPostsDeleteConfirmId,
+      lobbyPostsReadIds: getLobbyPostsReadIds(authSession?.profile.profileId ?? null),
+      lobbyPostsUnreadCount: computeLobbyPostsUnreadCount(authSession?.profile.profileId ?? null),
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
       registrationVerification: { ...state.registrationVerification, nowMs: Date.now() },
@@ -6440,6 +6542,9 @@ export function createLobbyFlowController(
       onProfileSelfDeleteClick: () => {
         getPopupCallbacks().onSelfDeleteClick()
       },
+      onProfileShopTabClick: (tab) => {
+        getPopupCallbacks().onShopTabClick(tab)
+      },
       onProfileDeleteCancel: () => {
         getPopupCallbacks().onDeleteCancel()
       },
@@ -6486,6 +6591,7 @@ export function createLobbyFlowController(
         // edit overlay-ят е стоял отгоре му (isFirstOpen би бил true) — без
         // това, entrance fade-in анимацията (140-160ms) би разкрила same Lobby.
         options.root.querySelector('[data-lobby-profile-editor-root="1"]')?.remove()
+        markLobbyRootHtmlStale()
         state.profilePopupOpen = true
         renderPopupOnly({ skipAnimation: true })
       },
@@ -7057,9 +7163,15 @@ export function createLobbyFlowController(
       onBlockedPlayersClick: () => {
         void openBlockedPlayersPopup()
       },
+      onSettingsClick: () => {
+        showSettingsPage()
+      },
       onBlockedPlayersClose: () => {
         state.blockedPlayersPopupOpen = false
-        render()
+        // Телефон: страницата /blocked се затваря само при преход от рамката —
+        // адресът го определя следващият преход (без междинен запис в историята).
+        if (isPhoneLayoutViewport()) scheduleRender()
+        else render()
       },
       onUnblockClick: (profileId) => {
         void unblockPlayer(profileId)
@@ -7135,6 +7247,15 @@ export function createLobbyFlowController(
       },
       onChatMessageDeleteConfirm: () => {
         void confirmChatMessageDelete()
+      },
+      onChatConversationDeleteClick: (friendshipId) => {
+        openChatConversationDeleteConfirm(friendshipId)
+      },
+      onChatConversationDeleteCancel: () => {
+        cancelChatConversationDelete()
+      },
+      onChatConversationDeleteConfirm: () => {
+        void confirmChatConversationDelete()
       },
       onChatSubmit: (friendshipId, body) => {
         void sendChatMessage(friendshipId, body)
@@ -7299,9 +7420,29 @@ export function createLobbyFlowController(
       },
       onLobbyChatDelete: (messageId) => {
         options.onLobbyChatDeleteMessage?.(messageId)
+        // Попъпът "Публикации": потвърждението се затваря; списъкът се
+        // обновява от lobby_chat_message_deleted (както досега).
+        if (state.lobbyPostsDeleteConfirmId !== null) {
+          state.lobbyPostsDeleteConfirmId = null
+          render()
+        }
       },
       onLobbyChatFullscreenChange: (isFullscreen) => {
         setLobbyChatFullscreen(isFullscreen)
+      },
+      onLobbyPostsRead: (messageIds) => {
+        // Само реално видените в попъпа публикации (виж observeLobbyPostsRead) —
+        // обикновените известия не се пипат; броячите се преизчисляват в render.
+        const profileId = options.getAuthSession?.()?.profile.profileId ?? null
+        for (const messageId of messageIds) markLobbyPostRead(profileId, messageId)
+        render()
+      },
+      onLobbyPostDeleteRequest: (messageId) => {
+        state.lobbyPostsDeleteConfirmId = messageId
+        render()
+      },
+      onNotificationLobbyPostsClick: () => {
+        openLobbyPostsPopupFromNotifications()
       },
       onLobbyChatWriteLockedTap: () => {
         openLobbyChatWriteLockedPopup()
@@ -8631,14 +8772,28 @@ export function createLobbyFlowController(
     // renderPopupOnly({skipAnimation:true}), вместо пълен Lobby render(), за
     // да няма нито един frame с разкрит гол Lobby между двата overlay екрана.
     options.root.querySelector('[data-lobby-profile-editor-root="1"]')?.remove()
+    markLobbyRootHtmlStale()
     renderPopupOnly({ skipAnimation: true })
   }
 
+  // Пазят от двойно изпращане (двоен tap/клик), докато заявката е в ход.
+  let isProfileNameChangeInFlight = false
+  let isProfileGalleryDeleteInFlight = false
+  let isChangePasswordInFlight = false
+
   async function submitProfileNameChange(displayName: string): Promise<void> {
+    if (isProfileNameChangeInFlight) return
     const targetProfileId = state.profileEditorTargetProfileId
-    const errorText = options.onProfileNameChangeSubmit
-      ? await options.onProfileNameChangeSubmit(targetProfileId, displayName)
-      : 'Смяната на име временно не е налична.'
+    isProfileNameChangeInFlight = true
+    const errorText = await (async () => {
+      try {
+        return options.onProfileNameChangeSubmit
+          ? await options.onProfileNameChangeSubmit(targetProfileId, displayName)
+          : 'Смяната на име временно не е налична.'
+      } finally {
+        isProfileNameChangeInFlight = false
+      }
+    })()
 
     if (errorText !== null) {
       state.profileNameChangeErrorText = errorText
@@ -9259,9 +9414,17 @@ export function createLobbyFlowController(
       return
     }
 
-    const errorText = options.onChangePasswordSubmit
-      ? await options.onChangePasswordSubmit(currentPassword, newPassword)
-      : 'Смяната на парола временно не е налична.'
+    if (isChangePasswordInFlight) return
+    isChangePasswordInFlight = true
+    const errorText = await (async () => {
+      try {
+        return options.onChangePasswordSubmit
+          ? await options.onChangePasswordSubmit(currentPassword, newPassword)
+          : 'Смяната на парола временно не е налична.'
+      } finally {
+        isChangePasswordInFlight = false
+      }
+    })()
 
     if (errorText !== null) {
       state.changePasswordErrorText = errorText
@@ -9275,10 +9438,18 @@ export function createLobbyFlowController(
   }
 
   async function deleteProfileGalleryImage(imageId: string): Promise<void> {
+    if (isProfileGalleryDeleteInFlight) return
     const targetProfileId = state.profileEditorTargetProfileId
-    const errorText = options.onProfileGalleryDelete
-      ? await options.onProfileGalleryDelete(targetProfileId, imageId)
-      : 'Изтриването на снимки временно не е налично.'
+    isProfileGalleryDeleteInFlight = true
+    const errorText = await (async () => {
+      try {
+        return options.onProfileGalleryDelete
+          ? await options.onProfileGalleryDelete(targetProfileId, imageId)
+          : 'Изтриването на снимки временно не е налично.'
+      } finally {
+        isProfileGalleryDeleteInFlight = false
+      }
+    })()
 
     if (errorText !== null) {
       state.profileEditorErrorText = errorText
@@ -12739,7 +12910,8 @@ export function createLobbyFlowController(
     if (!state.tournamentPartnerPickerOpen) return
     const container = options.root.querySelector<HTMLElement>('[data-tournament-partner-search-results="1"]')
     if (container === null) return
-    container.innerHTML = renderTournamentPartnerSearchSection(state)
+    // Светлият мобилен picker маркира контейнера — същият HTML като при пълен render.
+    container.innerHTML = renderTournamentPartnerSearchSection(state, container.dataset.tournamentPartnerSearchLight === '1')
     container.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-invite]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const profileId = btn.dataset.tournamentPartnerInvite ?? ''
@@ -17733,6 +17905,32 @@ export function createLobbyFlowController(
     scrollLobbyRootToTop()
   }
 
+  // "Настройки" (/settings) — светла мобилна страница само за регистриран на
+  // телефон (двете настройки за частните маси, преместени от камбанката).
+  // Иначе (desktop/таблет или гост) адресът се заменя с /lobby — същият
+  // подход като /blocked.
+  function showSettingsPage(): void {
+    if (!isPhoneLayoutViewport() || (options.getAuthSession?.() ?? null) === null) {
+      history.replaceState(null, '', '/lobby')
+      applyRouteSeo('/lobby')
+      switchToLobby()
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    closeLudoLobbyOverlay()
+    state.currentScreen = 'settings'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
   // "Не се сърди човече" lobby (списък с чакащи Ludo игри) — нормален
   // in-shell екран (navbar видим), не fullscreen overlay (виж
   // openLudoLobbyOverlay по-долу за mount механизма в data-ludo-lobby-mount
@@ -17837,12 +18035,14 @@ export function createLobbyFlowController(
     state.chatMessagesHasMore = false
     state.chatOldestMessageCursor = null
     state.chatOlderMessagesLoading = false
+    state.chatOlderMessagesErrorText = null
     state.chatErrorText = null
 
     if (shouldRenderLoading) {
       render()
     }
 
+    const openClearSeq = chatConversationClearSeq
     const result = await options.onChatMessagesLoad(friendshipId)
 
     if (!isActivePersonalChatConversation(friendshipId)) {
@@ -17854,6 +18054,15 @@ export function createLobbyFlowController(
     if (!result.ok) {
       state.chatErrorText = result.message
       render()
+      return
+    }
+
+    // Изтриване на разговор е пристигнало по време на зареждането — този
+    // отговор може да е отпреди него; зареждаме наново.
+    if (openClearSeq !== chatConversationClearSeq) {
+      state.chatMessagesFriendshipId = friendshipId
+      render()
+      void refreshChatAfterNotification(friendshipId)
       return
     }
 
@@ -17998,6 +18207,98 @@ export function createLobbyFlowController(
     render()
   }
 
+  /**
+   * Целият разговор е изтрит (от нас или от другия участник). Заредените
+   * съобщения влизат в deletedChatMessageIds — закъснели HTTP отговори не
+   * могат да ги върнат; по-старите страници и курсорът се нулират.
+   */
+  function clearChatConversationLocally(friendshipId: string): void {
+    chatConversationClearSeq += 1
+    const isLoaded = state.chatMessagesFriendshipId === friendshipId || isActivePersonalChatConversation(friendshipId)
+    if (isLoaded) {
+      for (const m of state.chatMessages) deletedChatMessageIds.add(m.messageId)
+      state.chatMessages = []
+      state.chatMessagesHasMore = false
+      state.chatOldestMessageCursor = null
+      state.chatOlderMessagesErrorText = null
+    }
+    if (state.chatMessageDeleteConfirm?.friendshipId === friendshipId && !state.chatMessageDeleteBusy) {
+      state.chatMessageDeleteConfirm = null
+      state.chatMessageDeleteErrorText = null
+    }
+    if (state.chatConversationDeleteConfirm?.friendshipId === friendshipId && !state.chatConversationDeleteBusy) {
+      state.chatConversationDeleteConfirm = null
+      state.chatConversationDeleteErrorText = null
+    }
+    const clear = (list: ChatConversationSnapshot[]) => list.map((c) => (
+      c.friendshipId === friendshipId ? { ...c, lastMessage: null, unreadCount: 0 } : c
+    ))
+    state.chatConversations = clear(state.chatConversations)
+    state.chatArchivedConversations = clear(state.chatArchivedConversations)
+  }
+
+  function openChatConversationDeleteConfirm(friendshipId: string): void {
+    if (state.chatConversationDeleteBusy) return
+    const conversation = state.chatConversations.find((c) => c.friendshipId === friendshipId)
+      ?? state.chatArchivedConversations.find((c) => c.friendshipId === friendshipId)
+      ?? null
+    // Бутонът се рендира само за разговори 'friend'; проверката тук е само
+    // UI защита — участието и видът се проверяват на сървъра.
+    if (conversation === null || conversation.kind !== 'friend') return
+    state.chatConversationDeleteConfirm = {
+      friendshipId,
+      displayName: conversation.friend.displayName?.trim() || 'Играч',
+    }
+    state.chatConversationDeleteErrorText = null
+    render()
+  }
+
+  function cancelChatConversationDelete(): void {
+    if (state.chatConversationDeleteBusy) return
+    state.chatConversationDeleteConfirm = null
+    state.chatConversationDeleteErrorText = null
+    render()
+  }
+
+  async function confirmChatConversationDelete(): Promise<void> {
+    const pending = state.chatConversationDeleteConfirm
+    if (pending === null || state.chatConversationDeleteBusy) return
+    if (!options.onChatConversationDelete) {
+      state.chatConversationDeleteErrorText = 'Чатът временно не е наличен.'
+      render()
+      return
+    }
+
+    state.chatConversationDeleteBusy = true
+    state.chatConversationDeleteErrorText = null
+    render()
+
+    const result = await options.onChatConversationDelete(pending.friendshipId)
+    state.chatConversationDeleteBusy = false
+
+    if (!result.ok) {
+      state.chatConversationDeleteErrorText = result.message
+      render()
+      return
+    }
+
+    state.chatConversationDeleteConfirm = null
+    clearChatConversationLocally(pending.friendshipId)
+    if (result.conversation !== null) {
+      const updated = result.conversation
+      const replace = (list: ChatConversationSnapshot[]) => list.map((c) => {
+        if (c.friendshipId !== updated.friendshipId) return c
+        return c.friend.isOnline !== undefined ? { ...updated, friend: { ...updated.friend, isOnline: c.friend.isOnline } } : updated
+      })
+      state.chatConversations = replace(state.chatConversations)
+      state.chatArchivedConversations = replace(state.chatArchivedConversations)
+    }
+    render()
+    // Съгласуване с authoritative състоянието (напр. ново съобщение от другия
+    // участник веднага след изтриването).
+    void refreshChatAfterNotification(pending.friendshipId)
+  }
+
   function mergeChatMessages(
     existing: readonly ChatMessageSnapshot[],
     incoming: readonly ChatMessageSnapshot[],
@@ -18056,8 +18357,9 @@ export function createLobbyFlowController(
       return
     }
 
-    const scrollAnchor = captureChatMessagesScrollAnchor()
+    const olderClearSeq = chatConversationClearSeq
     state.chatOlderMessagesLoading = true
+    state.chatOlderMessagesErrorText = null
     render()
 
     const result = await options.onChatMessagesLoad(friendshipId, state.chatOldestMessageCursor)
@@ -18070,12 +18372,22 @@ export function createLobbyFlowController(
 
     state.chatOlderMessagesLoading = false
 
-    if (!result.ok) {
-      state.chatErrorText = result.message
+    // Разговорът е изтрит междувременно — по-старата страница вече не съществува.
+    if (olderClearSeq !== chatConversationClearSeq) {
       render()
       return
     }
 
+    if (!result.ok) {
+      state.chatErrorText = result.message
+      state.chatOlderMessagesErrorText = result.message
+      render()
+      return
+    }
+
+    // Котвата — точно преди добавянето (не при старта на заявката): потребителят
+    // може да е продължил да скролва, докато заявката е била в движение.
+    const scrollAnchor = captureChatMessagesScrollAnchor()
     const merged = mergeChatMessages(state.chatMessages, result.messages)
     state.chatMessages = merged
     state.chatMessagesHasMore = result.hasMore
@@ -18406,6 +18718,7 @@ export function createLobbyFlowController(
       }
     }
 
+    const sendClearSeq = chatConversationClearSeq
     const result = await options.onChatSend(friendshipId, body, imageDataUrl)
 
     const nextUploading = new Set(state.chatUploadingFriendshipIds)
@@ -18428,6 +18741,16 @@ export function createLobbyFlowController(
     // успех от сървъра.
     state.chatDraftByFriendshipId = { ...state.chatDraftByFriendshipId, [friendshipId]: '' }
     clearChatPendingImage(friendshipId)
+    // Разговор е изтрит, докато заявката е била в движение — историята в
+    // отговора може да е отпреди изтриването; взимаме свежото състояние.
+    if (sendClearSeq !== chatConversationClearSeq) {
+      const restoreFocus = canRestoreComposerFocus(shouldRefocus)
+      await refreshChatAfterNotification(friendshipId)
+      if (restoreFocus) {
+        refocusPersonalChatComposer(friendshipId, 0)
+      }
+      return
+    }
     const isStillActiveChatConversation = isActivePersonalChatConversation(friendshipId)
     if (isStillActiveChatConversation) {
       // Merge, НЕ overwrite (§F в task brief-а) — result.messages е само
@@ -19282,6 +19605,7 @@ export function createLobbyFlowController(
     'more-games': '/games',
     'ludo-lobby': '/games/ludo',
     svara: '/games/svara',
+    settings: '/settings',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -19316,6 +19640,7 @@ export function createLobbyFlowController(
     '/more-games': 'more-games',
     '/games/ludo': 'ludo-lobby',
     '/games/svara': 'svara',
+    '/settings': 'settings',
   }
 
   const _loadPath = window.location.pathname
@@ -19343,6 +19668,14 @@ export function createLobbyFlowController(
   function syncUrlPath(): void {
     if (!_navigationReady || _pendingInitialNav) return
     if (document.getElementById('pwa-landing-overlay') !== null) return
+    // "Блокирани" на телефон — страница над текущия екран със собствен адрес.
+    if (isMobileBlockedPlayersPageOpen()) {
+      if (window.location.pathname !== BLOCKED_PLAYERS_PATH) {
+        history.pushState(null, '', BLOCKED_PLAYERS_PATH)
+        applyRouteSeo(BLOCKED_PLAYERS_PATH)
+      }
+      return
+    }
     // Dynamic screens manage their own URL via pushState — skip syncUrlPath for them
     if (state.currentScreen === 'admin-payment-detail') return
     if (state.currentScreen === 'tournament-detail') return
@@ -19354,7 +19687,30 @@ export function createLobbyFlowController(
     }
   }
 
+  function isMobileBlockedPlayersPageOpen(): boolean {
+    return state.blockedPlayersPopupOpen && isPhoneLayoutViewport() && (options.getAuthSession?.() ?? null) !== null
+  }
+
+  // /blocked (Назад/Напред, директно отваряне) — само регистриран на телефон.
+  // Иначе адресът се заменя с /lobby, без да се отваря попъпът.
+  function showBlockedPlayersFromRoute(): void {
+    if (isPhoneLayoutViewport() && (options.getAuthSession?.() ?? null) !== null) {
+      void openBlockedPlayersPopup()
+      return
+    }
+    history.replaceState(null, '', '/lobby')
+    applyRouteSeo('/lobby')
+    switchToLobby()
+    render()
+  }
+
   function navigateFromPath(path: string): void {
+    if (path === BLOCKED_PLAYERS_PATH) {
+      showBlockedPlayersFromRoute()
+      return
+    }
+    // Назад/Напред извън /blocked затваря страницата "Блокирани" на телефон.
+    if (isPhoneLayoutViewport()) state.blockedPlayersPopupOpen = false
     if (path === '/games/ludo' && !isLudoFeatureEnabled()) {
       showMoreGamesPage()
       return
@@ -19489,6 +19845,7 @@ export function createLobbyFlowController(
       case 'more-games': showMoreGamesPage(); break
       case 'ludo-lobby': showLudoLobbyPage(); break
       case 'svara': showSvaraPage(); break
+      case 'settings': showSettingsPage(); break
     }
   }
 
@@ -19583,6 +19940,8 @@ export function createLobbyFlowController(
       ? true
       : previousScroll.scrollHeight - previousScroll.scrollTop - previousScroll.clientHeight < 48
     const previousScrollTop = previousScroll?.scrollTop ?? 0
+    // Светлият мобилен вариант на чакалнята — само телефон; desktop/таблет — тъмният.
+    const isLightWaitingScreen = isPhoneLayoutViewport()
 
     options.root.innerHTML = renderPrivateRoomWaitingScreen({
       isLocked: room.kind === 'locked',
@@ -19619,7 +19978,9 @@ export function createLobbyFlowController(
         notice: viewerRole === 'member' ? getVisiblePrivateRoomPartnerNotice() : null,
         busy: state.privateRoomPartnerNoticeBusy,
         placement: 'inline',
+        light: isLightWaitingScreen,
       }),
+      light: isLightWaitingScreen,
     })
 
     attachPrivateRoomNoticeHandlers(options.root, {
@@ -20036,7 +20397,13 @@ export function createLobbyFlowController(
   // и оставя reconcile/директния fetch да свърши същинската работа, ако
   // клиентът наистина Е на началния екран в момента на reconnect-а.
   function reconcileLobbyChatSubscription(): void {
-    const shouldBeSubscribed = state.currentScreen === 'lobby'
+    // + докато е отворен светлият попъп "Публикации от Pika.bg" (камбанката);
+    // + на телефон за регистриран — на всеки екран (светлата камбанка брои
+    // непрочетените публикации навсякъде). Същият абонамент/история и live
+    // съобщения; по време на игра render() не стига дотук, а main.ts вика
+    // suspendLobbyChatForActiveRoom() както досега.
+    const isPhoneMember = isPhoneLayoutViewport() && (options.getAuthSession?.() ?? null) !== null
+    const shouldBeSubscribed = state.currentScreen === 'lobby' || state.lobbyChatFullscreen || isPhoneMember
 
     if (!shouldBeSubscribed) {
       if (state.lobbyChatSubscribed) {
@@ -20093,6 +20460,9 @@ export function createLobbyFlowController(
 
   function setLobbyChatFullscreen(value: boolean): void {
     state.lobbyChatFullscreen = value
+    if (!value) {
+      state.lobbyPostsDeleteConfirmId = null
+    }
     render()
   }
 
@@ -20211,6 +20581,9 @@ export function createLobbyFlowController(
     }
 
     renderLobby()
+    // Повторно (без промяна, ако HTML-ът е същият): светлият/тъмният вид и
+    // отстъпът над долната навигация се определят по току-що рендирания root.
+    syncPrivateRoomNoticeHost()
     // Transient "защо се променят Topics съобщенията" hint — консумиран
     // синхронно от renderLobbyScreen вътре в renderLobby() по-горе, нулира
     // се веднага след употреба (виж topicMessagesRenderReason в типа).
@@ -20590,6 +20963,12 @@ export function createLobbyFlowController(
       },
       onSelfDeleteClick: () => {
         options.onProfileSelfDeleteRequest?.()
+      },
+      onShopTabClick: (tab) => {
+        // Същият път като останалите "отвори магазина на раздел" входове
+        // (напр. openVipShopFromTopicsPopup): showShopPanel затваря профила.
+        state.shopActiveTab = tab
+        void showShopPanel()
       },
       onCampaignViewAllRewardsToggle: (_profileId) => {
         // §4: "Виж всички награди" разгъва/свива списъка В РАМКИТЕ на
@@ -21265,6 +21644,9 @@ export function createLobbyFlowController(
         options.onPrivateRoomInGameNotificationsChange?.(enabled)
         renderNotificationsDropdownOnly()
       },
+      onLobbyPostsClick: () => {
+        openLobbyPostsPopupFromNotifications()
+      },
       onPrivateRoomCreatedSoundChange: (enabled) => {
         state.privateRoomCreatedSoundEnabled = enabled
         options.onPrivateRoomCreatedSoundChange?.(enabled)
@@ -21461,7 +21843,7 @@ export function createLobbyFlowController(
       if (message.reason === 'insufficient_balance') {
         options.onLudoInsufficientBalanceEjected?.()
       } else {
-        _ludoLobbyController?.showMessage('Бяхте премахнат от създателя на играта.')
+        _ludoLobbyController?.showMessage('Бяхте премахнат от създателя на играта.', 'warning')
       }
       options.onLudoRoomsOpen?.()
       return true
@@ -22175,7 +22557,7 @@ export function createLobbyFlowController(
         // text/code match сам по себе си.
         if (_ludoSpectatorMatchId !== null && !_ludoController) {
           _ludoSpectatorMatchId = null
-          _ludoLobbyController?.showMessage('Играта вече не е налична за гледане.')
+          _ludoLobbyController?.showMessage('Играта вече не е налична за гледане.', 'info')
           options.onLudoGamesOpen?.()
           return true
         }
@@ -22425,6 +22807,15 @@ export function createLobbyFlowController(
       removeChatMessageLocally(message.friendshipId, message.messageId)
       render()
       void refreshChatConversationsAfterDeletion()
+      return true
+    }
+
+    if (message.type === 'chat_conversation_cleared') {
+      // Целият разговор е изтрит (от другия участник или от наш друг таб).
+      // Уведомлението „X изтри този чат.“ идва със свежия списък от сървъра.
+      clearChatConversationLocally(message.friendshipId)
+      render()
+      void refreshChatAfterNotification(message.friendshipId)
       return true
     }
 
@@ -23660,16 +24051,26 @@ export function createLobbyFlowController(
     const manualStartReady = isPrivateRoomManualStartReadyNoticeVisible()
     // Запълнената маса с ръчен старт има приоритет пред "прие" известието.
     const partnerNotice = getVisiblePrivateRoomPartnerNotice()
+    // Светлият мобилен вид (само телефон в светлия интерфейс): известията са
+    // в document.body, затова видът се определя по монтирания екран, а не по
+    // CSS родител. В светлата рамка долните известия застават над долната
+    // навигация (отстъпът включва safe-area); без навигация — досегашното място.
+    const lightContext = getMobileLightUiContext()
+    const noticeLight = {
+      light: lightContext !== null,
+      bottomOffset: lightContext === 'frame' ? GUEST_MOBILE_LOBBY_BOTTOM_NAV_CLEARANCE : undefined,
+      fontFamily: lightContext !== null ? MOBILE_LIGHT_FONT_FAMILY : undefined,
+    }
     // В чакалнята известието е вградено в самия екран (renderPrivateRoomWaitingRoom).
     const noticeHtml = state.currentScreen === 'private-room-waiting'
       ? ''
       : manualStartReady
-        ? renderPrivateRoomManualStartReadyNotice('bottom')
-        : renderPrivateRoomPartnerNotice({ notice: partnerNotice, busy: state.privateRoomPartnerNoticeBusy, placement: 'bottom' })
+        ? renderPrivateRoomManualStartReadyNotice('bottom', noticeLight)
+        : renderPrivateRoomPartnerNotice({ notice: partnerNotice, busy: state.privateRoomPartnerNoticeBusy, placement: 'bottom', ...noticeLight })
     // Краткото съобщение — само в лобито (в чакалнята е банер в самия екран).
     const toastText = isPrivateRoomInfoToastScreen() ? state.privateRoomInfoText : null
     schedulePrivateRoomInfoToastDismiss(toastText)
-    const html = noticeHtml + renderPrivateRoomInfoToast(toastText)
+    const html = noticeHtml + renderPrivateRoomInfoToast(toastText, noticeLight)
     const room = state.myPrivateRoom
 
     // Видимо известие → един таймер към крайния срок на масата (същия
@@ -24345,13 +24746,13 @@ export function createLobbyFlowController(
     },
     setPrivateRoomInGameNotificationsEnabled: (value) => {
       state.privateRoomInGameNotificationsEnabled = value
-      if (state.notificationsOpen) {
+      if (state.notificationsOpen || state.currentScreen === 'settings') {
         render()
       }
     },
     setPrivateRoomCreatedSoundEnabled: (value) => {
       state.privateRoomCreatedSoundEnabled = value
-      if (state.notificationsOpen) {
+      if (state.notificationsOpen || state.currentScreen === 'settings') {
         render()
       }
     },
@@ -24681,7 +25082,7 @@ export function createLobbyFlowController(
     navigateInitialPath: () => {
       _navigationReady = true
       applyRouteSeo(_loadPath || '/lobby')
-      const isKnownPath = _loadPath === '/games/ludo' || !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+\/games$/.test(_loadPath)
+      const isKnownPath = _loadPath === '/games/ludo' || _loadPath === BLOCKED_PLAYERS_PATH || !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+\/games$/.test(_loadPath)
       if (!_loadPath || !isKnownPath) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)

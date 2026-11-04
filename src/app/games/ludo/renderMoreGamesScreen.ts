@@ -1,3 +1,4 @@
+import { VIOLET_3D_BUTTON_CLASS } from '../../../ui/layout/violet3dButton'
 // "Игри" — lobby sub-screen. Засега съдържа една feature-flagged карта:
 // "Не се сърди човече" — кликуем банер (бутонът "ИГРАЙ" е нарисуван вътре
 // в самото изображение), обвит в златната рамка на action-card езика от
@@ -120,7 +121,7 @@ function renderLightMoreGamesScreen(showLudo: boolean, showSvara: boolean, isMem
           <div style="color:#17233C;font-size:18px;font-weight:800;">Свара</div>
           <div style="margin-top:4px;color:#667085;font-size:12px;font-weight:700;">Тестов достъп · В разработка</div>
         </div>
-        <span class="lobby-violet-btn" style="
+        <span class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="
           flex:0 0 auto;
           padding:9px 16px;
           border-radius:8px;

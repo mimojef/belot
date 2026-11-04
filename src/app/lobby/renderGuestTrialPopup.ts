@@ -1,4 +1,5 @@
 import { escapeHtml, GUEST_MOBILE_LOBBY_FONT_FAMILY } from './renderLobbyScreen.js'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 
 export type GuestTrialPopupState = {
   isOpen: boolean
@@ -86,13 +87,13 @@ function renderGuestTrialPopupLight(state: GuestTrialPopupState, signupBonus: nu
   const actions = limitReached
     ? `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px;">
-        <button type="button" class="lobby-violet-btn" data-guest-trial-register-button="1" style="${buttonBase}border:0;color:#FFFFFF;cursor:pointer;">Създай профил</button>
+        <button type="button" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" data-guest-trial-register-button="1" style="${buttonBase}border:0;color:#FFFFFF;cursor:pointer;">Създай профил</button>
         <button type="button" data-guest-trial-login-button="1" style="${buttonBase}border:1px solid #D0D5DD;background:#FFFFFF;color:#17233C;cursor:pointer;">Вход</button>
       </div>
     `
     : `
       <div style="display:flex;justify-content:center;margin-top:6px;">
-        <button type="button" class="lobby-violet-btn" data-guest-trial-play-button="1" ${state.isSubmitting ? 'disabled' : ''} style="${buttonBase}min-width:200px;padding:0 24px;border:0;color:#FFFFFF;cursor:${state.isSubmitting ? 'default' : 'pointer'};">${state.isSubmitting ? 'Зареждане…' : 'Играй'}</button>
+        <button type="button" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" data-guest-trial-play-button="1" ${state.isSubmitting ? 'disabled' : ''} style="${buttonBase}min-width:200px;padding:0 24px;border:0;color:#FFFFFF;cursor:${state.isSubmitting ? 'default' : 'pointer'};">${state.isSubmitting ? 'Зареждане…' : 'Играй'}</button>
       </div>
     `
 

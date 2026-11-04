@@ -73,6 +73,7 @@ export function createPartnerRatingNotification(options: {
           font-size:14px;
           font-weight:800;
           line-height:1.35;
+          overflow-wrap:anywhere;
           animation:partnerRatingNotifSlideIn 0.22s ease;
         "
       >

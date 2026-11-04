@@ -12,6 +12,25 @@ type NotificationController = {
 const AUTO_DISMISS_MS = 12_000
 const CONFIRMATION_DISMISS_MS = 4_000
 
+// Телефон (тесен екран или нисък хоризонтален тъч екран): картата заема
+// ширината на екрана, „Харесай“ минава под текста, а X остава до името.
+// Desktop изгледът не се променя.
+const PHONE_MEDIA_QUERY = '(max-width: 640px), (hover: none) and (pointer: coarse) and (max-height: 500px)'
+const PHONE_CARD_WIDTH_CSS = `
+  @media ${PHONE_MEDIA_QUERY} {
+    .like-notif-card { width:calc(100vw - 24px) !important; min-width:0 !important; max-width:420px !important; }
+  }
+`
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
 export function createProfileLikeNotification(options: {
   container: HTMLElement
   onLike: (profileId: string) => Promise<void>
@@ -67,7 +86,8 @@ export function createProfileLikeNotification(options: {
     if (confirmationName !== null) {
       const name = confirmationName
       options.container.innerHTML = `
-        <div style="
+        <style>${PHONE_CARD_WIDTH_CSS}</style>
+        <div class="like-notif-card" style="
           position:fixed;top:16px;left:50%;transform:translateX(-50%);
           z-index:99999;
           background:linear-gradient(135deg,rgba(18,14,6,0.98),rgba(10,8,3,0.98));
@@ -78,9 +98,9 @@ export function createProfileLikeNotification(options: {
           box-shadow:0 8px 40px rgba(0,0,0,0.85),0 0 24px rgba(212,175,55,0.08);
           min-width:320px;max-width:90vw;
         ">
-          <div style="font-size:28px;line-height:1;color:#e53e3e;">♥</div>
-          <div style="font-size:15px;font-weight:700;color:#fff;">
-            Вие харесахте профила на <span style="color:#d4af37;">${name}</span>
+          <div style="font-size:28px;line-height:1;color:#e53e3e;flex-shrink:0;">♥</div>
+          <div style="flex:1;min-width:0;font-size:15px;font-weight:700;color:#fff;overflow-wrap:anywhere;">
+            Вие харесахте профила на <span style="color:#d4af37;">${escapeHtml(name)}</span>
           </div>
         </div>
       `
@@ -94,7 +114,7 @@ export function createProfileLikeNotification(options: {
 
     const notif = current
     const avatarHtml = notif.fromAvatarUrl
-      ? `<img src="${notif.fromAvatarUrl}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;display:block;border:2px solid rgba(212,175,55,0.4);">`
+      ? `<img src="${escapeHtml(notif.fromAvatarUrl)}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;display:block;border:2px solid rgba(212,175,55,0.4);">`
       : `<div style="width:80px;height:80px;border-radius:10px;background:rgba(212,175,55,0.12);border:2px solid rgba(212,175,55,0.3);display:flex;align-items:center;justify-content:center;font-size:32px;flex-shrink:0;">👤</div>`
 
     options.container.innerHTML = `
@@ -112,8 +132,17 @@ export function createProfileLikeNotification(options: {
         }
         #like-notif-like-btn:hover { filter:brightness(1.15); transform:translateY(-1px); }
         #like-notif-close-btn:hover { filter:brightness(1.3); color:rgba(255,255,255,0.9) !important; }
+        ${PHONE_CARD_WIDTH_CSS}
+        @media ${PHONE_MEDIA_QUERY} {
+          .like-notif-card--notice { display:grid !important; grid-template-columns:80px minmax(0,1fr) auto; align-content:center; row-gap:8px; }
+          .like-notif-card--notice > .like-notif-avatar { grid-row:1 / span 2; align-self:start; }
+          .like-notif-card--notice > .like-notif-text { grid-column:2; grid-row:1; padding-top:4px; }
+          .like-notif-card--notice > .like-notif-actions { display:contents !important; }
+          .like-notif-card--notice #like-notif-close-btn { grid-column:3; grid-row:1; align-self:start; margin-top:4px; }
+          .like-notif-card--notice #like-notif-like-btn { grid-column:2 / span 2; grid-row:2; margin-bottom:3px; }
+        }
       </style>
-      <div style="
+      <div class="like-notif-card like-notif-card--notice" style="
         position:fixed;top:16px;left:50%;transform:translateX(-50%);
         z-index:99999;
         background:linear-gradient(135deg,rgba(18,14,6,0.98),rgba(10,8,3,0.98));
@@ -126,16 +155,16 @@ export function createProfileLikeNotification(options: {
         animation:likeNotifSlideIn 0.3s ease;
         overflow:hidden;
       ">
-        <div style="flex-shrink:0;">${avatarHtml}</div>
+        <div class="like-notif-avatar" style="flex-shrink:0;">${avatarHtml}</div>
 
-        <div style="flex:1;min-width:0;">
-          <div style="font-size:15px;font-weight:800;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-            ${notif.fromDisplayName}
+        <div class="like-notif-text" style="flex:1;min-width:0;">
+          <div style="font-size:15px;font-weight:800;color:#fff;line-height:1.25;overflow-wrap:anywhere;">
+            ${escapeHtml(notif.fromDisplayName)}
           </div>
           <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:2px;">хареса твоя профил</div>
         </div>
 
-        <div style="display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0;">
+        <div class="like-notif-actions" style="display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0;">
           <button id="like-notif-like-btn" type="button" style="
             padding:7px 14px;border:none;
             background:linear-gradient(135deg,#b8960c,#d4af37,#f0c040);

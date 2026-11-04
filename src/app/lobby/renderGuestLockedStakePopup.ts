@@ -1,4 +1,5 @@
 import { escapeHtml, GUEST_MOBILE_LOBBY_FONT_FAMILY } from './renderLobbyScreen.js'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 
 export type GuestLockedStakePopupState = {
   isOpen: boolean
@@ -57,7 +58,7 @@ function renderGuestLockedStakePopupLight(): string {
           <div style="font-size:22px;line-height:1.3;font-weight:900;color:#17233C;padding:0 22px;">${escapeHtml('Като гост не можете да играете на маса с този залог.')}</div>
           <div style="font-size:15px;line-height:1.5;color:#667085;font-weight:600;">${escapeHtml('Пробвайте маса със залог 5 000 или влезте в профила си.')}</div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:10px;margin-top:6px;">
-            <button type="button" class="lobby-violet-btn" data-guest-locked-stake-play-5000-button="1" style="height:46px;min-width:200px;padding:0 24px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:900;cursor:pointer;">Играй на 5 000</button>
+            <button type="button" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" data-guest-locked-stake-play-5000-button="1" style="height:46px;min-width:200px;padding:0 24px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:900;cursor:pointer;">Играй на 5 000</button>
             <div style="display:flex;align-items:center;justify-content:center;gap:10px;">
               <button type="button" data-guest-locked-stake-login-button="1" style="${linkStyle}">Вход</button>
               <span aria-hidden="true" style="width:1px;height:16px;background:#D0D5DD;"></span>

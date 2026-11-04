@@ -23,6 +23,8 @@
 // security НЕ зависи от това).
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
+import { MOBILE_LIGHT_PAGE_BACKGROUND } from '../../ui/layout/mobileLightPageBackground'
 
 // ─── Locator extraction ─────────────────────────────────────────────────────────
 
@@ -144,6 +146,8 @@ const DARK_THEME = {
   helper: '#ffffff',
   codeInput: 'width:100%;box-sizing:border-box;height:52px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:28px;font-weight:900;letter-spacing:10px;text-align:center;outline:none;',
   textInput: 'width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;',
+  // Класът на основния бутон: тъмната тема — без; светлата — общия 3D стил.
+  primaryClass: '',
   primary: 'width:100%;height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;',
   disabled: 'width:100%;height:46px;border:0;border-radius:8px;background:rgba(100,80,0,0.4);color:rgba(255,255,255,0.4);font-size:15px;font-weight:900;cursor:not-allowed;margin-top:4px;',
   secondary: 'width:100%;height:34px;border:0;background:transparent;color:rgba(255,255,255,0.72);font-size:13px;font-weight:800;cursor:pointer;',
@@ -161,7 +165,8 @@ const LIGHT_THEME: typeof DARK_THEME = {
   helper: '#667085',
   codeInput: "width:100%;box-sizing:border-box;height:56px;border-radius:8px;border:1px solid #D0D5DD;background:#FFFFFF;color:#17233C;padding:0 12px;font-family:inherit;font-size:28px;font-weight:800;letter-spacing:10px;text-align:center;outline:none;",
   textInput: 'width:100%;box-sizing:border-box;height:46px;border-radius:8px;border:1px solid #D0D5DD;background:#FFFFFF;color:#17233C;padding:0 12px;font-size:16px;font-weight:500;outline:none;font-family:inherit;',
-  primary: 'width:100%;height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#8961F0 0%,#7950E8 55%,#6C43DD 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.3),0 6px 14px rgba(121,80,232,0.28);color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;margin-top:4px;',
+  primaryClass: `class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}"`,
+  primary: 'width:100%;height:46px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;margin-top:4px;',
   disabled: 'width:100%;height:46px;border:0;border-radius:8px;background:#E4E7EC;color:#98A2B3;font-family:inherit;font-size:15px;font-weight:800;cursor:not-allowed;margin-top:4px;',
   secondary: 'width:100%;height:40px;border:0;background:transparent;color:#475467;font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;',
   error: 'border-radius:8px;border:1px solid #FECDCA;background:#FEF3F2;padding:10px 12px;color:#B42318;font-size:13px;font-weight:700;text-align:center;',
@@ -203,7 +208,7 @@ function buildInvalidHtml(): string {
       <div style="font-size:14px;line-height:1.55;color:${T.text};">
         Този линк за потвърждение не е валиден.
       </div>
-      <button type="button" data-verify-page-go-to-login="1" style="${T.primary}">Към вход</button>
+      <button type="button" data-verify-page-go-to-login="1" ${T.primaryClass} style="${T.primary}">Към вход</button>
       <button type="button" data-verify-page-go-to-register="1" style="${T.secondary}">Нова регистрация</button>
     </div>
   `
@@ -221,7 +226,7 @@ function buildExpiredHtml(): string {
         Можете да създадете нова регистрация.<br><br>
         <strong style="color:${T.title};">Важно:</strong> можете да използвате същия имейл адрес, който сте използвали преди. След изтичането на регистрацията той вече е освободен и може да бъде използван отново.
       </div>
-      <button type="button" data-verify-page-go-to-register="1" style="${T.primary}">Създай нова регистрация</button>
+      <button type="button" data-verify-page-go-to-register="1" ${T.primaryClass} style="${T.primary}">Създай нова регистрация</button>
     </div>
   `
 }
@@ -237,7 +242,7 @@ function buildInactiveHtml(): string {
       <div style="font-size:14px;line-height:1.55;color:${T.text};">
         Ако вече сте потвърдили регистрацията си, можете да влезете в профила си.
       </div>
-      <button type="button" data-verify-page-go-to-login="1" style="${T.primary}">Вход</button>
+      <button type="button" data-verify-page-go-to-login="1" ${T.primaryClass} style="${T.primary}">Вход</button>
       <button type="button" data-verify-page-go-to-register="1" style="${T.secondary}">Нова регистрация</button>
     </div>
   `
@@ -290,7 +295,7 @@ function buildFormHtml(state: Extract<RegistrationVerificationPageState, { phase
         Запомни ме на това устройство
       </label>
       ${errorBlock}
-      <button type="submit" data-verify-page-submit="1" style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
+      <button type="submit" data-verify-page-submit="1" ${state.submitting ? '' : T.primaryClass} style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
         ${state.submitting ? 'Проверка...' : 'Потвърди'}
       </button>
       <div style="display:flex;justify-content:center;gap:16px;flex-wrap:wrap;">
@@ -330,7 +335,7 @@ function buildDisplayNameHtml(state: Extract<RegistrationVerificationPageState, 
         <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:${T.helper};">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
       </label>
       ${errorBlock}
-      <button type="submit" data-verify-page-display-name-submit="1" style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
+      <button type="submit" data-verify-page-display-name-submit="1" ${state.submitting ? '' : T.primaryClass} style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
         ${state.submitting ? 'Запазване...' : 'Запази и продължи'}
       </button>
       <button type="button" data-verify-page-display-name-cancel="1" style="${T.secondary}">
@@ -367,7 +372,7 @@ function buildResendConfirmHtml(state: Extract<RegistrationVerificationPageState
         >
       </label>
       ${errorBlock}
-      <button type="submit" data-verify-page-resend-confirm-submit="1" style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
+      <button type="submit" data-verify-page-resend-confirm-submit="1" ${state.submitting ? '' : T.primaryClass} style="${state.submitting ? T.disabled : T.primary}" ${state.submitting ? 'disabled' : ''}>
         ${state.submitting ? 'Изпращане...' : 'Изпрати нов код'}
       </button>
       <button type="button" data-verify-page-resend-confirm-cancel="1" style="${T.secondary}">
@@ -380,7 +385,7 @@ function buildResendConfirmHtml(state: Extract<RegistrationVerificationPageState
 function buildSuccessHtml(state: Extract<RegistrationVerificationPageState, { phase: 'success' }>): string {
   const loginButton = state.autoLoginConfirmed
     ? ''
-    : `<button type="button" data-verify-page-go-to-login="1" style="${T.primary}">Вход</button>`
+    : `<button type="button" data-verify-page-go-to-login="1" ${T.primaryClass} style="${T.primary}">Вход</button>`
   const message = state.autoLoginConfirmed
     ? 'Регистрацията е активирана успешно. Влизате в профила си...'
     : 'Регистрацията е активирана успешно.<br>Можете да влезете в профила си.'
@@ -427,7 +432,7 @@ export function renderRegistrationVerificationPage(
   root.innerHTML = isPhone ? `
     <div data-standalone-light="1" style="
       position:fixed;inset:0;
-      background:#F5F7FC;color:#17233C;
+      background:${MOBILE_LIGHT_PAGE_BACKGROUND};color:#17233C;
       display:flex;flex-direction:column;align-items:center;
       padding:24px 16px;box-sizing:border-box;overflow-y:auto;
       font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;

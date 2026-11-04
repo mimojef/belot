@@ -45,16 +45,17 @@ export function createTournamentReclaimModal(options: {
     options.container.innerHTML = `
       <div
         data-tournament-reclaim-overlay="1"
+        data-mobile-notice-part="overlay"
         role="dialog"
         aria-modal="true"
         aria-live="assertive"
         style="position:fixed;inset:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(2,6,23,0.82);backdrop-filter:blur(2px);font-family:Inter,system-ui,sans-serif;"
       >
-        <div style="width:min(420px, calc(100vw - 32px));box-sizing:border-box;border:1px solid rgba(250,204,21,0.4);border-radius:10px;background:#101625;color:#f8fafc;box-shadow:0 24px 70px rgba(2,6,23,0.6);padding:22px 20px;text-align:center;">
-          <div style="font-size:13px;font-weight:900;color:#93c5fd;text-transform:uppercase;letter-spacing:0.04em;">${escapeHtml(tournamentName)}</div>
-          <div style="margin-top:12px;font-size:18px;font-weight:900;line-height:1.35;">Тече турнир с ваше участие.</div>
-          <div style="margin-top:8px;font-size:14px;line-height:1.5;color:rgba(248,250,252,0.75);">Играта ви временно е поета от бот.</div>
-          <button type="button" data-tournament-reclaim-button="1" style="margin-top:18px;width:100%;height:44px;border:0;border-radius:8px;background:#facc15;color:#1c1400;font-size:15px;font-weight:900;cursor:pointer;">Поеми играта</button>
+        <div data-mobile-notice-part="card" style="width:min(420px, calc(100vw - 32px));box-sizing:border-box;border:1px solid rgba(250,204,21,0.4);border-radius:10px;background:#101625;color:#f8fafc;box-shadow:0 24px 70px rgba(2,6,23,0.6);padding:22px 20px;text-align:center;">
+          <div data-mobile-notice-part="eyebrow" style="font-size:13px;font-weight:900;color:#93c5fd;text-transform:uppercase;letter-spacing:0.04em;">${escapeHtml(tournamentName)}</div>
+          <div data-mobile-notice-part="title" style="margin-top:12px;font-size:18px;font-weight:900;line-height:1.35;">Тече турнир с ваше участие.</div>
+          <div data-mobile-notice-part="text" style="margin-top:8px;font-size:14px;line-height:1.5;color:rgba(248,250,252,0.75);">Играта ви временно е поета от бот.</div>
+          <button type="button" data-tournament-reclaim-button="1" data-mobile-notice-part="primary" style="margin-top:18px;width:100%;height:44px;border:0;border-radius:8px;background:#facc15;color:#1c1400;font-size:15px;font-weight:900;cursor:pointer;">Поеми играта</button>
         </div>
       </div>
     `

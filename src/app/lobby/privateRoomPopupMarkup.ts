@@ -6,6 +6,7 @@
 // е безопасно — еднакви data-* атрибути, wiring-ът се прави отделно във
 // всеки от двата файла (различни render/wire дървета).
 import type { Team } from '../network/createGameServerClient'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 
 function escapeHtml(value: string): string {
   return value
@@ -81,7 +82,7 @@ export const PRIVATE_ROOM_POPUP_STYLES = `
     cursor:pointer;
   }
 
-  .prw-confirm-yes {
+  .prw-confirm-yes:not(.lobby-violet-btn) {
     border:0;
     background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
     color:#101010;
@@ -181,7 +182,7 @@ export const PRIVATE_ROOM_POPUP_STYLES = `
     color:#f87171;
   }
 
-  .prw-invite-send-btn {
+  .prw-invite-send-btn:not(.lobby-violet-btn) {
     flex-shrink:0;
     height:32px;
     padding:0 14px;
@@ -194,7 +195,7 @@ export const PRIVATE_ROOM_POPUP_STYLES = `
     cursor:pointer;
   }
 
-  .prw-invite-send-btn:disabled {
+  .prw-invite-send-btn:not(.lobby-violet-btn):disabled {
     background:rgba(255,255,255,0.10);
     color:rgba(248,250,252,0.4);
     cursor:not-allowed;
@@ -228,6 +229,151 @@ export const PRIVATE_ROOM_POPUP_STYLES = `
   .prw-invite-row[hidden],
   .prw-invite-empty[hidden] {
     display:none;
+  }
+`
+
+// Светъл мобилен вариант на prw-* попъпите — само под data-private-room-light="1"
+// (светлият списък "Частни маси"); тъмните/desktop остават непокътнати.
+// Основният бутон получава и .lobby-violet-btn (фонът идва от класа в style.css).
+export const PRIVATE_ROOM_POPUP_LIGHT_STYLES = `
+  [data-private-room-light="1"] .prw-popup-backdrop {
+    background:rgba(16,24,40,0.45);
+    padding:16px;
+    box-sizing:border-box;
+    overflow-y:auto;
+  }
+
+  [data-private-room-light="1"] .prw-popup-box {
+    margin:auto;
+    box-sizing:border-box;
+    background:#FFFFFF;
+    border:1px solid #E4E7EC;
+    border-radius:16px;
+    box-shadow:0 20px 48px rgba(16,24,40,0.18);
+    padding:20px;
+    gap:14px;
+  }
+
+  [data-private-room-light="1"] .prw-popup-title {
+    font-size:18px;
+    font-weight:800;
+    line-height:1.25;
+    color:#17233C;
+  }
+
+  [data-private-room-light="1"] .prw-popup-close-x + .prw-popup-title {
+    padding-right:40px;
+  }
+
+  [data-private-room-light="1"] .prw-popup-text {
+    font-size:14px;
+    font-weight:500;
+    line-height:1.5;
+    color:#111827;
+    overflow-wrap:anywhere;
+  }
+
+  [data-private-room-light="1"] .prw-popup-close-x {
+    top:12px;
+    right:12px;
+    width:36px;
+    height:36px;
+    border:0;
+    border-radius:8px;
+    background:#F2F4F7;
+    color:#667085;
+    font-family:inherit;
+    font-size:15px;
+  }
+
+  [data-private-room-light="1"] .prw-confirm-yes,
+  [data-private-room-light="1"] .prw-confirm-cancel {
+    min-width:0;
+    height:44px;
+    border-radius:10px;
+    font-family:inherit;
+    font-size:14px;
+    font-weight:800;
+  }
+
+  [data-private-room-light="1"] .prw-confirm-yes.lobby-violet-btn {
+    border:0;
+    color:#FFFFFF;
+  }
+
+  [data-private-room-light="1"] .prw-confirm-cancel {
+    border:1px solid #D0D5DD;
+    background:#FFFFFF;
+    color:#344054;
+  }
+
+  [data-private-room-light="1"] .prw-invite-empty {
+    color:#667085;
+    font-weight:600;
+  }
+
+  [data-private-room-light="1"] .prw-invite-row {
+    background:#F9FAFB;
+    border:1px solid #EAECF0;
+  }
+
+  [data-private-room-light="1"] .prw-invite-avatar {
+    background:#F4F0FF;
+    border-color:#D9CCFF;
+  }
+
+  [data-private-room-light="1"] .prw-invite-name {
+    color:#111827;
+  }
+
+  [data-private-room-light="1"] .prw-invite-status {
+    font-weight:700;
+  }
+
+  [data-private-room-light="1"] .prw-invite-status-online {
+    color:#067647;
+  }
+
+  [data-private-room-light="1"] .prw-invite-status-offline {
+    color:#667085;
+  }
+
+  [data-private-room-light="1"] .prw-invite-status-busy {
+    color:#B42318;
+  }
+
+  [data-private-room-light="1"] .prw-invite-send-btn.lobby-violet-btn {
+    flex-shrink:0;
+    height:34px;
+    padding:0 14px;
+    border:0;
+    border-radius:8px;
+    color:#FFFFFF;
+    font-family:inherit;
+    font-size:12.5px;
+    font-weight:800;
+    cursor:pointer;
+  }
+
+  [data-private-room-light="1"] .prw-partner-search {
+    border-color:#D0D5DD;
+    background:#FFFFFF;
+    color:#111827;
+    font-family:inherit;
+    color-scheme:light;
+  }
+
+  [data-private-room-light="1"] .prw-partner-search::placeholder {
+    color:#98A2B3;
+  }
+
+  [data-private-room-light="1"] .prw-partner-search:focus {
+    border-color:#7950E8;
+    box-shadow:0 0 0 3px rgba(121,80,232,0.15);
+  }
+
+  [data-private-room-light="1"] .prw-partner-notice {
+    font-family:inherit;
   }
 `
 
@@ -265,6 +411,10 @@ export function getPrivateRoomPartnerNoticeText(notice: PrivateRoomPartnerNotice
 const NOTICE_BUTTON_BASE = 'flex:1 1 140px;min-height:44px;padding:8px 12px;border-radius:10px;font-family:inherit;font-size:14px;font-weight:900;line-height:1.2;cursor:pointer;white-space:normal;overflow-wrap:anywhere;'
 const NOTICE_BUTTON_PRIMARY = `${NOTICE_BUTTON_BASE}border:0;background:linear-gradient(135deg,#7c3aed,#a78bfa);color:#fff;`
 const NOTICE_BUTTON_SECONDARY = `${NOTICE_BUTTON_BASE}border:1px solid rgba(255,255,255,0.22);background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.88);`
+// Светлият вариант (чакалнята на телефон): основният бутон е .lobby-violet-btn
+// — без собствен фон, той идва от класа.
+const NOTICE_BUTTON_PRIMARY_LIGHT = `${NOTICE_BUTTON_BASE}border:0;color:#FFFFFF;font-weight:800;`
+const NOTICE_BUTTON_SECONDARY_LIGHT = `${NOTICE_BUTTON_BASE}border:1px solid #D0D5DD;background:#FFFFFF;color:#344054;font-weight:800;`
 
 // 'inline' — в чакалнята: в потока на екрана (под бутоните), без да закрива
 // СТАРТ или полето за чат.
@@ -277,9 +427,22 @@ function renderPrivateRoomNoticeCard(params: {
   accent: 'violet' | 'green' | 'gold'
   actionsHtml: string
   placement: PrivateRoomNoticePlacement
+  light?: boolean
+  /** 'bottom' в светлата рамка: отстоянието от долния ръб (над долната навигация, с safe-area). */
+  bottomOffset?: string
+  /** Шрифтът на светлия дизайн за известията в document.body (извън рамката). */
+  fontFamily?: string
 }): string {
-  const border = params.accent === 'green' ? 'rgba(74,222,128,0.5)' : params.accent === 'gold' ? 'rgba(244,201,91,0.6)' : 'rgba(167,139,250,0.55)'
-  const titleColor = params.accent === 'green' ? '#86efac' : params.accent === 'gold' ? '#f4c95b' : 'rgba(196,181,253,0.85)'
+  const light = params.light === true
+  const border = light
+    ? (params.accent === 'green' ? '#ABEFC6' : params.accent === 'gold' ? '#FEC84B' : '#D9CCFF')
+    : (params.accent === 'green' ? 'rgba(74,222,128,0.5)' : params.accent === 'gold' ? 'rgba(244,201,91,0.6)' : 'rgba(167,139,250,0.55)')
+  const titleColor = light
+    ? (params.accent === 'green' ? '#067647' : params.accent === 'gold' ? '#B54708' : '#6941C6')
+    : (params.accent === 'green' ? '#86efac' : params.accent === 'gold' ? '#f4c95b' : 'rgba(196,181,253,0.85)')
+  const cardStyle = light
+    ? `background:#FFFFFF;border:1px solid ${border};border-radius:12px;padding:14px;box-shadow:0 1px 2px rgba(16,24,40,0.05);display:grid;gap:10px;box-sizing:border-box;`
+    : `background:linear-gradient(160deg,#1c1c33,#13132a);border:1.5px solid ${border};border-radius:14px;padding:14px;box-shadow:0 10px 36px rgba(0,0,0,0.75);display:grid;gap:10px;box-sizing:border-box;`
   return `
     <style>
       /* Лоби: долу (мобилното лоби няма долна навигация — менюто е горе).
@@ -316,10 +479,10 @@ function renderPrivateRoomNoticeCard(params: {
         }
       }
     </style>
-    <div class="prw-partner-notice" data-placement="${params.placement}" ${params.dataAttr} role="status" aria-live="polite">
-      <div style="background:linear-gradient(160deg,#1c1c33,#13132a);border:1.5px solid ${border};border-radius:14px;padding:14px;box-shadow:0 10px 36px rgba(0,0,0,0.75);display:grid;gap:10px;box-sizing:border-box;">
+    <div class="prw-partner-notice" data-placement="${params.placement}" ${params.dataAttr} role="status" aria-live="polite"${params.placement === 'bottom' && (params.bottomOffset !== undefined || params.fontFamily !== undefined) ? ` style="${params.bottomOffset !== undefined ? `bottom:${params.bottomOffset};` : ''}${params.fontFamily !== undefined ? `font-family:${params.fontFamily};` : ''}"` : ''}>
+      <div style="${cardStyle}">
         <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:${titleColor};">${escapeHtml(params.title)}</div>
-        <div data-private-room-notice-text="1" style="font-size:15px;font-weight:700;color:#ffffff;line-height:1.4;overflow-wrap:anywhere;">${escapeHtml(params.text)}</div>
+        <div data-private-room-notice-text="1" style="font-size:15px;font-weight:700;color:${light ? '#111827' : '#ffffff'};line-height:1.4;overflow-wrap:anywhere;">${escapeHtml(params.text)}</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">${params.actionsHtml}</div>
       </div>
     </div>
@@ -330,15 +493,22 @@ export function renderPrivateRoomPartnerNotice(params: {
   notice: PrivateRoomPartnerNoticeView | null
   busy: boolean
   placement: PrivateRoomNoticePlacement
+  light?: boolean
+  bottomOffset?: string
+  fontFamily?: string
 }): string {
   const notice = params.notice
   if (notice === null) return ''
   const disabled = params.busy ? 'disabled' : ''
+  const primary = params.light === true
+    ? `class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="${NOTICE_BUTTON_PRIMARY_LIGHT}"`
+    : `style="${NOTICE_BUTTON_PRIMARY}"`
+  const secondaryStyle = params.light === true ? NOTICE_BUTTON_SECONDARY_LIGHT : NOTICE_BUTTON_SECONDARY
   const actionsHtml = notice.kind === 'accepted'
-    ? `<button type="button" data-private-room-partner-notice-dismiss="1" style="${NOTICE_BUTTON_PRIMARY}" ${disabled}>ОК</button>`
+    ? `<button type="button" data-private-room-partner-notice-dismiss="1" ${primary} ${disabled}>ОК</button>`
     : `
-      <button type="button" data-private-room-partner-notice-invite="1" style="${NOTICE_BUTTON_PRIMARY}" ${disabled}>Покани друг</button>
-      <button type="button" data-private-room-partner-notice-release="1" style="${NOTICE_BUTTON_SECONDARY}" ${disabled}>Освободи мястото</button>
+      <button type="button" data-private-room-partner-notice-invite="1" ${primary} ${disabled}>Покани друг</button>
+      <button type="button" data-private-room-partner-notice-release="1" style="${secondaryStyle}" ${disabled}>Освободи мястото</button>
     `
   return renderPrivateRoomNoticeCard({
     dataAttr: `data-private-room-partner-notice="${notice.kind}"`,
@@ -347,18 +517,30 @@ export function renderPrivateRoomPartnerNotice(params: {
     accent: notice.kind === 'accepted' ? 'green' : 'violet',
     actionsHtml,
     placement: params.placement,
+    light: params.light,
+    bottomOffset: params.bottomOffset,
+    fontFamily: params.fontFamily,
   })
 }
 
 // Маса с ръчен старт е 4/4 и чака домакина ("Изчакай в лоби").
-export function renderPrivateRoomManualStartReadyNotice(placement: PrivateRoomNoticePlacement): string {
+export function renderPrivateRoomManualStartReadyNotice(
+  placement: PrivateRoomNoticePlacement,
+  lightOptions: { light: boolean; bottomOffset?: string; fontFamily?: string } = { light: false },
+): string {
+  const primary = lightOptions.light
+    ? `class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="${NOTICE_BUTTON_PRIMARY_LIGHT}"`
+    : `style="${NOTICE_BUTTON_PRIMARY}"`
   return renderPrivateRoomNoticeCard({
     dataAttr: 'data-private-room-manual-start-notice="1"',
     title: 'Частна маса',
     text: PRIVATE_ROOM_MANUAL_START_READY_TEXT,
     accent: 'gold',
-    actionsHtml: `<button type="button" data-private-room-manual-start-notice-open="1" style="${NOTICE_BUTTON_PRIMARY}">Към масата</button>`,
+    actionsHtml: `<button type="button" data-private-room-manual-start-notice-open="1" ${primary}>Към масата</button>`,
     placement,
+    light: lightOptions.light,
+    bottomOffset: lightOptions.bottomOffset,
+    fontFamily: lightOptions.fontFamily,
   })
 }
 
@@ -366,8 +548,24 @@ export function renderPrivateRoomManualStartReadyNotice(placement: PrivateRoomNo
 // и т.н.) — преместено от root-а на лобито в същия изолиран контейнер, за да
 // не прерисува страницата при поява/скриване. Скрива се след 3 сек (както
 // преди) — таймерът е в контролера.
-export function renderPrivateRoomInfoToast(text: string | null): string {
+export function renderPrivateRoomInfoToast(text: string | null, lightOptions: { light: boolean; fontFamily?: string } = { light: false }): string {
   if (!text) return ''
+  // Светъл мобилен вариант — същото място (център), време и текст.
+  if (lightOptions.light) {
+    return `
+    <div data-private-room-info-toast="1" style="position:fixed;inset:0;z-index:9500;display:flex;align-items:center;justify-content:center;pointer-events:none;padding:0 16px;${lightOptions.fontFamily !== undefined ? `font-family:${lightOptions.fontFamily};` : ''}">
+      <div role="status" aria-live="polite" style="pointer-events:auto;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:12px;padding:18px 22px;text-align:center;box-shadow:0 20px 48px rgba(16,24,40,0.18);min-width:min(260px, calc(100vw - 48px));max-width:calc(100vw - 48px);box-sizing:border-box;animation:prInfoIn 0.18s ease both;">
+        <style>
+          @keyframes prInfoIn {
+            from { opacity:0; transform:scale(0.92); }
+            to   { opacity:1; transform:scale(1); }
+          }
+        </style>
+        <div style="font-size:15px;font-weight:600;line-height:1.45;color:#111827;overflow-wrap:anywhere;">${escapeHtml(text)}</div>
+      </div>
+    </div>
+  `
+  }
   return `
     <div data-private-room-info-toast="1" style="position:fixed;inset:0;z-index:9500;display:flex;align-items:center;justify-content:center;pointer-events:none;padding:0 16px;">
       <div style="pointer-events:auto;background:#1a1a2e;border:1px solid rgba(167,139,250,0.5);border-radius:16px;padding:22px 28px;text-align:center;box-shadow:0 8px 48px rgba(0,0,0,0.8);min-width:min(260px, calc(100vw - 48px));max-width:calc(100vw - 48px);box-sizing:border-box;animation:prInfoIn 0.18s ease both;">
@@ -451,6 +649,7 @@ export function renderPrivateRoomPartnerPickerPopup(params: {
   candidates: PrivateRoomPartnerCandidate[] | null
   query: string
   inviteInFlight: boolean
+  light?: boolean
 }): string {
   if (!params.isOpen) return ''
 
@@ -491,7 +690,7 @@ export function renderPrivateRoomPartnerPickerPopup(params: {
           <button
             type="button"
             data-private-room-partner-send="${escapeHtml(c.profileId)}"
-            class="prw-invite-send-btn"
+            class="prw-invite-send-btn${params.light === true ? ` lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}` : ''}"
             ${canInvite ? '' : 'disabled'}
           >Покани</button>
         </div>
@@ -524,7 +723,7 @@ export function renderPrivateRoomPartnerPickerPopup(params: {
   `
 }
 
-export function renderPrivateRoomJoinConfirmPopup(popup: { team: Team } | null): string {
+export function renderPrivateRoomJoinConfirmPopup(popup: { team: Team } | null, light = false): string {
   if (!popup) return ''
   return `
     <div class="prw-popup-backdrop" data-private-room-join-popup-backdrop="1">
@@ -532,7 +731,7 @@ export function renderPrivateRoomJoinConfirmPopup(popup: { team: Team } | null):
         <div class="prw-popup-title">Влизане в частна маса</div>
         <div class="prw-popup-text">Вие ще седнете на тази маса в Отбор ${popup.team === 'A' ? 'А' : 'Б'}.</div>
         <div class="prw-popup-actions">
-          <button type="button" data-private-room-join-popup-confirm="1" class="prw-confirm-yes">Влез</button>
+          <button type="button" data-private-room-join-popup-confirm="1" class="prw-confirm-yes${light ? ` lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}` : ''}">Влез</button>
           <button type="button" data-private-room-join-popup-cancel="1" class="prw-confirm-cancel">Отказ</button>
         </div>
       </div>
@@ -576,14 +775,14 @@ export const PRIVATE_ROOM_CREATOR_BLOCKED_POPUP_LINES = [
   'Създателят ви е блокирал.',
 ] as const
 
-export function renderPrivateRoomCreatorBlockedPopup(isOpen: boolean): string {
+export function renderPrivateRoomCreatorBlockedPopup(isOpen: boolean, light = false): string {
   if (!isOpen) return ''
   return `
     <div class="prw-popup-backdrop" data-private-room-creator-blocked-popup-backdrop="1">
       <div class="prw-popup-box" role="alertdialog" aria-modal="true">
         <div class="prw-popup-text">${PRIVATE_ROOM_CREATOR_BLOCKED_POPUP_LINES.map(escapeHtml).join('<br>')}</div>
         <div class="prw-popup-actions">
-          <button type="button" data-private-room-creator-blocked-popup-ok="1" class="prw-confirm-yes">ОК</button>
+          <button type="button" data-private-room-creator-blocked-popup-ok="1" class="prw-confirm-yes${light ? ` lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}` : ''}">ОК</button>
         </div>
       </div>
     </div>
@@ -595,14 +794,14 @@ export function renderPrivateRoomCreatorBlockedPopup(isOpen: boolean): string {
 // ('private_room_partner_insufficient_balance') или нужното ниво
 // ('private_room_partner_level_required'). Текстът идва от сървъра; ОК само
 // затваря — резервацията не се променя.
-export function renderPrivateRoomPartnerEligibilityPopup(text: string | null): string {
+export function renderPrivateRoomPartnerEligibilityPopup(text: string | null, light = false): string {
   if (!text) return ''
   return `
     <div class="prw-popup-backdrop" data-private-room-partner-eligibility-popup="1">
       <div class="prw-popup-box" role="alertdialog" aria-modal="true">
         <div class="prw-popup-text" data-private-room-partner-eligibility-text="1">${escapeHtml(text)}</div>
         <div class="prw-popup-actions">
-          <button type="button" data-private-room-partner-eligibility-ok="1" class="prw-confirm-yes">ОК</button>
+          <button type="button" data-private-room-partner-eligibility-ok="1" class="prw-confirm-yes${light ? ` lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}` : ''}">ОК</button>
         </div>
       </div>
     </div>
@@ -628,6 +827,7 @@ export function renderPrivateRoomInviteFriendsPopup(params: {
   isOpen: boolean
   freeSeats: number
   friends: PrivateRoomInviteEligibleFriend[] | null
+  light?: boolean
 }): string {
   if (!params.isOpen) return ''
 
@@ -653,7 +853,7 @@ export function renderPrivateRoomInviteFriendsPopup(params: {
               <button
                 type="button"
                 data-private-room-invite-send="${escapeHtml(f.profileId)}:${escapeHtml(f.displayName)}"
-                class="prw-invite-send-btn"
+                class="prw-invite-send-btn${params.light === true ? ` lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}` : ''}"
                 ${buttonDisabled ? 'disabled' : ''}
               >${buttonLabel}</button>
             </div>

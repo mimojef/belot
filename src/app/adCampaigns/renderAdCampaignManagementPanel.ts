@@ -1,5 +1,6 @@
 import type { AdCampaignManagementDto } from '../network/createGameServerClient'
 import { renderAdCampaignThumbnailPreview, attachAdCampaignThumbnailPreviewHandlers } from './renderAdCampaignThumbnailPreview'
+import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 
 export type AdCampaignManagementState = {
   isAdCampaignManager: boolean
@@ -28,6 +29,95 @@ function fmtDate(value: string | null): string {
   const date = new Date(value)
   if (!Number.isFinite(date.getTime())) return value
   return date.toLocaleString('bg-BG', { dateStyle: 'short', timeStyle: 'short' })
+}
+
+// Светъл мобилен вариант (само телефон, в общата светла рамка на лобито):
+// бели карти върху общия фон, виолетов 3D бутон (.lobby-violet-btn) за
+// "Създай", светли вторични бутони. Полетата, текстовете и data-* атрибутите
+// са същите като в тъмния вариант.
+const LIGHT_CARD_STYLE = 'box-sizing:border-box;min-width:0;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:12px;box-shadow:0 6px 18px rgba(34,30,80,0.07);'
+const LIGHT_SECONDARY_BUTTON_STYLE = 'min-height:40px;border:1px solid #D0D5DD;border-radius:8px;background:#FFFFFF;color:#6941C6;padding:0 14px;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;'
+const LIGHT_NEUTRAL_BUTTON_STYLE = 'min-height:40px;border:1px solid #D0D5DD;border-radius:8px;background:#FFFFFF;color:#344054;padding:0 14px;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;'
+const LIGHT_DANGER_SECONDARY_BUTTON_STYLE = 'min-height:40px;border:1px solid #FECDCA;border-radius:8px;background:#FFFFFF;color:#B42318;padding:0 14px;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;'
+const LIGHT_DANGER_BUTTON_STYLE = 'min-height:40px;border:0;border-radius:8px;background:#D92D20;color:#FFFFFF;padding:0 14px;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;'
+const LIGHT_ERROR_BOX_STYLE = 'padding:9px 12px;border:1px solid #FECDCA;background:#FEF3F2;border-radius:8px;color:#B42318;font-size:13px;font-weight:700;line-height:1.4;overflow-wrap:anywhere;'
+const LIGHT_INPUT_STYLE = 'width:100%;height:44px;box-sizing:border-box;padding:0 12px;background:#FFFFFF;border:1px solid #D0D5DD;border-radius:8px;color:#111827;font-family:inherit;font-size:16px;color-scheme:light;'
+const LIGHT_EMPTY_BOX_STYLE = 'padding:18px 12px;border:1px dashed #D0D5DD;border-radius:12px;background:#FFFFFF;text-align:center;font-size:14px;font-weight:600;line-height:1.45;color:#667085;'
+
+function lightShell(body: string): string {
+  return `
+    <section data-ad-campaigns-light="1" style="color:#17233C;">
+      <style>
+        [data-ad-campaigns-light="1"] input[type="file"] {
+          width:100%;max-width:100%;box-sizing:border-box;padding:6px;border:1px dashed #D0D5DD;border-radius:8px;
+          background:#F9FAFB;color:#475467;font-family:inherit;font-size:13px;color-scheme:light;
+        }
+        [data-ad-campaigns-light="1"] input[type="file"]::file-selector-button {
+          margin-right:10px;height:34px;padding:0 12px;border:1px solid #D0D5DD;border-radius:8px;
+          background:#FFFFFF;color:#6941C6;font-family:inherit;font-size:13px;font-weight:800;cursor:pointer;
+        }
+        [data-ad-campaigns-light="1"] button:disabled { opacity:0.6;cursor:default; }
+      </style>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+        <h1 style="font-size:22px;line-height:1.2;margin:0;font-weight:800;color:#17233C;">Реклами</h1>
+        <button type="button" data-ad-campaigns-back="1" style="${LIGHT_NEUTRAL_BUTTON_STYLE}">Назад</button>
+      </div>
+      ${body}
+    </section>
+  `
+}
+
+function renderLightCampaignRow(row: AdCampaignManagementDto, state: AdCampaignManagementState): string {
+  const creatorLabel = row.createdByDisplayName ?? '— (изтрит профил)'
+  const isConfirmingDelete = state.deleteConfirmCampaignId === row.campaignId
+
+  return `
+    <div style="${LIGHT_CARD_STYLE}display:flex;gap:12px;padding:12px;flex-wrap:wrap;">
+      <button type="button" data-ad-campaign-thumbnail-preview-open="${escapeHtml(row.imageUrl)}" title="Преглед на изображението" aria-label="Преглед на изображението" style="width:120px;height:80px;flex-shrink:0;border:1px solid #EAECF0;padding:0;background:#F2F4F7;border-radius:8px;cursor:pointer;overflow:hidden;line-height:0;">
+        <img src="${escapeHtml(row.imageUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;pointer-events:none;">
+      </button>
+      <div style="flex:1 1 150px;min-width:0;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-size:13px;font-weight:700;color:${row.targetUrl === null ? '#98A2B3' : '#17233C'};overflow-wrap:anywhere;">${row.targetUrl === null ? 'Без линк' : escapeHtml(row.targetUrl)}</span>
+        <span style="font-size:12px;line-height:1.4;color:#667085;overflow-wrap:anywhere;">Създадена: ${fmtDate(row.createdAt)} · ${escapeHtml(creatorLabel)} (${escapeHtml(row.createdByRole)})</span>
+        <span style="font-size:12px;line-height:1.4;color:#667085;">Изпращания: ${row.dispatchCount}${row.lastDispatchAt ? ` · последно: ${fmtDate(row.lastDispatchAt)}` : ''}</span>
+      </div>
+      <div style="flex:1 1 100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        ${isConfirmingDelete ? `
+          <span style="flex:1 1 100%;font-size:13px;line-height:1.4;color:#B42318;font-weight:700;">Сигурни ли сте? Всички чакащи показвания ще бъдат отменени.</span>
+          <button type="button" data-ad-campaign-delete-confirm="${escapeHtml(row.campaignId)}" ${state.actionBusy ? 'disabled' : ''} style="${LIGHT_DANGER_BUTTON_STYLE}">Изтрий</button>
+          <button type="button" data-ad-campaign-delete-dismiss="1" style="${LIGHT_NEUTRAL_BUTTON_STYLE}">Отказ</button>
+        ` : `
+          <button type="button" data-ad-campaign-send="${escapeHtml(row.campaignId)}" ${state.actionBusy ? 'disabled' : ''} style="${LIGHT_SECONDARY_BUTTON_STYLE}">Изпрати</button>
+          <button type="button" data-ad-campaign-delete-request="${escapeHtml(row.campaignId)}" ${state.actionBusy ? 'disabled' : ''} style="${LIGHT_DANGER_SECONDARY_BUTTON_STYLE}">Изтрий кампания</button>
+        `}
+      </div>
+    </div>
+  `
+}
+
+function renderLightAdCampaignManagementPanel(state: AdCampaignManagementState): string {
+  if (!state.isAdCampaignManager) {
+    return lightShell(`<div style="${LIGHT_ERROR_BOX_STYLE}">Нямаш достъп.</div>`)
+  }
+
+  const rowsHtml = state.rows.map((row) => renderLightCampaignRow(row, state)).join('')
+
+  return lightShell(`
+    <form data-ad-campaign-create-form="1" style="${LIGHT_CARD_STYLE}display:flex;flex-direction:column;gap:12px;padding:14px;margin-bottom:14px;">
+      <strong style="font-size:16px;font-weight:800;color:#17233C;">+ Създай реклама</strong>
+      <input type="file" accept="image/png,image/jpeg,image/webp" data-ad-campaign-create-image="1">
+      <label style="display:flex;flex-direction:column;gap:6px;">
+        <span style="font-size:13px;font-weight:700;color:#344054;">Линк (по желание)</span>
+        <input type="text" name="targetUrl" placeholder="/tournaments или https://pika.bg/tournaments" maxlength="2048" style="${LIGHT_INPUT_STYLE}">
+      </label>
+      ${state.createErrorText ? `<div style="${LIGHT_ERROR_BOX_STYLE}">${escapeHtml(state.createErrorText)}</div>` : ''}
+      <button type="submit" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" ${state.createBusy ? 'disabled' : ''} style="min-height:44px;border:0;border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;align-self:flex-start;padding:0 22px;">${state.createBusy ? 'Качване...' : 'Създай'}</button>
+    </form>
+    ${state.loading ? '<div style="padding:16px 4px;color:#6941C6;font-size:14px;font-weight:800;">Зареждане...</div>' : ''}
+    ${state.errorText ? `<div style="${LIGHT_ERROR_BOX_STYLE}margin-bottom:12px;">${escapeHtml(state.errorText)}</div>` : ''}
+    <div style="display:flex;flex-direction:column;gap:10px;">${rowsHtml || `<div style="${LIGHT_EMPTY_BOX_STYLE}">Няма рекламни кампании.</div>`}</div>
+    ${renderAdCampaignThumbnailPreview(state.previewImageUrl)}
+  `)
 }
 
 function shell(body: string): string {
@@ -72,7 +162,10 @@ function renderCampaignRow(row: AdCampaignManagementDto, state: AdCampaignManage
   `
 }
 
-export function renderAdCampaignManagementPanel(state: AdCampaignManagementState): string {
+export function renderAdCampaignManagementPanel(state: AdCampaignManagementState, light = false): string {
+  if (light) {
+    return renderLightAdCampaignManagementPanel(state)
+  }
   if (!state.isAdCampaignManager) {
     return shell('<div style="color:#fecaca;font-weight:800;">Нямаш достъп.</div>')
   }

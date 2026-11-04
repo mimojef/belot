@@ -343,6 +343,9 @@ body::before {
 [data-lobby-guest-auth-modal="1"] .registration-contact-editor:focus,
 [data-guest-contact-light="1"] input:focus,
 [data-guest-contact-light="1"] textarea:focus,
+[data-support-popup-light="1"] textarea:focus,
+[data-profile-editor-light="1"] input:not([disabled]):focus,
+[data-change-password-light="1"] input:focus,
 [data-standalone-light="1"] input:not([type="checkbox"]):focus {
   border-color: #7950E8 !important;
   box-shadow: 0 0 0 3px rgba(121, 80, 232, 0.16);
@@ -384,6 +387,19 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
   backdrop-filter: none !important;
   color: #17233C !important;
   font-family: inherit !important;
+}
+
+/* "Теми" и "Чат" на телефон: докато екранната клавиатура е отворена (маркерът от
+   ensureMobileKeyboardWatcher в renderLobbyScreen.ts), долната навигация се
+   скрива и полето за писане слиза до долния ръб; връща се при затварянето ѝ. */
+html[data-mobile-keyboard-open] [data-lobby-topics-shell="1"],
+html[data-mobile-keyboard-open] [data-lobby-chat-shell="1"] {
+  padding-bottom: 0 !important;
+}
+
+html[data-mobile-keyboard-open] [data-lobby-topics-shell="1"] [data-lobby-guest-bottom-nav="1"],
+html[data-mobile-keyboard-open] [data-lobby-chat-shell="1"] [data-lobby-guest-bottom-nav="1"] {
+  display: none !important;
 }
 
 /* Над фиксираната долна навигация (71px), с 8px разстояние. */

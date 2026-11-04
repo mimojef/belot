@@ -129,6 +129,7 @@ export function createTournamentEconomyNotification(options: {
         }
       </style>
       <div
+        data-mobile-notice="top"
         role="status"
         aria-live="polite"
         style="
@@ -147,10 +148,10 @@ export function createTournamentEconomyNotification(options: {
         "
       >
         <span aria-hidden="true" style="font-size:18px;line-height:1;flex-shrink:0;margin-top:1px;">${icon}</span>
-        <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.45;color:rgba(255,255,255,0.88);">
-          ${prefix}<strong style="color:${accentColor};font-weight:900;">${amountText}</strong>${suffix ?? '.'}
+        <div data-mobile-notice-part="title" style="flex:1;min-width:0;font-size:13.5px;line-height:1.45;color:rgba(255,255,255,0.88);">
+          ${prefix}<strong data-mobile-notice-part="${isPositive ? 'success' : 'danger'}" style="color:${accentColor};font-weight:900;">${amountText}</strong>${suffix ?? '.'}
         </div>
-        <button id="tournament-economy-notif-close-btn" type="button" aria-label="Затвори известието" style="
+        <button id="tournament-economy-notif-close-btn" data-mobile-notice-part="icon-button" type="button" aria-label="Затвори известието" style="
           width:32px;height:32px;min-width:32px;border-radius:50%;border:1px solid rgba(255,255,255,0.15);
           background:rgba(255,255,255,0.07);color:#fff;
           font-size:14px;font-weight:700;line-height:1;cursor:pointer;
@@ -163,7 +164,7 @@ export function createTournamentEconomyNotification(options: {
           position:absolute;bottom:0;left:0;height:3px;
           background:${accentColor};
           border-radius:0 0 0 14px;
-        " id="tournament-economy-notif-progress"></div>
+        " id="tournament-economy-notif-progress" data-mobile-notice-part="progress"></div>
       </div>
     `
 
