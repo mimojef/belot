@@ -1083,6 +1083,8 @@ export type CampaignCreditReconciliationHealth = {
   lastBelotResult: BelotCampaignReconciliationResult | null
   lastLudoResult: LudoCampaignReconciliationResult | null
   lastPurchaseResult: PurchaseCampaignReconciliationResult | null
+  /** Последният tick е пропуснал историческите сканирания и защо (null = изпълнен). */
+  lastSkipReason: 'no_credit_candidate_campaign' | null
 }
 
 export type CampaignCreditReconciliationJob = {
@@ -1101,11 +1103,16 @@ export type CampaignCreditReconciliationJobDeps = {
   lookbackHours?: number
   limit?: number
   now?: () => Date
-  setInterval?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setInterval>
+  /**
+   * Callback-ът връща Promise-а на tick-а (никога rejected — runTick() хваща
+   * грешките), за да може timing wrapper-ът (index.ts timedSetInterval) да
+   * отчете цялото async времетраене в jobAsync.
+   */
+  setInterval?: (fn: () => unknown, ms: number) => ReturnType<typeof globalThis.setInterval>
   clearInterval?: (id: ReturnType<typeof globalThis.setInterval>) => void
   /** Отлагане на първия tick след start() (default 30 s) — виж start(). */
   initialDelayMs?: number
-  setTimeout?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setTimeout>
+  setTimeout?: (fn: () => unknown, ms: number) => ReturnType<typeof globalThis.setTimeout>
   clearTimeout?: (id: ReturnType<typeof globalThis.setTimeout>) => void
   /**
    * Фаза 5 — инжектирана зависимост (не статичен import, виж доc коментара
@@ -1119,6 +1126,12 @@ export type CampaignCreditReconciliationJobDeps = {
     campaignCreditStore: CampaignCreditStore,
     bounds: { limit?: number },
   ) => Promise<PurchaseCampaignReconciliationResult>
+  /**
+   * Eligibility gate — index.ts подава campaignCreditStore.hasCreditCandidateCampaign.
+   * false -> tick-ът пропуска историческите сканирания. Optional — без него
+   * (напр. по-стари тестове със spy store) поведението е непроменено.
+   */
+  hasCreditCandidateCampaign?: () => boolean
 }
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 300_000
@@ -1151,9 +1164,48 @@ export function createCampaignCreditReconciliationJob(
   let lastBelotResult: BelotCampaignReconciliationResult | null = null
   let lastLudoResult: LudoCampaignReconciliationResult | null = null
   let lastPurchaseResult: PurchaseCampaignReconciliationResult | null = null
+  let lastSkipReason: CampaignCreditReconciliationHealth['lastSkipReason'] = null
+
+  // Eligibility gate: без кандидат-кампания всеки сканиран ред би завършил с
+  // no_eligible_campaign (credited=0), а самото сканиране (нова DatabaseSync
+  // връзка, исторически ledger заявки, ~1600 транзакции) блокира event loop-а
+  // за секунди на всеки 5 минути. Пропускането не мести cursor-ите — при нова
+  // кандидат-кампания обработката продължава оттам, където е спряла. Грешка в
+  // проверката -> fail-open (досегашното пълно сканиране). Логва се само при
+  // смяна на решението, не на всеки tick.
+  type GateDecision = 'execute' | 'skip' | 'check_failed'
+  let lastGateDecision: GateDecision | null = null
+
+  function decideGate(): GateDecision {
+    if (deps.hasCreditCandidateCampaign === undefined) return 'execute'
+    try {
+      return deps.hasCreditCandidateCampaign() ? 'execute' : 'skip'
+    } catch (error) {
+      if (lastGateDecision !== 'check_failed') {
+        console.error('[campaign-credit-reconciliation] eligibility check failed; running full reconciliation (fail-open)', error)
+      }
+      return 'check_failed'
+    }
+  }
+
+  function recordGateDecision(decision: GateDecision): void {
+    if (decision === 'skip' && lastGateDecision !== 'skip') {
+      console.log('[campaign-credit-reconciliation] no credit-eligible campaign (active or non-archived finished/stopped); skipping historical scans')
+    } else if (decision === 'execute' && lastGateDecision === 'skip') {
+      console.log('[campaign-credit-reconciliation] credit-eligible campaign found; resuming historical scans')
+    }
+    lastGateDecision = decision
+  }
 
   async function runTickBody(): Promise<void> {
     if (!isCampaignsFeatureEnabled()) return
+    const gateDecision = decideGate()
+    recordGateDecision(gateDecision)
+    if (gateDecision === 'skip') {
+      lastSkipReason = 'no_credit_candidate_campaign'
+      return
+    }
+    lastSkipReason = null
     const belotResult = await reconcileMissingBelotCampaignCredits(
       deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true },
     )
@@ -1205,14 +1257,17 @@ export function createCampaignCreditReconciliationJob(
     // nextTick/setImmediate (setImmediate се изпълнява в check phase на СЪЩАТА
     // итерация, преди poll pass-а с ACK-овете). Отлагането е безопасно:
     // изходните ledger-и са durable, а credit-ите — идемпотентни.
+    // Callback-ите връщат Promise-а на runTick() (вместо `void`), за да
+    // отчете timing wrapper-ът и async частта (след await import) в jobAsync.
+    // runTick() не reject-ва (catch вътре) и пази inFlight guard-а.
     initialTimeoutId = setInitialTimer(() => {
       initialTimeoutId = null
-      void runTick()
+      return runTick()
     }, initialDelayMs)
     if (typeof initialTimeoutId === 'object' && initialTimeoutId !== null && 'unref' in initialTimeoutId) {
       ;(initialTimeoutId as { unref: () => void }).unref()
     }
-    intervalId = setTimer(() => { void runTick() }, intervalMs)
+    intervalId = setTimer(() => runTick(), intervalMs)
     if (typeof intervalId === 'object' && intervalId !== null && 'unref' in intervalId) {
       ;(intervalId as { unref: () => void }).unref()
     }
@@ -1243,6 +1298,7 @@ export function createCampaignCreditReconciliationJob(
       lastBelotResult,
       lastLudoResult,
       lastPurchaseResult,
+      lastSkipReason,
     }),
     close: () => stop(),
   }

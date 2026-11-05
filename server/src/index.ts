@@ -3914,6 +3914,9 @@ const campaignCreditReconciliationJob = campaignCreditStore !== null
       // внася cursor helper-ите от campaignGameHooks.ts, затова последният
       // не прави статичен value import обратно).
       reconcilePurchases: reconcileMissingPurchaseCampaignCredits,
+      // Eligibility gate — без кандидат-кампания tick-ът пропуска
+      // историческите сканирания (евтина заявка само върху campaigns).
+      hasCreditCandidateCampaign: () => campaignCreditStore.hasCreditCandidateCampaign(),
       setInterval: (fn, ms) => timedSetInterval('campaignCreditReconciliation', fn, ms),
       // Отложеният първи tick (performance fix A) — същото Phase 0B timing.
       setTimeout: (fn, ms) => timedSetTimeout('campaignCreditReconciliation', fn, ms),

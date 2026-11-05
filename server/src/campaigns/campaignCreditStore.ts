@@ -237,6 +237,15 @@ export type PlayerCampaignProfileSummary = {
 
 export type CampaignCreditStore = {
   creditCampaignUnits: (input: CreditGameOrPurchaseEventInput) => CreditCampaignUnitsResult
+  /**
+   * Евтина проверка само върху campaigns (без игрови ledger таблици): има ли
+   * поне една кампания, която resolveCampaignForEvent() изобщо би могъл да
+   * избере (CREDIT_CANDIDATE_CAMPAIGN_SQL). false означава, че ВСЯКО
+   * creditCampaignUnits() извикване за game/purchase събитие ще върне
+   * no_eligible_campaign/ineligible_profile — reconciliation job-ът ползва
+   * това, за да пропусне историческите сканирания (виж campaignGameHooks.ts).
+   */
+  hasCreditCandidateCampaign: () => boolean
   applyManualAdjustment: (input: ManualAdjustmentInput) => CreditCampaignUnitsResult
   getProfileCampaignTotal: (campaignId: string, profileId: string) => number
   /**
@@ -340,6 +349,13 @@ class NegativeTotalRejectedError extends Error {
   }
 }
 
+// Кампании, които могат да получат game/purchase начисление: active, както и
+// finished/stopped до архивирането им (закъснели начисления в прозореца им).
+// draft/scheduled и архивираните никога. deleted_at нарочно НЕ участва
+// (непроменено поведение). Единствен източник за selectCandidateCampaigns и
+// hasCreditCandidateCampaign — двете не бива да се разминават.
+const CREDIT_CANDIDATE_CAMPAIGN_SQL = `archived_at IS NULL AND status IN ('active', 'finished', 'stopped')`
+
 export async function createCampaignCreditStore(databaseFilePath: string): Promise<CampaignCreditStore> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -388,11 +404,24 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     SELECT campaign_id, name, status, starts_at, ends_at, unit_name_singular, unit_name_plural,
            gift_sender_profile_id, archived_at, unit_icon_url
     FROM campaigns
-    WHERE archived_at IS NULL
-      AND status IN ('active', 'finished', 'stopped')
+    WHERE ${CREDIT_CANDIDATE_CAMPAIGN_SQL}
       AND datetime(starts_at) <= datetime(?)
     ORDER BY datetime(starts_at) DESC, starts_at DESC;
   `)
+
+  // Същият предикат без eventAt условието — необходимо условие
+  // resolveCampaignForEvent() да намери кампания за КОЕТО И ДА Е събитие.
+  // Нарочно по-широк (без starts_at): false е сигурен само когато наистина
+  // няма кандидат.
+  const selectAnyCreditCandidateCampaignStatement = database.prepare(`
+    SELECT 1 FROM campaigns
+    WHERE ${CREDIT_CANDIDATE_CAMPAIGN_SQL}
+    LIMIT 1;
+  `)
+
+  function hasCreditCandidateCampaign(): boolean {
+    return selectAnyCreditCandidateCampaignStatement.get() !== undefined
+  }
 
   const selectStoppedEventStatement = database.prepare(`
     SELECT created_at FROM campaign_events
@@ -1358,6 +1387,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
 
   return {
     creditCampaignUnits,
+    hasCreditCandidateCampaign,
     applyManualAdjustment,
     getProfileCampaignTotal: getProfileCampaignTotalInternal,
     getMatchCreditSnapshot: getMatchCreditSnapshotInternal,
