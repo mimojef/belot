@@ -3917,6 +3917,12 @@ const campaignCreditReconciliationJob = campaignCreditStore !== null
       // Eligibility gate — без кандидат-кампания tick-ът пропуска
       // историческите сканирания (евтина заявка само върху campaigns).
       hasCreditCandidateCampaign: () => campaignCreditStore.hasCreditCandidateCampaign(),
+      // Етап 2 — сканира се само интервалът на кандидат-кампаниите, а
+      // работата се дели на порции (50 реда / ~20 ms) със setImmediate
+      // между тях. Всяка порция = реално непрекъснато блокиране на main
+      // thread-а -> 'job' група, отделно от jobAsync (целия tick с паузите).
+      getCreditCandidateWindows: () => campaignCreditStore.listCreditCandidateWindows(),
+      onSlice: (durationMs) => mainThreadTimings.record('job', 'campaignCreditReconciliationSlice', durationMs),
       setInterval: (fn, ms) => timedSetInterval('campaignCreditReconciliation', fn, ms),
       // Отложеният първи tick (performance fix A) — същото Phase 0B timing.
       setTimeout: (fn, ms) => timedSetTimeout('campaignCreditReconciliation', fn, ms),

@@ -708,7 +708,10 @@ await check('[G18] index.ts wiring, без `void runTick()`, споделен п
   assert.ok(gateIndex > 0 && firstScanIndex > gateIndex, 'gate-ът е преди първото сканиране')
 
   const storeSource = await readFile(resolve(serverRoot, 'src/campaigns/campaignCreditStore.ts'), 'utf8')
-  assert.equal(storeSource.split('${CREDIT_CANDIDATE_CAMPAIGN_SQL}').length - 1, 2, 'двете заявки ползват един и същ предикат')
+  // 3 = selectCandidateCampaigns + hasCreditCandidateCampaign (Етап 1) +
+  // listCreditCandidateWindows (Етап 2, филтър по прозореца) — всички през
+  // ЕДИН споделен предикат.
+  assert.equal(storeSource.split('${CREDIT_CANDIDATE_CAMPAIGN_SQL}').length - 1, 3, 'трите заявки ползват един и същ предикат')
   assert.ok(!/WHERE archived_at IS NULL\s+AND status IN/.test(storeSource), 'няма дублиран inline предикат')
 })
 

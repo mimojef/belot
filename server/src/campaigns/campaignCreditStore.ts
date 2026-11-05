@@ -235,6 +235,14 @@ export type PlayerCampaignProfileSummary = {
   lastFinished: LastFinishedCampaignProfileResult | null
 }
 
+export type CampaignCreditCandidateWindow = {
+  campaignId: string
+  /** campaigns.starts_at (суров DB низ). */
+  startsAt: string
+  /** getEffectiveWindowEndIso(): ends_at, или моментът на campaign_stopped за спряна кампания. */
+  effectiveEnd: string
+}
+
 export type CampaignCreditStore = {
   creditCampaignUnits: (input: CreditGameOrPurchaseEventInput) => CreditCampaignUnitsResult
   /**
@@ -246,6 +254,15 @@ export type CampaignCreditStore = {
    * това, за да пропусне историческите сканирания (виж campaignGameHooks.ts).
    */
   hasCreditCandidateCampaign: () => boolean
+  /**
+   * Етап 2 (филтър по прозореца) — периодите на ВСИЧКИ кандидат-кампании
+   * (същия CREDIT_CANDIDATE_CAMPAIGN_SQL) с ЕФЕКТИВНИЯ край от
+   * getEffectiveWindowEndIso() — точно стойностите, които
+   * resolveCampaignForEvent() сравнява. Суровите DB низове се връщат
+   * непроменени; reconciliation job-ът ги парсва по същия начин
+   * (dbDateToUtc), за да изчисли по-широк безопасен интервал за сканиране.
+   */
+  listCreditCandidateWindows: () => CampaignCreditCandidateWindow[]
   applyManualAdjustment: (input: ManualAdjustmentInput) => CreditCampaignUnitsResult
   getProfileCampaignTotal: (campaignId: string, profileId: string) => number
   /**
@@ -440,6 +457,24 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     if (campaign.status !== 'stopped') return campaign.ends_at
     const row = selectStoppedEventStatement.get(campaign.campaign_id) as { created_at: string } | undefined
     return row === undefined ? campaign.ends_at : new Date(dbDateToUtc(row.created_at)).toISOString()
+  }
+
+  // Етап 2 — същият предикат като selectCandidateCampaignsStatement, без
+  // eventAt условието (нужни са периодите на всички кандидати).
+  const selectAllCreditCandidateCampaignsStatement = database.prepare(`
+    SELECT campaign_id, name, status, starts_at, ends_at, unit_name_singular, unit_name_plural,
+           gift_sender_profile_id, archived_at, unit_icon_url
+    FROM campaigns
+    WHERE ${CREDIT_CANDIDATE_CAMPAIGN_SQL};
+  `)
+
+  function listCreditCandidateWindows(): CampaignCreditCandidateWindow[] {
+    const rows = selectAllCreditCandidateCampaignsStatement.all() as CampaignRow[]
+    return rows.map((row) => ({
+      campaignId: row.campaign_id,
+      startsAt: row.starts_at,
+      effectiveEnd: getEffectiveWindowEndIso(row),
+    }))
   }
 
   function resolveCampaignForEvent(
@@ -1388,6 +1423,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   return {
     creditCampaignUnits,
     hasCreditCandidateCampaign,
+    listCreditCandidateWindows,
     applyManualAdjustment,
     getProfileCampaignTotal: getProfileCampaignTotalInternal,
     getMatchCreditSnapshot: getMatchCreditSnapshotInternal,

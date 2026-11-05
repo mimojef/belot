@@ -71,7 +71,7 @@ import type { CampaignCreditStore } from './campaignCreditStore.js'
 // runtime dependency между двата модула. Самата reconcile функция се
 // инжектира отвън (виж CampaignCreditReconciliationJobDeps.reconcilePurchases
 // по-долу) — index.ts е единствената точка, която импортира ОБЕ стойности.
-import type { PurchaseCampaignReconciliationResult } from './campaignPurchaseHooks.js'
+import type { PurchaseCampaignReconciliationResult, PurchaseReconciliationBounds } from './campaignPurchaseHooks.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -298,6 +298,20 @@ export type ReconciliationBounds = {
    * default, which keeps existing one-shot maintenance checks predictable.
    */
   useDurableCursor?: boolean
+  /**
+   * Етап 2 (A) — сканират се само редове със събитие в този интервал (виж
+   * computeReconciliationEventWindow). undefined -> без филтър (досегашното
+   * поведение; ръчни/stateless извиквания).
+   */
+  eventWindow?: ReconciliationEventWindow
+  /**
+   * Етап 2 (C) — контролер на порциите (job-ът го подава). undefined ->
+   * досегашното единично синхронно изпълнение.
+   */
+  slicer?: ReconciliationSliceController
+  /** Етап 2 — прегледани редове на заявка (default 1000) и на tick за източник (default 20 000). */
+  pageSize?: number
+  maxExaminedRows?: number
 }
 
 const RECONCILIATION_UNBOUNDED_SINCE_ISO = '1970-01-01T00:00:00.000Z'
@@ -406,6 +420,444 @@ export function runReconciliationBatch<Row>(
   }
 }
 
+// ─── Етап 2: филтър по прозореца на кампаниите + обработка на порции ───
+//
+// (A) Филтър по прозореца. Ред, чието събитие е извън периода на ВСЯКА
+// кандидат-кампания, винаги завършва с no_eligible_campaign — сканирането му
+// е чиста загуба, а заради wrap-а на cursor-а такива редове се сканират
+// отново и отново. Сканираме само обхващащия интервал на кандидатите,
+// разширен до цели UTC дни с резерв (−1 ден / +2 дни). Границите са
+// 'YYYY-MM-DD' и се сравняват лексикографски срещу суровия TEXT — така
+// работят еднакво за ISO ('…T…Z', belot_match_completion_ledger.ended_at) и
+// за SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS', останалите таблици):
+// всяка стойност от ден D започва с 'D' и е >= 'D' и < 'D+1'. Всички
+// съхранени моменти са UTC (toISOString/CURRENT_TIMESTAMP), затова първите
+// 10 символа са UTC денят — същото тълкуване, което dbDateToUtc() дава в
+// resolveCampaignForEvent(). Интервалът е строго по-широк от прозореца на
+// всяка кампания; окончателната проверка (creditCampaignUnits ->
+// resolveCampaignForEvent) остава непроменена и решаваща. Непарсваем период
+// -> без филтър (fail-open).
+//
+// (C) Порции. node:sqlite е синхронен — async/await сам по себе си НЕ пуска
+// event loop-а. Затова работата на tick-а се разделя на порции (до N реда
+// или ~budget ms) и между тях event loop-ът се освобождава със setImmediate.
+// Порцията се мери като wall време между две освобождавания, т.е. включва
+// ВСИЧКО синхронно в нея: отваряне на връзка, prepare, SQL, начисления,
+// запис на cursor-а. Бюджетът не е твърда гаранция — единична синхронна
+// операция може да го надхвърли; затова се отчита реалният максимум.
+
+export type ReconciliationEventWindow = {
+  /** 'YYYY-MM-DD' (или '' = без долна граница) — включително. */
+  fromInclusive: string
+  /** 'YYYY-MM-DD' (или '99999' = без горна граница) — изключително. */
+  toExclusive: string
+}
+
+export type ReconciliationEventWindowDecision =
+  | { kind: 'none' }
+  | { kind: 'unbounded'; reason: string }
+  | { kind: 'range'; window: ReconciliationEventWindow }
+
+const RECONCILIATION_DAY_MS = 86_400_000
+const RECONCILIATION_WINDOW_LEAD_DAYS = 1
+const RECONCILIATION_WINDOW_TRAIL_DAYS = 2
+// Извън [1000, 9999) годините не са 4-цифрени в toISOString() и
+// лексикографското сравнение би се счупило — там границата се маха.
+const RECONCILIATION_MIN_BOUNDED_MS = Date.UTC(1000, 0, 1)
+const RECONCILIATION_MAX_BOUNDED_MS = Date.UTC(9999, 0, 1)
+const RECONCILIATION_UNBOUNDED_FROM = ''
+// '9999-12-31…' < '99999' (на 5-та позиция '-' < '9').
+const RECONCILIATION_UNBOUNDED_TO = '99999'
+
+function formatReconciliationUtcDay(dayIndex: number): string {
+  return new Date(dayIndex * RECONCILIATION_DAY_MS).toISOString().slice(0, 10)
+}
+
+export function computeReconciliationEventWindow(
+  windows: readonly { startsAt: string; effectiveEnd: string }[],
+): ReconciliationEventWindowDecision {
+  if (windows.length === 0) return { kind: 'none' }
+  let minStartMs = Number.POSITIVE_INFINITY
+  let maxEndMs = Number.NEGATIVE_INFINITY
+  for (const window of windows) {
+    // Същото парсване като resolveCampaignForEvent().
+    const startMs = new Date(dbDateToUtc(window.startsAt)).getTime()
+    const endMs = new Date(dbDateToUtc(window.effectiveEnd)).getTime()
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+      return { kind: 'unbounded', reason: 'unparseable_campaign_period' }
+    }
+    if (startMs < minStartMs) minStartMs = startMs
+    if (endMs > maxEndMs) maxEndMs = endMs
+  }
+  const fromDay = Math.floor(minStartMs / RECONCILIATION_DAY_MS) - RECONCILIATION_WINDOW_LEAD_DAYS
+  const toDay = Math.floor(maxEndMs / RECONCILIATION_DAY_MS) + RECONCILIATION_WINDOW_TRAIL_DAYS
+  return {
+    kind: 'range',
+    window: {
+      fromInclusive: fromDay * RECONCILIATION_DAY_MS < RECONCILIATION_MIN_BOUNDED_MS
+        ? RECONCILIATION_UNBOUNDED_FROM
+        : formatReconciliationUtcDay(fromDay),
+      toExclusive: toDay * RECONCILIATION_DAY_MS >= RECONCILIATION_MAX_BOUNDED_MS
+        ? RECONCILIATION_UNBOUNDED_TO
+        : formatReconciliationUtcDay(toDay),
+    },
+  }
+}
+
+/** SQL фрагмент + параметри за филтъра по прозореца (празен без прозорец). */
+export function reconciliationEventWindowClause(
+  column: string,
+  window: ReconciliationEventWindow | undefined,
+): { sql: string; params: string[] } {
+  if (window === undefined) return { sql: '', params: [] }
+  return {
+    sql: `\n        AND ${column} >= ? AND ${column} < ?`,
+    params: [window.fromInclusive, window.toExclusive],
+  }
+}
+
+export type ReconciliationRowSource = 'belotPrimary' | 'belotLegacy' | 'ludo' | 'coin' | 'bundle' | 'vip'
+
+export const RECONCILIATION_ROW_SOURCES: readonly ReconciliationRowSource[] = [
+  'belotPrimary', 'belotLegacy', 'ludo', 'coin', 'bundle', 'vip',
+]
+
+export type ReconciliationSliceStats = {
+  /** Брой порции (синхронни сегменти между освобождаванията на event loop-а). */
+  slices: number
+  /** Най-дългият непрекъснат синхронен сегмент (ms). */
+  maxSliceMs: number
+  /** Сума на всички порции = реално синхронно време в main thread-а (ms). */
+  busyMs: number
+  /** Брой отделно измерени SQL операции (select/cursor/open/ред). */
+  sqlCount: number
+  sqlTotalMs: number
+  maxSqlMs: number
+  maxSqlLabel: string | null
+  /** Обработени редове (опит за начисление) по източник. */
+  rowsBySource: Record<ReconciliationRowSource, number>
+  /** Прегледани редове (вкл. вече начислените) по източник. */
+  examinedBySource: Record<ReconciliationRowSource, number>
+}
+
+export type ReconciliationSliceController = {
+  /** true след stop()/shutdown — обработката спира при следващата граница. */
+  isAborted: () => boolean
+  /** Отчита обработен ред; true = бюджетът на порцията е изчерпан. */
+  rowProcessed: (source: ReconciliationRowSource) => boolean
+  /** Отчита прегледани редове (само статистика). */
+  rowsExamined: (source: ReconciliationRowSource, count: number) => void
+  /** true = бюджетът на порцията (редове или време) е изчерпан. */
+  budgetExhausted: () => boolean
+  /** Освобождава event loop-а, ако бюджетът (редове или време) е изчерпан. */
+  checkpoint: () => Promise<void>
+  /** Приключва порцията и освобождава event loop-а безусловно. */
+  yieldNow: () => Promise<void>
+  /** await извън порция (напр. dynamic import) — не се брои като блокиране. */
+  awaitOutsideSlice: <T>(promise: Promise<T>) => Promise<T>
+  /** Измерва отделна синхронна SQL операция (вътре в текущата порция). */
+  timeSql: <T>(label: string, fn: () => T) => T
+}
+
+export type ReconciliationSliceControllerOptions = {
+  maxRowsPerSlice: number
+  sliceBudgetMs: number
+  nowMs: () => number
+  yieldToEventLoop: () => Promise<void>
+  isAborted: () => boolean
+  onSlice?: (durationMs: number) => void
+}
+
+export function createReconciliationSliceController(
+  options: ReconciliationSliceControllerOptions,
+): ReconciliationSliceController & { finish: () => ReconciliationSliceStats } {
+  const stats: ReconciliationSliceStats = {
+    slices: 0,
+    maxSliceMs: 0,
+    busyMs: 0,
+    sqlCount: 0,
+    sqlTotalMs: 0,
+    maxSqlMs: 0,
+    maxSqlLabel: null,
+    rowsBySource: { belotPrimary: 0, belotLegacy: 0, ludo: 0, coin: 0, bundle: 0, vip: 0 },
+    examinedBySource: { belotPrimary: 0, belotLegacy: 0, ludo: 0, coin: 0, bundle: 0, vip: 0 },
+  }
+  let sliceStartedAt = options.nowMs()
+  let rowsInSlice = 0
+  let inSlice = true
+
+  function endSlice(): void {
+    if (!inSlice) return
+    inSlice = false
+    const durationMs = Math.max(0, options.nowMs() - sliceStartedAt)
+    stats.slices += 1
+    stats.busyMs += durationMs
+    if (durationMs > stats.maxSliceMs) stats.maxSliceMs = durationMs
+    try {
+      options.onSlice?.(durationMs)
+    } catch {
+      // мониторингът никога не чупи reconciliation-а
+    }
+  }
+
+  function startSlice(): void {
+    inSlice = true
+    rowsInSlice = 0
+    sliceStartedAt = options.nowMs()
+  }
+
+  function budgetExhausted(): boolean {
+    return rowsInSlice >= options.maxRowsPerSlice || options.nowMs() - sliceStartedAt >= options.sliceBudgetMs
+  }
+
+  async function yieldNow(): Promise<void> {
+    endSlice()
+    try {
+      await options.yieldToEventLoop()
+    } finally {
+      startSlice()
+    }
+  }
+
+  return {
+    isAborted: options.isAborted,
+    rowProcessed: (source) => {
+      stats.rowsBySource[source] += 1
+      rowsInSlice += 1
+      return budgetExhausted()
+    },
+    rowsExamined: (source, count) => {
+      stats.examinedBySource[source] += count
+    },
+    budgetExhausted,
+    checkpoint: async () => {
+      if (budgetExhausted()) await yieldNow()
+    },
+    yieldNow,
+    awaitOutsideSlice: async (promise) => {
+      endSlice()
+      try {
+        return await promise
+      } finally {
+        startSlice()
+      }
+    },
+    timeSql: (label, fn) => {
+      const startedAt = options.nowMs()
+      try {
+        return fn()
+      } finally {
+        const durationMs = Math.max(0, options.nowMs() - startedAt)
+        stats.sqlCount += 1
+        stats.sqlTotalMs += durationMs
+        if (stats.maxSqlLabel === null || durationMs > stats.maxSqlMs) {
+          stats.maxSqlMs = durationMs
+          stats.maxSqlLabel = label
+        }
+      }
+    },
+    finish: () => {
+      endSlice()
+      return stats
+    },
+  }
+}
+
+/** Без контролер -> старото единично синхронно поведение. */
+function timeReconciliationSql<T>(slicer: ReconciliationSliceController | undefined, label: string, fn: () => T): T {
+  return slicer === undefined ? fn() : slicer.timeSql(label, fn)
+}
+
+export async function openReconciliationDatabase(
+  databaseFilePath: string,
+  slicer: ReconciliationSliceController | undefined,
+): Promise<SqliteDatabase> {
+  const sqliteModule = slicer === undefined
+    ? await import('node:sqlite')
+    : await slicer.awaitOutsideSlice(import('node:sqlite'))
+  return timeReconciliationSql(slicer, 'db.open', () => {
+    const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
+      open: true,
+      enableForeignKeyConstraints: true,
+    })
+    database.exec('PRAGMA busy_timeout = 5000;')
+    return database
+  })
+}
+
+// ─── Етап 2: сканиране с ограничен брой ПРЕГЛЕДАНИ редове ───
+//
+// Защо: "липсва ли начисление" (NOT EXISTS срещу campaign_unit_ledger, турнир,
+// legacy съответствие) беше във WHERE. Когато в интервала почти няма редове за
+// обработка (всичко вече е начислено, legacy редовете имат съответствие в
+// новия ledger, режим all_participants), една заявка обхождаше ЦЕЛИЯ интервал,
+// за да намери LIMIT реда — O(редове в интервала) в една синхронна операция.
+//
+// Сега базовата заявка съдържа само индексируеми условия (интервал + cursor
+// диапазон) и LIMIT ограничава ПРЕГЛЕДАНИТЕ редове (страница). Проверката се
+// връща като флаг (needs_credit) и се прилага в JS. На tick се преглеждат
+// най-много maxExaminedRows реда на източник, на страници от pageSize, с
+// освобождаване на event loop-а между тях.
+//
+// Cursor семантика (непроменена по същество): cursor-ът сочи последния
+// ОБРАБОТЕН ред — вече включително прегледаните редове, които не се нуждаят
+// от начисление (те не изискват действие). Фази: (1) след cursor-а до края,
+// (2) wrap: от началото до cursor-а включително. Пълен цикъл без нито един
+// ред за обработка -> reset към началото (както преди). Лимитът `limit` е
+// както досега — най-много толкова реда за обработка на tick. Неочаквано
+// exception в ред -> cursor-ът сочи този ред, грешката се препредава (B1).
+// Записът на cursor-а: при всяко освобождаване на event loop-а и в края.
+
+const DEFAULT_RECONCILIATION_PAGE_SIZE = 1_000
+const DEFAULT_RECONCILIATION_MAX_EXAMINED_ROWS = 20_000
+
+export type ReconciliationPageBounds = {
+  /** Изключителна долна граница (cursor ключ) или null = от началото. */
+  lower: ReconciliationCursor | null
+  /** Включителна горна граница (wrap фазата) или null = до края. */
+  upperInclusive: ReconciliationCursor | null
+}
+
+export type BoundedReconciliationScan<Row> = {
+  database: SqliteDatabase
+  slicer: ReconciliationSliceController | undefined
+  rowSource: ReconciliationRowSource
+  cursorSourceType: ReconciliationSourceType
+  /** Най-много редове за обработка на tick (досегашният limit). */
+  limit: number
+  /** Най-много прегледани редове в една заявка. */
+  pageSize: number
+  /** Най-много прегледани редове на tick за този източник. */
+  maxExaminedRows: number
+  /** Редове в реда на cursor ключа, най-много pageLimit, в границите. */
+  selectPage: (bounds: ReconciliationPageBounds, pageLimit: number) => Row[]
+  keyOf: (row: Row) => ReconciliationCursor
+  needsCredit: (row: Row) => boolean
+  processRow: (row: Row) => void
+}
+
+export function resolveReconciliationPaging(bounds: { pageSize?: number; maxExaminedRows?: number }): { pageSize: number; maxExaminedRows: number } {
+  const pageSize = bounds.pageSize !== undefined && Number.isFinite(bounds.pageSize) && bounds.pageSize >= 1
+    ? Math.floor(bounds.pageSize)
+    : DEFAULT_RECONCILIATION_PAGE_SIZE
+  const maxExaminedRows = bounds.maxExaminedRows !== undefined && Number.isFinite(bounds.maxExaminedRows) && bounds.maxExaminedRows >= 1
+    ? Math.floor(bounds.maxExaminedRows)
+    : DEFAULT_RECONCILIATION_MAX_EXAMINED_ROWS
+  return { pageSize, maxExaminedRows }
+}
+
+function reconciliationCursorParams(cursor: ReconciliationCursor | null): string[] {
+  return cursor === null ? [] : [cursor.eventAt, cursor.sourceId, cursor.profileId]
+}
+
+/**
+ * selectPage за runBoundedReconciliationScan: подготвя (и кешира) по една
+ * заявка за всяка комбинация от граници. Параметри: prefixParams (напр.
+ * прозорецът), долна граница (3), горна граница (3), LIMIT.
+ */
+export function createReconciliationPageSelector<Row>(
+  database: SqliteDatabase,
+  buildSql: (hasLower: boolean, hasUpper: boolean) => string,
+  prefixParams: readonly string[],
+): (bounds: ReconciliationPageBounds, pageLimit: number) => Row[] {
+  const statements = new Map<string, ReturnType<SqliteDatabase['prepare']>>()
+  return (bounds, pageLimit) => {
+    const hasLower = bounds.lower !== null
+    const hasUpper = bounds.upperInclusive !== null
+    const key = `${hasLower ? 1 : 0}${hasUpper ? 1 : 0}`
+    let statement = statements.get(key)
+    if (statement === undefined) {
+      statement = database.prepare(buildSql(hasLower, hasUpper))
+      statements.set(key, statement)
+    }
+    return statement.all(
+      ...prefixParams,
+      ...reconciliationCursorParams(bounds.lower),
+      ...reconciliationCursorParams(bounds.upperInclusive),
+      pageLimit,
+    ) as Row[]
+  }
+}
+
+export async function runBoundedReconciliationScan<Row>(
+  scan: BoundedReconciliationScan<Row>,
+): Promise<{ cursorWrapped: boolean }> {
+  const { database, slicer, rowSource, cursorSourceType } = scan
+  const startCursor = timeReconciliationSql(slicer, `${rowSource}.cursorRead`, () => getReconciliationCursor(database, cursorSourceType))
+  const hasStartCursor = startCursor.eventAt !== ''
+  let frontier: ReconciliationCursor | null = null
+  let savedFrontier: ReconciliationCursor | null = null
+  let processed = 0
+  let examined = 0
+  let cursorWrapped = false
+  let fullCycle = false
+
+  const saveFrontier = (): void => {
+    if (frontier === null || frontier === savedFrontier) return
+    const cursor = frontier
+    timeReconciliationSql(slicer, 'cursor.save', () => saveReconciliationCursor(database, cursorSourceType, cursor))
+    savedFrontier = cursor
+  }
+
+  try {
+    const phases: Array<'after' | 'through'> = hasStartCursor ? ['after', 'through'] : ['after']
+    scanLoop: for (const phase of phases) {
+      let lower: ReconciliationCursor | null = phase === 'after' && hasStartCursor ? startCursor : null
+      const upperInclusive = phase === 'through' ? startCursor : null
+      for (;;) {
+        if (slicer?.isAborted() === true) break scanLoop
+        const pageLimit = Math.min(scan.pageSize, scan.maxExaminedRows - examined)
+        if (pageLimit <= 0) break scanLoop
+        const pageBounds: ReconciliationPageBounds = { lower, upperInclusive }
+        const page = timeReconciliationSql(slicer, `${rowSource}.selectPage`, () => scan.selectPage(pageBounds, pageLimit))
+        examined += page.length
+        slicer?.rowsExamined(rowSource, page.length)
+        for (const row of page) {
+          if (slicer?.isAborted() === true) break scanLoop
+          if (!scan.needsCredit(row)) {
+            frontier = scan.keyOf(row)
+            continue
+          }
+          if (processed >= scan.limit) break scanLoop
+          frontier = scan.keyOf(row)
+          processed += 1
+          if (phase === 'through') cursorWrapped = true
+          if (slicer === undefined) {
+            scan.processRow(row)
+          } else {
+            slicer.timeSql(`${rowSource}.row`, () => scan.processRow(row))
+            if (slicer.rowProcessed(rowSource)) {
+              saveFrontier()
+              await slicer.yieldNow()
+            }
+          }
+        }
+        if (page.length < pageLimit) {
+          // краят на фазата: при 'after' без начален cursor и при 'through' = пълен цикъл
+          if (phase === 'through' || !hasStartCursor) fullCycle = true
+          break
+        }
+        lower = scan.keyOf(page[page.length - 1]!)
+        if (slicer !== undefined && slicer.budgetExhausted()) {
+          saveFrontier()
+          await slicer.yieldNow()
+        }
+      }
+    }
+  } finally {
+    if (fullCycle && processed === 0) {
+      // Пълен цикъл без нито един ред за обработка — както досега: cursor-ът
+      // се връща в началото (или остава там, без излишен запис).
+      if (hasStartCursor) {
+        timeReconciliationSql(slicer, `${rowSource}.cursorReset`, () => resetReconciliationCursor(database, cursorSourceType))
+      }
+    } else {
+      saveFrontier()
+    }
+  }
+  return { cursorWrapped }
+}
+
 export async function reconcileMissingBelotCampaignCredits(
   databaseFilePath: string,
   campaignCreditStore: CampaignCreditStore,
@@ -423,13 +875,10 @@ export async function reconcileMissingBelotCampaignCredits(
 
   const sinceIso = bounds.sinceIso ?? RECONCILIATION_UNBOUNDED_SINCE_ISO
   const limit = normalizeReconciliationLimit(bounds.limit ?? RECONCILIATION_DEFAULT_LIMIT)
+  const slicer = bounds.slicer
+  const paging = resolveReconciliationPaging(bounds)
 
-  const sqliteModule = await import('node:sqlite')
-  const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
-    open: true,
-    enableForeignKeyConstraints: true,
-  })
-  database.exec('PRAGMA busy_timeout = 5000;')
+  const database = await openReconciliationDatabase(databaseFilePath, slicer)
 
   try {
     // ─── Фаза 6.2 — ПЪРВИЧЕН източник: belot_match_completion_ledger ───
@@ -489,12 +938,20 @@ export async function reconcileMissingBelotCampaignCredits(
     // ledger ред за губещ, точно както преди did_win=1 филтъра просто не
     // го правеше candidate изобщо (идентичен краен резултат за
     // съществуващи кампании/правила).
+    //
+    // Етап 2: (A) филтър по прозореца (празен без bounds.eventWindow) и
+    // (B) row-value cursor условие (ended_at, match_scope, profile_id) >/<=
+    // (?, ?, ?) — семантично идентично с предишната OR форма (ended_at и
+    // match_scope са NOT NULL, profile_id IS NOT NULL е отделен филтър), но
+    // позволява seek по idx_belot_match_completion_ledger_campaign_reconciliation_seek
+    // в реда на ORDER BY, без TEMP B-TREE (виж 20261105_002 миграцията).
+    const belotWindow = reconciliationEventWindowClause('bmcl.ended_at', bounds.eventWindow)
     const selectNewMissingCreditsSinceStatement = database.prepare(`
       SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
              bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
       FROM belot_match_completion_ledger bmcl
       WHERE bmcl.is_guest_trial = 0
-        AND bmcl.profile_id IS NOT NULL
+        AND bmcl.profile_id IS NOT NULL${belotWindow.sql}
         AND bmcl.ended_at >= ?
         AND ${NOT_ALREADY_CREDITED_NEW_SQL}
         AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
@@ -502,93 +959,28 @@ export async function reconcileMissingBelotCampaignCredits(
       LIMIT ?;
     `)
 
-    const selectNewMissingCreditsAfterCursorStatement = database.prepare(`
+    // Durable cursor режим (production job): страница с ограничен брой
+    // прегледани редове; "липсва ли начисление" + турнирът са флаг
+    // needs_credit, не WHERE (виж runBoundedReconciliationScan).
+    const BELOT_PRIMARY_AFTER_CURSOR_SQL = `
+        AND (bmcl.ended_at, bmcl.match_scope, bmcl.profile_id) > (?, ?, ?)`
+    const BELOT_PRIMARY_THROUGH_CURSOR_SQL = `
+        AND (bmcl.ended_at, bmcl.match_scope, bmcl.profile_id) <= (?, ?, ?)`
+    type BelotNewPageRow = BelotNewMissingCreditRow & { needs_credit: number }
+    const selectBelotPrimaryPage = createReconciliationPageSelector<BelotNewPageRow>(database, (hasLower, hasUpper) => `
       SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
-             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win,
+             CASE WHEN ${NOT_ALREADY_CREDITED_NEW_SQL}
+               AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
+             THEN 1 ELSE 0 END AS needs_credit
       FROM belot_match_completion_ledger bmcl
       WHERE bmcl.is_guest_trial = 0
-        AND bmcl.profile_id IS NOT NULL
-        AND (
-          bmcl.ended_at > ?
-          OR (bmcl.ended_at = ? AND bmcl.match_scope > ?)
-          OR (bmcl.ended_at = ? AND bmcl.match_scope = ? AND bmcl.profile_id > ?)
-        )
-        AND ${NOT_ALREADY_CREDITED_NEW_SQL}
-        AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
+        AND bmcl.profile_id IS NOT NULL${belotWindow.sql}${hasLower ? BELOT_PRIMARY_AFTER_CURSOR_SQL : ''}${hasUpper ? BELOT_PRIMARY_THROUGH_CURSOR_SQL : ''}
       ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
       LIMIT ?;
-    `)
+    `, belotWindow.params)
 
-    const selectNewMissingCreditsFromStartStatement = database.prepare(`
-      SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
-             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
-      FROM belot_match_completion_ledger bmcl
-      WHERE bmcl.is_guest_trial = 0
-        AND bmcl.profile_id IS NOT NULL
-        AND ${NOT_ALREADY_CREDITED_NEW_SQL}
-        AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
-      ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
-      LIMIT ?;
-    `)
-
-    const selectNewMissingCreditsThroughCursorStatement = database.prepare(`
-      SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
-             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
-      FROM belot_match_completion_ledger bmcl
-      WHERE bmcl.is_guest_trial = 0
-        AND bmcl.profile_id IS NOT NULL
-        AND (
-          bmcl.ended_at < ?
-          OR (bmcl.ended_at = ? AND bmcl.match_scope < ?)
-          OR (bmcl.ended_at = ? AND bmcl.match_scope = ? AND bmcl.profile_id <= ?)
-        )
-        AND ${NOT_ALREADY_CREDITED_NEW_SQL}
-        AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
-      ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
-      LIMIT ?;
-    `)
-
-    let newRows: BelotNewMissingCreditRow[]
-    if (bounds.useDurableCursor === true) {
-      const cursor = getReconciliationCursor(database, 'belot_win')
-      if (cursor.eventAt === '') {
-        newRows = selectNewMissingCreditsFromStartStatement.all(limit) as BelotNewMissingCreditRow[]
-      } else {
-        newRows = selectNewMissingCreditsAfterCursorStatement.all(
-          cursor.eventAt,
-          cursor.eventAt,
-          cursor.sourceId,
-          cursor.eventAt,
-          cursor.sourceId,
-          cursor.profileId,
-          limit,
-        ) as BelotNewMissingCreditRow[]
-        if (newRows.length < limit) {
-          const wrappedRows = selectNewMissingCreditsThroughCursorStatement.all(
-            cursor.eventAt,
-            cursor.eventAt,
-            cursor.sourceId,
-            cursor.eventAt,
-            cursor.sourceId,
-            cursor.profileId,
-            limit - newRows.length,
-          ) as BelotNewMissingCreditRow[]
-          if (wrappedRows.length > 0) {
-            result.cursorWrapped = true
-            newRows = newRows.concat(wrappedRows)
-          } else if (newRows.length === 0) {
-            resetReconciliationCursor(database, 'belot_win')
-          }
-        }
-      }
-    } else {
-      // ended_at е TEXT ISO; lexicographic >= работи за форматите, които
-      // тая кодова база произвежда. Stateless/manual извиквания пазят старата
-      // sinceIso escape hatch; production job-ът ползва durable cursor-а.
-      newRows = selectNewMissingCreditsSinceStatement.all(sinceIso, limit) as BelotNewMissingCreditRow[]
-    }
-
-    runReconciliationBatch(newRows, (row) => {
+    const processBelotPrimaryRow = (row: BelotNewMissingCreditRow): void => {
       result.scanned += 1
 
       try {
@@ -615,13 +1007,34 @@ export async function reconcileMissingBelotCampaignCredits(
           error,
         )
       }
-    }, bounds.useDurableCursor === true
-      ? (row) => saveReconciliationCursor(database, 'belot_win', {
-          eventAt: row.ended_at,
-          sourceId: row.match_scope,
-          profileId: row.profile_id,
-        })
-      : null)
+    }
+
+    if (bounds.useDurableCursor === true) {
+      const scanResult = await runBoundedReconciliationScan<BelotNewPageRow>({
+        database,
+        slicer,
+        rowSource: 'belotPrimary',
+        cursorSourceType: 'belot_win',
+        limit,
+        ...paging,
+        selectPage: selectBelotPrimaryPage,
+        keyOf: (row) => ({ eventAt: row.ended_at, sourceId: row.match_scope, profileId: row.profile_id }),
+        needsCredit: (row) => row.needs_credit === 1,
+        processRow: processBelotPrimaryRow,
+      })
+      if (scanResult.cursorWrapped) result.cursorWrapped = true
+    } else {
+      // ended_at е TEXT ISO; lexicographic >= работи за форматите, които
+      // тая кодова база произвежда. Stateless/manual извиквания пазят старата
+      // sinceIso escape hatch; production job-ът ползва durable cursor-а.
+      const newRows = selectNewMissingCreditsSinceStatement.all(...belotWindow.params, sinceIso, limit) as BelotNewMissingCreditRow[]
+      runReconciliationBatch(newRows, processBelotPrimaryRow, null)
+    }
+
+    // stop()/shutdown по време на паузата — legacy sweep-ът не започва;
+    // cursor-ът на primary scan-а вече е записан.
+    if (slicer?.isAborted() === true) return result
+    await slicer?.checkpoint()
 
     // ─── Фаза 6.1/6.2 — LEGACY sweep: profile_match_results ───
     // СОБСТВЕН durable cursor ('belot_win_legacy', виж
@@ -683,11 +1096,13 @@ export async function reconcileMissingBelotCampaignCredits(
 
     // "Само при победа" (Фаза 13) — did_win филтъра премахнат, mirror на
     // primary scan-а по-горе (виж doc коментара там за пълния rationale).
+    // Етап 2 (A): същият филтър по прозореца върху completed_at.
+    const legacyWindow = reconciliationEventWindowClause('pmr.completed_at', bounds.eventWindow)
     const selectLegacyMissingCreditsSinceStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
       FROM profile_match_results pmr
       WHERE pmr.is_guest_trial = 0
-        AND pmr.profile_id IS NOT NULL
+        AND pmr.profile_id IS NOT NULL${legacyWindow.sql}
         AND pmr.completed_at >= ?
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
@@ -704,43 +1119,28 @@ export async function reconcileMissingBelotCampaignCredits(
     // (is_guest_trial, completed_at, room_id, profile_id, did_win) в реда на
     // ORDER BY — без пълно обхождане и TEMP B-TREE (виж
     // 20261021_002_create_profile_match_results_campaign_reconciliation_seek_index.sql).
-    const selectLegacyMissingCreditsAfterCursorStatement = database.prepare(`
-      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
+    // Етап 2: страница с ограничен брой прегледани редове (същият seek
+    // индекс и row-value предикати); трите NOT EXISTS проверки са флаг
+    // needs_credit. NOT_IN_NEW_LEDGER е първа — евтина индексна проверка,
+    // която за всеки ред след въвеждането на новия ledger е false
+    // (AND се изчислява отляво надясно с прекъсване).
+    const LEGACY_AFTER_CURSOR_SQL = `
+        AND (pmr.completed_at, pmr.room_id, pmr.profile_id) > (?, ?, ?)`
+    const LEGACY_THROUGH_CURSOR_SQL = `
+        AND (pmr.completed_at, pmr.room_id, pmr.profile_id) <= (?, ?, ?)`
+    type BelotLegacyPageRow = BelotLegacyMissingCreditRow & { needs_credit: number }
+    const selectLegacyPage = createReconciliationPageSelector<BelotLegacyPageRow>(database, (hasLower, hasUpper) => `
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win,
+             CASE WHEN ${NOT_IN_NEW_LEDGER_SQL}
+               AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
+               AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
+             THEN 1 ELSE 0 END AS needs_credit
       FROM profile_match_results pmr
       WHERE pmr.is_guest_trial = 0
-        AND pmr.profile_id IS NOT NULL
-        AND (pmr.completed_at, pmr.room_id, pmr.profile_id) > (?, ?, ?)
-        AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
-        AND ${NOT_IN_NEW_LEDGER_SQL}
-        AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
+        AND pmr.profile_id IS NOT NULL${legacyWindow.sql}${hasLower ? LEGACY_AFTER_CURSOR_SQL : ''}${hasUpper ? LEGACY_THROUGH_CURSOR_SQL : ''}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
-    `)
-
-    const selectLegacyMissingCreditsFromStartStatement = database.prepare(`
-      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
-      FROM profile_match_results pmr
-      WHERE pmr.is_guest_trial = 0
-        AND pmr.profile_id IS NOT NULL
-        AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
-        AND ${NOT_IN_NEW_LEDGER_SQL}
-        AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
-      ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
-      LIMIT ?;
-    `)
-
-    const selectLegacyMissingCreditsThroughCursorStatement = database.prepare(`
-      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
-      FROM profile_match_results pmr
-      WHERE pmr.is_guest_trial = 0
-        AND pmr.profile_id IS NOT NULL
-        AND (pmr.completed_at, pmr.room_id, pmr.profile_id) <= (?, ?, ?)
-        AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
-        AND ${NOT_IN_NEW_LEDGER_SQL}
-        AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
-      ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
-      LIMIT ?;
-    `)
+    `, legacyWindow.params)
 
     const selectOwnStakeDebitStatement = database.prepare(`
       SELECT amount FROM match_economy_ledger
@@ -752,46 +1152,12 @@ export async function reconcileMissingBelotCampaignCredits(
       SELECT 1 FROM match_economy_ledger WHERE room_id = ? AND entry_type = 'stake_debit' LIMIT 1;
     `)
 
-    let legacyRows: BelotLegacyMissingCreditRow[]
-    if (bounds.useDurableCursor === true) {
-      const legacyCursor = getReconciliationCursor(database, 'belot_win_legacy')
-      if (legacyCursor.eventAt === '') {
-        legacyRows = selectLegacyMissingCreditsFromStartStatement.all(limit) as BelotLegacyMissingCreditRow[]
-      } else {
-        legacyRows = selectLegacyMissingCreditsAfterCursorStatement.all(
-          legacyCursor.eventAt,
-          legacyCursor.sourceId,
-          legacyCursor.profileId,
-          limit,
-        ) as BelotLegacyMissingCreditRow[]
-        if (legacyRows.length < limit) {
-          const wrappedLegacyRows = selectLegacyMissingCreditsThroughCursorStatement.all(
-            legacyCursor.eventAt,
-            legacyCursor.sourceId,
-            legacyCursor.profileId,
-            limit - legacyRows.length,
-          ) as BelotLegacyMissingCreditRow[]
-          if (wrappedLegacyRows.length > 0) {
-            result.cursorWrapped = true
-            legacyRows = legacyRows.concat(wrappedLegacyRows)
-          } else if (legacyRows.length === 0) {
-            resetReconciliationCursor(database, 'belot_win_legacy')
-          }
-        }
-      }
-    } else {
-      // Stateless/manual извиквания (без durable cursor) пазят старата
-      // sinceIso-bounded еднократна страница — production job-ът винаги
-      // ползва useDurableCursor:true (виж createCampaignCreditReconciliationJob).
-      legacyRows = selectLegacyMissingCreditsSinceStatement.all(sinceIso, limit) as BelotLegacyMissingCreditRow[]
-    }
-
     // Cursor-ът напредва на ВСЕКИ обработен ред — credited, skipped
     // (no_eligible_campaign/ineligible_profile/insufficient stake info), ИЛИ
     // failed — виж doc коментара най-отгоре за пълния "защо" (иначе
-    // постоянно недопустим prefix блокира напредването). Записва се веднъж
-    // след batch-а (runReconciliationBatch), не на всеки ред.
-    runReconciliationBatch(legacyRows, (row) => {
+    // постоянно недопустим prefix блокира напредването). Записва се в края
+    // и при всяко освобождаване на event loop-а (runBoundedReconciliationScan).
+    const processLegacyRow = (row: BelotLegacyMissingCreditRow): void => {
       result.scanned += 1
 
       try {
@@ -845,13 +1211,29 @@ export async function reconcileMissingBelotCampaignCredits(
           error,
         )
       }
-    }, bounds.useDurableCursor === true
-      ? (row) => saveReconciliationCursor(database, 'belot_win_legacy', {
-          eventAt: row.completed_at,
-          sourceId: row.room_id,
-          profileId: row.profile_id,
-        })
-      : null)
+    }
+
+    if (bounds.useDurableCursor === true) {
+      const scanResult = await runBoundedReconciliationScan<BelotLegacyPageRow>({
+        database,
+        slicer,
+        rowSource: 'belotLegacy',
+        cursorSourceType: 'belot_win_legacy',
+        limit,
+        ...paging,
+        selectPage: selectLegacyPage,
+        keyOf: (row) => ({ eventAt: row.completed_at, sourceId: row.room_id, profileId: row.profile_id }),
+        needsCredit: (row) => row.needs_credit === 1,
+        processRow: processLegacyRow,
+      })
+      if (scanResult.cursorWrapped) result.cursorWrapped = true
+    } else {
+      // Stateless/manual извиквания (без durable cursor) пазят старата
+      // sinceIso-bounded еднократна страница — production job-ът винаги
+      // ползва useDurableCursor:true (виж createCampaignCreditReconciliationJob).
+      const legacyRows = selectLegacyMissingCreditsSinceStatement.all(...legacyWindow.params, sinceIso, limit) as BelotLegacyMissingCreditRow[]
+      runReconciliationBatch(legacyRows, processLegacyRow, null)
+    }
   } finally {
     database.close()
   }
@@ -886,13 +1268,10 @@ export async function reconcileMissingLudoCampaignCredits(
 
   const sinceIso = bounds.sinceIso ?? RECONCILIATION_UNBOUNDED_SINCE_ISO
   const limit = normalizeReconciliationLimit(bounds.limit ?? RECONCILIATION_DEFAULT_LIMIT)
+  const slicer = bounds.slicer
+  const paging = resolveReconciliationPaging(bounds)
 
-  const sqliteModule = await import('node:sqlite')
-  const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
-    open: true,
-    enableForeignKeyConstraints: true,
-  })
-  database.exec('PRAGMA busy_timeout = 5000;')
+  const database = await openReconciliationDatabase(databaseFilePath, slicer)
 
   try {
     // "Само при победа" (Фаза 13) — за разлика от Белот,
@@ -913,6 +1292,9 @@ export async function reconcileMissingLudoCampaignCredits(
       finished_at: string
     }
 
+    // Етап 2 (A): филтър по прозореца върху finished_at (NULL стойностите
+    // отпадат и без него — `NULL >= ?` не е true).
+    const ludoWindow = reconciliationEventWindowClause('lrm.finished_at', bounds.eventWindow)
     const PARTICIPANT_PROFILE_ID_SQL = `json_extract(je.value, '$.profileId')`
     const NOT_ALREADY_CREDITED_LUDO_SQL = `
           NOT EXISTS (
@@ -927,97 +1309,36 @@ export async function reconcileMissingLudoCampaignCredits(
              lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
       FROM ludo_room_matches lrm, json_each(lrm.players_json) je
       WHERE lrm.status = 'finished'
-        AND lrm.winner_profile_id IS NOT NULL
+        AND lrm.winner_profile_id IS NOT NULL${ludoWindow.sql}
         AND lrm.finished_at >= ?
         AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
       ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
       LIMIT ?;
     `)
 
-    const selectMissingCreditsAfterCursorStatement = database.prepare(`
+    // Етап 2: страница с ограничен брой прегледани редове. Cursor условието
+    // е row value (finished_at, match_id, участник) — семантично като
+    // предишната OR форма (и при NULL участник: решава първият различен
+    // член), SQLite seek-ва по (finished_at, match_id) от него.
+    // "Вече начислено" е флаг needs_credit, не WHERE.
+    const LUDO_AFTER_CURSOR_SQL = `
+        AND (lrm.finished_at, lrm.match_id, ${PARTICIPANT_PROFILE_ID_SQL}) > (?, ?, ?)`
+    const LUDO_THROUGH_CURSOR_SQL = `
+        AND (lrm.finished_at, lrm.match_id, ${PARTICIPANT_PROFILE_ID_SQL}) <= (?, ?, ?)`
+    type LudoPageRow = LudoMissingCreditRow & { needs_credit: number }
+    const selectLudoPage = createReconciliationPageSelector<LudoPageRow>(database, (hasLower, hasUpper) => `
       SELECT lrm.match_id AS match_id, ${PARTICIPANT_PROFILE_ID_SQL} AS participant_profile_id,
-             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
+             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at,
+             CASE WHEN ${NOT_ALREADY_CREDITED_LUDO_SQL} THEN 1 ELSE 0 END AS needs_credit
       FROM ludo_room_matches lrm, json_each(lrm.players_json) je
       WHERE lrm.status = 'finished'
-        AND lrm.winner_profile_id IS NOT NULL
-        AND lrm.finished_at IS NOT NULL
-        AND (
-          lrm.finished_at > ?
-          OR (lrm.finished_at = ? AND lrm.match_id > ?)
-          OR (lrm.finished_at = ? AND lrm.match_id = ? AND ${PARTICIPANT_PROFILE_ID_SQL} > ?)
-        )
-        AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
+        AND lrm.winner_profile_id IS NOT NULL${ludoWindow.sql}
+        AND lrm.finished_at IS NOT NULL${hasLower ? LUDO_AFTER_CURSOR_SQL : ''}${hasUpper ? LUDO_THROUGH_CURSOR_SQL : ''}
       ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
       LIMIT ?;
-    `)
+    `, ludoWindow.params)
 
-    const selectMissingCreditsFromStartStatement = database.prepare(`
-      SELECT lrm.match_id AS match_id, ${PARTICIPANT_PROFILE_ID_SQL} AS participant_profile_id,
-             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
-      FROM ludo_room_matches lrm, json_each(lrm.players_json) je
-      WHERE lrm.status = 'finished'
-        AND lrm.winner_profile_id IS NOT NULL
-        AND lrm.finished_at IS NOT NULL
-        AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
-      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
-      LIMIT ?;
-    `)
-
-    const selectMissingCreditsThroughCursorStatement = database.prepare(`
-      SELECT lrm.match_id AS match_id, ${PARTICIPANT_PROFILE_ID_SQL} AS participant_profile_id,
-             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
-      FROM ludo_room_matches lrm, json_each(lrm.players_json) je
-      WHERE lrm.status = 'finished'
-        AND lrm.winner_profile_id IS NOT NULL
-        AND lrm.finished_at IS NOT NULL
-        AND (
-          lrm.finished_at < ?
-          OR (lrm.finished_at = ? AND lrm.match_id < ?)
-          OR (lrm.finished_at = ? AND lrm.match_id = ? AND ${PARTICIPANT_PROFILE_ID_SQL} <= ?)
-        )
-        AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
-      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
-      LIMIT ?;
-    `)
-
-    let rows: LudoMissingCreditRow[]
-    if (bounds.useDurableCursor === true) {
-      const cursor = getReconciliationCursor(database, 'ludo_win')
-      if (cursor.eventAt === '') {
-        rows = selectMissingCreditsFromStartStatement.all(limit) as LudoMissingCreditRow[]
-      } else {
-        rows = selectMissingCreditsAfterCursorStatement.all(
-          cursor.eventAt,
-          cursor.eventAt,
-          cursor.sourceId,
-          cursor.eventAt,
-          cursor.sourceId,
-          cursor.profileId,
-          limit,
-        ) as LudoMissingCreditRow[]
-        if (rows.length < limit) {
-          const wrappedRows = selectMissingCreditsThroughCursorStatement.all(
-            cursor.eventAt,
-            cursor.eventAt,
-            cursor.sourceId,
-            cursor.eventAt,
-            cursor.sourceId,
-            cursor.profileId,
-            limit - rows.length,
-          ) as LudoMissingCreditRow[]
-          if (wrappedRows.length > 0) {
-            result.cursorWrapped = true
-            rows = rows.concat(wrappedRows)
-          } else if (rows.length === 0) {
-            resetReconciliationCursor(database, 'ludo_win')
-          }
-        }
-      }
-    } else {
-      rows = selectMissingCreditsSinceStatement.all(sinceIso, limit) as LudoMissingCreditRow[]
-    }
-
-    runReconciliationBatch(rows, (row) => {
+    const processLudoRow = (row: LudoMissingCreditRow): void => {
       result.scanned += 1
 
       try {
@@ -1044,13 +1365,26 @@ export async function reconcileMissingLudoCampaignCredits(
           error,
         )
       }
-    }, bounds.useDurableCursor === true
-      ? (row) => saveReconciliationCursor(database, 'ludo_win', {
-          eventAt: row.finished_at,
-          sourceId: row.match_id,
-          profileId: row.participant_profile_id,
-        })
-      : null)
+    }
+
+    if (bounds.useDurableCursor === true) {
+      const scanResult = await runBoundedReconciliationScan<LudoPageRow>({
+        database,
+        slicer,
+        rowSource: 'ludo',
+        cursorSourceType: 'ludo_win',
+        limit,
+        ...paging,
+        selectPage: selectLudoPage,
+        keyOf: (row) => ({ eventAt: row.finished_at, sourceId: row.match_id, profileId: row.participant_profile_id }),
+        needsCredit: (row) => row.needs_credit === 1,
+        processRow: processLudoRow,
+      })
+      if (scanResult.cursorWrapped) result.cursorWrapped = true
+    } else {
+      const rows = selectMissingCreditsSinceStatement.all(...ludoWindow.params, sinceIso, limit) as LudoMissingCreditRow[]
+      runReconciliationBatch(rows, processLudoRow, null)
+    }
   } finally {
     database.close()
   }
@@ -1085,6 +1419,25 @@ export type CampaignCreditReconciliationHealth = {
   lastPurchaseResult: PurchaseCampaignReconciliationResult | null
   /** Последният tick е пропуснал историческите сканирания и защо (null = изпълнен). */
   lastSkipReason: 'no_credit_candidate_campaign' | null
+  // ─── Етап 2 — показатели на последния tick (null преди първия tick) ───
+  /** Общо wall време на tick-а, ВКЛЮЧИТЕЛНО паузите между порциите. */
+  lastTickDurationMs: number | null
+  /** Най-дългият непрекъснат синхронен сегмент = реалното блокиране на main thread-а. */
+  lastTickMaxSliceMs: number | null
+  /** Брой синхронни сегменти (порции). */
+  lastTickSlices: number | null
+  /** Сума на сегментите = общо синхронно време в main thread-а. */
+  lastTickBusyMs: number | null
+  /** Най-бавната отделна SQL операция (select/cursor/open/ред) и етикетът ѝ. */
+  lastTickMaxSqlMs: number | null
+  lastTickMaxSqlLabel: string | null
+  lastTickSqlTotalMs: number | null
+  /** Обработени редове (опит за начисление) по източник. */
+  lastTickRowsBySource: Record<ReconciliationRowSource, number> | null
+  /** Прегледани редове (вкл. вече начислените) по източник — ограничени от maxExaminedRows. */
+  lastTickExaminedBySource: Record<ReconciliationRowSource, number> | null
+  /** Интервалът, по който е филтрирано (null = без филтър/пропуснат tick). */
+  lastTickEventWindow: ReconciliationEventWindow | null
 }
 
 export type CampaignCreditReconciliationJob = {
@@ -1124,7 +1477,7 @@ export type CampaignCreditReconciliationJobDeps = {
   reconcilePurchases?: (
     databaseFilePath: string,
     campaignCreditStore: CampaignCreditStore,
-    bounds: { limit?: number },
+    bounds: PurchaseReconciliationBounds,
   ) => Promise<PurchaseCampaignReconciliationResult>
   /**
    * Eligibility gate — index.ts подава campaignCreditStore.hasCreditCandidateCampaign.
@@ -1132,11 +1485,39 @@ export type CampaignCreditReconciliationJobDeps = {
    * (напр. по-стари тестове със spy store) поведението е непроменено.
    */
   hasCreditCandidateCampaign?: () => boolean
+  /**
+   * Етап 2 (A) — index.ts подава campaignCreditStore.listCreditCandidateWindows.
+   * Без него -> без филтър по прозореца (досегашното поведение). Грешка или
+   * непарсваем период -> без филтър (fail-open).
+   */
+  getCreditCandidateWindows?: () => readonly { startsAt: string; effectiveEnd: string }[]
+  /** Етап 2 (C) — бюджет на порция (default 50 реда / 20 ms). */
+  maxRowsPerSlice?: number
+  sliceBudgetMs?: number
+  /** Етап 2 — прегледани редове на заявка (default 1000) и на tick за източник (default 20 000). */
+  pageSize?: number
+  maxExaminedRows?: number
+  /** Монотонен часовник за измерване на порциите (default performance.now). */
+  monotonicNowMs?: () => number
+  /** Освобождаване на event loop-а между порциите (default setImmediate). */
+  yieldToEventLoop?: () => Promise<void>
+  /**
+   * Мониторинг: продължителност на всяка порция (index.ts -> main-thread
+   * timing 'job' група). Отделно от jobAsync, който мери целия tick
+   * ВКЛЮЧИТЕЛНО паузите.
+   */
+  onSlice?: (durationMs: number) => void
 }
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 300_000
 const DEFAULT_RECONCILIATION_INITIAL_DELAY_MS = 30_000
 const DEFAULT_RECONCILIATION_LIMIT = 500
+const DEFAULT_RECONCILIATION_MAX_ROWS_PER_SLICE = 50
+const DEFAULT_RECONCILIATION_SLICE_BUDGET_MS = 20
+
+function defaultYieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => { setImmediate(resolve) })
+}
 
 function sanitizeReconciliationError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -1197,7 +1578,47 @@ export function createCampaignCreditReconciliationJob(
     lastGateDecision = decision
   }
 
-  async function runTickBody(): Promise<void> {
+  // Етап 2 (A) — интервал за сканиране от периодите на кандидат-кампаниите.
+  // Логва се само при смяна (не на всеки tick).
+  let lastWindowLogKey: string | null = null
+
+  function decideEventWindow(): { skip: true } | { skip: false; window: ReconciliationEventWindow | undefined } {
+    if (deps.getCreditCandidateWindows === undefined) return { skip: false, window: undefined }
+    let decision: ReconciliationEventWindowDecision
+    try {
+      decision = computeReconciliationEventWindow(deps.getCreditCandidateWindows())
+    } catch (error) {
+      decision = { kind: 'unbounded', reason: 'window_lookup_failed' }
+      if (lastWindowLogKey !== 'unbounded:window_lookup_failed') {
+        console.error('[campaign-credit-reconciliation] campaign window lookup failed; scanning without window filter (fail-open)', error)
+      }
+    }
+    const logKey = decision.kind === 'range'
+      ? `range:${decision.window.fromInclusive}:${decision.window.toExclusive}`
+      : decision.kind === 'unbounded' ? `unbounded:${decision.reason}` : 'none'
+    if (logKey !== lastWindowLogKey) {
+      if (decision.kind === 'range') {
+        console.log(`[campaign-credit-reconciliation] scan window [${decision.window.fromInclusive}, ${decision.window.toExclusive})`)
+      } else if (decision.kind === 'unbounded' && decision.reason !== 'window_lookup_failed') {
+        console.warn(`[campaign-credit-reconciliation] scan window disabled (${decision.reason}); scanning without window filter (fail-open)`)
+      }
+      lastWindowLogKey = logKey
+    }
+    if (decision.kind === 'none') return { skip: true }
+    return { skip: false, window: decision.kind === 'range' ? decision.window : undefined }
+  }
+
+  // Етап 2 (C) — порции.
+  const maxRowsPerSlice = deps.maxRowsPerSlice ?? DEFAULT_RECONCILIATION_MAX_ROWS_PER_SLICE
+  const sliceBudgetMs = deps.sliceBudgetMs ?? DEFAULT_RECONCILIATION_SLICE_BUDGET_MS
+  const monotonicNowMs = deps.monotonicNowMs ?? (() => performance.now())
+  const yieldToEventLoop = deps.yieldToEventLoop ?? defaultYieldToEventLoop
+  let lastTickDurationMs: number | null = null
+  let lastTickStats: ReconciliationSliceStats | null = null
+  let lastTickEventWindow: ReconciliationEventWindow | null = null
+  let tickEventWindow: ReconciliationEventWindow | null = null
+
+  async function runTickBody(slicer: ReconciliationSliceController): Promise<void> {
     if (!isCampaignsFeatureEnabled()) return
     const gateDecision = decideGate()
     recordGateDecision(gateDecision)
@@ -1205,17 +1626,30 @@ export function createCampaignCreditReconciliationJob(
       lastSkipReason = 'no_credit_candidate_campaign'
       return
     }
+    // Кандидатът може да е изчезнал между gate-а и тук (архивиране) — същото
+    // пропускане, без cursor промени.
+    const windowDecision = decideEventWindow()
+    if (windowDecision.skip) {
+      lastSkipReason = 'no_credit_candidate_campaign'
+      return
+    }
     lastSkipReason = null
+    const eventWindow = windowDecision.window
+    tickEventWindow = eventWindow ?? null
     const belotResult = await reconcileMissingBelotCampaignCredits(
-      deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true },
+      deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true, eventWindow, slicer, pageSize: deps.pageSize, maxExaminedRows: deps.maxExaminedRows },
     )
     lastBelotResult = belotResult
+    if (stopped) return
+    await slicer.checkpoint()
     const ludoResult = await reconcileMissingLudoCampaignCredits(
-      deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true },
+      deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true, eventWindow, slicer, pageSize: deps.pageSize, maxExaminedRows: deps.maxExaminedRows },
     )
     lastLudoResult = ludoResult
+    if (stopped) return
+    await slicer.checkpoint()
     const purchaseResult = deps.reconcilePurchases
-      ? await deps.reconcilePurchases(deps.databaseFilePath, deps.campaignCreditStore, { limit })
+      ? await deps.reconcilePurchases(deps.databaseFilePath, deps.campaignCreditStore, { limit, eventWindow, slicer, pageSize: deps.pageSize, maxExaminedRows: deps.maxExaminedRows })
       : null
     lastPurchaseResult = purchaseResult
     if (belotResult.scanned > 0 || ludoResult.scanned > 0) {
@@ -1234,9 +1668,21 @@ export function createCampaignCreditReconciliationJob(
     if (stopped || inFlight) return Promise.resolve()
     inFlight = true
     lastTickAt = now().toISOString()
-    return runTickBody()
+    tickEventWindow = null
+    // Първата порция започва тук — в синхронната част на timer callback-а.
+    const tickStartedAt = monotonicNowMs()
+    const slicer = createReconciliationSliceController({
+      maxRowsPerSlice,
+      sliceBudgetMs,
+      nowMs: monotonicNowMs,
+      yieldToEventLoop,
+      isAborted: () => stopped,
+      onSlice: deps.onSlice,
+    })
+    return runTickBody(slicer)
       .then(() => {
-        lastSuccessAt = new Date().toISOString()
+        // Прекъснат от stop() tick не е "успешен", но не е и грешка.
+        if (!stopped) lastSuccessAt = new Date().toISOString()
         lastError = null
       })
       .catch((error: unknown) => {
@@ -1244,8 +1690,15 @@ export function createCampaignCreditReconciliationJob(
         console.error('[campaign-credit-reconciliation] tick failed', error)
       })
       .finally(() => {
+        lastTickStats = slicer.finish()
+        lastTickDurationMs = Math.max(0, monotonicNowMs() - tickStartedAt)
+        lastTickEventWindow = tickEventWindow
         inFlight = false
       })
+  }
+
+  function roundMs(value: number): number {
+    return Math.round(value * 100) / 100
   }
 
   function start(): void {
@@ -1299,6 +1752,16 @@ export function createCampaignCreditReconciliationJob(
       lastLudoResult,
       lastPurchaseResult,
       lastSkipReason,
+      lastTickDurationMs: lastTickDurationMs === null ? null : roundMs(lastTickDurationMs),
+      lastTickMaxSliceMs: lastTickStats === null ? null : roundMs(lastTickStats.maxSliceMs),
+      lastTickSlices: lastTickStats === null ? null : lastTickStats.slices,
+      lastTickBusyMs: lastTickStats === null ? null : roundMs(lastTickStats.busyMs),
+      lastTickMaxSqlMs: lastTickStats === null ? null : roundMs(lastTickStats.maxSqlMs),
+      lastTickMaxSqlLabel: lastTickStats === null ? null : lastTickStats.maxSqlLabel,
+      lastTickSqlTotalMs: lastTickStats === null ? null : roundMs(lastTickStats.sqlTotalMs),
+      lastTickRowsBySource: lastTickStats === null ? null : { ...lastTickStats.rowsBySource },
+      lastTickExaminedBySource: lastTickStats === null ? null : { ...lastTickStats.examinedBySource },
+      lastTickEventWindow,
     }),
     close: () => stop(),
   }

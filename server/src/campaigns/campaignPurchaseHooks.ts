@@ -33,11 +33,15 @@ import { dbDateToUtc } from '../db/dbDate.js'
 import { isCampaignsFeatureEnabled } from './campaignsFeatureFlag.js'
 import type { CampaignCreditStore } from './campaignCreditStore.js'
 import {
-  getReconciliationCursor,
-  saveReconciliationCursor,
-  resetReconciliationCursor,
-  runReconciliationBatch,
+  createReconciliationPageSelector,
   normalizeReconciliationLimit,
+  openReconciliationDatabase,
+  reconciliationEventWindowClause,
+  resolveReconciliationPaging,
+  runBoundedReconciliationScan,
+  type ReconciliationEventWindow,
+  type ReconciliationRowSource,
+  type ReconciliationSliceController,
   type ReconciliationSourceType,
 } from './campaignGameHooks.js'
 
@@ -134,99 +138,72 @@ type PurchaseLedgerConfig = {
   tableName: 'coin_purchase_ledger' | 'bundle_purchase_ledger' | 'vip_purchase_ledger'
   packageKeyColumn: 'package_key_snapshot' | 'package_id'
   cursorSourceType: ReconciliationSourceType
+  rowSource: ReconciliationRowSource
 }
 
 const PURCHASE_LEDGER_CONFIGS: readonly PurchaseLedgerConfig[] = [
-  { tableName: 'coin_purchase_ledger', packageKeyColumn: 'package_key_snapshot', cursorSourceType: 'package_purchase_coin' },
-  { tableName: 'bundle_purchase_ledger', packageKeyColumn: 'package_key_snapshot', cursorSourceType: 'package_purchase_bundle' },
-  { tableName: 'vip_purchase_ledger', packageKeyColumn: 'package_id', cursorSourceType: 'package_purchase_vip' },
+  { tableName: 'coin_purchase_ledger', packageKeyColumn: 'package_key_snapshot', cursorSourceType: 'package_purchase_coin', rowSource: 'coin' },
+  { tableName: 'bundle_purchase_ledger', packageKeyColumn: 'package_key_snapshot', cursorSourceType: 'package_purchase_bundle', rowSource: 'bundle' },
+  { tableName: 'vip_purchase_ledger', packageKeyColumn: 'package_id', cursorSourceType: 'package_purchase_vip', rowSource: 'vip' },
 ]
+
+/**
+ * Етап 2 — същите разширения като ReconciliationBounds в campaignGameHooks.ts:
+ * eventWindow (филтър по прозореца върху credited_at) и slicer (порции).
+ * И двете са optional — без тях поведението е досегашното.
+ */
+export type PurchaseReconciliationBounds = {
+  limit?: number
+  eventWindow?: ReconciliationEventWindow
+  slicer?: ReconciliationSliceController
+  pageSize?: number
+  maxExaminedRows?: number
+}
 
 // tableName/packageKeyColumn идват ИЗКЛЮЧИТЕЛНО от PURCHASE_LEDGER_CONFIGS
 // по-горе (hardcoded literals, никога user/caller-supplied свободен текст)
 // — безопасно за string interpolation в SQL identifier позиция, SQLite
 // няма parameterized identifier binding.
-function scanPurchaseLedgerWithCursor(
-  database: SqliteDatabase,
-  config: PurchaseLedgerConfig,
-  limit: number,
-): { rows: PendingPurchaseRow[]; cursorWrapped: boolean } {
-  const { tableName, packageKeyColumn, cursorSourceType } = config
-  const notAlreadyCreditedClause = `
-    AND NOT EXISTS (
-      SELECT 1 FROM campaign_unit_ledger cul
-      WHERE cul.source_type = 'package_purchase'
-        AND cul.source_id = t.purchase_id
-        AND cul.profile_id = t.profile_id
-    )
-  `
+//
+// Етап 2: страница с ограничен брой прегледани редове (виж
+// campaignGameHooks.ts::runBoundedReconciliationScan) — същият общ алгоритъм
+// като Belot/Ludo. Cursor условието е row value (credited_at, purchase_id,
+// profile_id) — семантично като предишната OR форма (трите колони са NOT
+// NULL/филтрирани), seek по idx_*_purchase_ledger_campaign_reconciliation.
+// "Вече начислено" е флаг needs_credit, не WHERE; (A) филтър по прозореца
+// върху credited_at.
+type PendingPurchasePageRow = PendingPurchaseRow & { needs_credit: number }
 
-  const cursor = getReconciliationCursor(database, cursorSourceType)
-  let cursorWrapped = false
-  let rows: PendingPurchaseRow[]
+const PURCHASE_AFTER_CURSOR_SQL = `
+        AND (t.credited_at, t.purchase_id, t.profile_id) > (?, ?, ?)`
+const PURCHASE_THROUGH_CURSOR_SQL = `
+        AND (t.credited_at, t.purchase_id, t.profile_id) <= (?, ?, ?)`
 
-  if (cursor.eventAt === '') {
-    rows = database.prepare(`
-      SELECT t.purchase_id AS purchase_id, t.profile_id AS profile_id, t.${packageKeyColumn} AS package_key, t.credited_at AS credited_at
-      FROM ${tableName} t
-      WHERE t.status = 'paid' AND t.credited_at IS NOT NULL AND t.profile_id IS NOT NULL
-      ${notAlreadyCreditedClause}
-      ORDER BY t.credited_at ASC, t.purchase_id ASC, t.profile_id ASC
-      LIMIT ?;
-    `).all(limit) as PendingPurchaseRow[]
-  } else {
-    rows = database.prepare(`
-      SELECT t.purchase_id AS purchase_id, t.profile_id AS profile_id, t.${packageKeyColumn} AS package_key, t.credited_at AS credited_at
-      FROM ${tableName} t
-      WHERE t.status = 'paid' AND t.credited_at IS NOT NULL AND t.profile_id IS NOT NULL
-        AND (
-          t.credited_at > ?
-          OR (t.credited_at = ? AND t.purchase_id > ?)
-          OR (t.credited_at = ? AND t.purchase_id = ? AND t.profile_id > ?)
-        )
-      ${notAlreadyCreditedClause}
-      ORDER BY t.credited_at ASC, t.purchase_id ASC, t.profile_id ASC
-      LIMIT ?;
-    `).all(cursor.eventAt, cursor.eventAt, cursor.sourceId, cursor.eventAt, cursor.sourceId, cursor.profileId, limit) as PendingPurchaseRow[]
-
-    if (rows.length < limit) {
-      const wrappedRows = database.prepare(`
-        SELECT t.purchase_id AS purchase_id, t.profile_id AS profile_id, t.${packageKeyColumn} AS package_key, t.credited_at AS credited_at
-        FROM ${tableName} t
-        WHERE t.status = 'paid' AND t.credited_at IS NOT NULL AND t.profile_id IS NOT NULL
-          AND (
-            t.credited_at < ?
-            OR (t.credited_at = ? AND t.purchase_id < ?)
-            OR (t.credited_at = ? AND t.purchase_id = ? AND t.profile_id <= ?)
-          )
-        ${notAlreadyCreditedClause}
-        ORDER BY t.credited_at ASC, t.purchase_id ASC, t.profile_id ASC
-        LIMIT ?;
-      `).all(cursor.eventAt, cursor.eventAt, cursor.sourceId, cursor.eventAt, cursor.sourceId, cursor.profileId, limit - rows.length) as PendingPurchaseRow[]
-
-      if (wrappedRows.length > 0) {
-        cursorWrapped = true
-        rows = rows.concat(wrappedRows)
-      } else if (rows.length === 0) {
-        resetReconciliationCursor(database, cursorSourceType)
-      }
-    }
-  }
-
-  return { rows, cursorWrapped }
-}
-
-function scanAndCreditPurchaseLedger(
+async function scanAndCreditPurchaseLedger(
   database: SqliteDatabase,
   campaignCreditStore: CampaignCreditStore,
   config: PurchaseLedgerConfig,
   limit: number,
-): PurchaseLedgerReconciliationResult {
+  bounds: PurchaseReconciliationBounds,
+): Promise<PurchaseLedgerReconciliationResult> {
   const result: PurchaseLedgerReconciliationResult = { scanned: 0, credited: 0, failed: 0, cursorWrapped: false }
-  const { rows, cursorWrapped } = scanPurchaseLedgerWithCursor(database, config, limit)
-  result.cursorWrapped = cursorWrapped
+  const { tableName, packageKeyColumn } = config
+  const purchaseWindow = reconciliationEventWindowClause('t.credited_at', bounds.eventWindow)
+  const selectPage = createReconciliationPageSelector<PendingPurchasePageRow>(database, (hasLower, hasUpper) => `
+      SELECT t.purchase_id AS purchase_id, t.profile_id AS profile_id, t.${packageKeyColumn} AS package_key, t.credited_at AS credited_at,
+             CASE WHEN NOT EXISTS (
+               SELECT 1 FROM campaign_unit_ledger cul
+               WHERE cul.source_type = 'package_purchase'
+                 AND cul.source_id = t.purchase_id
+                 AND cul.profile_id = t.profile_id
+             ) THEN 1 ELSE 0 END AS needs_credit
+      FROM ${tableName} t
+      WHERE t.status = 'paid' AND t.credited_at IS NOT NULL AND t.profile_id IS NOT NULL${purchaseWindow.sql}${hasLower ? PURCHASE_AFTER_CURSOR_SQL : ''}${hasUpper ? PURCHASE_THROUGH_CURSOR_SQL : ''}
+      ORDER BY t.credited_at ASC, t.purchase_id ASC, t.profile_id ASC
+      LIMIT ?;
+    `, purchaseWindow.params)
 
-  runReconciliationBatch(rows, (row) => {
+  const processRow = (row: PendingPurchaseRow): void => {
     result.scanned += 1
 
     try {
@@ -252,11 +229,21 @@ function scanAndCreditPurchaseLedger(
         error,
       )
     }
-  }, (row) => saveReconciliationCursor(database, config.cursorSourceType, {
-    eventAt: row.credited_at,
-    sourceId: row.purchase_id,
-    profileId: row.profile_id,
-  }))
+  }
+
+  const scanResult = await runBoundedReconciliationScan<PendingPurchasePageRow>({
+    database,
+    slicer: bounds.slicer,
+    rowSource: config.rowSource,
+    cursorSourceType: config.cursorSourceType,
+    limit,
+    ...resolveReconciliationPaging(bounds),
+    selectPage,
+    keyOf: (row) => ({ eventAt: row.credited_at, sourceId: row.purchase_id, profileId: row.profile_id }),
+    needsCredit: (row) => row.needs_credit === 1,
+    processRow,
+  })
+  result.cursorWrapped = scanResult.cursorWrapped
 
   return result
 }
@@ -264,25 +251,27 @@ function scanAndCreditPurchaseLedger(
 export async function reconcileMissingPurchaseCampaignCredits(
   databaseFilePath: string,
   campaignCreditStore: CampaignCreditStore,
-  bounds: { limit?: number } = {},
+  bounds: PurchaseReconciliationBounds = {},
 ): Promise<PurchaseCampaignReconciliationResult> {
   const empty: PurchaseLedgerReconciliationResult = { scanned: 0, credited: 0, failed: 0, cursorWrapped: false }
   if (!isCampaignsFeatureEnabled()) return { coin: { ...empty }, bundle: { ...empty }, vip: { ...empty } }
 
   const limit = normalizeReconciliationLimit(bounds.limit ?? 500)
+  const { slicer } = bounds
 
-  const sqliteModule = await import('node:sqlite')
-  const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
-    open: true,
-    enableForeignKeyConstraints: true,
-  })
-  database.exec('PRAGMA busy_timeout = 5000;')
+  const database = await openReconciliationDatabase(databaseFilePath, slicer)
 
   try {
     const [coinConfig, bundleConfig, vipConfig] = PURCHASE_LEDGER_CONFIGS
-    const coin = scanAndCreditPurchaseLedger(database, campaignCreditStore, coinConfig!, limit)
-    const bundle = scanAndCreditPurchaseLedger(database, campaignCreditStore, bundleConfig!, limit)
-    const vip = scanAndCreditPurchaseLedger(database, campaignCreditStore, vipConfig!, limit)
+    // stop()/shutdown по време на пауза -> следващите ledger-и не започват
+    // (cursor-ите на вече обработените са записани).
+    const coin = await scanAndCreditPurchaseLedger(database, campaignCreditStore, coinConfig!, limit, bounds)
+    if (slicer?.isAborted() === true) return { coin, bundle: { ...empty }, vip: { ...empty } }
+    await slicer?.checkpoint()
+    const bundle = await scanAndCreditPurchaseLedger(database, campaignCreditStore, bundleConfig!, limit, bounds)
+    if (slicer?.isAborted() === true) return { coin, bundle, vip: { ...empty } }
+    await slicer?.checkpoint()
+    const vip = await scanAndCreditPurchaseLedger(database, campaignCreditStore, vipConfig!, limit, bounds)
     return { coin, bundle, vip }
   } finally {
     database.close()
