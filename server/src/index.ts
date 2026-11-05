@@ -333,6 +333,7 @@ import { findParticipantSeat } from './core/findParticipantSeat.js'
 import { getConnectionById } from './core/getConnectionById.js'
 import { handleCreateRoom } from './core/handleCreateRoom.js'
 import { handleDisconnect } from './core/handleDisconnect.js'
+import { releaseClosedConnection } from './core/releaseClosedConnection.js'
 import { handleJoinRoom } from './core/handleJoinRoom.js'
 import { markHumanParticipantDisconnected } from './core/markHumanParticipantDisconnected.js'
 import { rawDataToText } from './core/rawDataToText.js'
@@ -20743,11 +20744,20 @@ async function handleFriendsRequest(
 
   if (pathname === '/api/friends' && req.method === 'GET') {
     const rawFriendships = friendshipStore.listForProfile(profileId)
+    // ЕДНО обхождане на connections за цялата заявка (преди: по едно пълно
+    // обхождане за всеки приятел -> O(приятели × връзки)). Пази ПЪРВАТА
+    // 'connected' връзка на профила в реда на обхождане — същият резултат
+    // като предишното Object.values(...).find() за всеки приятел.
+    const firstConnectedConnectionByProfileId = new Map<string, ServerConnection>()
+    for (const candidate of Object.values(serverState.connections)) {
+      if (candidate.status !== 'connected' || candidate.profileId === null) continue
+      if (!firstConnectedConnectionByProfileId.has(candidate.profileId)) {
+        firstConnectedConnectionByProfileId.set(candidate.profileId, candidate)
+      }
+    }
     const enrichOnlineStatus = <T extends { profile: { profileId: string | null } }>(rel: T) => {
       const conn = rel.profile.profileId
-        ? Object.values(serverState.connections).find(
-            (c) => c.profileId === rel.profile.profileId && c.status === 'connected',
-          )
+        ? firstConnectedConnectionByProfileId.get(rel.profile.profileId)
         : null
       return {
         ...rel,
@@ -28853,7 +28863,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       ludoRoomsStore.removeConnection(connection.id)
       if (connection.profileId) ludoMatchRuntime.disconnect(connection.profileId, connection.id)
 
-      const result = handleDisconnect(serverState, connection.id)
+      // Финален close: handleDisconnect + премахване на записа от
+      // serverState.connections (виж core/releaseClosedConnection.ts).
+      const result = releaseClosedConnection(serverState, connection.id)
       const disconnectState = result.serverState
 
       socketRegistry.delete(connection.id)

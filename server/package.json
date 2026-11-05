@@ -122,6 +122,8 @@
     "check:campaign-reconciliation-performance-fix": "tsx scripts/checkCampaignReconciliationPerformanceFix.ts",
     "check:campaign-reconciliation-eligibility-gate": "tsx scripts/checkCampaignReconciliationEligibilityGate.ts",
     "check:campaign-reconciliation-active-campaign": "tsx scripts/checkCampaignReconciliationActiveCampaign.ts",
+    "check:connection-lifecycle-release": "tsx scripts/checkConnectionLifecycleRelease.ts",
+    "check:ws-connection-release-integration": "tsx scripts/checkWsConnectionReleaseIntegration.ts --server-root=.",
     "check:campaign-match-credit-ws-authorization": "tsx scripts/checkCampaignMatchCreditWebSocketAuthorization.ts --server-root=.",
     "check:campaign-profile-summary-store": "tsx scripts/checkCampaignProfileSummaryStore.ts --server-root=.",
     "check:campaign-profile-summary-http-authorization": "tsx scripts/checkCampaignProfileSummaryHttpAuthorization.ts --server-root=.",
