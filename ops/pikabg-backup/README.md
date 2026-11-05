@@ -38,7 +38,9 @@ restore them.
 - `scripts/pikabg-db-backup`
   Extended (not replaced) to also archive
   `server/uploads/` in the same run, same
-  lock, same 15-minute systemd schedule.
+  lock, same systemd timer (hourly at
+  minute :41 since 2026-11 — see "Backup
+  schedule" below).
   Order per run:
   1. Disk space check (aborts cleanly,
      touching nothing, if insufficient).
@@ -154,6 +156,192 @@ systemd unit file changed in Фаза 10.1 — same
 filenames, same `ExecStart` paths, same
 `OnCalendar` schedules as before; only the
 script *contents* behind those names changed.
+
+`scripts/deploy-production.sh` (Smart Deploy)
+never installs or reloads anything from
+`ops/`. It only classifies the exactly
+enumerated files here as "non-runtime" so a
+change to them does not block a deploy; drop-in
+paths (`*.timer.d/*.conf`) stay "unclassified"
+and still STOP the deploy.
+
+## Backup schedule
+
+`pikabg-db-backup.timer` is the ONLY source of
+the schedule:
+
+```
+OnCalendar=*-*-* *:41:00   # every hour at :41
+Persistent=true
+AccuracySec=1s
+```
+
+There is no drop-in in Git and there must be
+none on the VPS
+(`/etc/systemd/system/pikabg-db-backup.timer.d/`
+must not exist). Change the schedule only here,
+then install the file (procedure below).
+
+Why minute :41 — it avoids the other periodic
+jobs on the VPS:
+- `pikabg-ledger-backup.timer` `*:0/5`
+  (:00, :05, … :55) — 41 is not a multiple of 5;
+- `pikabg-db-retention.timer` daily 03:20;
+- `cron.hourly` at :17; `sysstat` at multiples
+  of 10; most daily timers at :00;
+- `apt-daily.timer` uses
+  `RandomizedDelaySec=12h`, so its time changes
+  on every activation and no fixed minute can
+  avoid it with certainty; :41 avoids the
+  observed slot (17:43:43 UTC). Its load (package
+  list download) is light.
+
+The minute does not depend on the VPS time zone
+(all of them are whole-hour offsets).
+
+History: until 2026-11 the backup ran every 15
+minutes, effectively at :07/:22/:37/:52 via a
+VPS-only drop-in `schedule.conf` that was never
+in Git.
+
+What the hourly schedule changes (no script
+change was needed):
+- Google Drive retention (`pikabg-db-retention`,
+  03:20): ≤24h keeps every backup — now ~24
+  instead of ~96; 24h–14d already keeps 1/hour
+  (nothing is deleted there any more); 14d–90d
+  keeps 1/day. The old 15-minute archives are
+  thinned automatically at the next 03:20 runs.
+- Local retention (24h, `-mmin +1440`, applied
+  at the end of every successful run): ~24 sets
+  instead of ~96, so local usage drops to about
+  a quarter within ~24h. Do not delete archives
+  manually.
+- Worst-case data loss window (RPO) becomes
+  60 minutes. The deletion ledger keeps its own
+  5-minute backup; the pre-migration snapshot in
+  `scripts/deploy-backend-production.sh` is
+  unaffected.
+
+### Persistent=true and immediate triggering
+
+With `Persistent=true`, when the timer is
+reloaded/restarted systemd computes the next
+run from the LAST trigger time
+(`LastTriggerUSec`, stamp in
+`/var/lib/systemd/timers/`). If that next
+calendar time is already in the past, the
+backup starts IMMEDIATELY. Therefore:
+
+- **Install** only in minutes **:53–:59**,
+  after the :52 run (old schedule) has finished:
+  the next :41 after :52 is in the next hour —
+  no immediate run, and the old :07 slot is not
+  reached.
+- **Rollback** only in minutes **:42–:51**,
+  after the :41 run has finished: the next of
+  :07/:22/:37/:52 after :41 is :52 — in the
+  future.
+
+Outside these windows an extra backup can start
+right after `daemon-reload`/`restart`. It is
+harmless (same lock, same checks) but not
+desired.
+
+### Installation on the VPS
+
+Run as root, from the production checkout that
+already contains this commit
+(`/var/www/belot-v2`). Nothing here touches PM2,
+the scripts, the archives or Google Drive.
+
+```bash
+cd /var/www/belot-v2
+SRC=ops/pikabg-backup/systemd/pikabg-db-backup.timer
+DST=/etc/systemd/system/pikabg-db-backup.timer
+DROPIN=/etc/systemd/system/pikabg-db-backup.timer.d
+RB=/root/pikabg-timer-rollback-$(date -u +%Y%m%dT%H%MZ)
+
+# 1. Pre-checks (all must pass)
+grep -x 'OnCalendar=\*-\*-\* \*:41:00' "$SRC"
+systemd-analyze verify "$SRC"
+systemd-analyze calendar '*-*-* *:41:00' --iterations=3
+systemctl is-active pikabg-db-backup.service    # expected: inactive
+systemctl show pikabg-db-backup.timer -p LastTriggerUSec
+#   expected: the :52 run of the CURRENT hour
+M=$(date +%M); [ "$M" -ge 53 ] && [ "$M" -le 59 ] \
+  && echo "window OK" || echo "STOP: wait for :53-:59"
+
+# 2. Rollback copy (base timer + whole drop-in dir)
+install -d -m 0700 "$RB"
+cp -a "$DST" "$RB/"
+cp -a "$DROPIN" "$RB/"
+ls -la "$RB" "$RB/pikabg-db-backup.timer.d"
+
+# 3. Install the base timer, move the drop-in OUT
+#    of the active configuration (not deleted)
+install -m 0644 "$SRC" "$DST"
+mv "$DROPIN/schedule.conf" "$RB/schedule.conf.removed-from-active"
+rmdir "$DROPIN"          # fails if anything else is there — then STOP and inspect
+
+# 4. Apply (still inside :53-:59)
+systemctl daemon-reload
+systemctl restart pikabg-db-backup.timer
+systemctl is-active pikabg-db-backup.service    # expected: inactive (no immediate run)
+```
+
+### Checks after installation
+
+```bash
+# Effective config: one file, no drop-in, one calendar
+systemctl cat pikabg-db-backup.timer
+systemctl show pikabg-db-backup.timer -p DropInPaths -p TimersCalendar -p NextElapseUSecRealtime
+#   DropInPaths= (empty); TimersCalendar contains only *-*-* *:41:00
+systemctl list-timers pikabg-db-backup.timer --no-pager   # NEXT = :41 of the next hour
+systemctl is-enabled pikabg-db-backup.timer               # enabled
+
+# After the first :41 run
+systemctl show pikabg-db-backup.service -p Result -p ExecMainStatus -p ExecMainExitTimestamp
+journalctl -u pikabg-db-backup.service --since -30min --no-pager \
+  | grep -E 'START|integrity_check|consistency=|archive_validation|local_md5|SUCCESS|ERROR'
+ls -lt /var/backups/pikabg-db | head -6
+env RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+  rclone lsl "pikabg-drive:PikaBG-Backups/database/$(date -u +%F)/" | sort -k2,3 | tail -3
+
+# After 3 hours: exactly one START/SUCCESS per hour, all at :41
+journalctl -u pikabg-db-backup.service --since -3h --no-pager | grep -E '\[backup\] (START|SUCCESS)'
+
+# After ~24h and after the next 03:20
+du -sh /var/backups/pikabg-db
+journalctl -u pikabg-db-retention.service --since today --no-pager | grep -E 'archives=|ERROR|COMPLETE'
+systemctl list-timers pikabg-ledger-backup.timer --no-pager   # unchanged, every 5 min
+```
+
+### Rollback to the previous 15-minute schedule
+
+Run only in minutes **:42–:51** (after the :41
+run has finished).
+
+```bash
+RB=/root/pikabg-timer-rollback-<stamp>          # the directory from step 2
+M=$(date +%M); [ "$M" -ge 42 ] && [ "$M" -le 51 ] \
+  && echo "window OK" || echo "STOP: wait for :42-:51"
+systemctl is-active pikabg-db-backup.service    # expected: inactive
+
+install -m 0644 "$RB/pikabg-db-backup.timer" /etc/systemd/system/pikabg-db-backup.timer
+install -d -m 0755 /etc/systemd/system/pikabg-db-backup.timer.d
+install -m 0644 "$RB/pikabg-db-backup.timer.d/schedule.conf" \
+  /etc/systemd/system/pikabg-db-backup.timer.d/schedule.conf
+systemctl daemon-reload
+systemctl restart pikabg-db-backup.timer
+systemctl show pikabg-db-backup.timer -p TimersCalendar -p DropInPaths
+systemctl list-timers pikabg-db-backup.timer --no-pager   # NEXT = :52
+```
+
+In Git, revert only the `OnCalendar`/`Description`
+change of `pikabg-db-backup.timer`; keep the
+`classify_path()` entries. Retention needs no
+rollback (unchanged).
 
 ## Local backup retention
 

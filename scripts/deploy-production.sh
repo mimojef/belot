@@ -116,6 +116,13 @@ classify_path() {
       # Deletion ledger backup/restore tooling + systemd unit-и (DELETION_LEDGER.md) —
       # същото правило: инсталират се РЪЧНО на VPS, никога от deploy-а.
       echo "non-runtime" ;;
+    ops/pikabg-backup/systemd/pikabg-db-backup.service|ops/pikabg-backup/systemd/pikabg-db-backup.timer|ops/pikabg-backup/systemd/pikabg-db-retention.service|ops/pikabg-backup/systemd/pikabg-db-retention.timer)
+      # DB/uploads backup + retention systemd unit-и (графикът на backup-а се
+      # определя САМО от основния pikabg-db-backup.timer — без drop-in в Git).
+      # Същото правило като ledger unit-ите: инсталират се РЪЧНО на VPS (виж
+      # ops/pikabg-backup/README.md), никога от deploy-а. Drop-in пътища
+      # (*.timer.d/*.conf) НЕ са тук -> остават "unclassified" -> STOP.
+      echo "non-runtime" ;;
     temp/*.png)
       # Дизайн source изображения (напр. 3574009 — 27 PNG икони, mobile
       # redesign art). Проверено: temp/ НЕ е build/runtime вход — frontend

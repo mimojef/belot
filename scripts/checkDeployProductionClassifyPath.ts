@@ -28,6 +28,10 @@
  *       изображенията на mobile redesign-а са изцяло non-runtime; всеки
  *       друг файл под temp/ (код, svg, json, .PNG, ...) и .redesign-wip
  *       остават "unclassified"; src/ и public/ PNG-та остават "frontend".
+ *   [7] DB backup/retention systemd unit-ите са "non-runtime" (промяна на
+ *       графика не STOP-ва Smart Deploy); drop-in пътища остават
+ *       "unclassified"; в Git няма drop-in; pikabg-db-backup.timer има един
+ *       OnCalendar=*-*-* *:41:00 без конфликт с ledger/retention/cron.hourly.
  *
  * [1]/[2] са закрепени към delta-та на оригиналната поправка (9e8761f..bb971a4).
  * [5c] е закрепен към 89b8a99 — commit-а, в който е написан: решението
@@ -298,6 +302,95 @@ check('[6g] Изображенията на mobile redesign-а (45c73ac..ba00c14
   const classified = classifyPaths(delta)
   const wrong = delta.filter((p) => classified.get(p) !== 'non-runtime')
   assert(wrong.length === 0, `не са "non-runtime": ${wrong.join(', ')}`)
+})
+
+// ─── [7] DB backup/retention systemd unit-и + часов график ─────────────────
+// Графикът на pikabg-db-backup се определя САМО от основния timer в Git
+// (без schedule.conf drop-in). Промяна по unit-ите не трябва да STOP-ва
+// Smart Deploy, но drop-in и непознати имена остават "unclassified".
+const DB_BACKUP_UNITS = [
+  'ops/pikabg-backup/systemd/pikabg-db-backup.service',
+  'ops/pikabg-backup/systemd/pikabg-db-backup.timer',
+  'ops/pikabg-backup/systemd/pikabg-db-retention.service',
+  'ops/pikabg-backup/systemd/pikabg-db-retention.timer',
+]
+const SYSTEMD_DIR = 'ops/pikabg-backup/systemd'
+
+function readRepoFile(relativePath: string): string {
+  return readFileSync(resolve(repoRoot, relativePath), 'utf8').replace(/\r\n/g, '\n')
+}
+
+function timerDirective(source: string, key: string): string[] {
+  return source
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${key}=`))
+    .map((line) => line.slice(key.length + 1))
+}
+
+check('[7a] DB backup/retention service+timer (4 unit-а) класифицират като "non-runtime"', () => {
+  const classified = classifyPaths(DB_BACKUP_UNITS)
+  for (const p of DB_BACKUP_UNITS) {
+    assert(classified.get(p) === 'non-runtime', `${p} -> ${classified.get(p)}, очаквах "non-runtime"`)
+  }
+})
+
+check('[7b] Drop-in-и и сходни имена под systemd/ остават "unclassified" (точен списък, не wildcard)', () => {
+  const paths = [
+    'ops/pikabg-backup/systemd/pikabg-db-backup.timer.d/schedule.conf',
+    'ops/pikabg-backup/systemd/pikabg-db-backup.service.d/override.conf',
+    'ops/pikabg-backup/systemd/pikabg-db-retention.timer.d/schedule.conf',
+    'ops/pikabg-backup/systemd/pikabg-db-backup.timer.bak',
+    'ops/pikabg-backup/systemd/pikabg-db-backup2.timer',
+    'ops/pikabg-backup/systemd/pikabg-db-backup.path',
+    'ops/pikabg-backup/systemd/schedule.conf',
+  ]
+  const classified = classifyPaths(paths)
+  for (const p of paths) {
+    assert(classified.get(p) === 'unclassified', `${p} -> ${classified.get(p)}, очаквах "unclassified"`)
+  }
+})
+
+check('[7c] Всеки tracked файл под ops/pikabg-backup/systemd/ е "non-runtime" и няма drop-in директория в Git', () => {
+  const tracked = execFileSync('git', ['-c', 'core.quotePath=false', 'ls-files', '--', SYSTEMD_DIR], { cwd: repoRoot, encoding: 'utf8' })
+    .split('\n').filter((line) => line.length > 0)
+  assert(tracked.length === 6, `очаквах 6 unit файла (db-backup, db-retention, ledger-backup × service/timer), намерих ${tracked.length}: ${tracked.join(', ')}`)
+  const dropIns = tracked.filter((p) => /\.d\//.test(p))
+  assert(dropIns.length === 0, `drop-in файлове в Git (графикът трябва да е само в основния timer): ${dropIns.join(', ')}`)
+  const classified = classifyPaths(tracked)
+  const wrong = tracked.filter((p) => classified.get(p) !== 'non-runtime')
+  assert(wrong.length === 0, `не са "non-runtime": ${wrong.map((p) => `${p} -> ${classified.get(p)}`).join(', ')}`)
+})
+
+check('[7d] pikabg-db-backup.timer: единствен OnCalendar=*-*-* *:41:00, Persistent/AccuracySec/Unit непроменени', () => {
+  const timer = readRepoFile(`${SYSTEMD_DIR}/pikabg-db-backup.timer`)
+  const onCalendar = timerDirective(timer, 'OnCalendar')
+  assert(onCalendar.length === 1 && onCalendar[0] === '*-*-* *:41:00', `OnCalendar редове: ${JSON.stringify(onCalendar)}`)
+  assert(JSON.stringify(timerDirective(timer, 'Persistent')) === '["true"]', 'Persistent трябва да е true')
+  assert(JSON.stringify(timerDirective(timer, 'AccuracySec')) === '["1s"]', 'AccuracySec трябва да е 1s')
+  assert(JSON.stringify(timerDirective(timer, 'Unit')) === '["pikabg-db-backup.service"]', 'Unit трябва да е pikabg-db-backup.service')
+  assert(timerDirective(timer, 'RandomizedDelaySec').length === 0, 'не очаквам RandomizedDelaySec (детерминистичен график)')
+  assert(/^WantedBy=timers\.target$/m.test(timer), 'липсва WantedBy=timers.target')
+})
+
+check('[7e] Минута :41 не съвпада с ledger (*:0/5), retention (03:20) и cron.hourly (:17)', () => {
+  const ledger = timerDirective(readRepoFile(`${SYSTEMD_DIR}/pikabg-ledger-backup.timer`), 'OnCalendar')
+  assert(JSON.stringify(ledger) === '["*:0/5"]', `ledger графикът е променен: ${JSON.stringify(ledger)} — преизчисли конфликтите`)
+  const retention = timerDirective(readRepoFile(`${SYSTEMD_DIR}/pikabg-db-retention.timer`), 'OnCalendar')
+  assert(JSON.stringify(retention) === '["*-*-* 03:20:00"]', `retention графикът е променен: ${JSON.stringify(retention)} — преизчисли конфликтите`)
+  const minute = 41
+  assert(minute % 5 !== 0, 'съвпада с ledger минута')
+  assert(minute !== 20, 'съвпада с retention минута')
+  assert(minute !== 17, 'съвпада с cron.hourly')
+  assert(minute !== 0, 'съвпада с :00')
+})
+
+check('[7f] Текущите (некоммитнати) промени спрямо HEAD нямат "unclassified" path', () => {
+  const delta = execFileSync('git', ['-c', 'core.quotePath=false', 'diff', '--name-only', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' })
+    .split('\n').filter((line) => line.length > 0)
+  const classified = classifyPaths(delta)
+  const unclassified = delta.filter((p) => classified.get(p) === 'unclassified')
+  assert(unclassified.length === 0, `${unclassified.length} unclassified path(и): ${unclassified.join(', ')}`)
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)
