@@ -2492,7 +2492,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
       </div>
       ${state.topicThreadRootMessageId ? renderInlineReplyComposer(state, state.topicThreadRootMessageId, { variant: 'thread' }) : ''}
       ` : `
-      <div data-topics-stream-container="1" style="flex:1;min-height:0;${isLightStreamContainer ? 'border:0;background:#F5F7FC;' : 'border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;'}display:flex;flex-direction:column;overflow:hidden;">
+      <div data-topics-stream-container="1" style="flex:1;min-height:0;${isLightStreamContainer ? 'border:0;border-top:1px solid #7950E8;background:#F5F7FC;' : 'border:1px solid rgba(255,255,255,0.10);border-radius:12px 12px 0 0;border-bottom:0;background:#0a0a0a;'}display:flex;flex-direction:column;overflow:hidden;">
         ${renderTopicModerationBanners(state)}
         ${renderTopicMessageStream(state)}
       </div>
