@@ -148,6 +148,7 @@ import {
 } from './protocol/lobbyChatValidation.js'
 import { validateTopicMessageBody, TOPIC_MESSAGE_MAX_BODY_CODE_POINTS } from './protocol/topicMessageValidation.js'
 import { computeTopicMessagePollAdvance } from './realtime/topicMessagePollAdvance.js'
+import { createTopicMessageLikeTracker } from './realtime/topicMessageLikeTracking.js'
 import {
   validatePrivateRoomChatBody,
   PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS,
@@ -2175,7 +2176,12 @@ function cleanupTopicMessageLikeRateLimitState(now: number): void {
 const topicMessageLikeLocallyAnnouncedAt = new Map<string, number>()
 // Последно излъчения (или локално известен) likeCount per messageId — за
 // drift detection: poll-ът broadcast-ва САМО ако текущия DB count се различава.
-const topicMessageLikeLastKnownCountByMessageId = new Map<string, number>()
+// Ограничен по абонаменти + твърд таван (виж realtime/topicMessageLikeTracking.ts).
+const topicMessageLikeTracking = createTopicMessageLikeTracker()
+
+function hasLocalTopicMessageSubscribers(topicId: string): boolean {
+  return (topicMessageSubscribersByTopicId.get(topicId)?.size ?? 0) > 0
+}
 
 function checkTopicMessageRateLimit(profileId: string, now: number = Date.now()): boolean {
   const existing = topicMessageRateLimitByProfileId.get(profileId)
@@ -3224,10 +3230,10 @@ function runMuteExpirySweep(): void {
 
 // Lightweight aggregate drift-detection poll (Етап 3 cross-instance likes) —
 // НЕ е seq-based invariant като root/reply poll-а. За всеки topicId с
-// локални subscribers в момента, взима likeCount за message-ите, чийто
-// count вече следим (topicMessageLikeLastKnownCountByMessageId), и
-// broadcast-ва само реалните промени. Message-и влизат в tracking set-а
-// когато local toggle се случи (виж toggle handler-а) — множество instances
+// локални subscribers в момента (+ grace прозорец след последния subscriber),
+// взима likeCount за message-ите, чийто count вече следим
+// (topicMessageLikeTracking), и broadcast-ва само реалните промени.
+// Message-и влизат в tracking set-а когато local toggle се случи (виж toggle handler-а) — множество instances
 // естествено се синхронизират, защото всеки от тях следи message-ите,
 // toggle-нати НА НЕГО, и всеки клиент subscribe-ва към ЕДИН instance
 // наведнъж (WS connection е sticky към конкретен process).
@@ -3246,13 +3252,19 @@ function runTopicMessageLikePoll(): void {
   cleanupTopicMessageLikeRateLimitState(now)
 
   try {
-    const trackedMessageIds = [...topicMessageLikeLastKnownCountByMessageId.keys()]
+    // Маха записите на теми без локални subscribers (след grace) ПРЕДИ
+    // заявката — broadcast към тях е no-op, а REST/catch-up връщат DB count-а.
+    topicMessageLikeTracking.pruneUnwatched(now, hasLocalTopicMessageSubscribers)
+    // Таван — само ако е надвишен: първо несъществуващи съобщения, после
+    // най-старите (изтеклите без subscribers вече са махнати по-горе).
+    topicMessageLikeTracking.enforceMaxEntries(now, (messageId) => topicMessageStore.getMessageById(messageId) !== null)
+    const trackedMessageIds = topicMessageLikeTracking.messageIds()
     if (trackedMessageIds.length > 0) {
       const currentCounts = topicMessageStore.getLikeCountsByMessageIds(trackedMessageIds)
 
       for (const messageId of trackedMessageIds) {
         const currentCount = currentCounts.get(messageId) ?? 0
-        const knownCount = topicMessageLikeLastKnownCountByMessageId.get(messageId)
+        const knownCount = topicMessageLikeTracking.getKnownCount(messageId)
 
         // Same-instance echo suppression — ако ТОЗИ instance е toggle-нал
         // message-а наскоро, local-instant broadcast-ът вече е доставил
@@ -3261,24 +3273,30 @@ function runTopicMessageLikePoll(): void {
         const recentlyLocallyAnnounced = announcedAt !== undefined && now - announcedAt < TOPIC_MESSAGE_LIKE_LOCALLY_ANNOUNCED_TTL_MS
 
         if (currentCount !== knownCount) {
-          topicMessageLikeLastKnownCountByMessageId.set(messageId, currentCount)
+          topicMessageLikeTracking.setKnownCount(messageId, currentCount)
           if (!recentlyLocallyAnnounced) {
             const targetMessage = topicMessageStore.getMessageById(messageId)
             if (targetMessage !== null) {
               broadcastTopicMessageLikeChangedToLocalSubscribers(targetMessage.topicId, messageId, currentCount)
+            } else {
+              // Редът вече не съществува (hard delete / Лафче retention) —
+              // няма какво да се следи повече.
+              topicMessageLikeTracking.forget(messageId)
             }
           }
         }
       }
     }
-
-    for (const [messageId, announcedAt] of topicMessageLikeLocallyAnnouncedAt.entries()) {
-      if (now - announcedAt >= TOPIC_MESSAGE_LIKE_LOCALLY_ANNOUNCED_TTL_MS) {
-        topicMessageLikeLocallyAnnouncedAt.delete(messageId)
-      }
-    }
   } catch (error) {
     console.error('[topics] like drift-detection poll failed:', error)
+  }
+
+  // Извън try: грешка в заявката не бива да спира и това почистване
+  // (иначе и тази карта расте без граница).
+  for (const [messageId, announcedAt] of topicMessageLikeLocallyAnnouncedAt.entries()) {
+    if (now - announcedAt >= TOPIC_MESSAGE_LIKE_LOCALLY_ANNOUNCED_TTL_MS) {
+      topicMessageLikeLocallyAnnouncedAt.delete(messageId)
+    }
   }
 }
 
@@ -3363,9 +3381,7 @@ function runTopicMessagesCrossInstancePollUnsafe(): void {
         // insert-нат СЛЕД subscribe-а на дадена инстанция никога не влиза в
         // tracking set-а ѝ, и likes върху него никога не се synchronize-ват
         // cross-instance (виж checkTopicRepliesLikesRealtime.ts [Cross-Like]).
-        if (!topicMessageLikeLastKnownCountByMessageId.has(message.messageId)) {
-          topicMessageLikeLastKnownCountByMessageId.set(message.messageId, message.likeCount)
-        }
+        topicMessageLikeTracking.seedIfAbsent(message.messageId, message.topicId, message.likeCount, now)
         if (message.parentMessageId === null) {
           broadcastTopicMessageToLocalSubscribers(message.topicId, message)
         } else {
@@ -28153,10 +28169,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // toggle-нати на ДРУГ instance никога не биха влезли в tracking set-а
         // на текущия (той сам иначе seed-ва само при own local toggle, виж
         // коментара при runTopicMessageLikePoll).
+        const catchupSeededAt = Date.now()
         for (const m of hydratedCatchup) {
-          if (!topicMessageLikeLastKnownCountByMessageId.has(m.messageId)) {
-            topicMessageLikeLastKnownCountByMessageId.set(m.messageId, m.likeCount)
-          }
+          topicMessageLikeTracking.seedIfAbsent(m.messageId, m.topicId, m.likeCount, catchupSeededAt)
         }
 
         safeSendToConnection(connection.id, {
@@ -28649,8 +28664,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // Маркираме за drift-detection polling-а (виж
         // runTopicMessageLikePoll) — same-instance echo suppression,
         // аналогично на topicMessageLocallyAnnouncedSeqs за root/reply.
-        topicMessageLikeLocallyAnnouncedAt.set(message.messageId, Date.now())
-        topicMessageLikeLastKnownCountByMessageId.set(message.messageId, likeCount)
+        const likeToggledAt = Date.now()
+        topicMessageLikeLocallyAnnouncedAt.set(message.messageId, likeToggledAt)
+        topicMessageLikeTracking.recordLocalCount(message.messageId, targetMessage.topicId, likeCount, likeToggledAt)
 
         // PUBLIC broadcast — само messageId+likeCount, НИКАКВА liker identity.
         broadcastTopicMessageLikeChangedToLocalSubscribers(targetMessage.topicId, message.messageId, likeCount)

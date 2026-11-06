@@ -228,6 +228,8 @@
     "check:topic-replies-likes-store": "tsx scripts/checkTopicRepliesLikesStore.ts",
     "check:private-room-match-store": "tsx scripts/checkPrivateRoomMatchStore.ts",
     "check:topic-replies-likes-realtime": "tsx scripts/checkTopicRepliesLikesRealtime.ts",
+    "check:topic-message-like-tracking": "tsx scripts/checkTopicMessageLikeTracking.ts",
+    "check:topic-message-like-poll-integration": "tsx scripts/checkTopicMessageLikePollIntegration.ts",
     "check:topic-messages-realtime": "tsx scripts/checkTopicMessagesRealtime.ts",
     "check:topic-attachments": "tsx scripts/checkTopicAttachments.ts",
     "check:image-viewer-history-state": "tsx scripts/checkImageViewerHistoryState.ts",
