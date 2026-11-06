@@ -391,9 +391,11 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
 
 /* "Теми" и "Чат" на телефон: докато екранната клавиатура е отворена (маркерът от
    ensureMobileKeyboardWatcher в renderLobbyScreen.ts), долната навигация се
-   скрива и полето за писане слиза до долния ръб; връща се при затварянето ѝ. */
-html[data-mobile-keyboard-open] [data-lobby-topics-shell="1"],
-html[data-mobile-keyboard-open] [data-lobby-chat-shell="1"] {
+   скрива; връща се при затварянето ѝ. В "Теми" полето за писане слиза и до
+   долния ръб. В личния чат отстоянието (71px) нарочно остава: iOS вече е
+   изместил видимата зона така, че полето да е над клавиатурата, и махането
+   на отстоянието след това го сваля под нея. */
+html[data-mobile-keyboard-open] [data-lobby-topics-shell="1"] {
   padding-bottom: 0 !important;
 }
 

@@ -9116,7 +9116,7 @@ function renderLightMobileChatConversation(
         .pika-chat-light .pika-chat-del:focus-visible{outline-color:#7950E8;}
       </style>
       ${CHAT_CONVERSATION_DELETE_BUTTON_STYLE}
-      <div data-chat-messages-scroll="1" style="position:relative;flex:1 1 0;min-height:0;overflow-y:auto;overflow-x:hidden;padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+      <div data-chat-messages-scroll="1" style="position:relative;flex:1 1 0;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
         ${renderLightChatOlderMessagesStatus(state)}
         ${messagesHtml}
       </div>
@@ -21922,7 +21922,11 @@ export function renderLobbyScreen(
   if (wasChatInputFocused) {
     const newChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
     if (newChatInputEl) {
-      newChatInputEl.focus()
+      // Телефон: само връщане на вече съществуващ фокус след rebuild — без
+      // браузърно "scroll into view" (в iOS отмества видимата зона наново при
+      // всяко входящо съобщение/WS обновяване). Скролът на root-а и на
+      // съобщенията се възстановява изрично в този render.
+      newChatInputEl.focus(isPhoneLayout ? { preventScroll: true } : undefined)
       if (savedChatInputSelectionStart !== null && savedChatInputSelectionEnd !== null) {
         newChatInputEl.setSelectionRange(
           savedChatInputSelectionStart,
