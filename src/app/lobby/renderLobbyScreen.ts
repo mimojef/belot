@@ -8990,8 +8990,9 @@ function renderMobileChatPanel(state: LobbyScreenState, light = false): string {
 
   return `
     ${light ? `
-      <div style="padding:8px 16px 0;">
-        <h1 style="margin:0;color:#17233C;font-size:18px;font-weight:800;line-height:22px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Чат между приятели</h1>
+      <div style="padding:8px 16px 0;display:flex;align-items:center;justify-content:center;gap:10px;">
+        <img src="/assets/lobby-mobile/icon-nav-chat.webp" alt="" width="36" height="36" decoding="async" style="width:36px;height:36px;flex:0 0 auto;display:block;object-fit:contain;">
+        <h1 style="margin:0;min-width:0;color:#17233C;font-size:22px;font-weight:800;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Чат <span style="font-size:14px;font-weight:400;color:#17233C;">между приятели</span></h1>
       </div>
     ` : renderMobilePageTitle('Чат', 'Само между приятели')}
     <section style="${light ? 'padding:8px 0 0;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;' : 'padding:12px;display:grid;gap:10px;'}">
