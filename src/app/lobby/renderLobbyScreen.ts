@@ -142,6 +142,27 @@ import {
 } from './renderTournamentsScreen'
 import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton, renderTopicModerationActionPopup, renderTopicThreadEdgeSentinel, renderTopicThreadOwnReplyNotice, renderTopicThreadUnreadDivider, findTopicThreadDividerIndex } from './renderTopicsScreen'
 import { getRoleNicknameColor, type NicknameHighlightRole } from './roleNicknameColor'
+import { renderDecoratedNickname, resolveMessageColor, resolveNicknameColor, type ProfileCustomizationDisplay } from '../profileCustomization/customizationDisplay'
+
+/**
+ * Активният UI режим: светлата мобилна рамка на лобито е показана (същите
+ * маркери, по които се избира и темата на профилния попъп). Не е проверка за
+ * размер/устройство — десктоп интерфейсът на телефон остава тъмен.
+ */
+export function isLobbyMobileLightFrameActive(): boolean {
+  return document.querySelector('[data-lobby-guest-mobile-light="1"], [data-lobby-member-mobile-light="1"]') !== null
+}
+
+// Персонализация (Етап 3) — цвят на ника на събеседника в личните чатове:
+// роля (#F72585) -> закупен -> стандартен бял/черен (само при пълен изглед);
+// null -> caller-ът ползва досегашния цвят (персонализацията е изключена или
+// ограничен изглед без закупен цвят).
+function resolveConversationNameColor(
+  conversation: { friendNameHighlightRole?: NicknameHighlightRole | null; friendCustomization?: ProfileCustomizationDisplay },
+  light: boolean,
+): string | null {
+  return resolveNicknameColor(conversation.friendCustomization, getRoleNicknameColor(conversation.friendNameHighlightRole), light, null)
+}
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderRegistrationVerificationPopup, attachRegistrationVerificationPopupEventListeners, type RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
@@ -518,7 +539,7 @@ export type LobbyScreenState = {
   topicsPersonalMessagePendingProfileId: string | null
   // Pending compose context за нов vip_dm БЕЗ persistent friendshipId —
   // виж §7 в task spec-а (createLobbyFlowController.ts за пълния rationale).
-  topicsPersonalPendingRecipient: { profileId: string; displayName: string; nameHighlightRole?: NicknameHighlightRole | null } | null
+  topicsPersonalPendingRecipient: { profileId: string; displayName: string; nameHighlightRole?: NicknameHighlightRole | null; customization?: ProfileCustomizationDisplay } | null
   topicCreatePopupOpen: boolean
   topicCreateBusy: boolean
   topicCreateErrorText: string | null
@@ -746,6 +767,8 @@ export type LobbyScreenState = {
   isAdminOrSubadmin: boolean
   /** Самоизтриване (Етап 4I) — server-derived: да се покаже ли "Изтрий" в собствения профил. */
   canSelfDeleteProfile?: boolean
+  /** Персонализация (Етап 2) — session.profileCustomizationAvailable. */
+  canCustomizeProfile?: boolean
   /**
    * admin ИЛИ pika_team — единствено за показване на бутона "(×)" в
    * "Публикации от Pika.bg". НЕ дава достъп до нищо друго (виж isAdmin/
@@ -1212,6 +1235,7 @@ export type RenderLobbyScreenOptions = {
   onProfileDeleteSubmit: (profileId: string | null, reason: string) => void
   /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил (НЕ административното изтриване по-горе). */
   onProfileSelfDeleteClick: () => void
+  onProfileCustomizeClick?: () => void
   /** Собствен профил (светъл, телефон): "+" до баланса / "+ВИП" — отваря магазина на съответния раздел. */
   onProfileShopTabClick: (tab: 'coins' | 'vip') => void
   onProfileRiskRecheckClick: (profileId: string | null) => void
@@ -1636,6 +1660,8 @@ export type RenderLobbyScreenOptions = {
   onAdminCampaignsOpen?: () => void
   /** Етап 4J — "Заявки за изтриване" (само пълен admin; правата са на сървъра). */
   onAdminProfileDeletionsOpen?: () => void
+  /** "Персонализация" (Етап 1, само пълен admin; правата и флагът са на сървъра). */
+  onAdminProfileCustomizationOpen?: () => void
   onAdminCampaignsBack?: () => void
   onAdminCampaignCreate?: () => void
   onAdminCampaignEdit?: (campaignId: string) => void
@@ -1966,6 +1992,7 @@ export type ProfilePopupCallbacks = {
   onCampaignsNavClick: (profileId: string | null) => void
   onCampaignViewAllRewardsToggle: (profileId: string | null) => void
   onSelfDeleteClick: () => void
+  onCustomizeClick?: () => void
   onShopTabClick: (tab: 'coins' | 'vip') => void
 }
 
@@ -1983,6 +2010,13 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); cb.onSelfDeleteClick() }
     })
   }
+  // Персонализация (Етап 2) — собствен профил, десктоп и светъл мобилен вариант.
+  el.querySelectorAll<HTMLElement>('[data-player-profile-customize="1"]').forEach((customizeEl) => {
+    customizeEl.addEventListener('click', () => { cb.onCustomizeClick?.() })
+    customizeEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); cb.onCustomizeClick?.() }
+    })
+  })
   // Собствен профил (светъл, телефон): магазин на раздел.
   el.querySelector<HTMLButtonElement>('[data-player-profile-shop-coins="1"]')
     ?.addEventListener('click', () => { cb.onShopTabClick('coins') })
@@ -2267,6 +2301,8 @@ export function syncProfilePopup(
     showTopicsPersonalMessageButton?: boolean
     /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил. */
     canSelfDelete?: boolean
+    /** Персонализация (Етап 2) — бутон в собствения профил. */
+    canCustomize?: boolean
     /** Tri-state — виж LobbyScreenState.ownVipActiveUntil за discriminator semantics-а. Подава се explicit undefined за "not loaded yet", НЕ се пропуска/coerce-ва към null тук (виж renderPlayerProfilePopup.ts). */
     ownVipActiveUntil?: string | null | undefined
     vipGrantOpen?: boolean
@@ -2336,6 +2372,7 @@ export function syncProfilePopup(
     isAdmin: popupState.isAdmin ?? false,
     isOwnProfile: popupState.isOwnProfile ?? false,
     canSelfDelete: (popupState.isOwnProfile ?? false) && (popupState.canSelfDelete ?? false),
+    canCustomize: (popupState.isOwnProfile ?? false) && (popupState.canCustomize ?? false),
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen || (popupState.skipAnimation ?? false),
     viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
@@ -4566,6 +4603,20 @@ function renderNav(state: LobbyScreenState): string {
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>
                   Заявки за изтриване
                 </button>
+                <button type="button" data-lobby-nav-admin-profile-customization="1" style="
+                  display:flex; align-items:center; gap:10px;
+                  width:100%; background:none; border:none;
+                  padding:13px 18px; cursor:pointer; text-align:left;
+                  font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                  color:rgba(255,255,255,0.82);
+                  transition:background 0.12s, color 0.12s;
+                "
+                onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'"
+                onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.82)'"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20c1.1 0 2-.9 2-2v-.5c0-.6.4-1 1-1h1.5A5.5 5.5 0 0 0 22 13 11 11 0 0 0 12 2z"/></svg>
+                  Персонализация
+                </button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="
                   display:flex; align-items:center; gap:10px;
@@ -6500,6 +6551,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
                 <button type="button" data-lobby-nav-admin="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ настройки')}</button>
                 <button type="button" data-lobby-nav-admin-campaigns="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Кампании')}</button>
                 <button type="button" data-lobby-nav-admin-profile-deletions="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Заявки за изтриване')}</button>
+                <button type="button" data-lobby-nav-admin-profile-customization="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Персонализация')}</button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
                 <button type="button" data-lobby-nav-admin-server="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Сървър')}</button>
@@ -7139,6 +7191,7 @@ function renderGuestMobileLobbyMenu(state: LobbyScreenState | null = null): stri
             <button type="button" data-lobby-nav-admin="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Админ настройки')}</button>
             <button type="button" data-lobby-nav-admin-campaigns="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Кампании')}</button>
             <button type="button" data-lobby-nav-admin-profile-deletions="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Заявки за изтриване')}</button>
+            <button type="button" data-lobby-nav-admin-profile-customization="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Персонализация')}</button>
             ` : ''}
             <button type="button" data-lobby-nav-admin-info="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Админ информация')}</button>
             <button type="button" data-lobby-nav-admin-server="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Сървър')}</button>
@@ -9014,30 +9067,30 @@ function renderMobileChatPanel(state: LobbyScreenState, light = false): string {
           const unreadBadge = formatNotificationBadgeCount(conversation.unreadCount)
           // Ролев цвят на ника (pika_team/marketing) — приоритет пред
           // стандартния/активния цвят на името.
-          const roleNameColor = getRoleNicknameColor(conversation.friendNameHighlightRole)
+          const roleNameColor = resolveConversationNameColor(conversation, light)
           // Светъл вариант (телефон): същият бутон и атрибут, само визия —
           // бял "чип" 12px, кръгъл аватар, виолетов активен разговор, червена значка.
           if (light) {
-            return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}"${unreadBadge !== null ? ` aria-label="${escapeHtml(`${displayName}, ${conversation.unreadCount} нови съобщения`)}"` : ''} style="position:relative;flex:0 0 84px;box-sizing:border-box;border:1px solid ${isActive ? '#7950E8' : '#E4E7EC'};border-radius:12px;background:${isActive ? '#F4F0FF' : '#FFFFFF'};box-shadow:${isActive ? '0 0 0 1px #7950E8' : '0 1px 2px rgba(16,24,40,0.05)'};color:#17233C;padding:6px 6px 6px;display:grid;grid-template-columns:minmax(0,1fr);gap:4px;justify-items:center;font-family:inherit;cursor:pointer;"><div style="position:relative;width:40px;height:40px;flex:0 0 auto;"><div style="width:100%;height:100%;border-radius:8px;border:1px solid #E4E7EC;box-sizing:border-box;background:#F4F0FF;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#7950E8;font-size:16px;font-weight:800;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div>${renderFriendOnlineStatusDot(conversation.friend.isOnline, true, 'left')}</div><div title="${escapeHtml(displayName)}" style="width:100%;min-width:0;max-width:72px;height:16px;font-size:12px;font-weight:800;line-height:16px;text-align:center;color:${roleNameColor ?? (isActive ? '#6941C6' : '#17233C')};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>${unreadBadge !== null ? `<span aria-hidden="true" style="position:absolute;top:4px;right:4px;min-width:18px;height:18px;box-sizing:border-box;padding:0 5px;border-radius:999px;border:2px solid #FFFFFF;background:#ef4444;color:#FFFFFF;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;">${escapeHtml(unreadBadge)}</span>` : ''}</button>`
+            return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}"${unreadBadge !== null ? ` aria-label="${escapeHtml(`${displayName}, ${conversation.unreadCount} нови съобщения`)}"` : ''} style="position:relative;flex:0 0 84px;box-sizing:border-box;border:1px solid ${isActive ? '#7950E8' : '#E4E7EC'};border-radius:12px;background:${isActive ? '#F4F0FF' : '#FFFFFF'};box-shadow:${isActive ? '0 0 0 1px #7950E8' : '0 1px 2px rgba(16,24,40,0.05)'};color:#17233C;padding:6px 6px 6px;display:grid;grid-template-columns:minmax(0,1fr);gap:4px;justify-items:center;font-family:inherit;cursor:pointer;"><div style="position:relative;width:40px;height:40px;flex:0 0 auto;"><div style="width:100%;height:100%;border-radius:8px;border:1px solid #E4E7EC;box-sizing:border-box;background:#F4F0FF;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#7950E8;font-size:16px;font-weight:800;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div>${renderFriendOnlineStatusDot(conversation.friend.isOnline, true, 'left')}</div><div title="${escapeHtml(displayName)}" style="width:100%;min-width:0;max-width:72px;height:16px;font-size:12px;font-weight:800;line-height:16px;text-align:center;color:${roleNameColor ?? (isActive ? '#6941C6' : '#17233C')};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${renderDecoratedNickname(displayName, conversation.friendCustomization)}</div>${unreadBadge !== null ? `<span aria-hidden="true" style="position:absolute;top:4px;right:4px;min-width:18px;height:18px;box-sizing:border-box;padding:0 5px;border-radius:999px;border:2px solid #FFFFFF;background:#ef4444;color:#FFFFFF;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;">${escapeHtml(unreadBadge)}</span>` : ''}</button>`
           }
-          return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="flex:0 0 88px;border:1px solid ${isActive ? 'rgba(212,165,32,0.72)' : 'rgba(255,255,255,0.12)'};border-radius:8px;background:#080808;color:#ffffff;padding:8px;display:grid;gap:6px;justify-items:center;"><div style="position:relative;width:44px;height:44px;flex:0 0 auto;"><div style="width:100%;height:100%;border-radius:8px;background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-weight:900;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div>${renderFriendOnlineStatusDot(conversation.friend.isOnline)}</div><div style="max-width:72px;font-size:11px;font-weight:900;${roleNameColor !== null ? `color:${roleNameColor};` : ''}white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>${unreadBadge !== null ? `<div style="font-size:10px;font-weight:900;color:#fca5a5;">${escapeHtml(unreadBadge)} нови</div>` : ''}</button>`
+          return `<button type="button" data-lobby-chat-conversation="${escapeHtml(conversation.friendshipId)}" style="flex:0 0 88px;border:1px solid ${isActive ? 'rgba(212,165,32,0.72)' : 'rgba(255,255,255,0.12)'};border-radius:8px;background:#080808;color:#ffffff;padding:8px;display:grid;gap:6px;justify-items:center;"><div style="position:relative;width:44px;height:44px;flex:0 0 auto;"><div style="width:100%;height:100%;border-radius:8px;background:#101010;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-weight:900;">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(displayName.charAt(0).toUpperCase() || '?')}</div>${renderFriendOnlineStatusDot(conversation.friend.isOnline)}</div><div style="max-width:72px;font-size:11px;font-weight:900;${roleNameColor !== null ? `color:${roleNameColor};` : ''}white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${renderDecoratedNickname(displayName, conversation.friendCustomization)}</div>${unreadBadge !== null ? `<div style="font-size:10px;font-weight:900;color:#fca5a5;">${escapeHtml(unreadBadge)} нови</div>` : ''}</button>`
         }).join('')}
       </div>
 
       ${light ? renderLightMobileChatConversation(state, activeConversation, sortedConversations.length > 0, lightComposerHtml) : `<div style="border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#080808;overflow:hidden;">
         ${activeConversation === null ? `<div style="min-height:240px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;padding:18px;">Избери приятел от списъка.</div>` : `
-          <div style="padding:10px 12px;border-bottom:1px solid rgba(212,165,32,0.20);font-size:15px;font-weight:900;color:${getRoleNicknameColor(activeConversation.friendNameHighlightRole) ?? '#ffffff'};">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
+          <div style="padding:10px 12px;border-bottom:1px solid rgba(212,165,32,0.20);font-size:15px;font-weight:900;color:${resolveConversationNameColor(activeConversation, false) ?? '#ffffff'};">${renderDecoratedNickname(activeConversation.friend.displayName ?? 'Играч', activeConversation.friendCustomization)}</div>
           ${PERSONAL_CHAT_DELETE_STYLE}
           <div data-chat-messages-scroll="1" style="height:360px;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:6px;">
             ${state.chatMessagesLoading ? `<div style="margin:auto;color:#d4a520;font-size:14px;font-weight:900;">Зареждане...</div>` : state.chatMessages.length === 0 ? `<div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения.</div>` : state.chatMessages.map((message) => {
               const hasText = message.body.trim().length > 0
               return `<div ${message.isOwnMessage ? 'class="pika-chat-own" ' : ''}style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;position:relative;">${renderPersonalChatDeleteButton(message, 32)}${message.attachment ? `
-                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
+                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : resolveMessageColor(activeConversation?.friendCustomization, '#f8fafc')};padding:6px;display:grid;gap:6px;">
                   ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
                   ${hasText ? `<div style="padding:0 4px 2px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                 </div>
               ` : `
-                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>
+                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : resolveMessageColor(activeConversation?.friendCustomization, '#f8fafc')};padding:7px 9px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>
               `}<div style="margin-top:2px;font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div></div>`
             }).join('')}
           </div>
@@ -9068,7 +9121,7 @@ function renderLightChatOlderMessagesStatus(state: LobbyScreenState): string {
 // получените вляво, бели). Същият скрол контейнер data-chat-messages-scroll —
 // позиционирането (близо до дъното/запазена позиция) е непроменено в
 // renderLobbyScreen. Без разговори — нищо (празната карта е в лентата горе).
-function renderLightMobileChatConversation(
+export function renderLightMobileChatConversation(
   state: LobbyScreenState,
   activeConversation: ChatConversationSnapshot | null,
   hasConversations: boolean,
@@ -9090,9 +9143,11 @@ function renderLightMobileChatConversation(
       ? (renderChatConversationClearedNotice(activeConversation, true) ?? `<div style="margin:auto;color:#667085;font-size:14px;font-weight:700;text-align:center;">Няма съобщения.</div>`)
       : state.chatMessages.map((message) => {
           const isOwn = message.isOwnMessage
+          // Персонализация: цвят на текста — на зрителя за собствените, на
+          // събеседника за неговите; фонът на балончетата не се променя.
           const bubble = isOwn
-            ? 'background:#E9E2FF;color:#17233C;'
-            : 'background:#FFFFFF;color:#111827;border:1px solid #E4E7EC;'
+            ? `background:#E9E2FF;color:${resolveMessageColor(activeConversation.viewerCustomization, '#17233C')};`
+            : `background:#FFFFFF;color:${resolveMessageColor(activeConversation.friendCustomization, '#111827')};border:1px solid #E4E7EC;`
           const hasText = message.body.trim().length > 0
           return `<div data-chat-message="${escapeHtml(message.messageId)}" ${isOwn ? 'class="pika-chat-own" ' : ''}style="align-self:${isOwn ? 'flex-end' : 'flex-start'};max-width:82%;min-width:0;position:relative;">${renderPersonalChatDeleteButton(message, 32)}${message.attachment ? `
             <div style="border-radius:12px;${bubble}padding:6px;display:grid;gap:6px;box-sizing:border-box;">
@@ -9112,7 +9167,7 @@ function renderLightMobileChatConversation(
           ${renderFriendOnlineStatusDot(isOnline, true)}
         </div>
         <div style="min-width:0;flex:1;">
-          <div style="font-size:15px;font-weight:800;color:${getRoleNicknameColor(activeConversation.friendNameHighlightRole) ?? '#17233C'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+          <div style="font-size:15px;font-weight:800;color:${resolveConversationNameColor(activeConversation, true) ?? '#17233C'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${renderDecoratedNickname(displayName, activeConversation.friendCustomization)}</div>
           ${isOnline !== undefined ? `<div style="margin-top:2px;font-size:12px;font-weight:700;color:${isOnline ? '#079455' : '#667085'};">${isOnline ? 'Онлайн' : 'Офлайн'}</div>` : ''}
         </div>
         ${renderChatConversationDeleteButton(state, activeConversation, true)}
@@ -10089,7 +10144,7 @@ function renderTopicsPersonalConversationRow(
       </div>
       <div style="min-width:0;flex:1;">
         <div style="display:flex;align-items:center;gap:6px;">
-          <div style="font-size:14px;font-weight:900;color:${getRoleNicknameColor(conversation.friendNameHighlightRole) ?? '#f8fafc'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(displayName)}</div>
+          <div style="font-size:14px;font-weight:900;color:${resolveConversationNameColor(conversation, false) ?? '#f8fafc'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${renderDecoratedNickname(displayName, conversation.friendCustomization)}</div>
           ${activityTime ? `<span data-topics-personal-row-time="1" style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);white-space:nowrap;flex:0 0 auto;">${escapeHtml(activityTime)}</span>` : ''}
           ${unreadBadge !== null ? `<span data-topics-personal-row-badge="1" aria-label="${escapeHtml(`${conversation.unreadCount} непрочетени съобщения`)}" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;">${escapeHtml(unreadBadge)}</span>` : ''}
         </div>
@@ -10127,14 +10182,14 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
         return `
           <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(82%,620px);display:grid;gap:3px;">
             ${message.attachment ? `
-              <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
+              <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : resolveMessageColor(activeConversation?.friendCustomization, '#f8fafc')};padding:6px;display:grid;gap:6px;">
                 ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
                 ${hasText ? `<div style="padding:0 4px 2px;font-size:16px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBodyEmphasized(message.body)}</div>` : ''}
               </div>
             ` : `
               <div style="${isEmojiOnly
                 ? 'padding:2px;line-height:1;'
-                : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:16px;font-weight:800;line-height:1.35;word-break:break-word;`}">
+                : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : resolveMessageColor(activeConversation?.friendCustomization, '#f8fafc')};padding:7px 10px;font-size:16px;font-weight:800;line-height:1.35;word-break:break-word;`}">
                 ${isEmojiOnly
                   ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
                   : renderPersonalChatMessageBodyEmphasized(message.body)}
@@ -10169,14 +10224,19 @@ const PENDING_VIP_DM_UPLOAD_KEY = '__pending_vip_dm__'
 // с PENDING_VIP_DM_UPLOAD_KEY вместо истински friendshipId — контролерът
 // (sendChatMessage) detect-ва този sentinel и route-ва към атомарния
 // start+send path вместо обикновения sendMessage(friendshipId, ...).
-function renderTopicsPersonalPendingComposer(state: LobbyScreenState, recipientDisplayName: string, recipientNameHighlightRole: NicknameHighlightRole | null = null): string {
+function renderTopicsPersonalPendingComposer(
+  state: LobbyScreenState,
+  recipientDisplayName: string,
+  recipientNameHighlightRole: NicknameHighlightRole | null = null,
+  recipientCustomization: ProfileCustomizationDisplay | undefined = undefined,
+): string {
   const isUploading = state.chatUploadingFriendshipIds.has(PENDING_VIP_DM_UPLOAD_KEY)
   const isComposerDisabled = isUploading
 
   return `
     <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(212,165,32,0.24);flex:0 0 auto;">
       <button type="button" data-topics-personal-conversation-back="1" aria-label="Назад към личните разговори" style="align-items:center;justify-content:center;width:34px;height:34px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:18px;font-weight:900;cursor:pointer;">&larr;</button>
-      <div style="font-size:18px;font-weight:900;color:${getRoleNicknameColor(recipientNameHighlightRole) ?? '#f8fafc'};min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(recipientDisplayName)}</div>
+      <div style="font-size:18px;font-weight:900;color:${resolveNicknameColor(recipientCustomization, getRoleNicknameColor(recipientNameHighlightRole), false, null) ?? '#f8fafc'};min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${renderDecoratedNickname(recipientDisplayName, recipientCustomization)}</div>
       ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
     </div>
     <div data-chat-messages-scroll="1" style="flex:1;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
@@ -10247,14 +10307,14 @@ export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
         `}
       </div>
       <div data-topics-personal-detail="1" style="min-width:0;min-height:0;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#111 0%,#050505 100%);overflow:hidden;display:flex;flex-direction:column;">
-        ${activeConversation === null && state.topicsPersonalPendingRecipient !== null ? renderTopicsPersonalPendingComposer(state, state.topicsPersonalPendingRecipient.displayName, state.topicsPersonalPendingRecipient.nameHighlightRole ?? null) : activeConversation === null ? `
+        ${activeConversation === null && state.topicsPersonalPendingRecipient !== null ? renderTopicsPersonalPendingComposer(state, state.topicsPersonalPendingRecipient.displayName, state.topicsPersonalPendingRecipient.nameHighlightRole ?? null, state.topicsPersonalPendingRecipient.customization) : activeConversation === null ? `
           <div style="min-height:260px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;text-align:center;padding:20px;">
             Избери личен разговор.
           </div>
         ` : `
           <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(212,165,32,0.24);flex:0 0 auto;">
             <button type="button" data-topics-personal-conversation-back="1" aria-label="Назад към личните разговори" style="align-items:center;justify-content:center;width:34px;height:34px;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;font-size:18px;font-weight:900;cursor:pointer;">&larr;</button>
-            <div style="font-size:18px;font-weight:900;color:${getRoleNicknameColor(activeConversation.friendNameHighlightRole) ?? '#f8fafc'};min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
+            <div style="font-size:18px;font-weight:900;color:${resolveConversationNameColor(activeConversation, false) ?? '#f8fafc'};min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${renderDecoratedNickname(activeConversation.friend.displayName ?? 'Играч', activeConversation.friendCustomization)}</div>
             ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
           </div>
           ${renderTopicsPersonalMessages(state, activeConversation)}
@@ -10341,7 +10401,7 @@ function renderChatPanel(state: LobbyScreenState): string {
                   </div>
                   <div style="min-width:0;flex:1;">
                     <div style="display:flex;align-items:center;gap:6px;">
-                      <div style="font-size:14px;font-weight:900;color:${getRoleNicknameColor(conversation.friendNameHighlightRole) ?? '#f8fafc'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(displayName)}</div>
+                      <div style="font-size:14px;font-weight:900;color:${resolveConversationNameColor(conversation, false) ?? '#f8fafc'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${renderDecoratedNickname(displayName, conversation.friendCustomization)}</div>
                       ${isPikaSupport ? pikaSupportBadge : ''}
                       ${unreadBadge !== null ? `<span style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;">${escapeHtml(unreadBadge)}</span>` : ''}
                     </div>
@@ -10361,7 +10421,7 @@ function renderChatPanel(state: LobbyScreenState): string {
           </div>
         ` : `
           <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);flex-shrink:0;">
-            <div style="font-size:19px;font-weight:900;color:${getRoleNicknameColor(activeConversation.friendNameHighlightRole) ?? '#f8fafc'};min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
+            <div style="font-size:19px;font-weight:900;color:${resolveConversationNameColor(activeConversation, false) ?? '#f8fafc'};min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${renderDecoratedNickname(activeConversation.friend.displayName ?? 'Играч', activeConversation.friendCustomization)}</div>
             ${activeConversation.friendIsPikaTeam === true ? pikaSupportBadge : ''}
             ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
             ${renderChatConversationDeleteButton(state, activeConversation, false, !state.chatErrorText)}
@@ -10388,14 +10448,14 @@ function renderChatPanel(state: LobbyScreenState): string {
                 <div data-chat-message="${escapeHtml(message.messageId)}" ${message.isOwnMessage ? 'class="pika-chat-own" ' : ''}style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;position:relative;">
                   ${renderPersonalChatDeleteButton(message, 28)}
                   ${message.attachment ? `
-                    <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
+                    <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : resolveMessageColor(activeConversation?.friendCustomization, '#f8fafc')};padding:6px;display:grid;gap:6px;">
                       ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
                       ${hasText ? `<div style="padding:0 4px 2px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                     </div>
                   ` : `
                     <div style="${isEmojiOnly
                       ? 'padding:2px;line-height:1;'
-                      : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;`}">
+                      : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : resolveMessageColor(activeConversation?.friendCustomization, '#f8fafc')};padding:7px 10px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;`}">
                       ${isEmojiOnly
                         ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
                         : renderPersonalChatMessageBody(message.body)}
@@ -18124,7 +18184,7 @@ export function renderLobbyScreen(
   // навигация, меню) първо затваря страницата, после се изпълнява нормално.
   if (root.querySelector('[data-lobby-blocked-light="1"]')) {
     root
-      .querySelectorAll<HTMLElement>('[data-lobby-nav-lobby],[data-lobby-nav-shop],[data-lobby-nav-games],[data-lobby-nav-tournaments],[data-lobby-nav-friends],[data-lobby-nav-players],[data-lobby-nav-leaderboards],[data-lobby-nav-chat],[data-lobby-nav-topics],[data-lobby-nav-support],[data-lobby-nav-admin],[data-lobby-nav-admin-campaigns],[data-lobby-nav-admin-profile-deletions],[data-lobby-nav-admin-info],[data-lobby-nav-admin-server],[data-lobby-nav-ad-campaigns],[data-lobby-nav-settings],[data-lobby-nav-logout]')
+      .querySelectorAll<HTMLElement>('[data-lobby-nav-lobby],[data-lobby-nav-shop],[data-lobby-nav-games],[data-lobby-nav-tournaments],[data-lobby-nav-friends],[data-lobby-nav-players],[data-lobby-nav-leaderboards],[data-lobby-nav-chat],[data-lobby-nav-topics],[data-lobby-nav-support],[data-lobby-nav-admin],[data-lobby-nav-admin-campaigns],[data-lobby-nav-admin-profile-deletions],[data-lobby-nav-admin-profile-customization],[data-lobby-nav-admin-info],[data-lobby-nav-admin-server],[data-lobby-nav-ad-campaigns],[data-lobby-nav-settings],[data-lobby-nav-logout]')
       .forEach((element) => {
         element.addEventListener('click', () => options.onBlockedPlayersClose(), { capture: true })
       })
@@ -19022,6 +19082,13 @@ export function renderLobbyScreen(
     .forEach((button) => button.addEventListener('click', () => {
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminProfileDeletionsOpen?.()
+    }))
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-admin-profile-customization="1"]')
+    .forEach((button) => button.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminProfileCustomizationOpen?.()
     }))
 
   root
@@ -20055,6 +20122,7 @@ export function renderLobbyScreen(
       isAdmin: state.isAdmin,
       isOwnProfile: profilePopupIsOwnProfile,
       canSelfDelete: profilePopupIsOwnProfile && state.canSelfDeleteProfile === true,
+      canCustomize: profilePopupIsOwnProfile && state.canCustomizeProfile === true,
       friendshipAction: state.friendshipAction,
       viewerIsFullAdmin: state.isAdmin,
       viewerCanProfileMute: state.isProfileMuteModerator ?? false,
@@ -20137,6 +20205,7 @@ export function renderLobbyScreen(
       onCampaignsNavClick: options.onProfileCampaignsNavClick,
       onCampaignViewAllRewardsToggle: options.onProfileCampaignViewAllRewardsToggle,
       onSelfDeleteClick: options.onProfileSelfDeleteClick,
+      onCustomizeClick: options.onProfileCustomizeClick,
       onShopTabClick: options.onProfileShopTabClick,
     },
   )

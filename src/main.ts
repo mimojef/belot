@@ -154,6 +154,15 @@ import {
   type AdminProfileDeletionFilters,
   type AdminProfileDeletionRow,
 } from './app/adminProfileDeletions/showAdminProfileDeletionsPanel'
+import { showAdminProfileCustomizationPanel } from './app/adminProfileCustomization/showAdminProfileCustomizationPanel'
+import { showProfileCustomizationWindow, type ProfileCustomizationWindowDeps } from './app/profileCustomization/showProfileCustomizationWindow'
+import {
+  getPendingProfileCustomizationCheckout,
+  rememberPendingProfileCustomizationCheckout,
+  showProfileCustomizationPurchasePopup,
+  wasProfileCustomizationResultShown,
+} from './app/profileCustomization/showProfileCustomizationPurchasePopup'
+import { isLobbyMobileLightFrameActive } from './app/lobby/renderLobbyScreen'
 import {
   extractAndClearVerificationLocator,
   renderRegistrationVerificationPage,
@@ -546,6 +555,8 @@ type AuthSession = {
   svaraTestAccess?: boolean
   /** Самоизтриване (Етап 4I) — derived UI-only сигнал (server: withPikaTeamGiftBypassFlag → canSessionOfferProfileSelfDeletion) за бутона "Изтрий" в собствения профил. Authoritative проверката е POST /api/account/deletion-request. */
   profileSelfDeletionAvailable?: boolean
+  /** Персонализация (Етап 2) — UI сигнал (server: PROFILE_CUSTOMIZATION_ENABLED). Authoritative е /api/profile-customization. */
+  profileCustomizationAvailable?: boolean
 }
 
 type AuthResponse = {
@@ -1115,6 +1126,47 @@ function openAdminProfileDeletionsPanel(): void {
   // Само UI предпазител — сървърът проверява ролята при всяка заявка.
   if (currentAuthSession?.account.role !== 'admin') return
   showAdminProfileDeletionsPanel({ fetchList: fetchAdminProfileDeletions, cancelRequest: postAdminProfileDeletionCancel })
+}
+
+/**
+ * "Персонализация" (Етап 2) — прозорецът от собствения профил. Показва се
+ * само при session.profileCustomizationAvailable (feature flag); всичко
+ * останало (цени, покупка, активиране) е на сървъра. Тема: светлата мобилна
+ * на телефон, тъмната на десктоп.
+ */
+function openProfileCustomizationWindow(stripeReturn: ProfileCustomizationWindowDeps['stripeReturn'] = null): void {
+  if (currentAuthSession === null || currentAuthSession.profileCustomizationAvailable !== true) return
+  showProfileCustomizationWindow({
+    getApiBaseUrl,
+    displayName: currentAuthSession.profile.displayName,
+    theme: isLobbyMobileLightFrameActive() ? 'light' : 'dark',
+    nameHighlightRole: currentAuthSession.account.role,
+    stripeReturn,
+    navigateToCheckout: (url) => { window.location.assign(url) },
+  })
+}
+
+/**
+ * Персонализация (Етап 3) — попъп след връщане от Stripe. Само session id-то
+ * идва от URL-а; статусът/сумата/артикулът се проверяват на сървъра. Тема:
+ * активният интерфейс. null = отказано плащане.
+ */
+function openProfileCustomizationPurchasePopup(checkoutSessionId: string | null): void {
+  if (currentAuthSession === null) return
+  showProfileCustomizationPurchasePopup({
+    getApiBaseUrl,
+    checkoutSessionId,
+    displayName: currentAuthSession.profile.displayName,
+    nameHighlightRole: currentAuthSession.account.role,
+    theme: isLobbyMobileLightFrameActive() ? 'light' : 'dark',
+  })
+}
+
+/** "Персонализация" (Етап 1) — само пълен admin; правата са на сървъра (не зависят от feature flag-а). */
+function openAdminProfileCustomizationPanel(): void {
+  // Само UI предпазител — сървърът проверява ролята при всяка заявка.
+  if (currentAuthSession?.account.role !== 'admin') return
+  showAdminProfileCustomizationPanel({ getApiBaseUrl })
 }
 
 async function submitRegisterRequest(body: Record<string, string>): Promise<{
@@ -7284,6 +7336,8 @@ lobby = createLobbyFlowController({
   onLoginSubmit: (email, password, rememberMe) => submitLoginRequest(email, password, rememberMe),
   onProfileSelfDeleteRequest: () => openSelfDeletionDialog(),
   onAdminProfileDeletionsRequest: () => openAdminProfileDeletionsPanel(),
+  onAdminProfileCustomizationRequest: () => openAdminProfileCustomizationPanel(),
+  onProfileCustomizationRequest: () => openProfileCustomizationWindow(),
   onRegisterSubmit: (displayName, email, password, gender) =>
     {
       const validation = validateProfileDisplayName(displayName)
@@ -9484,10 +9538,15 @@ const stripeReturnParams = new URLSearchParams(window.location.search)
 const stripeReturnScreen = stripeReturnParams.get('screen')
 const stripeReturnPayment = stripeReturnParams.get('payment')
 const stripeReturnCheckoutSessionId = stripeReturnParams.get('session_id')
+// Персонализация (Етап 2) — собствени return URL-и (/lobby?customization=...),
+// отделни от магазина: не стартират coin/VIP/bundle lookup-ите.
+const stripeReturnCustomization = stripeReturnParams.get('customization')
 const isStripePaymentReturn =
   stripeReturnPayment === 'success' ||
   stripeReturnPayment === 'cancel' ||
-  stripeReturnScreen === 'shop'
+  stripeReturnScreen === 'shop' ||
+  stripeReturnCustomization === 'success' ||
+  stripeReturnCustomization === 'cancel'
 const offlineReloadParam = stripeReturnParams.get('offlineReload')
 const recoveryReloadParam = stripeReturnParams.get('recoveryReload')
 
@@ -10059,6 +10118,18 @@ void loadAuthSession().then(() => {
   }
   if (stripeReturnPayment === 'success') {
     void handleStripePaymentSuccessReturn(stripeReturnCheckoutSessionId)
+  }
+  // Персонализация: попъп с резултата (проверен на сървъра). Чакащата поръчка
+  // се помни при забавен webhook и се проверява пак при следващо зареждане;
+  // вече показан резултат не се показва повторно.
+  if (stripeReturnCustomization === 'success' && stripeReturnCheckoutSessionId) {
+    rememberPendingProfileCustomizationCheckout(stripeReturnCheckoutSessionId)
+    if (!wasProfileCustomizationResultShown(stripeReturnCheckoutSessionId)) openProfileCustomizationPurchasePopup(stripeReturnCheckoutSessionId)
+  } else if (stripeReturnCustomization === 'cancel') {
+    openProfileCustomizationPurchasePopup(null)
+  } else if (currentAuthSession !== null) {
+    const pendingCheckout = getPendingProfileCustomizationCheckout()
+    if (pendingCheckout !== null) openProfileCustomizationPurchasePopup(pendingCheckout)
   }
   pwaBootstrapAuthSessionLoaded = true
   requestPwaUpdateApplyAttempt()

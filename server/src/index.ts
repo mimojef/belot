@@ -66,6 +66,29 @@ import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import { createBelotVisualOverrideStore, isBelotVisualAssetKind, type BelotVisualAssetKind } from './belotVisual/belotVisualOverrideStore.js'
+import {
+  createProfileCustomizationStore,
+  emptyAppearance as emptyProfileCustomizationAppearance,
+  type ProfileCustomizationAccessMode,
+  type ProfileCustomizationAppearance,
+  type ProfileCustomizationDisplay,
+  type ProfileCustomizationFailure,
+  type ProfileCustomizationPurchaseSnapshot,
+} from './profileCustomization/profileCustomizationStore.js'
+import { isProfileCustomizationEmergencyStopActive } from './profileCustomization/profileCustomizationFeatureFlag.js'
+import {
+  PROFILE_CUSTOMIZATION_COLOR_GROUPS,
+  PROFILE_CUSTOMIZATION_COLOR_GROUP_LABELS,
+  PROFILE_CUSTOMIZATION_DURATION_DAYS,
+  PROFILE_CUSTOMIZATION_EMOJI_CATEGORIES,
+  PROFILE_CUSTOMIZATION_EMOJI_CATEGORY_ICONS,
+  PROFILE_CUSTOMIZATION_EMOJI_CATEGORY_LABELS,
+  PROFILE_CUSTOMIZATION_MIN_CONTRAST_RATIO,
+  PROFILE_CUSTOMIZATION_KIND_LABELS,
+  PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR,
+  getProfileCustomizationItemType,
+  parseEuroAmountToCents,
+} from './profileCustomization/profileCustomizationCatalog.js'
 import { resolveBelotVisual, type BelotVisualAssets } from './belotVisual/resolveBelotVisual.js'
 import { processBelotVisualImageToWebp } from './belotVisual/belotVisualImageProcessing.js'
 import { createCampaignCreditStore } from './campaigns/campaignCreditStore.js'
@@ -551,6 +574,8 @@ import { obtainBuyCheckoutSession } from './shop/obtainPendingPurchaseCheckoutSe
 import {
   buildBundleCheckoutSessionParams,
   buildCoinCheckoutSessionParams,
+  buildProfileCustomizationCheckoutSessionParams,
+  buildProfileCustomizationReturnUrls,
   buildVipCheckoutSessionParams,
 } from './shop/checkoutSessionParams.js'
 import { runFulfillment, settleCreditedPaidCheckout, settleUncreditedPaidCheckout } from './shop/recordUncreditedPaidCheckout.js'
@@ -1132,6 +1157,9 @@ const adminSettingsStore = await createAdminSettingsStore(
 )
 // "Визия на Белот" — ръчна приоритетна визия (admin_settings ключове).
 const belotVisualOverrideStore = await createBelotVisualOverrideStore(databaseBootstrap.databaseFilePath)
+// "Персонализация на профила" — store-ът се създава винаги (само схема и
+// четене при заявка); всичко видимо е зад PROFILE_CUSTOMIZATION_ENABLED.
+const profileCustomizationStore = await createProfileCustomizationStore(databaseBootstrap.databaseFilePath)
 
 // Anti Bad Luck runtime config (admin_settings) — main thread cache, подаван
 // ЗАДЪЛЖИТЕЛНО при всеки game tick към worker-а (workerProtocol v4). Initial
@@ -1308,6 +1336,7 @@ const chatStore = await createChatStore(
     roleChecker: {
       isPikaTeamProfile: (profileId) => authStore.getAccountRoleForProfile(profileId) === 'pika_team',
       getNameHighlightRoles: (profileIds) => getNameHighlightRolesByProfileId(profileIds),
+      getCustomizationDisplays: (profileIds, viewerProfileId) => getChatProfileCustomizationDisplays(profileIds, viewerProfileId),
     },
   },
 )
@@ -2355,6 +2384,127 @@ function getNameHighlightRolesByProfileId(profileIds: readonly string[]): Map<st
   return rolesByProfileId
 }
 
+// ─── Персонализация на профила: режим на достъп и показване (Етап 3) ──────
+//
+// Режимът ('admin_only' | 'public') се управлява от админ панела и се пази в
+// SQLite; без запис е 'admin_only'. PROFILE_CUSTOMIZATION_ENABLED=0 е само
+// авариен стоп на НОВИТЕ плащания (виж profileCustomizationFeatureFlag.ts).
+//
+// Показване (ТЕКУЩАТА активна персонализация на автора, derived при четене —
+// НЕ копие в съобщението; старите съобщения показват актуалния вид,
+// изтеклите — стандартния). Политика за ВСЕКИ зрител, приложена на сървъра:
+//   * пълен изглед (режим 'public' ИЛИ зрителят е пълен admin): всички
+//     автори носят senderCustomization (празен обект = няма екстри) със
+//     standardDefaults=true -> новите стандартни бял/черен ник;
+//   * ограничен изглед ('admin_only' + обикновен зрител/гост): досегашният
+//     вид. Изключение — вече платени екстри на НЕ-admin автори (купени в
+//     публичен период) остават видими (standardDefaults=false), за да не
+//     изтичат невидимо след деактивиране. Тестовите екстри на admin-ите не
+//     се изпращат изобщо.
+// Всички извличания са batch (ЕДНА заявка за персонализациите + ЕДНА за
+// ролите на списък), не lookup на автор/съобщение/зрител.
+
+function getProfileCustomizationMode(): ProfileCustomizationAccessMode {
+  return profileCustomizationStore.getAccessState().mode
+}
+
+/** Бутонът/прозорецът/checkout: 'public' -> всички; 'admin_only' -> само пълен admin; авариен стоп -> никой. */
+function canSessionUseProfileCustomization(session: { profile: { profileId: string | null }; account: { role: string } } | null): boolean {
+  if (session === null || session.profile.profileId === null) return false
+  if (isProfileCustomizationEmergencyStopActive()) return false
+  return getProfileCustomizationMode() === 'public' || session.account.role === 'admin'
+}
+
+function hasActiveProfileCustomization(display: ProfileCustomizationAppearance): boolean {
+  return display.nicknameColor !== null || display.messageColor !== null || display.emojiBefore !== null || display.emojiAfter !== null
+}
+
+// Кои автори с активни екстри са admin — попълва се при hydration (само в
+// 'admin_only' и само за автори с екстри) и се чете от ограничения изглед.
+// Липсващ запис се третира като admin (по-безопасното: не се показва).
+const profileCustomizationOwnerIsAdminByProfileId = new Map<string, boolean>()
+
+function getFullProfileCustomizationDisplays(ownerProfileIds: readonly string[]): Map<string, ProfileCustomizationDisplay> {
+  const appearances = profileCustomizationStore.getAppearancesForProfiles(ownerProfileIds)
+  if (getProfileCustomizationMode() === 'admin_only') {
+    const ownersWithActive = [...appearances.entries()].filter(([, appearance]) => hasActiveProfileCustomization(appearance)).map(([id]) => id)
+    if (ownersWithActive.length > 0) {
+      const roles = authStore.getAccountRolesForProfiles(ownersWithActive)
+      for (const ownerId of ownersWithActive) profileCustomizationOwnerIsAdminByProfileId.set(ownerId, roles.get(ownerId) === 'admin')
+    }
+  }
+  const displays = new Map<string, ProfileCustomizationDisplay>()
+  for (const ownerId of new Set(ownerProfileIds)) {
+    displays.set(ownerId, { ...(appearances.get(ownerId) ?? emptyProfileCustomizationAppearance()), standardDefaults: true })
+  }
+  return displays
+}
+
+/** Предикат "пълен изглед" за зрителите — ЕДНА batch заявка за ролите (само в 'admin_only'). */
+function createProfileCustomizationViewerPolicy(viewerProfileIds: readonly (string | null)[]): (viewerProfileId: string | null) => boolean {
+  if (getProfileCustomizationMode() === 'public') return () => true
+  const ids = [...new Set(viewerProfileIds.filter((id): id is string => id !== null))]
+  const roles = ids.length > 0 ? authStore.getAccountRolesForProfiles(ids) : new Map<string, string>()
+  return (viewerProfileId) => viewerProfileId !== null && roles.get(viewerProfileId) === 'admin'
+}
+
+function applyProfileCustomizationViewerPolicy<T extends { senderProfileId: string; senderCustomization?: ProfileCustomizationDisplay }>(
+  snapshot: T,
+  fullView: boolean,
+): T {
+  if (fullView || snapshot.senderCustomization === undefined) return snapshot
+  const { senderCustomization: display, ...rest } = snapshot
+  if (!hasActiveProfileCustomization(display) || profileCustomizationOwnerIsAdminByProfileId.get(snapshot.senderProfileId) !== false) {
+    return rest as T
+  }
+  return { ...rest, senderCustomization: { ...display, standardDefaults: false } } as T
+}
+
+/** Личните чатове: персонализациите на участниците, вече филтрирани за конкретния зрител. */
+function getChatProfileCustomizationDisplays(profileIds: readonly string[], viewerProfileId: string): Map<string, ProfileCustomizationDisplay> {
+  const displays = getFullProfileCustomizationDisplays(profileIds)
+  if (createProfileCustomizationViewerPolicy([viewerProfileId])(viewerProfileId)) return displays
+  const restricted = new Map<string, ProfileCustomizationDisplay>()
+  for (const [ownerId, display] of displays) {
+    if (hasActiveProfileCustomization(display) && profileCustomizationOwnerIsAdminByProfileId.get(ownerId) === false) {
+      restricted.set(ownerId, { ...display, standardDefaults: false })
+    }
+  }
+  return restricted
+}
+
+function getProfileCustomizationDisplaysByProfileId(profileIds: readonly string[]): Map<string, ProfileCustomizationDisplay> {
+  return getFullProfileCustomizationDisplays(profileIds)
+}
+
+function profileCustomizationDisplayField(
+  displays: Map<string, ProfileCustomizationDisplay>,
+  profileId: string,
+): { senderCustomization?: ProfileCustomizationDisplay } {
+  const display = displays.get(profileId)
+  return display === undefined ? {} : { senderCustomization: display }
+}
+
+function profileCustomizationDisplayFieldForViewer(
+  displays: Map<string, ProfileCustomizationDisplay>,
+  senderProfileId: string,
+  fullView: boolean,
+): { senderCustomization?: ProfileCustomizationDisplay } {
+  const display = displays.get(senderProfileId)
+  if (display === undefined) return {}
+  const applied = applyProfileCustomizationViewerPolicy({ senderProfileId, senderCustomization: display }, fullView)
+  return applied.senderCustomization === undefined ? {} : { senderCustomization: applied.senderCustomization }
+}
+
+/** Режим на Stripe по префикса на ключа — без да се показва самият ключ. */
+function getStripeKeyMode(): 'live' | 'test' | 'not_configured' | 'unknown' {
+  const key = process.env.STRIPE_SECRET_KEY?.trim() ?? ''
+  if (key.length === 0) return 'not_configured'
+  if (key.startsWith('sk_live_') || key.startsWith('rk_live_')) return 'live'
+  if (key.startsWith('sk_test_') || key.startsWith('rk_test_')) return 'test'
+  return 'unknown'
+}
+
 function hydrateTopicMessagesWithCurrentAvatars(
   messages: readonly TopicMessageSnapshot[],
 ): TopicMessageBroadcastBase[] {
@@ -2362,6 +2512,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
   const nameHighlightRoleByProfileId = getNameHighlightRolesByProfileId(uniqueSenderProfileIds)
+  const customizationByProfileId = getProfileCustomizationDisplaysByProfileId(uniqueSenderProfileIds)
   // Batch lookup — ЕДНА заявка за целия batch sender profile IDs (mute
   // indicator icon брифа §8), не N+1 lookup по съобщение.
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
@@ -2394,6 +2545,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
       senderRole: message.senderRole,
       senderNameHighlightRole: nameHighlightRoleByProfileId.get(message.senderProfileId) ?? null,
+      ...profileCustomizationDisplayField(customizationByProfileId, message.senderProfileId),
       body: message.body,
       createdAt: message.createdAt,
       lastActivityAt: message.lastActivityAt,
@@ -2494,13 +2646,16 @@ function broadcastTopicMessageToLocalSubscribers(
       excludedSendersByViewer,
     )
 
+    // Персонализация — политика за зрителя (ЕДНА batch заявка за ролите).
+    const customizationViewerPolicy = createProfileCustomizationViewerPolicy(liveRecipients.map((r) => r.profileId))
+
     for (const recipient of liveRecipients) {
       const isOriginator = opts?.originatingConnectionId === recipient.connectionId
       const viewerData = recipient.profileId !== null ? viewerDataByProfileId.get(recipient.profileId) : undefined
 
       safeSendToConnection(recipient.connectionId, {
         type: 'topic_message',
-        ...snapshot,
+        ...applyProfileCustomizationViewerPolicy(snapshot, customizationViewerPolicy(recipient.profileId)),
         // replyCount вече е viewer-agnostic (block вече не изважда сендъри) —
         // override-ва shared base стойността само за симетрия с viewerData shape-а.
         replyCount: viewerData?.replyCount ?? 0,
@@ -2565,6 +2720,9 @@ function broadcastTopicReplyToLocalSubscribers(
     emptyExclusions,
   )
 
+  // Персонализация — политика за зрителя (ЕДНА batch заявка за ролите).
+  const customizationViewerPolicy = createProfileCustomizationViewerPolicy(liveRecipients.map((r) => r.profileId))
+
   for (const recipient of liveRecipients) {
     const isOriginator = opts?.originatingConnectionId === recipient.connectionId
     const viewerHasLiked = recipient.profileId !== null
@@ -2573,7 +2731,7 @@ function broadcastTopicReplyToLocalSubscribers(
 
     safeSendToConnection(recipient.connectionId, {
       type: 'topic_reply',
-      ...snapshot,
+      ...applyProfileCustomizationViewerPolicy(snapshot, customizationViewerPolicy(recipient.profileId)),
       viewerHasLiked,
       ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
     })
@@ -2963,7 +3121,9 @@ function reconcileTopicUnreadAfterProfileVisibilityChange(changedProfileId: stri
       },
     ] as const))
     if (restoredRoots.length > 0) {
+      const customizationViewerPolicy = createProfileCustomizationViewerPolicy(generalRecipients.map((r) => r.profileId))
       for (const recipient of generalRecipients) {
+        const customizationFullView = customizationViewerPolicy(recipient.profileId)
         safeSendToConnection(recipient.connectionId, {
           type: 'topic_message_catchup',
           topicId: generalTopicId,
@@ -2971,7 +3131,7 @@ function reconcileTopicUnreadAfterProfileVisibilityChange(changedProfileId: stri
             const perViewer = viewerDataByRootId.get(m.messageId)
             const viewerData = perViewer?.viewerData.get(recipient.profileId)
             return {
-              ...m,
+              ...applyProfileCustomizationViewerPolicy(m, customizationFullView),
               replyCount: viewerData?.replyCount ?? 0,
               unreadCount: perViewer?.unreadCount.get(recipient.profileId) ?? 0,
               viewerHasLiked: viewerData?.viewerHasLiked ?? false,
@@ -10277,6 +10437,7 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
   marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
   svaraTestAccess: boolean
   profileSelfDeletionAvailable: boolean
+  profileCustomizationAvailable: boolean
 }) | null {
   if (session === null || session.profile.profileId === null) return session as null
   const isLegacyProfileBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
@@ -10317,6 +10478,10 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
     // handleAccountDeletionSubmit). Authoritative проверките остават в
     // POST /api/account/deletion-request.
     profileSelfDeletionAvailable: canSessionOfferProfileSelfDeletion(session),
+    // Персонализация (Етап 2) — UI-only сигнал за бутона "Персонализация" в
+    // собствения профил: само при PROFILE_CUSTOMIZATION_ENABLED. Authoritative
+    // проверките са в /api/profile-customization (флаг, профил, цена).
+    profileCustomizationAvailable: canSessionUseProfileCustomization(session),
   } as T extends null ? null : T & {
     pikaTeamGiftMaxAmount: number | null
     pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
@@ -10324,6 +10489,7 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
     marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
     svaraTestAccess: boolean
     profileSelfDeletionAvailable: boolean
+    profileCustomizationAvailable: boolean
   }
 }
 
@@ -14401,6 +14567,8 @@ async function handleTopicMessagesRequest(
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
   const nameHighlightRoleByProfileId = getNameHighlightRolesByProfileId(uniqueSenderProfileIds)
+  const customizationByProfileId = getProfileCustomizationDisplaysByProfileId(uniqueSenderProfileIds)
+  const customizationFullView = createProfileCustomizationViewerPolicy([auth.profileId])(auth.profileId)
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   // Батово likeCount/replyCount/viewerHasLiked за цялата страница (Етап 3,
@@ -14425,6 +14593,7 @@ async function handleTopicMessagesRequest(
       ...message,
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
       senderNameHighlightRole: nameHighlightRoleByProfileId.get(message.senderProfileId) ?? null,
+      ...profileCustomizationDisplayFieldForViewer(customizationByProfileId, message.senderProfileId, customizationFullView),
       attachment: attachmentRecord
         ? {
             attachmentId: attachmentRecord.storageFilename,
@@ -14578,6 +14747,8 @@ async function handleTopicRepliesRequest(
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
   const nameHighlightRoleByProfileId = getNameHighlightRolesByProfileId(uniqueSenderProfileIds)
+  const customizationByProfileId = getProfileCustomizationDisplaysByProfileId(uniqueSenderProfileIds)
+  const customizationFullView = createProfileCustomizationViewerPolicy([auth.profileId])(auth.profileId)
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   const messageIds = page.messages.map((m) => m.messageId)
@@ -14604,6 +14775,7 @@ async function handleTopicRepliesRequest(
       ...message,
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
       senderNameHighlightRole: nameHighlightRoleByProfileId.get(message.senderProfileId) ?? null,
+      ...profileCustomizationDisplayFieldForViewer(customizationByProfileId, message.senderProfileId, customizationFullView),
       attachment: attachmentRecord
         ? {
             attachmentId: attachmentRecord.storageFilename,
@@ -18791,6 +18963,15 @@ async function handleStripeWebhookRequest(
   if (event.type === 'checkout.session.completed') {
     const stripeSession = event.data.object as Stripe.Checkout.Session
 
+    // Персонализация на профила — собствен клон ПРЕДИ всички останали, за да
+    // не стигне никога до coin fallback-а по-долу (непознат purchaseType там
+    // се третира като жълтици).
+    if (stripeSession.metadata?.purchaseType === 'profile_customization') {
+      const customizationStatus = await settleProfileCustomizationCheckoutWebhook(stripe, stripeSession, event.id)
+      sendJsonResponse(res, customizationStatus, { ok: customizationStatus === 200 })
+      return true
+    }
+
     if (stripeSession.metadata?.purchaseType === 'vip') {
       const purchaseId = stripeSession.metadata?.purchaseId ?? ''
       const checkoutSessionId = stripeSession.id
@@ -19144,17 +19325,208 @@ async function handleStripeWebhookRequest(
     console.log(
       `[stripe/webhook] checkout.session.expired session=${stripeSession.id} purchaseId=${stripeSession.metadata?.purchaseId ?? ''} type=${stripeSession.metadata?.purchaseType ?? 'coin'}`,
     )
-    if (stripeSession.metadata?.purchaseType === 'vip') {
+    if (stripeSession.metadata?.purchaseType === 'profile_customization') {
+      profileCustomizationStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
+    } else if (stripeSession.metadata?.purchaseType === 'vip') {
       vipPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
     } else if (stripeSession.metadata?.purchaseType === 'bundle') {
       bundlePurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
     } else {
       coinPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
     }
+  } else if (
+    (event.type === 'checkout.session.async_payment_succeeded' || event.type === 'checkout.session.async_payment_failed')
+    && (event.data.object as Stripe.Checkout.Session).metadata?.purchaseType === 'profile_customization'
+  ) {
+    // Персонализация — отложено потвърждение (асинхронен метод на плащане):
+    // completed е пристигнал с payment_status='unpaid' (нищо не е активирано);
+    // успехът минава през СЪЩОТО кредитиране (CAS — без двойно активиране),
+    // неуспехът маркира поръчката 'failed'. Жълтиците/VIP/пакетите не се
+    // засягат (за тях тези събития и досега не се обработват).
+    const stripeSession = event.data.object as Stripe.Checkout.Session
+    if (event.type === 'checkout.session.async_payment_succeeded') {
+      const asyncStatus = await settleProfileCustomizationCheckoutWebhook(stripe, stripeSession, event.id)
+      sendJsonResponse(res, asyncStatus, { ok: asyncStatus === 200 })
+      return true
+    }
+    profileCustomizationStore.markPurchaseFailedByCheckoutSessionId(stripeSession.id)
+    console.log(`[stripe/webhook] profile customization async payment failed session=${stripeSession.id}`)
+  } else if (
+    (event.type as string) === 'refund.failed'
+    || (event.type as string) === 'refund.updated'
+    || (event.type as string) === 'charge.refund.updated'
+  ) {
+    // Неуспешен/отменен refund — само за персонализацията (жълтиците/VIP/
+    // пакетите и досега нямат refund обработка — непроменено).
+    const refundStatus = await handleProfileCustomizationRefundStatusChange(stripe, event.data.object as Stripe.Refund, event.id)
+    sendJsonResponse(res, refundStatus, { ok: refundStatus === 200 })
+    return true
+  } else if (event.type === 'charge.refunded') {
+    // Засега само персонализацията реагира на refund (жълтиците/VIP/пакетите
+    // нямат такава обработка — непроменено). Charge, който не е на
+    // персонализация, се потвърждава с 200 без промени.
+    const status = await handleProfileCustomizationChargeRefunded(stripe, event.data.object as Stripe.Charge, event.id)
+    sendJsonResponse(res, status, { ok: status === 200 })
+    return true
   }
 
   sendJsonResponse(res, webhookRetryRequested ? 500 : 200, { ok: !webhookRetryRequested })
   return true
+}
+
+// ─── Персонализация на профила: webhook ────────────────────────────────────
+
+// checkout.session.completed за purchaseType='profile_customization'.
+// Кредитирането е единствено тук (не от client redirect) — atomic CAS в
+// store-а предпазва от двойно активиране при повторен/конкурентен webhook.
+// Връща HTTP статуса: 500 само при временна грешка (Stripe опитва отново).
+async function settleProfileCustomizationCheckoutWebhook(
+  stripe: Stripe,
+  stripeSession: Stripe.Checkout.Session,
+  stripeEventId: string,
+): Promise<200 | 500> {
+  const purchaseId = stripeSession.metadata?.purchaseId ?? ''
+  const checkoutSessionId = stripeSession.id
+  const paymentIntentId = typeof stripeSession.payment_intent === 'string'
+    ? stripeSession.payment_intent
+    : (stripeSession.payment_intent as { id?: string } | null)?.id ?? null
+
+  const result = runFulfillment(() => profileCustomizationStore.fulfillPaidPurchase({
+    checkoutSessionId,
+    purchaseId,
+    stripePaymentStatus: stripeSession.payment_status,
+    stripeCurrency: (stripeSession.currency ?? '').toUpperCase(),
+    stripeAmountTotalCents: stripeSession.amount_total ?? -1,
+    stripePaymentIntentId: paymentIntentId,
+  }))
+
+  if (!result.ok) {
+    console.error(`[stripe/webhook] profile customization fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${result.message}`)
+    return reportUncreditedPaidCheckout('profile_customization', stripeSession, stripeEventId, result)
+  }
+
+  if (result.refundedBeforeCredit) {
+    console.log(`[stripe/webhook] profile customization refunded before credit purchaseId=${result.purchase.purchaseId} — nothing activated`)
+  } else if (result.alreadyCredited) {
+    console.log(`[stripe/webhook] profile customization already credited session=${checkoutSessionId} purchaseId=${purchaseId}`)
+  } else {
+    console.log(`[stripe/webhook] profile customization fulfilled purchaseId=${result.purchase.purchaseId} kind=${result.purchase.kind} effect=${result.purchase.grantEffect} until=${result.purchase.grantedUntil}`)
+  }
+
+  const httpStatus: 200 | 500 = settleCreditedWebhookCheckout(checkoutSessionId) ? 200 : 500
+
+  // Payment-method enrichment — само за Admin → Персонализация (display-only),
+  // никога не влияе на вече направеното кредитиране.
+  const fulfilledPurchaseId = result.purchase.purchaseId
+  if (paymentIntentId && profileCustomizationStore.needsPaymentMethodSnapshot(fulfilledPurchaseId)) {
+    try {
+      const paymentIntent = await trackHttpWait('io', stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] }))
+      let charge: Stripe.Charge | null = null
+      if (paymentIntent.latest_charge && typeof paymentIntent.latest_charge === 'object') {
+        charge = paymentIntent.latest_charge as Stripe.Charge
+      } else if (paymentIntent.latest_charge && typeof paymentIntent.latest_charge === 'string') {
+        charge = await trackHttpWait('io', stripe.charges.retrieve(paymentIntent.latest_charge))
+      }
+      const details = charge?.payment_method_details ?? null
+      profileCustomizationStore.updatePaymentMethodSnapshot(fulfilledPurchaseId, {
+        stripePaymentIntentId: paymentIntentId,
+        stripeChargeId: charge?.id ?? null,
+        paymentMethodType: details?.type ?? null,
+        walletType: details?.card?.wallet?.type ?? null,
+        cardBrand: details?.card?.brand ?? null,
+        cardLast4: details?.card?.last4 ?? null,
+        cardCountry: details?.card?.country ?? null,
+      })
+    } catch (error) {
+      console.warn(`[stripe/webhook] profile customization payment method enrichment failed purchaseId=${fulfilledPurchaseId}:`, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  return httpStatus
+}
+
+// refund.failed / refund.updated / charge.refund.updated — когато refund-ът
+// е неуспешен или отменен, сумата НЕ е върната, а правото може вече да е
+// анулирано (от charge.refunded). Автоматично възстановяване не се прави:
+// стара заменена екстра не се връща и по-нова валидна покупка не се отменя.
+// Покупката се маркира за админ преглед с причина 'refund_failed'
+// (idempotent по refund id). Други статуси (pending/succeeded) — без промяна:
+// сумите идват от charge.refunded.
+async function handleProfileCustomizationRefundStatusChange(
+  stripe: Stripe,
+  refund: Stripe.Refund,
+  stripeEventId: string,
+): Promise<200 | 500> {
+  if (refund.status !== 'failed' && refund.status !== 'canceled') return 200
+  const paymentIntentId = typeof refund.payment_intent === 'string'
+    ? refund.payment_intent
+    : (refund.payment_intent as { id?: string } | null)?.id ?? null
+  if (paymentIntentId === null) return 200
+
+  let result = profileCustomizationStore.recordRefundFailure({ paymentIntentId, stripeRefundId: refund.id, stripeEventId })
+  if (!result.ok && result.reason === 'purchase_not_found') {
+    let checkoutSession: Stripe.Checkout.Session | undefined
+    try {
+      const sessions = await trackHttpWait('io', stripe.checkout.sessions.list({ payment_intent: paymentIntentId, limit: 1 }))
+      checkoutSession = sessions.data[0]
+    } catch (error) {
+      console.error(`[stripe/webhook] refund failure session lookup failed pi=${paymentIntentId}:`, error instanceof Error ? error.message : String(error))
+      return 500
+    }
+    if (checkoutSession === undefined || checkoutSession.metadata?.purchaseType !== 'profile_customization') return 200
+    result = profileCustomizationStore.recordRefundFailure({ checkoutSessionId: checkoutSession.id, stripeRefundId: refund.id, stripeEventId })
+  }
+  if (!result.ok) {
+    console.error(`[stripe/webhook] profile customization refund failure not recorded pi=${paymentIntentId}: ${result.message}`)
+    return 200
+  }
+  console.warn(`[stripe/webhook] profile customization refund ${refund.status} refund=${refund.id} purchaseId=${result.purchase.purchaseId} outcome=${result.outcome} — marked for admin review`)
+  return 200
+}
+
+// charge.refunded — Stripe праща кумулативната възстановена сума. Покупката
+// се търси по payment intent (записан при кредитирането); ако още не е
+// кредитирана (refund преди checkout.session.completed), по checkout
+// сесията на този payment intent. Пълен refund анулира правото, без да
+// поврежда следващи покупки; частичен — само се маркира за преглед.
+async function handleProfileCustomizationChargeRefunded(
+  stripe: Stripe,
+  charge: Stripe.Charge,
+  stripeEventId: string,
+): Promise<200 | 500> {
+  const paymentIntentId = typeof charge.payment_intent === 'string'
+    ? charge.payment_intent
+    : (charge.payment_intent as { id?: string } | null)?.id ?? null
+  if (paymentIntentId === null) return 200
+
+  let result = profileCustomizationStore.applyRefund({ paymentIntentId, refundedAmountCents: charge.amount_refunded, stripeEventId })
+
+  if (!result.ok && result.reason === 'purchase_not_found') {
+    let checkoutSession: Stripe.Checkout.Session | undefined
+    try {
+      const sessions = await trackHttpWait('io', stripe.checkout.sessions.list({ payment_intent: paymentIntentId, limit: 1 }))
+      checkoutSession = sessions.data[0]
+    } catch (error) {
+      console.error(`[stripe/webhook] charge.refunded session lookup failed pi=${paymentIntentId}:`, error instanceof Error ? error.message : String(error))
+      return 500
+    }
+    if (checkoutSession === undefined || checkoutSession.metadata?.purchaseType !== 'profile_customization') {
+      return 200
+    }
+    result = profileCustomizationStore.applyRefund({ checkoutSessionId: checkoutSession.id, refundedAmountCents: charge.amount_refunded, stripeEventId })
+  }
+
+  if (!result.ok) {
+    if (result.reason === 'purchase_not_found') {
+      console.error(`[stripe/webhook] charge.refunded for profile customization without local purchase pi=${paymentIntentId}`)
+      return 200
+    }
+    console.error(`[stripe/webhook] profile customization refund failed pi=${paymentIntentId}: ${result.message}`)
+    return result.reason === 'refund_failed' && result.transient === true ? 500 : 200
+  }
+
+  console.log(`[stripe/webhook] profile customization refund outcome=${result.outcome} purchaseId=${result.purchase.purchaseId} refunded=${result.purchase.refundedAmountCents ?? 0}/${result.purchase.priceCents}`)
+  return 200
 }
 
 async function handleAdminSettingsRequest(
@@ -20183,6 +20555,499 @@ async function handleAdminBelotVisualRequest(
     await trackHttpWait('io', deleteBelotVisualUploadIfUnused(activation.previousUrl))
   }
   sendJsonResponse(res, 200, { ok: true, visual: activation.snapshot })
+  return true
+}
+
+// "Персонализация на профила" — Admin → Персонализация: базови цени за 30
+// дни, продажба вкл./изкл. по вид, каталог с цветове/емоджита, покупки и
+// преглед на частични refund-и. Само пълен admin. НЕ зависи от
+// PROFILE_CUSTOMIZATION_ENABLED: администраторът подготвя каталога и цените,
+// докато функцията е изключена за потребителите (флагът управлява само
+// публичното активиране — виж handleProfileCustomizationRequest).
+// Всички правила (цена, запазен цвят, валидно емоджи) са в
+// profileCustomizationStore/Catalog — тук е само транспортът.
+function sendProfileCustomizationFailure(res: ServerResponse, result: ProfileCustomizationFailure): void {
+  const status = result.code === 'not_found' ? 404 : result.code === 'duplicate' ? 409 : 400
+  sendJsonResponse(res, status, { ok: false, code: result.code, message: result.message })
+}
+
+function buildAdminProfileCustomizationSnapshot() {
+  return {
+    kinds: profileCustomizationStore.listKindSettings(),
+    colors: profileCustomizationStore.listColors({ includeInactive: true }),
+    emojis: profileCustomizationStore.listEmojis({ includeInactive: true }),
+    stats: profileCustomizationStore.getAdminKindStats(),
+    durations: PROFILE_CUSTOMIZATION_DURATION_DAYS,
+    colorGroups: PROFILE_CUSTOMIZATION_COLOR_GROUPS.map((key) => ({ key, label: PROFILE_CUSTOMIZATION_COLOR_GROUP_LABELS[key] })),
+    emojiCategories: PROFILE_CUSTOMIZATION_EMOJI_CATEGORIES.map((key) => ({
+      key,
+      label: PROFILE_CUSTOMIZATION_EMOJI_CATEGORY_LABELS[key],
+      icon: PROFILE_CUSTOMIZATION_EMOJI_CATEGORY_ICONS[key],
+    })),
+    reservedStaffColor: PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR,
+    minContrastRatio: PROFILE_CUSTOMIZATION_MIN_CONTRAST_RATIO,
+    access: {
+      ...profileCustomizationStore.getAccessState(),
+      emergencyStop: isProfileCustomizationEmergencyStopActive(),
+      history: profileCustomizationStore.listModeChanges(10),
+    },
+    // Само режимът на ключа (live/test) по префикса — ключът никога не се изпраща.
+    stripeMode: getStripeKeyMode(),
+    pendingRefundReviews: profileCustomizationStore.countPendingRefundReviews(),
+  }
+}
+
+// "Персонализация на профила", Етап 2 — потребителски API (собственият
+// профил). САМО при PROFILE_CUSTOMIZATION_ENABLED=1 — иначе 404
+// feature_disabled: прозорецът не се показва, покупки не могат да се
+// създадат, нищо не се активира. Цената винаги е от админ настройката
+// (store.previewPurchase/createPendingPurchase) — клиентът подава само вид,
+// артикул и срок. Активирането е единствено от webhook-а.
+/**
+ * Тестов режим на admin: в 'admin_only' пълният admin може да купи всяка
+ * екстра, без да включва публичния ѝ превключвател за продажба (иначе при
+ * по-късно "Активирай" продажбата би станала публична неволно).
+ */
+function isProfileCustomizationAdminTestMode(session: { account: { role: string } }): boolean {
+  return getProfileCustomizationMode() === 'admin_only' && session.account.role === 'admin'
+}
+
+function serializeProfileCustomizationReturnPurchase(returnPurchase: ProfileCustomizationPurchaseSnapshot | null) {
+  // Всичко за попъпа след плащането идва от сървърния запис на поръчката
+  // (не от URL/клиента): артикул, срок, реално платената сума, ефект и
+  // крайната дата. Статусът 'paid' означава потвърдено от webhook-а.
+  return returnPurchase === null ? null : {
+    purchaseId: returnPurchase.purchaseId,
+    kind: returnPurchase.kind,
+    kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[returnPurchase.kind],
+    itemType: getProfileCustomizationItemType(returnPurchase.kind),
+    itemValue: returnPurchase.itemValue,
+    itemLabel: returnPurchase.itemLabel,
+    days: returnPurchase.days,
+    priceCents: returnPurchase.priceCents,
+    currency: returnPurchase.currency,
+    status: returnPurchase.status,
+    grantEffect: returnPurchase.grantEffect,
+    grantedUntil: returnPurchase.grantedUntil,
+    creditedAt: returnPurchase.creditedAt,
+  }
+}
+
+function buildProfileCustomizationClientSnapshot(profileId: string, adminTestMode = false, now: Date = new Date()) {
+  return {
+    adminTestMode,
+    kinds: profileCustomizationStore.listKindSettings().map((kind) => ({
+      kind: kind.kind,
+      label: kind.label,
+      itemType: kind.itemType,
+      salesEnabled: kind.salesEnabled,
+      // Може ли ТОЗИ потребител да я купи сега (публична продажба или тестов режим на admin).
+      purchasable: kind.salesEnabled || adminTestMode,
+      basePrice30DaysCents: kind.basePrice30DaysCents,
+      priceTable: kind.priceTable,
+    })),
+    // Само артикулите в продажба; активен, но скрит артикул идва със
+    // snapshot стойността си в `active` (и може да бъде удължен).
+    colors: profileCustomizationStore.listColors().map((color) => ({ colorId: color.colorId, hex: color.hex, label: color.label, groupKey: color.groupKey })),
+    emojis: profileCustomizationStore.listEmojis().map((emoji) => ({ emojiId: emoji.emojiId, emoji: emoji.emoji, categoryKey: emoji.categoryKey })),
+    colorGroups: PROFILE_CUSTOMIZATION_COLOR_GROUPS.map((key) => ({ key, label: PROFILE_CUSTOMIZATION_COLOR_GROUP_LABELS[key] })),
+    emojiCategories: PROFILE_CUSTOMIZATION_EMOJI_CATEGORIES.map((key) => ({
+      key,
+      label: PROFILE_CUSTOMIZATION_EMOJI_CATEGORY_LABELS[key],
+      icon: PROFILE_CUSTOMIZATION_EMOJI_CATEGORY_ICONS[key],
+    })),
+    durations: PROFILE_CUSTOMIZATION_DURATION_DAYS,
+    active: profileCustomizationStore.getProfileActiveItems(profileId, now),
+    serverNow: now.toISOString(),
+  }
+}
+
+async function handleProfileCustomizationRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  requestUrl: URL,
+): Promise<boolean> {
+  const basePath = '/api/profile-customization'
+  const pathname = requestUrl.pathname
+  if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
+    return false
+  }
+
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const profileId = session.profile.profileId
+  // Режим 'admin_only' -> само пълен admin; 'public' -> всички. Проверява се
+  // на сървъра при всяка заявка (не по бутона в клиента).
+  if (getProfileCustomizationMode() !== 'public' && session.account.role !== 'admin') {
+    // Изключение: потребител, започнал покупка докато функцията е била
+    // публична, вижда статуса на СВОЯТА вече съществуваща поръчка (попъпът
+    // след Stripe). Само четене, само собствена поръчка по session id — без
+    // каталог, без нови покупки, без чужди поръчки.
+    const limitedSessionId = requestUrl.searchParams.get('sessionId')?.trim() ?? ''
+    const ownPurchase = req.method === 'GET' && (pathname === basePath || pathname === `${basePath}/`) && limitedSessionId.length > 0
+      ? profileCustomizationStore.findProfilePurchaseByCheckoutSessionId(profileId, limitedSessionId)
+      : null
+    if (ownPurchase !== null) {
+      sendJsonResponse(res, 200, {
+        ok: true,
+        limited: true,
+        active: profileCustomizationStore.getProfileActiveItems(profileId),
+        returnPurchase: serializeProfileCustomizationReturnPurchase(ownPurchase),
+      })
+      return true
+    }
+    sendJsonResponse(res, 404, { ok: false, code: 'feature_disabled', message: 'Персонализацията не е налична.' })
+    return true
+  }
+  const adminTestMode = isProfileCustomizationAdminTestMode(session)
+  const subPath = pathname.slice(basePath.length)
+
+  if (subPath === '' || subPath === '/') {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    // ?sessionId=cs_... — състоянието на поръчката след връщане от Stripe
+    // (само собствена поръчка; webhook-ът може да закъснее).
+    const returnSessionId = requestUrl.searchParams.get('sessionId')?.trim() ?? ''
+    const returnPurchase = returnSessionId.length > 0
+      ? profileCustomizationStore.findProfilePurchaseByCheckoutSessionId(profileId, returnSessionId)
+      : null
+    sendJsonResponse(res, 200, {
+      ok: true,
+      ...buildProfileCustomizationClientSnapshot(profileId, adminTestMode),
+      returnPurchase: serializeProfileCustomizationReturnPurchase(returnPurchase),
+    })
+    return true
+  }
+
+  if (subPath !== '/checkout') {
+    sendJsonResponse(res, 404, { ok: false, message: 'Not found' })
+    return true
+  }
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+    return true
+  }
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+    return true
+  }
+  const kind = getStringField(body, 'kind')
+  const itemId = getStringField(body, 'itemId')
+  const days = typeof body.days === 'number' ? body.days : Number.NaN
+  const acknowledgeReplace = body.acknowledgeReplace === true
+
+  // Авариен стоп (PROFILE_CUSTOMIZATION_ENABLED=0) — нови плащания за никого.
+  if (isProfileCustomizationEmergencyStopActive()) {
+    sendJsonResponse(res, 503, { ok: false, code: 'purchases_halted', message: 'Покупките на персонализация са временно спрени.' })
+    return true
+  }
+
+  // Самоизтриване — скрит профил не купува нищо ново.
+  if (playerProgressStore.isProfileHiddenForDeletion(profileId)) {
+    sendJsonResponse(res, 403, { ok: false, code: 'profile_not_eligible', message: 'Профилът е подаден за изтриване.' })
+    return true
+  }
+
+  const preview = profileCustomizationStore.previewPurchase({ profileId, kind, itemId, days, ignoreSalesToggle: adminTestMode })
+  if (!preview.ok) {
+    sendProfileCustomizationFailure(res, preview)
+    return true
+  }
+  // Предупреждението при замяна е задължително и проверено от сървъра:
+  // без изрично потвърждение не се създава плащане, което губи активни дни.
+  if (preview.preview.effect === 'replace' && !acknowledgeReplace) {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      code: 'replace_confirmation_required',
+      message: 'Новата покупка ще замени активната ти персонализация и оставащите дни ще се загубят. Потвърди, за да продължиш.',
+      preview: preview.preview,
+    })
+    return true
+  }
+
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY
+  if (!stripeSecretKey) {
+    sendJsonResponse(res, 500, { ok: false, message: 'Stripe не е конфигуриран на сървъра. Моля, свържи се с администратор.' })
+    return true
+  }
+
+  const pending = profileCustomizationStore.createPendingPurchase({ profileId, kind, itemId, days, ignoreSalesToggle: adminTestMode })
+  if (!pending.ok) {
+    sendProfileCustomizationFailure(res, pending)
+    return true
+  }
+
+  const { successUrl, cancelUrl } = buildProfileCustomizationReturnUrls(process.env)
+  const stripe = new Stripe(stripeSecretKey)
+
+  // Една платима сесия на pending ред (виж obtainPendingPurchaseCheckoutSession.ts);
+  // webhook-ът търси реда СТРОГО по session id.
+  const obtained = await obtainBuyCheckoutSession({
+    stripe,
+    purchase: pending.purchase,
+    buildCreateParams: (purchase) => buildProfileCustomizationCheckoutSessionParams(purchase, profileId, { successUrl, cancelUrl }),
+    retirePendingPurchase: (purchaseId) => profileCustomizationStore.retirePendingPurchase(purchaseId),
+    createReplacementPurchase: () => {
+      const replacement = profileCustomizationStore.createPendingPurchase({ profileId, kind, itemId, days, ignoreSalesToggle: adminTestMode })
+      return replacement.ok ? { ok: true as const, purchase: replacement.purchase } : { ok: false as const, message: replacement.message }
+    },
+    logLabel: 'profile-customization/checkout',
+  })
+  if (!obtained.ok) {
+    sendJsonResponse(res, obtained.status, { ok: false, message: obtained.message })
+    return true
+  }
+
+  const attached = profileCustomizationStore.attachCheckoutSession(obtained.purchase.purchaseId, obtained.session.id)
+  if (attached === null || attached.providerCheckoutSessionId !== obtained.session.id) {
+    sendJsonResponse(res, 500, { ok: false, message: 'Checkout сесията не беше записана към покупката.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    checkoutUrl: obtained.session.url,
+    checkoutSessionId: obtained.session.id,
+    purchaseId: attached.purchaseId,
+    priceCents: attached.priceCents,
+    preview: pending.preview,
+  })
+  return true
+}
+
+async function handleAdminProfileCustomizationRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  requestUrl: URL,
+): Promise<boolean> {
+  const basePath = '/api/admin/profile-customization'
+  const pathname = requestUrl.pathname
+  if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
+    return false
+  }
+
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш достъп до персонализацията.' })
+    return true
+  }
+
+  const subPath = pathname.slice(basePath.length)
+
+  if (subPath === '' || subPath === '/') {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, ...buildAdminProfileCustomizationSnapshot() })
+    return true
+  }
+
+  if (subPath === '/purchases') {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    const limit = Number.parseInt(requestUrl.searchParams.get('limit') ?? '50', 10)
+    const offset = Number.parseInt(requestUrl.searchParams.get('offset') ?? '0', 10)
+    const status = requestUrl.searchParams.get('status')
+    const page = profileCustomizationStore.listAdminPurchases({
+      limit: Number.isFinite(limit) ? limit : 50,
+      offset: Number.isFinite(offset) ? offset : 0,
+      status: status === '' ? null : status,
+    })
+    sendJsonResponse(res, 200, { ok: true, ...page })
+    return true
+  }
+
+  // Всички останали са промени: POST (добавяне) / PATCH (редакция).
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+    return true
+  }
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+    return true
+  }
+
+  const optionalBoolean = (key: string): boolean | undefined | null => {
+    const value = body[key]
+    if (value === undefined) return undefined
+    return typeof value === 'boolean' ? value : null
+  }
+  const optionalInteger = (key: string): number | undefined | null => {
+    const value = body[key]
+    if (value === undefined) return undefined
+    return typeof value === 'number' && Number.isSafeInteger(value) ? value : null
+  }
+  const optionalString = (key: string): string | undefined | null => {
+    const value = body[key]
+    if (value === undefined) return undefined
+    return typeof value === 'string' ? value : null
+  }
+
+  // "Активирай" / "Деактивирай" — режимът на достъп, само пълен admin (горе).
+  // Изисква изрично confirm: true (UI-ят показва потвърждение). Одитира кой
+  // и кога. Деактивирането спира новите публични покупки, без да отнема вече
+  // платените права (те остават видими — виж политиката по зрител).
+  if (subPath === '/mode') {
+    if (req.method !== 'POST') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    // Тялото вече е прочетено и валидирано като обект по-горе.
+    const requestedMode = body.mode
+    if (requestedMode !== 'public' && requestedMode !== 'admin_only') {
+      sendJsonResponse(res, 400, { ok: false, code: 'invalid_mode', message: 'Невалиден режим.' })
+      return true
+    }
+    if (body.confirm !== true) {
+      sendJsonResponse(res, 400, { ok: false, code: 'confirmation_required', message: 'Потвърди промяната на режима.' })
+      return true
+    }
+    const result = profileCustomizationStore.setAccessMode(requestedMode, {
+      profileId: session.profile.profileId,
+      displayName: session.profile.displayName ?? null,
+    })
+    console.log(`[profile-customization] mode ${result.changed ? 'changed' : 'unchanged'} -> ${result.state.mode} by profile=${session.profile.profileId ?? 'unknown'}`)
+    sendJsonResponse(res, 200, { ok: true, changed: result.changed, ...buildAdminProfileCustomizationSnapshot() })
+    return true
+  }
+
+  // Частичен refund -> "Маркирай като прегледан".
+  const reviewMatch = /^\/purchases\/([^/]+)\/refund-review$/.exec(subPath)
+  if (reviewMatch !== null) {
+    if (req.method !== 'POST') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    // Кой admin и кога — записва се в самата покупка (без отделна одитна таблица).
+    const reviewed = profileCustomizationStore.markRefundReviewed(decodeURIComponent(reviewMatch[1] ?? ''), {
+      profileId: session.profile.profileId,
+      displayName: session.profile.displayName ?? null,
+    })
+    if (!reviewed) {
+      sendJsonResponse(res, 404, { ok: false, code: 'not_found', message: 'Няма покупка, която чака преглед.' })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, pendingRefundReviews: profileCustomizationStore.countPendingRefundReviews() })
+    return true
+  }
+
+  const kindMatch = /^\/kinds\/([^/]+)$/.exec(subPath)
+  if (kindMatch !== null) {
+    if (req.method !== 'PATCH') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    const salesEnabled = optionalBoolean('salesEnabled')
+    // Цената идва като текст в евро ("1.99") и се разбира до центове тук —
+    // без floating-point закръгляне в браузъра.
+    const priceText = optionalString('basePrice30Days')
+    const basePrice30DaysCents = priceText === undefined ? undefined : priceText === null ? null : parseEuroAmountToCents(priceText)
+    if (salesEnabled === null || basePrice30DaysCents === null) {
+      sendJsonResponse(res, 400, { ok: false, code: 'invalid_request', message: 'Невалидна цена или стойност за продажбата.' })
+      return true
+    }
+    const result = profileCustomizationStore.updateKindSettings(decodeURIComponent(kindMatch[1] ?? ''), { salesEnabled, basePrice30DaysCents })
+    if (!result.ok) {
+      sendProfileCustomizationFailure(res, result)
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, settings: result.settings })
+    return true
+  }
+
+  if (subPath === '/colors' || subPath === '/emojis') {
+    if (req.method !== 'POST') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    if (subPath === '/colors') {
+      const result = profileCustomizationStore.addColor({
+        hex: optionalString('hex') ?? '',
+        label: optionalString('label') ?? '',
+        groupKey: optionalString('groupKey') ?? '',
+      })
+      if (!result.ok) {
+        sendProfileCustomizationFailure(res, result)
+        return true
+      }
+      sendJsonResponse(res, 200, { ok: true, color: result.color })
+      return true
+    }
+    const result = profileCustomizationStore.addEmoji({
+      emoji: optionalString('emoji') ?? '',
+      categoryKey: optionalString('categoryKey') ?? '',
+    })
+    if (!result.ok) {
+      sendProfileCustomizationFailure(res, result)
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, emoji: result.emoji })
+    return true
+  }
+
+  const itemMatch = /^\/(colors|emojis)\/([^/]+)$/.exec(subPath)
+  if (itemMatch !== null) {
+    if (req.method !== 'PATCH') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    const itemId = decodeURIComponent(itemMatch[2] ?? '')
+    const isActive = optionalBoolean('isActive')
+    const sortOrder = optionalInteger('sortOrder')
+    if (isActive === null || sortOrder === null) {
+      sendJsonResponse(res, 400, { ok: false, code: 'invalid_request', message: 'Невалидни стойности.' })
+      return true
+    }
+    if (itemMatch[1] === 'colors') {
+      const label = optionalString('label')
+      const groupKey = optionalString('groupKey')
+      if (label === null || groupKey === null) {
+        sendJsonResponse(res, 400, { ok: false, code: 'invalid_request', message: 'Невалидни стойности.' })
+        return true
+      }
+      // hex нарочно не се приема — неизменим е (тригер в схемата).
+      const result = profileCustomizationStore.updateColor(itemId, { label, groupKey, sortOrder, isActive })
+      if (!result.ok) {
+        sendProfileCustomizationFailure(res, result)
+        return true
+      }
+      sendJsonResponse(res, 200, { ok: true, color: result.color })
+      return true
+    }
+    const categoryKey = optionalString('categoryKey')
+    if (categoryKey === null) {
+      sendJsonResponse(res, 400, { ok: false, code: 'invalid_request', message: 'Невалидни стойности.' })
+      return true
+    }
+    const result = profileCustomizationStore.updateEmoji(itemId, { categoryKey, sortOrder, isActive })
+    if (!result.ok) {
+      sendProfileCustomizationFailure(res, result)
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, emoji: result.emoji })
+    return true
+  }
+
+  sendJsonResponse(res, 404, { ok: false, message: 'Not found' })
   return true
 }
 
@@ -24094,6 +24959,14 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminBelotVisualRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminProfileCustomizationRequest(req, res, requestUrl)) {
+    return
+  }
+
+  if (await handleProfileCustomizationRequest(req, res, requestUrl)) {
     return
   }
 
@@ -28225,10 +29098,11 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           topicMessageLikeTracking.seedIfAbsent(m.messageId, m.topicId, m.likeCount, catchupSeededAt)
         }
 
+        const catchupCustomizationFullView = createProfileCustomizationViewerPolicy([connection.profileId])(connection.profileId)
         safeSendToConnection(connection.id, {
           type: 'topic_message_catchup',
           topicId: message.topicId,
-          messages: hydratedCatchup,
+          messages: hydratedCatchup.map((m) => applyProfileCustomizationViewerPolicy(m, catchupCustomizationFullView)),
           truncated: page.hasMore,
         })
         if (!topic.isGeneral) {
@@ -29890,6 +30764,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('playerProgressStore', () => playerProgressStore.close())
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
   closeStore('belotVisualOverrideStore', () => belotVisualOverrideStore.close())
+  closeStore('profileCustomizationStore', () => profileCustomizationStore.close())
   closeStore('authStore', () => authStore.close())
   closeStore('friendshipStore', () => friendshipStore.close())
   closeStore('chatStore', () => chatStore.close())

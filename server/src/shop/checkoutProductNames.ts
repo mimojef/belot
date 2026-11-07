@@ -62,3 +62,22 @@ export function buildBundleCheckoutProductName(purchase: {
     `${formatCoins(purchase.yellowCoinsAmount)} + ${formatDays(purchase.vipDays)} VIP`,
   )
 }
+
+/**
+ * Персонализация на профила (всичко от snapshot-а на поръчката):
+ * „Pika.bg — Цвят на никнейма: Тъмночервено (#C2101C) — 90 дни“
+ * „Pika.bg — Емоджи пред никнейма: 🦋 — 30 дни“
+ */
+export function buildProfileCustomizationCheckoutProductName(purchase: {
+  kindLabel: string
+  itemType: 'color' | 'emoji'
+  itemValue: string
+  itemLabel: string | null
+  days: number
+}): string {
+  const label = purchase.itemLabel?.trim().replace(/\s+/g, ' ') ?? ''
+  const item = purchase.itemType === 'color'
+    ? (label.length > 0 ? `${label} (${purchase.itemValue})` : purchase.itemValue)
+    : purchase.itemValue
+  return composeProductName(`Pika.bg${SEPARATOR}${purchase.kindLabel}: ${item}`, formatDays(purchase.days))
+}

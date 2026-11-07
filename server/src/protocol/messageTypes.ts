@@ -19,6 +19,7 @@ import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 import type { TopicSnapshot } from '../db/topicStore.js'
 import type { NameHighlightRole } from '../core/nameHighlightRole.js'
+import type { ProfileCustomizationDisplay } from '../profileCustomization/profileCustomizationStore.js'
 import type { LudoEngineEvent } from '../game/ludoEngine/ludoEngineEvents.js'
 import type { LudoColor, LudoGameState, LudoPieceSlot } from '../game/ludoEngine/ludoEngineTypes.js'
 
@@ -2144,6 +2145,12 @@ export type TopicMessageBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   /** Derived at read time — ТЕКУЩАТА роля на автора, само ако никът му се оцветява отличително (виж core/nameHighlightRole.ts); иначе null. */
   senderNameHighlightRole: NameHighlightRole | null
+  /**
+   * Персонализация (Етап 3) — ТЕКУЩАТА активна персонализация на автора,
+   * derived при четене (не копие в съобщението). Липсва изцяло при изключен
+   * PROFILE_CUSTOMIZATION_ENABLED; празен обект = няма активни екстри.
+   */
+  senderCustomization?: ProfileCustomizationDisplay
   body: string
   createdAt: string
   lastActivityAt: string
@@ -2188,6 +2195,12 @@ export type TopicReplyBroadcastSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   /** Derived at read time — виж TopicMessageBroadcastSnapshot.senderNameHighlightRole. */
   senderNameHighlightRole: NameHighlightRole | null
+  /**
+   * Персонализация (Етап 3) — ТЕКУЩАТА активна персонализация на автора,
+   * derived при четене (не копие в съобщението). Липсва изцяло при изключен
+   * PROFILE_CUSTOMIZATION_ENABLED; празен обект = няма активни екстри.
+   */
+  senderCustomization?: ProfileCustomizationDisplay
   body: string
   createdAt: string
   editedAt: string | null

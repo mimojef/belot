@@ -15,6 +15,7 @@ import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
 import { getRoleNicknameColor } from './roleNicknameColor'
+import { renderDecoratedNickname, resolveMessageColor, resolveNicknameColor, type ProfileCustomizationDisplay } from '../profileCustomization/customizationDisplay'
 import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 
 // Read-only Етап 1 — root history + navigation. Етап 2 добави real composer
@@ -435,11 +436,14 @@ function renderTopicAuthorBlock(
   isTopicsSectionMuted = false,
   light = false,
   senderNameHighlightRole: string | null = null,
+  senderCustomization: ProfileCustomizationDisplay | undefined = undefined,
 ): string {
   // Ролевият цвят на ника (pika_team/marketing) има приоритет пред
   // стандартното оцветяване — само цветът, размер/тегло остават.
+  // Персонализация (Етап 3): при включена функция — роля → закупен цвят →
+  // стандартен бял/черен; при изключена — досегашният златист/тъмен.
   const roleNameColor = getRoleNicknameColor(senderNameHighlightRole)
-  const authorNameColor = roleNameColor ?? (light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR)
+  const authorNameColor = resolveNicknameColor(senderCustomization, roleNameColor, light, light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR)
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
   // viewer-a (модератор не мутира себе си). Не претрупва обикновения
@@ -497,7 +501,7 @@ function renderTopicAuthorBlock(
             data-topic-message-author="${escapeHtml(senderProfileId)}"
             data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
             style="border:0;background:transparent;padding:0;cursor:pointer;${light ? `font-family:inherit;font-size:15px;font-weight:800;color:${authorNameColor};` : `font-size:16px;font-weight:900;color:${authorNameColor};`}min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-          >${escapeHtml(senderDisplayName)}</button>
+          >${renderDecoratedNickname(senderDisplayName, senderCustomization)}</button>
           ${muteIndicator}
           <span style="font-size:12px;color:${light ? '#667085' : 'rgba(248,250,252,0.42)'};white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
           ${muteControl}
@@ -687,12 +691,12 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}" data-topic-thread-seq="${reply.seq}"${light ? ' class="topic-reply-light topic-light-scope"' : ''}>
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px 12px;">
-        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted, light, reply.senderNameHighlightRole)}
+        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted, light, reply.senderNameHighlightRole, reply.senderCustomization)}
       </div>
       <div style="margin:-6px 0 6px 58px;">
         ${isEditing
           ? renderTopicMessageEditForm(state, reply.messageId, light)
-          : (reply.body.length > 0 ? `<div style="font-size:16px;line-height:1.4;color:${light ? TOPIC_LIGHT_BODY_COLOR : '#e2e8f0'};word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body, { emphasizeEmoji: true })}</div>` : '')
+          : (reply.body.length > 0 ? `<div style="font-size:16px;line-height:1.4;color:${resolveMessageColor(reply.senderCustomization, light ? TOPIC_LIGHT_BODY_COLOR : '#e2e8f0')};word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body, { emphasizeEmoji: true })}</div>` : '')
         }
         ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl, light) : ''}
         <div style="margin-top:2px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
@@ -836,12 +840,12 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
     <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs}${isThread ? ` data-topic-thread-seq="${message.seq}"` : ''} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${light ? ' topic-root-card-light topic-light-scope' : ''}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
       ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px ${light ? '#FFFFFF' : 'rgba(0,0,0,0.72)'};z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
-        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted, light, message.senderNameHighlightRole)}
+        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted, light, message.senderNameHighlightRole, message.senderCustomization)}
       </div>
       <div style="padding:0 12px ${light ? '8px' : '12px'} 58px;">
         ${isEditing
           ? renderTopicMessageEditForm(state, message.messageId, light)
-          : (message.body.length > 0 ? `<div style="margin-top:4px;${light ? `font-size:16px;color:${TOPIC_LIGHT_BODY_COLOR};` : 'font-size:17px;color:#e2e8f0;'}line-height:1.45;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
+          : (message.body.length > 0 ? `<div style="margin-top:4px;font-size:${light ? '16' : '17'}px;color:${resolveMessageColor(message.senderCustomization, light ? TOPIC_LIGHT_BODY_COLOR : '#e2e8f0')};line-height:1.45;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
         }
         ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl, light) : ''}
         <div style="margin-top:6px;margin-left:-8px;display:flex;align-items:center;gap:${light ? '4px' : '10px'};">
@@ -963,8 +967,8 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
               type="button"
               data-topic-message-author="${escapeHtml(message.senderProfileId)}"
               data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
-              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:${light ? '800' : '900'};color:${getRoleNicknameColor(message.senderNameHighlightRole) ?? (light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR)};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-            >${escapeHtml(message.senderDisplayName)}</button>
+              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:${light ? '800' : '900'};color:${resolveNicknameColor(message.senderCustomization, getRoleNicknameColor(message.senderNameHighlightRole), light, light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR)};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            >${renderDecoratedNickname(message.senderDisplayName, message.senderCustomization)}</button>
             ${renderTopicAuthorMuteIndicator({
               isMuted: message.isTopicsSectionMuted,
               canModerate: state.isLafcheModerator && message.senderProfileId !== state.profile.profileId,
@@ -979,7 +983,7 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
           </div>
           ${isEditing
             ? renderTopicMessageEditForm(state, message.messageId, light)
-            : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:17px;line-height:1.45;color:${light ? TOPIC_LIGHT_BODY_COLOR : '#e2e8f0'};word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
+            : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:17px;line-height:1.45;color:${resolveMessageColor(message.senderCustomization, light ? TOPIC_LIGHT_BODY_COLOR : '#e2e8f0')};word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
           }
           ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl, light) : ''}
         </div>

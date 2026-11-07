@@ -4,6 +4,7 @@ import type {
   ProfileId,
 } from '../core/serverTypes.js'
 import type { NameHighlightRole } from '../core/nameHighlightRole.js'
+import type { ProfileCustomizationDisplay } from '../profileCustomization/profileCustomizationStore.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
 import { dbDateToUtc } from './dbDate.js'
 import { getConfiguredOfficialPikaProfileId } from './normalizeProfileIdentityText.js'
@@ -119,6 +120,12 @@ export type ChatConversationSnapshot = {
   // Per-participant, derived при четене: ТЕКУЩАТА роля на `friend`, само ако
   // никът му се оцветява отличително (виж core/nameHighlightRole.ts); иначе null.
   friendNameHighlightRole: NameHighlightRole | null
+  // Персонализация (Етап 3) — ТЕКУЩАТА активна персонализация на събеседника
+  // и на самия зрител (за цвета на текста на собствените му съобщения).
+  // Derived при четене; липсват изцяло при изключен
+  // PROFILE_CUSTOMIZATION_ENABLED (клиентът запазва досегашния вид).
+  friendCustomization?: ProfileCustomizationDisplay
+  viewerCustomization?: ProfileCustomizationDisplay
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
@@ -419,6 +426,13 @@ export type ChatStoreRoleChecker = {
    * роля липсва от map-а. Липсващ checker → null навсякъде.
    */
   getNameHighlightRoles?: (profileIds: readonly ProfileId[]) => Map<ProfileId, NameHighlightRole>
+  /**
+   * Персонализация (Етап 3) — активните екстри на подадените профили, вече
+   * филтрирани за конкретния зрител (политиката е в index.ts). ЕДНА batch
+   * заявка за целия списък. Профил без запис в map-а -> полето не се добавя
+   * (досегашният вид). Липсващ checker -> полетата не се добавят.
+   */
+  getCustomizationDisplays?: (profileIds: readonly ProfileId[], viewerProfileId: ProfileId) => Map<ProfileId, ProfileCustomizationDisplay>
 }
 
 export type ChatStoreOptions = {
@@ -1005,6 +1019,9 @@ export async function createChatStore(
     // Предварително batch-зареден map (listConversations) — без него се прави
     // единичен lookup само за този разговор.
     nameHighlightRoleByProfileId?: ReadonlyMap<ProfileId, NameHighlightRole>,
+    // Персонализация: undefined = не е заредена предварително (единична batch
+    // заявка за двамата участници).
+    customizationByProfileId?: ReadonlyMap<ProfileId, ProfileCustomizationDisplay>,
   ): ChatConversationSnapshot | null {
     // Самоизтриване, Етап 2 — разговор с профил, подаден за изтриване, е
     // невидим за другата страна (и за двамата — скритият няма сесия).
@@ -1037,6 +1054,7 @@ export async function createChatStore(
       friend: friendProfile,
       friendIsPikaTeam: isPikaTeamProfile(friendProfile.profileId),
       friendNameHighlightRole: getFriendNameHighlightRole(friendProfile.profileId, nameHighlightRoleByProfileId),
+      ...getConversationCustomizationFields(friendProfile.profileId, ownProfileId, customizationByProfileId),
       lastMessage: lastMessageRow
         ? toMessageSnapshot(lastMessageRow, ownProfileId)
         : null,
@@ -1049,6 +1067,24 @@ export async function createChatStore(
         ownProfileId,
         lastMessageRow !== undefined,
       ),
+    }
+  }
+
+  function getConversationCustomizationFields(
+    friendProfileId: ProfileId | null,
+    ownProfileId: ProfileId,
+    preloaded: ReadonlyMap<ProfileId, ProfileCustomizationDisplay> | undefined,
+  ): { friendCustomization?: ProfileCustomizationDisplay; viewerCustomization?: ProfileCustomizationDisplay } {
+    const getter = roleChecker?.getCustomizationDisplays
+    if (getter === undefined) return {}
+    const displays = preloaded !== undefined
+      ? preloaded
+      : getter(friendProfileId !== null ? [friendProfileId, ownProfileId] : [ownProfileId], ownProfileId)
+    const friendCustomization = friendProfileId !== null ? displays.get(friendProfileId) : undefined
+    const viewerCustomization = displays.get(ownProfileId)
+    return {
+      ...(friendCustomization !== undefined ? { friendCustomization } : {}),
+      ...(viewerCustomization !== undefined ? { viewerCustomization } : {}),
     }
   }
 
@@ -1098,8 +1134,14 @@ export async function createChatStore(
       friendships.map((friendship) => getFriendProfileId(friendship, profileId)),
     ) ?? new Map<ProfileId, NameHighlightRole>()
 
+    // Персонализация — също ЕДНА batch заявка (всички събеседници + зрителя).
+    const customizationGetter = roleChecker?.getCustomizationDisplays
+    const customizationByProfileId = customizationGetter === undefined
+      ? undefined
+      : customizationGetter([...friendships.map((friendship) => getFriendProfileId(friendship, profileId)), profileId], profileId)
+
     return friendships
-      .map((friendship) => createConversationSnapshot(friendship, profileId, onlineProfileIds, nameHighlightRoleByProfileId))
+      .map((friendship) => createConversationSnapshot(friendship, profileId, onlineProfileIds, nameHighlightRoleByProfileId, customizationByProfileId))
       .filter((conversation): conversation is ChatConversationSnapshot => {
         return conversation !== null
       })

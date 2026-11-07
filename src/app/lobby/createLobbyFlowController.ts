@@ -173,6 +173,7 @@ import type {
   SvaraParticipantCommand,
 } from '../network/createGameServerClient'
 import type { NicknameHighlightRole } from './roleNicknameColor'
+import { setProfileCustomizationExpiryHandler, type ProfileCustomizationDisplay } from '../profileCustomization/customizationDisplay'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 import { canShowSvaraEntry, fetchSvaraAccess } from '../games/svara/svaraAccess'
 import type { SvaraPageStatus } from '../games/svara/renderSvaraPage'
@@ -272,6 +273,8 @@ export type LobbyAuthSession = {
   svaraTestAccess?: boolean
   /** Самоизтриване (Етап 4I) — server-derived UI сигнал за бутона "Изтрий" в собствения профил. Authoritative е POST /api/account/deletion-request. */
   profileSelfDeletionAvailable?: boolean
+  /** Персонализация (Етап 2) — UI сигнал (feature flag), authoritative е сървърът. */
+  profileCustomizationAvailable?: boolean
 }
 
 /** Пълен администратор — единствената роля с достъп до "Настройки", редакция на профили, чат с поддръжката, управление на роли. */
@@ -611,8 +614,12 @@ export type CreateLobbyFlowControllerOptions = {
    */
   /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил: main.ts отваря прозореца за потвърждение. */
   onProfileSelfDeleteRequest?: () => void
+  /** Персонализация (Етап 2) — "Персонализация" в собствения профил: main.ts отваря прозореца. */
+  onProfileCustomizationRequest?: () => void
   /** Етап 4J — admin меню "Заявки за изтриване": main.ts отваря панела. */
   onAdminProfileDeletionsRequest?: () => void
+  /** "Персонализация" (Етап 1) — admin меню: main.ts отваря панела. */
+  onAdminProfileCustomizationRequest?: () => void
   onAdminHardDeleteProfile?: (
     targetProfileId: string,
     reason: string,
@@ -1838,7 +1845,7 @@ type InternalLobbyFlowState = {
   // friendshipId атомарно заедно със самото съобщение. Back/close просто
   // нулира това поле — 0 backend write, 0 DB row. nameHighlightRole — за
   // ролевия цвят на ника в заглавието още преди първото съобщение.
-  topicsPersonalPendingRecipient: { profileId: string; displayName: string; nameHighlightRole: NicknameHighlightRole | null } | null
+  topicsPersonalPendingRecipient: { profileId: string; displayName: string; nameHighlightRole: NicknameHighlightRole | null; customization?: ProfileCustomizationDisplay } | null
 
   // ─── Create Topic popup (Custom Topic Creation) ─────────────────────────
   /** Mirror на tournamentCreatePopupOpen lifecycle-а. */
@@ -5848,6 +5855,7 @@ export function createLobbyFlowController(
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
       canSelfDeleteProfile: authSession?.profileSelfDeletionAvailable === true,
+      canCustomizeProfile: authSession?.profileCustomizationAvailable === true,
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       canShowSvaraEntry: canShowSvaraEntry(authSession),
       svaraPageStatus: state.svaraPageStatus,
@@ -6543,6 +6551,9 @@ export function createLobbyFlowController(
       },
       onProfileSelfDeleteClick: () => {
         getPopupCallbacks().onSelfDeleteClick()
+      },
+      onProfileCustomizeClick: () => {
+        getPopupCallbacks().onCustomizeClick?.()
       },
       onProfileShopTabClick: (tab) => {
         getPopupCallbacks().onShopTabClick(tab)
@@ -8451,6 +8462,10 @@ export function createLobbyFlowController(
       onAdminProfileDeletionsOpen: () => {
         if (!isFullAdminAuthSession(options.getAuthSession?.() ?? null)) return
         options.onAdminProfileDeletionsRequest?.()
+      },
+      onAdminProfileCustomizationOpen: () => {
+        if (!isFullAdminAuthSession(options.getAuthSession?.() ?? null)) return
+        options.onAdminProfileCustomizationRequest?.()
       },
       onAdminCampaignsBack: () => {
         void showAdminPanel()
@@ -16510,6 +16525,21 @@ export function createLobbyFlowController(
   // носи сървърно изчислената текуща роля на автора (senderNameHighlightRole).
   // Без допълнителна заявка; първото съобщение връща canonical разговор с
   // friendNameHighlightRole, който поема оттам нататък.
+  // Персонализация (Етап 3) — активната персонализация на получателя в нов
+  // (pending) VIP разговор, от вече заредения snapshot на темата (сървърът я
+  // е филтрирал за този зрител). Без допълнителна заявка.
+  function findTopicAuthorCustomization(profileId: string): ProfileCustomizationDisplay | undefined {
+    for (const message of state.topicMessages ?? []) {
+      if (message.senderProfileId === profileId && message.senderCustomization !== undefined) return message.senderCustomization
+    }
+    for (const replies of Object.values(state.topicRepliesByRootId)) {
+      for (const reply of replies ?? []) {
+        if (reply.senderProfileId === profileId && reply.senderCustomization !== undefined) return reply.senderCustomization
+      }
+    }
+    return undefined
+  }
+
   function findTopicAuthorNameHighlightRole(profileId: string): NicknameHighlightRole | null {
     for (const message of state.topicMessages ?? []) {
       if (message.senderProfileId === profileId && message.senderNameHighlightRole) return message.senderNameHighlightRole
@@ -16599,6 +16629,7 @@ export function createLobbyFlowController(
         profileId: recipientProfileId,
         displayName: recipientDisplayName,
         nameHighlightRole: findTopicAuthorNameHighlightRole(recipientProfileId),
+        customization: findTopicAuthorCustomization(recipientProfileId),
       }
       state.activeChatFriendshipId = null
       state.chatMessages = []
@@ -20562,6 +20593,11 @@ export function createLobbyFlowController(
     })
   }
 
+  // Персонализация (Етап 3) — изтекла екстра по време на сесията: един
+  // таймер в customizationDisplay.ts (не polling) пренарисува в момента на
+  // най-ранното изтичане сред показаните; оттам нататък стандартният вид.
+  setProfileCustomizationExpiryHandler(() => { render() })
+
   function render(): void {
     // Известията за частната маса — изолирано от root-а (виж syncPrivateRoomNoticeHost).
     syncPrivateRoomNoticeHost()
@@ -21011,6 +21047,9 @@ export function createLobbyFlowController(
       },
       onSelfDeleteClick: () => {
         options.onProfileSelfDeleteRequest?.()
+      },
+      onCustomizeClick: () => {
+        options.onProfileCustomizationRequest?.()
       },
       onShopTabClick: (tab) => {
         // Същият път като останалите "отвори магазина на раздел" входове
@@ -21746,6 +21785,7 @@ export function createLobbyFlowController(
         isAdmin: isFullAdminAuthSession(authSession),
         isOwnProfile,
         canSelfDelete: isOwnProfile && authSession?.profileSelfDeletionAvailable === true,
+        canCustomize: isOwnProfile && authSession?.profileCustomizationAvailable === true,
         friendshipAction: buildPopupFriendshipAction(),
         viewerIsFullAdmin: isFullAdminAuthSession(authSession),
         viewerCanProfileMute: isProfileMuteModeratorAuthSession(authSession),

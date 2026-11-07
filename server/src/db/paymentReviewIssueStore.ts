@@ -16,7 +16,7 @@ export type PaymentReviewIssueKind =
   | 'not_creditable'
   | 'credit_failed'
 
-export type PaymentReviewIssuePurchaseType = 'coin' | 'vip' | 'bundle'
+export type PaymentReviewIssuePurchaseType = 'coin' | 'vip' | 'bundle' | 'profile_customization'
 
 export type RecordPaymentReviewIssueInput = {
   checkoutSessionId: string

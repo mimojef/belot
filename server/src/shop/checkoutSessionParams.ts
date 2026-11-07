@@ -2,9 +2,12 @@ import type Stripe from 'stripe'
 import type { CoinPurchaseSnapshot } from '../db/coinPurchaseStore.js'
 import type { VipPurchaseSnapshot } from '../db/vipPurchaseStore.js'
 import type { BundlePurchaseSnapshot } from '../db/bundlePurchaseStore.js'
+import type { ProfileCustomizationPurchaseSnapshot } from '../profileCustomization/profileCustomizationStore.js'
+import { PROFILE_CUSTOMIZATION_KIND_LABELS, getProfileCustomizationItemType } from '../profileCustomization/profileCustomizationCatalog.js'
 import {
   buildBundleCheckoutProductName,
   buildCoinCheckoutProductName,
+  buildProfileCustomizationCheckoutProductName,
   buildVipCheckoutProductName,
 } from './checkoutProductNames.js'
 
@@ -98,5 +101,69 @@ export function buildBundleCheckoutSessionParams(
       recipientProfileId: purchase.recipientProfileId ?? '',
       packageId: purchase.packageId ?? '',
     },
+  }
+}
+
+// Персонализация на профила. ВАЖНО за Етап 2: webhook-ът трябва да има
+// собствен клон за purchaseType='profile_customization' ПРЕДИ coin
+// fallback-а (handleStripeWebhookRequest третира непознат тип като coin).
+export function buildProfileCustomizationCheckoutSessionParams(
+  purchase: ProfileCustomizationPurchaseSnapshot,
+  profileId: string,
+  urls: SessionUrls,
+): Stripe.Checkout.SessionCreateParams {
+  return {
+    mode: 'payment',
+    success_url: urls.successUrl,
+    cancel_url: urls.cancelUrl,
+    // „Pika.bg — <вид>: <цвят/емоджи> — <дни>“
+    line_items: [lineItem(purchase.currency, purchase.priceCents, buildProfileCustomizationCheckoutProductName({
+      kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[purchase.kind],
+      itemType: getProfileCustomizationItemType(purchase.kind),
+      itemValue: purchase.itemValue,
+      itemLabel: purchase.itemLabel,
+      days: purchase.days,
+    }))],
+    metadata: {
+      purchaseType: 'profile_customization',
+      purchaseId: purchase.purchaseId,
+      profileId,
+      kind: purchase.kind,
+      itemId: purchase.itemId,
+      days: String(purchase.days),
+    },
+  }
+}
+
+const STRIPE_CHECKOUT_SESSION_ID_TEMPLATE = '{CHECKOUT_SESSION_ID}'
+
+function originOf(value: string | undefined): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  try {
+    const url = new URL(value.trim())
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Return URL-и на персонализацията. Собствени (/lobby?customization=…),
+ * за да не стартират lookup-ите на магазина. Stripe замества литерала
+ * {CHECKOUT_SESSION_ID} с id-то на сесията — клиентът го чете от
+ * session_id и проверява ТОЧНО тази поръчка на сървъра. Произходът:
+ * CLIENT_ORIGIN, иначе произходът на вече конфигурирания
+ * STRIPE_SUCCESS_URL/STRIPE_CANCEL_URL (production може да задава само тях),
+ * иначе локалният dev адрес.
+ */
+export function buildProfileCustomizationReturnUrls(env: Record<string, string | undefined>): { successUrl: string; cancelUrl: string; origin: string } {
+  const origin = originOf(env.CLIENT_ORIGIN)
+    ?? originOf(env.STRIPE_SUCCESS_URL)
+    ?? originOf(env.STRIPE_CANCEL_URL)
+    ?? 'http://localhost:5173'
+  return {
+    origin,
+    successUrl: `${origin}/lobby?customization=success&session_id=${STRIPE_CHECKOUT_SESSION_ID_TEMPLATE}`,
+    cancelUrl: `${origin}/lobby?customization=cancel`,
   }
 }

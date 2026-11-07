@@ -31,6 +31,12 @@ export type RenderPlayerProfilePopupOptions = {
    * (data-player-profile-delete-open). Сървърът проверява всичко при подаване.
    */
   canSelfDelete?: boolean
+  /**
+   * Персонализация (Етап 2) — бутон "Персонализация" в СОБСТВЕНИЯ профил.
+   * Server-derived (session.profileCustomizationAvailable = feature flag);
+   * никога за чужд профил. Всички правила са на сървъра.
+   */
+  canCustomize?: boolean
   isAdmin?: boolean
   friendshipAction?: PlayerProfileFriendshipAction | null
   /**
@@ -231,6 +237,7 @@ const LUCIDE_X = '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
 const LUCIDE_PLUS = '<path d="M5 12h14"/><path d="M12 5v14"/>'
 const LUCIDE_CROWN = '<path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/>'
 const LUCIDE_SQUARE_PEN = '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>'
+const LUCIDE_PALETTE = '<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>'
 const LUCIDE_TRASH = '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>'
 const LUCIDE_CHART = '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>'
 const LUCIDE_GAMEPAD = '<line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/>'
@@ -924,7 +931,7 @@ function renderForeignVipRow(profile: PlayerPublicProfileSnapshot, viewerIsFullA
  * вместо computeVipRemainingDays(undefined), който би върнал невярно "0
  * дни" (root cause на flash бъга: null/undefined бяха неразличими).
  */
-function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipActiveUntil: string | null | undefined, canSelfDelete: boolean): string {
+function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipActiveUntil: string | null | undefined, canSelfDelete: boolean, canCustomize: boolean): string {
   const hasBalance = profile.yellowCoinsBalance !== null && profile.yellowCoinsBalance !== undefined
   const isVipStatusLoading = ownVipActiveUntil === undefined
   const vipDaysText = isVipStatusLoading ? '…' : formatVipDaysWords(computeVipRemainingDays(ownVipActiveUntil))
@@ -972,6 +979,28 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           Редакция
         </span>
+        ${canCustomize ? `
+          <span
+            data-player-profile-customize="1"
+            role="button"
+            tabindex="0"
+            aria-label="Персонализация"
+            style="
+              display:inline-flex;
+              align-items:center;
+              gap:7px;
+              color:${themed('#f4c95b', '#6941C6')};
+              font-size:15px;
+              font-weight:400;
+              cursor:pointer;
+              white-space:nowrap;
+              width:fit-content;
+            "
+          >
+            ${lucideIcon(LUCIDE_PALETTE, 16, 2.4)}
+            Персонализация
+          </span>
+        ` : ''}
         ${canSelfDelete ? `
           <span
             data-player-profile-self-delete="1"
@@ -1016,6 +1045,7 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
 type OwnProfileHeroOptions = {
   ownVipActiveUntil: string | null | undefined
   canSelfDelete: boolean
+  canCustomize: boolean
 }
 
 type ForeignProfileHeroOptions = {
@@ -1106,6 +1136,11 @@ function renderProfileHero(
           ${canSelfDelete ? `
             <button type="button" data-player-profile-self-delete="1" aria-label="Изтрий профила" style="${actionButton}border:0;background:linear-gradient(180deg,#F04438 0%,#D92D20 100%);color:#FFFFFF;box-shadow:0 4px 10px rgba(217,45,32,0.25);">
               ${lucideIcon(LUCIDE_TRASH, 15, 2.4)}Изтрий
+            </button>
+          ` : ''}
+          ${own.canCustomize ? `
+            <button type="button" data-player-profile-customize="1" style="${actionButton}grid-column:1 / -1;border:1px solid #D9CCFA;background:#F9F5FF;color:#6941C6;">
+              ${lucideIcon(LUCIDE_PALETTE, 15, 2.4)}Персонализация
             </button>
           ` : ''}
         </div>
@@ -2760,6 +2795,7 @@ function renderProfileContent(
   campaignSummary: PlayerCampaignProfileSummary | null | undefined,
   campaignAllRewardsExpanded: boolean,
   canSelfDelete: boolean,
+  canCustomize: boolean,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -2849,7 +2885,7 @@ function renderProfileContent(
 
           ${renderVipGrantForm(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen, vipGrantSubmitting, vipGrantErrorText)}
 
-          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil, canSelfDelete) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
+          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil, canSelfDelete, canCustomize) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
 
           <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
             <div style="font-size:13px;font-weight:400;color:${themed('rgba(148,163,184,0.80)', LIGHT_MUTED)};">Рейтинг:</div>
@@ -3085,6 +3121,7 @@ function renderPlayerProfilePopupHtml(
           options.campaignSummary ?? null,
           options.campaignAllRewardsExpanded ?? false,
           (options.isOwnProfile ?? false) && (options.canSelfDelete ?? false),
+          (options.isOwnProfile ?? false) && (options.canCustomize ?? false),
         )
       : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 
@@ -3457,7 +3494,7 @@ function renderPlayerProfilePopupHtml(
           ${(isOwnRichLayout || isForeignRichLayout) && options.profile ? `
             <div ${isOwnRichLayout ? 'data-player-profile-own-layout="1"' : 'data-player-profile-foreign-layout="1"'} style="display:flex;flex-direction:column;min-height:100%;">
               ${isOwnRichLayout
-                ? renderProfileHero(options.profile, options.seat, { ownVipActiveUntil: options.ownVipActiveUntil, canSelfDelete: (options.isOwnProfile ?? false) && (options.canSelfDelete ?? false) }, null)
+                ? renderProfileHero(options.profile, options.seat, { ownVipActiveUntil: options.ownVipActiveUntil, canSelfDelete: (options.isOwnProfile ?? false) && (options.canSelfDelete ?? false), canCustomize: (options.isOwnProfile ?? false) && (options.canCustomize ?? false) }, null)
                 : renderForeignRichProfileHero(options.profile, options)}
               <div style="padding:16px 16px 20px;">
                 ${renderCampaignNavBarHtml(options.campaignSummary)}

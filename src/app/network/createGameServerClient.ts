@@ -16,6 +16,7 @@ import type { BundlePackageVisualKey } from '../../../server/src/shared/bundlePa
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { sharedServerClock } from './serverClock'
 import type { NicknameHighlightRole } from '../lobby/roleNicknameColor'
+import type { ProfileCustomizationDisplay } from '../profileCustomization/customizationDisplay'
 
 export type MatchRoomSnapshot = {
   stakeAmount: number
@@ -411,6 +412,9 @@ export type ChatConversationSnapshot = {
   // Server-derived, per-participant: ТЕКУЩАТА роля на `friend`, само ако
   // никът му се оцветява отличително (виж lobby/roleNicknameColor.ts).
   friendNameHighlightRole?: NicknameHighlightRole | null
+  /** Персонализация (Етап 3) — активните екстри на събеседника/зрителя; липсват при изключена функция. */
+  friendCustomization?: ProfileCustomizationDisplay
+  viewerCustomization?: ProfileCustomizationDisplay
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
@@ -3054,6 +3058,8 @@ export type TopicMessageSnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   /** Derived при четене — ТЕКУЩАТА роля на автора, само ако никът му се оцветява отличително (виж lobby/roleNicknameColor.ts). Optional за съвместимост с по-стар сървър. */
   senderNameHighlightRole?: NicknameHighlightRole | null
+  /** Персонализация (Етап 3) — ТЕКУЩАТА активна персонализация на автора; липсва при изключена функция. */
+  senderCustomization?: ProfileCustomizationDisplay
   body: string
   createdAt: string
   lastActivityAt: string
@@ -3085,6 +3091,8 @@ export type TopicReplySnapshot = {
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
   /** Виж TopicMessageSnapshot.senderNameHighlightRole. */
   senderNameHighlightRole?: NicknameHighlightRole | null
+  /** Персонализация (Етап 3) — ТЕКУЩАТА активна персонализация на автора; липсва при изключена функция. */
+  senderCustomization?: ProfileCustomizationDisplay
   body: string
   createdAt: string
   editedAt: string | null
