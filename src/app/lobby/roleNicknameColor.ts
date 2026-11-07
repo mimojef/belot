@@ -10,11 +10,11 @@
 // когато резултатът не е null. Всички други роли → null (цветът им не се
 // променя).
 
-export type NicknameHighlightRole = 'top_chat_admin' | 'marketing'
+export type NicknameHighlightRole = 'pika_team' | 'marketing'
 
-/** Ярко, наситено цикламенорозово — еднакво за top_chat_admin и marketing. */
+/** Ярко, наситено цикламенорозово — еднакво за pika_team и marketing. */
 export const ROLE_NICKNAME_HIGHLIGHT_COLOR = '#F72585'
 
 export function getRoleNicknameColor(role: string | null | undefined): string | null {
-  return role === 'top_chat_admin' || role === 'marketing' ? ROLE_NICKNAME_HIGHLIGHT_COLOR : null
+  return role === 'pika_team' || role === 'marketing' ? ROLE_NICKNAME_HIGHLIGHT_COLOR : null
 }

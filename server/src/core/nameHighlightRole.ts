@@ -9,10 +9,10 @@
 // topic_messages.sender_role умишлено записва 'marketing' като 'player'
 // (виж getTopicAuthorRoleSnapshotForProfile в index.ts) и DB CHECK-ът не
 // допуска 'marketing' — затова оцветяването не може да се базира на него.
-export const NAME_HIGHLIGHT_ROLES = ['top_chat_admin', 'marketing'] as const
+export const NAME_HIGHLIGHT_ROLES = ['pika_team', 'marketing'] as const
 
 export type NameHighlightRole = typeof NAME_HIGHLIGHT_ROLES[number]
 
 export function toNameHighlightRole(role: string | null | undefined): NameHighlightRole | null {
-  return role === 'top_chat_admin' || role === 'marketing' ? role : null
+  return role === 'pika_team' || role === 'marketing' ? role : null
 }

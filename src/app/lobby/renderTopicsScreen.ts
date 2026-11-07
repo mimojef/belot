@@ -436,7 +436,7 @@ function renderTopicAuthorBlock(
   light = false,
   senderNameHighlightRole: string | null = null,
 ): string {
-  // Ролевият цвят на ника (top_chat_admin/marketing) има приоритет пред
+  // Ролевият цвят на ника (pika_team/marketing) има приоритет пред
   // стандартното оцветяване — само цветът, размер/тегло остават.
   const roleNameColor = getRoleNicknameColor(senderNameHighlightRole)
   const authorNameColor = roleNameColor ?? (light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR)

@@ -9012,7 +9012,7 @@ function renderMobileChatPanel(state: LobbyScreenState, light = false): string {
           const displayName = conversation.friend.displayName?.trim() || 'Играч'
           const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
           const unreadBadge = formatNotificationBadgeCount(conversation.unreadCount)
-          // Ролев цвят на ника (top_chat_admin/marketing) — приоритет пред
+          // Ролев цвят на ника (pika_team/marketing) — приоритет пред
           // стандартния/активния цвят на името.
           const roleNameColor = getRoleNicknameColor(conversation.friendNameHighlightRole)
           // Светъл вариант (телефон): същият бутон и атрибут, само визия —
