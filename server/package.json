@@ -42,6 +42,8 @@
     "check:anti-bad-luck": "tsx scripts/checkAntiBadLuck.ts",
     "check:anti-bad-luck-threshold-config": "tsx scripts/checkAntiBadLuckThresholdConfig.ts",
     "check:admin-anti-bad-luck-setting": "tsx scripts/checkAdminAntiBadLuckSettingHttp.ts --server-root=.",
+    "check:physical-shuffle": "tsx scripts/checkPhysicalShuffle.ts",
+    "simulate:physical-shuffle": "tsx scripts/simulatePhysicalShuffle.ts",
     "check:private-room-deterministic-seat-mapping": "tsx scripts/checkPrivateRoomDeterministicSeatMapping.ts",
     "check:private-room-bot-ownership": "tsx scripts/checkPrivateRoomBotOwnership.ts",
     "check:private-room-team-join-choice": "tsx scripts/checkPrivateRoomTeamJoinChoice.ts",

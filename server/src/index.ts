@@ -100,6 +100,11 @@ import {
   type ServerAntiBadLuckConfig,
 } from './game/antiBadLuck/serverAntiBadLuckTypes.js'
 import {
+  SERVER_PHYSICAL_SHUFFLE_MODES,
+  isServerPhysicalShuffleMode,
+  type ServerPhysicalShuffleMode,
+} from './game/physicalShuffle/serverPhysicalShuffleTypes.js'
+import {
   createAuthStore,
   createClearSessionCookieHeader,
   createSessionCookieHeader,
@@ -1134,10 +1139,12 @@ const belotVisualOverrideStore = await createBelotVisualOverrideStore(databaseBo
 // multi-instance deployment, където PATCH може да мине през друга инстанция.
 // Грешка при refresh пази последната ПРОЧЕТЕНА от базата стойност (не
 // default 5). Стойността никога не стига до клиент/snapshot.
+// Същият cache носи и physicalShuffleMode („Метод на размесване“, прилага се
+// само при праг 0) — същият refresh/PATCH път, важи от следващото раздаване.
 const ANTI_BAD_LUCK_CONFIG_REFRESH_INTERVAL_MS = 5_000
 let antiBadLuckRuntimeConfig: ServerAntiBadLuckConfig = adminSettingsStore.getAntiBadLuckRuntimeConfig()
 console.log(
-  `[anti-bad-luck] runtime config: threshold=${antiBadLuckRuntimeConfig.threshold} resetGeneration=${antiBadLuckRuntimeConfig.resetGeneration}`,
+  `[anti-bad-luck] runtime config: threshold=${antiBadLuckRuntimeConfig.threshold} resetGeneration=${antiBadLuckRuntimeConfig.resetGeneration} physicalShuffleMode=${antiBadLuckRuntimeConfig.physicalShuffleMode}`,
 )
 
 function refreshAntiBadLuckRuntimeConfig(reason: string): void {
@@ -1145,10 +1152,11 @@ function refreshAntiBadLuckRuntimeConfig(reason: string): void {
     const next = adminSettingsStore.getAntiBadLuckRuntimeConfig()
     if (
       next.threshold !== antiBadLuckRuntimeConfig.threshold ||
-      next.resetGeneration !== antiBadLuckRuntimeConfig.resetGeneration
+      next.resetGeneration !== antiBadLuckRuntimeConfig.resetGeneration ||
+      next.physicalShuffleMode !== antiBadLuckRuntimeConfig.physicalShuffleMode
     ) {
       console.log(
-        `[anti-bad-luck] runtime config (${reason}): threshold ${antiBadLuckRuntimeConfig.threshold} -> ${next.threshold}, resetGeneration ${antiBadLuckRuntimeConfig.resetGeneration} -> ${next.resetGeneration}`,
+        `[anti-bad-luck] runtime config (${reason}): threshold ${antiBadLuckRuntimeConfig.threshold} -> ${next.threshold}, resetGeneration ${antiBadLuckRuntimeConfig.resetGeneration} -> ${next.resetGeneration}, physicalShuffleMode ${antiBadLuckRuntimeConfig.physicalShuffleMode} -> ${next.physicalShuffleMode}`,
       )
     }
     antiBadLuckRuntimeConfig = next
@@ -19230,6 +19238,21 @@ async function handleAdminSettingsRequest(
       nextAntiBadLuckThreshold = rawAntiBadLuckThreshold
     }
 
+    // "Метод на размесване" — strict enum (само JSON string от allowlist-а).
+    // Explicit 400 тук, store-ът re-validate-ва независимо.
+    let nextPhysicalShuffleMode: ServerPhysicalShuffleMode | undefined
+    if ('physicalShuffleMode' in body) {
+      const rawPhysicalShuffleMode = body.physicalShuffleMode
+      if (!isServerPhysicalShuffleMode(rawPhysicalShuffleMode)) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: `Полето "physicalShuffleMode" трябва да е ${SERVER_PHYSICAL_SHUFFLE_MODES.join(' или ')}.`,
+        })
+        return true
+      }
+      nextPhysicalShuffleMode = rawPhysicalShuffleMode
+    }
+
     const previousAntiBadLuckConfig = antiBadLuckRuntimeConfig
     const result = adminSettingsStore.updateSettings({
       signupBonusYellowCoins: getNumberField(body, 'signupBonusYellowCoins') ?? undefined,
@@ -19242,6 +19265,7 @@ async function handleAdminSettingsRequest(
       freeTopicsVipDays: getNumberField(body, 'freeTopicsVipDays') ?? undefined,
       registrationVerificationMode: nextRegistrationVerificationMode,
       antiBadLuckThreshold: nextAntiBadLuckThreshold,
+      physicalShuffleMode: nextPhysicalShuffleMode,
     })
 
     if (!result.ok) {
@@ -19249,9 +19273,14 @@ async function handleAdminSettingsRequest(
       return true
     }
 
-    if (nextAntiBadLuckThreshold !== undefined) {
+    if (nextAntiBadLuckThreshold !== undefined || nextPhysicalShuffleMode !== undefined) {
       // Immediate cache update — следващият game tick вече носи новия config.
       refreshAntiBadLuckRuntimeConfig('admin PATCH')
+      if (previousAntiBadLuckConfig.physicalShuffleMode !== antiBadLuckRuntimeConfig.physicalShuffleMode) {
+        console.log(
+          `[physical-shuffle] admin profile=${session.profile.profileId} changed mode ${previousAntiBadLuckConfig.physicalShuffleMode} -> ${antiBadLuckRuntimeConfig.physicalShuffleMode}`,
+        )
+      }
       if (previousAntiBadLuckConfig.threshold !== antiBadLuckRuntimeConfig.threshold) {
         console.log(
           `[anti-bad-luck] admin profile=${session.profile.profileId} changed threshold ${previousAntiBadLuckConfig.threshold} -> ${antiBadLuckRuntimeConfig.threshold} (resetGeneration=${antiBadLuckRuntimeConfig.resetGeneration})`,

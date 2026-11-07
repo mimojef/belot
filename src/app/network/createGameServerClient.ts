@@ -506,6 +506,8 @@ export type AdminSettingsSnapshot = {
   registrationVerificationMode: 'email_code' | 'direct'
   /** "Anti Bad Luck праг" — 0 (изключено) | 5..10. SERVER-AUTHORITATIVE (allowlist валидация в server/src/db/adminSettingsStore.ts); само admin панела го чете/пише, никога не идва в game/lobby snapshot. */
   antiBadLuckThreshold: 0 | 5 | 6 | 7 | 8 | 9 | 10
+  /** "Метод на размесване" — 'RANDOM_INSERT' (Случайно вмъкване, default) | 'ALTERNATING_ENDS' (Редуване горе–долу). Прилага се само при antiBadLuckThreshold 0. SERVER-AUTHORITATIVE (enum валидация в server/src/db/adminSettingsStore.ts); само admin панела го чете/пише. */
+  physicalShuffleMode: 'RANDOM_INSERT' | 'ALTERNATING_ENDS'
 }
 
 export type AdminPaymentPeriodStats = {

@@ -7,6 +7,10 @@
 
 import type { Seat } from '../../core/serverTypes.js'
 import type { ServerSuit } from '../serverGameTypes.js'
+import {
+  isServerPhysicalShuffleMode,
+  type ServerPhysicalShuffleMode,
+} from '../physicalShuffle/serverPhysicalShuffleTypes.js'
 
 // Admin-конфигурируем праг (admin_settings.anti_bad_luck_threshold). Seat
 // става pending след `threshold` поредни BAD първи 5 → rescue най-рано на
@@ -26,6 +30,13 @@ export const SERVER_ANTI_BAD_LUCK_DEFAULT_THRESHOLD: ServerAntiBadLuckThreshold 
 export type ServerAntiBadLuckConfig = {
   threshold: ServerAntiBadLuckThreshold
   resetGeneration: number
+  // Метод на физическото размесване (admin_settings.physical_shuffle_mode).
+  // Пътува в същия runtime config, защото е обвързан с Anti Bad Luck: прилага
+  // се САМО при threshold 0 (виж resolveServerNextRoundDeck). Optional за
+  // backward compatibility (тестови adapter-и, по-стари config-и) — липсващ
+  // = SERVER_PHYSICAL_SHUFFLE_DEFAULT_MODE. Ако е подаден, трябва да е
+  // валиден (isServerAntiBadLuckConfig отказва непозната стойност).
+  physicalShuffleMode?: ServerPhysicalShuffleMode
 }
 
 // САМО за ниски helper-и/тестови adapter-и (backward compatibility).
@@ -44,7 +55,9 @@ export function isServerAntiBadLuckConfig(value: unknown): value is ServerAntiBa
   if (value === null || typeof value !== 'object') return false
   const config = value as Record<string, unknown>
   const resetGeneration = config['resetGeneration']
+  const physicalShuffleMode = config['physicalShuffleMode']
   return (
+    (physicalShuffleMode === undefined || isServerPhysicalShuffleMode(physicalShuffleMode)) &&
     isServerAntiBadLuckThreshold(config['threshold']) &&
     typeof resetGeneration === 'number' &&
     Number.isSafeInteger(resetGeneration) &&

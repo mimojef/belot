@@ -14,6 +14,9 @@
  *  G. persistence през process restart
  *  H. privacy: публичните endpoints не съдържат настройката
  *  I. frontend source review: admin <select> с 7-те стойности + текст
+ *  J. "Метод на размесване" (physicalShuffleMode): default RANDOM_INSERT без
+ *     restart/seed, auth, strict enum validation, atomic, runtime cache,
+ *     persistence през restart, privacy, frontend <select>
  */
 
 import { randomUUID } from 'node:crypto'
@@ -253,12 +256,53 @@ try {
     assert(rawSetting(isolated.databaseFile, 'anti_bad_luck_reset_generation') === '2', 'generation changed')
   })
 
+  console.log('\n=== J. Метод на размесване ===')
+  await check('J1. default: GET physicalShuffleMode=RANDOM_INSERT без ред в базата; startup лог', async () => {
+    const get = await request(port, 'GET', '/api/admin/settings', undefined, adminCookie)
+    assert(get.status === 200 && (get.body?.settings as Record<string, unknown>)?.physicalShuffleMode === 'RANDOM_INSERT', get.text)
+    assert(rawSetting(isolated.databaseFile, 'physical_shuffle_mode') === undefined, 'unexpected DB row')
+    assert(server.output().includes('physicalShuffleMode=RANDOM_INSERT'), 'startup log')
+  })
+  for (const [label, cookie] of [['guest', undefined], ['player', playerCookie], ['subadmin', subadminCookie]] as const) {
+    await check(`J2. ${label}: PATCH physicalShuffleMode → 403, без промяна`, async () => {
+      const patch = await request(port, 'PATCH', '/api/admin/settings', { physicalShuffleMode: 'ALTERNATING_ENDS' }, cookie)
+      assert(patch.status === 403, `${patch.status}`)
+      assert(rawSetting(isolated.databaseFile, 'physical_shuffle_mode') === undefined, 'DB changed')
+    })
+  }
+  for (const value of ['random_insert', 'alternating_ends', 'RANDOM', '', ' RANDOM_INSERT', 0, 1, null, true, [], {}]) {
+    await check(`J3. PATCH physicalShuffleMode=${JSON.stringify(value)} → 400, DB непроменена`, async () => {
+      const patch = await request(port, 'PATCH', '/api/admin/settings', { physicalShuffleMode: value }, adminCookie)
+      assert(patch.status === 400, `${patch.status} ${patch.text}`)
+      assert(rawSetting(isolated.databaseFile, 'physical_shuffle_mode') === undefined, 'DB changed')
+    })
+  }
+  await check('J4. PATCH ALTERNATING_ENDS → 200; GET/DB; runtime cache обновен веднага (лог) + admin audit лог', async () => {
+    const patch = await request(port, 'PATCH', '/api/admin/settings', { physicalShuffleMode: 'ALTERNATING_ENDS' }, adminCookie)
+    assert(patch.status === 200 && (patch.body?.settings as Record<string, unknown>)?.physicalShuffleMode === 'ALTERNATING_ENDS', patch.text)
+    const get = await request(port, 'GET', '/api/admin/settings', undefined, adminCookie)
+    assert((get.body?.settings as Record<string, unknown>)?.physicalShuffleMode === 'ALTERNATING_ENDS', get.text)
+    assert(rawSetting(isolated.databaseFile, 'physical_shuffle_mode') === 'ALTERNATING_ENDS', 'DB')
+    assert(/runtime config \(admin PATCH\):.*physicalShuffleMode RANDOM_INSERT -> ALTERNATING_ENDS/.test(server.output()), 'missing cache update log')
+    assert(/\[physical-shuffle\] admin profile=\S+ changed mode RANDOM_INSERT -> ALTERNATING_ENDS/.test(server.output()), 'missing admin audit log')
+    assert(rawSetting(isolated.databaseFile, 'anti_bad_luck_threshold') === '7', 'threshold changed')
+  })
+  await check('J5. валиден mode + невалиден праг → 400 изцяло (mode непроменен)', async () => {
+    const patch = await request(port, 'PATCH', '/api/admin/settings', { physicalShuffleMode: 'RANDOM_INSERT', antiBadLuckThreshold: 4 }, adminCookie)
+    assert(patch.status === 400, patch.text)
+    assert(rawSetting(isolated.databaseFile, 'physical_shuffle_mode') === 'ALTERNATING_ENDS', 'mode changed')
+  })
+  await check('J6. PATCH само на прага не пипа метода', async () => {
+    const patch = await request(port, 'PATCH', '/api/admin/settings', { antiBadLuckThreshold: 7 }, adminCookie)
+    assert(patch.status === 200 && (patch.body?.settings as Record<string, unknown>)?.physicalShuffleMode === 'ALTERNATING_ENDS', patch.text)
+  })
+
   console.log('\n=== H. privacy ===')
   await check('H1. /api/settings/public и /api/rooms не съдържат настройката', async () => {
     const pub = await request(port, 'GET', '/api/settings/public', undefined, playerCookie)
     const rooms = await request(port, 'GET', '/api/rooms', undefined, playerCookie)
     assert(pub.status === 200 && rooms.status === 200, `${pub.status}/${rooms.status}`)
-    assert(!/antiBadLuck|resetGeneration/i.test(pub.text + rooms.text), 'leak')
+    assert(!/antiBadLuck|resetGeneration|physicalShuffle|ALTERNATING_ENDS|RANDOM_INSERT/i.test(pub.text + rooms.text), 'leak')
   })
 
   console.log('\n=== G. restart persistence ===')
@@ -269,6 +313,11 @@ try {
     assert(server.output().includes('[anti-bad-luck] runtime config: threshold=7 resetGeneration=2'), 'startup log')
     const login = await request(port, 'GET', '/api/admin/settings', undefined, adminCookie)
     assert(login.status === 200 && (login.body?.settings as Record<string, unknown>)?.antiBadLuckThreshold === 7, login.text)
+  })
+  await check('J7. след restart: startup лог physicalShuffleMode=ALTERNATING_ENDS, GET = ALTERNATING_ENDS', async () => {
+    assert(server.output().includes('physicalShuffleMode=ALTERNATING_ENDS'), 'startup log')
+    const get = await request(port, 'GET', '/api/admin/settings', undefined, adminCookie)
+    assert((get.body?.settings as Record<string, unknown>)?.physicalShuffleMode === 'ALTERNATING_ENDS', get.text)
   })
   await check('G2. defensive refresh (~5s) хваща out-of-band промяна в базата без PATCH', async () => {
     withDb(isolated.databaseFile, (db) => db.prepare(`UPDATE admin_settings SET setting_value = '10' WHERE setting_key = 'anti_bad_luck_threshold'`).run())
@@ -287,6 +336,15 @@ try {
     assert(lobby.includes('При 5 — помощ най-рано на следващото слабо раздаване след 5 поредни слаби') && lobby.includes('При 0 системата е напълно изключена'), 'explanatory text')
     assert(lobby.includes('        antiBadLuckThreshold,\n') || lobby.includes('        antiBadLuckThreshold,\r\n'), 'submit field')
     assert(client.includes('antiBadLuckThreshold: 0 | 5 | 6 | 7 | 8 | 9 | 10'), 'client type')
+  })
+  await check('J8. admin <select name="physicalShuffleMode"> „Случайно вмъкване“ (default) / „Редуване горе–долу“ + submit', () => {
+    const lobby = readFileSync(join(sourceServerRoot, '..', 'src', 'app', 'lobby', 'renderLobbyScreen.ts'), 'utf8')
+    const client = readFileSync(join(sourceServerRoot, '..', 'src', 'app', 'network', 'createGameServerClient.ts'), 'utf8')
+    assert(lobby.includes('<select name="physicalShuffleMode"'), 'select')
+    assert(lobby.includes("{ value: 'RANDOM_INSERT', label: 'Случайно вмъкване' }") && lobby.includes("{ value: 'ALTERNATING_ENDS', label: 'Редуване горе–долу' }"), 'options')
+    assert(lobby.includes('Метод на размесване'), 'heading')
+    assert(lobby.includes('        physicalShuffleMode,\n') || lobby.includes('        physicalShuffleMode,\r\n'), 'submit field')
+    assert(client.includes("physicalShuffleMode: 'RANDOM_INSERT' | 'ALTERNATING_ENDS'"), 'client type')
   })
 } finally {
   await stopServer(server)

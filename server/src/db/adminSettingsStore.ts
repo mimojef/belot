@@ -4,6 +4,11 @@ import {
   type ServerAntiBadLuckConfig,
   type ServerAntiBadLuckThreshold,
 } from '../game/antiBadLuck/serverAntiBadLuckTypes.js'
+import {
+  SERVER_PHYSICAL_SHUFFLE_DEFAULT_MODE,
+  isServerPhysicalShuffleMode,
+  type ServerPhysicalShuffleMode,
+} from '../game/physicalShuffle/serverPhysicalShuffleTypes.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -67,6 +72,16 @@ export type AdminSettingsSnapshot = {
    * index.ts) — никога в game/lobby snapshot към клиент.
    */
   antiBadLuckThreshold: ServerAntiBadLuckThreshold
+  /**
+   * "Метод на размесване" (Admin -> Настройки) — SERVER-AUTHORITATIVE.
+   * 'RANDOM_INSERT' (default, „Случайно вмъкване“) | 'ALTERNATING_ENDS'
+   * („Редуване горе–долу“). Прилага се САМО при antiBadLuckThreshold 0 —
+   * физическо размесване на събраната камара от предишното раздаване (виж
+   * server/src/game/physicalShuffle/). Стига до game worker-а през
+   * getAntiBadLuckRuntimeConfig() (main thread cache в index.ts) и важи от
+   * следващото раздаване, без restart. Никога в snapshot към клиент.
+   */
+  physicalShuffleMode: ServerPhysicalShuffleMode
 }
 
 export type AdminSettingsStore = {
@@ -75,7 +90,8 @@ export type AdminSettingsStore = {
    * Runtime config за game worker-а: прагът + вътрешната reset generation
    * (увеличава се атомарно при всяко превключване към 0, виж updateSettings).
    * Generation-ът НЕ е част от AdminSettingsSnapshot (не се показва/приема
-   * през admin API).
+   * през admin API). Носи и physicalShuffleMode („Метод на размесване“) —
+   * прилага се само при праг 0, виж resolveServerNextRoundDeck.
    */
   getAntiBadLuckRuntimeConfig: () => ServerAntiBadLuckConfig
   updateSettings: (
@@ -137,6 +153,9 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // запазена стойност — 5 запазва поведението отпреди настройката. Никога 0:
   // повредена стойност не бива тихо да изключва системата.
   antiBadLuckThreshold: SERVER_ANTI_BAD_LUCK_DEFAULT_THRESHOLD,
+  // Липсващ ред (не е нужна seed migration) или невалидна запазена стойност
+  // → RANDOM_INSERT („Случайно вмъкване“ е методът по подразбиране).
+  physicalShuffleMode: SERVER_PHYSICAL_SHUFFLE_DEFAULT_MODE,
 }
 
 const SETTING_KEYS = {
@@ -150,6 +169,7 @@ const SETTING_KEYS = {
   freeTopicsVipDays: 'free_topics_vip_days',
   registrationVerificationMode: 'registration_verification_mode',
   antiBadLuckThreshold: 'anti_bad_luck_threshold',
+  physicalShuffleMode: 'physical_shuffle_mode',
 } as const
 
 // Вътрешен (не admin-editable) ключ — виж getAntiBadLuckRuntimeConfig.
@@ -215,6 +235,15 @@ function parseStoredAntiBadLuckThreshold(value: string): ServerAntiBadLuckThresh
   return isServerAntiBadLuckThreshold(parsed) ? parsed : SERVER_ANTI_BAD_LUCK_DEFAULT_THRESHOLD
 }
 
+/** Strict enum validation — само 'RANDOM_INSERT' | 'ALTERNATING_ENDS' (string). */
+function normalizePhysicalShuffleMode(value: unknown): ServerPhysicalShuffleMode | null {
+  return isServerPhysicalShuffleMode(value) ? value : null
+}
+
+function parseStoredPhysicalShuffleMode(value: string | undefined): ServerPhysicalShuffleMode {
+  return isServerPhysicalShuffleMode(value) ? value : DEFAULT_SETTINGS.physicalShuffleMode
+}
+
 function parseStoredResetGeneration(value: string | undefined): number {
   const parsed = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0
@@ -255,14 +284,15 @@ export async function createAdminSettingsStore(
       'marketing_daily_gift_limit',
       'free_topics_vip_days',
       'registration_verification_mode',
-      'anti_bad_luck_threshold'
+      'anti_bad_luck_threshold',
+      'physical_shuffle_mode'
     );
   `)
 
   const selectAntiBadLuckRuntimeStatement = database.prepare(`
     SELECT setting_key, setting_value
     FROM admin_settings
-    WHERE setting_key IN ('anti_bad_luck_threshold', 'anti_bad_luck_reset_generation');
+    WHERE setting_key IN ('anti_bad_luck_threshold', 'anti_bad_luck_reset_generation', 'physical_shuffle_mode');
   `)
 
   const upsertSettingStatement = database.prepare(`
@@ -327,6 +357,7 @@ export async function createAdminSettingsStore(
         DEFAULT_SETTINGS.registrationVerificationMode,
       ),
       antiBadLuckThreshold: parseStoredAntiBadLuckThreshold(values.get(SETTING_KEYS.antiBadLuckThreshold) ?? ''),
+      physicalShuffleMode: parseStoredPhysicalShuffleMode(values.get(SETTING_KEYS.physicalShuffleMode)),
     }
   }
 
@@ -336,6 +367,7 @@ export async function createAdminSettingsStore(
     return {
       threshold: parseStoredAntiBadLuckThreshold(values.get(SETTING_KEYS.antiBadLuckThreshold) ?? ''),
       resetGeneration: parseStoredResetGeneration(values.get(ANTI_BAD_LUCK_RESET_GENERATION_KEY)),
+      physicalShuffleMode: parseStoredPhysicalShuffleMode(values.get(SETTING_KEYS.physicalShuffleMode)),
     }
   }
 
@@ -382,6 +414,10 @@ export async function createAdminSettingsStore(
       input.antiBadLuckThreshold === undefined
         ? undefined
         : normalizeAntiBadLuckThreshold(input.antiBadLuckThreshold)
+    const nextPhysicalShuffleMode =
+      input.physicalShuffleMode === undefined
+        ? undefined
+        : normalizePhysicalShuffleMode(input.physicalShuffleMode)
 
     if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
       return {
@@ -453,6 +489,13 @@ export async function createAdminSettingsStore(
       }
     }
 
+    if (input.physicalShuffleMode !== undefined && nextPhysicalShuffleMode === null) {
+      return {
+        ok: false,
+        message: 'Методът на размесване трябва да е "RANDOM_INSERT" или "ALTERNATING_ENDS".',
+      }
+    }
+
     // Всички записи на един PATCH — една BEGIN IMMEDIATE транзакция (atomic):
     // особено прагът + reset generation при превключване към 0 трябва да се
     // видят заедно или изобщо.
@@ -511,6 +554,10 @@ export async function createAdminSettingsStore(
         if (nextAntiBadLuckThreshold === 0 && previous.threshold !== 0) {
           upsertSettingStatement.run(ANTI_BAD_LUCK_RESET_GENERATION_KEY, String(previous.resetGeneration + 1))
         }
+      }
+
+      if (nextPhysicalShuffleMode !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.physicalShuffleMode, nextPhysicalShuffleMode)
       }
 
       database.exec('COMMIT;')

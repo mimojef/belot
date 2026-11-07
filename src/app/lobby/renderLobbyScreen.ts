@@ -197,6 +197,10 @@ function renderDesktopLobbyScaleDownMediaQueries(): string {
 // "Anti Bad Luck праг" admin select — mirror на server allowlist-а
 // (SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES); сървърът е източникът на истина.
 const ADMIN_ANTI_BAD_LUCK_THRESHOLD_OPTIONS: ReadonlyArray<AdminSettingsSnapshot['antiBadLuckThreshold']> = [0, 5, 6, 7, 8, 9, 10]
+const ADMIN_PHYSICAL_SHUFFLE_MODE_OPTIONS: ReadonlyArray<{ value: AdminSettingsSnapshot['physicalShuffleMode']; label: string }> = [
+  { value: 'RANDOM_INSERT', label: 'Случайно вмъкване' },
+  { value: 'ALTERNATING_ENDS', label: 'Редуване горе–долу' },
+]
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -12429,6 +12433,9 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // остане консистентен с server DEFAULT_SETTINGS/migration seed
     // (adminSettingsStore.ts, 5), не независима стойност.
     antiBadLuckThreshold: 5,
+    // Само fallback докато state.adminSettings се зарежда — консистентен със
+    // server DEFAULT_SETTINGS (adminSettingsStore.ts, 'RANDOM_INSERT').
+    physicalShuffleMode: 'RANDOM_INSERT',
   }
   const adminPackages = state.adminCoinPackages
   const adminBundlePackages = state.adminBundlePackages
@@ -12585,7 +12592,20 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
               </select>
             </label>
           </div>
-          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Брой поредни слаби раздавания (първите 5 карти), след които играчът получава помощ. При 5 — помощ най-рано на следващото слабо раздаване след 5 поредни слаби (т.е. на 6-тото). При 0 системата е напълно изключена — обикновено разбъркване, цепене и раздаване. Промяната важи от следващото раздаване на всяка маса, без restart; изключването (0) нулира натрупания прогрес на всички маси.</div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Брой поредни слаби раздавания (първите 5 карти), след които играчът получава помощ. При 5 — помощ най-рано на следващото слабо раздаване след 5 поредни слаби (т.е. на 6-тото). При 0 системата е напълно изключена — размесване по „Метод на размесване“ (по-долу), цепене и раздаване. Промяната важи от следващото раздаване на всяка маса, без restart; изключването (0) нулира натрупания прогрес на всички маси.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Метод на размесване (Белот)</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Метод на размесване
+              <select name="physicalShuffleMode" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+                ${ADMIN_PHYSICAL_SHUFFLE_MODE_OPTIONS.map((option) => `<option value="${option.value}" ${settings.physicalShuffleMode === option.value ? 'selected' : ''}>${option.label}</option>`).join('')}
+              </select>
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Важи само при Anti Bad Luck праг 0. Вместо ново пълно разбъркване, следващото раздаване започва от събраните взятки на предишното (при всички пас — от ръцете и неразданите карти), размесени с 3–6 прехвърляния на пакети от 6–16 карти. „Случайно вмъкване“ — пакет отгоре или отдолу се вмъква на случайно място в тестето. „Редуване горе–долу“ — пакетите се местят последователно отгоре долу и отдолу горе. Първото раздаване на мача е с обичайното случайно разбъркване; цепенето остава реално. Промяната важи от следващото раздаване, без restart.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -19454,6 +19474,13 @@ export function renderLobbyScreen(
       if (antiBadLuckThreshold === undefined) {
         return
       }
+      // Същият принцип — само allowlist стойностите, сървърът re-validate-ва.
+      const physicalShuffleMode = ADMIN_PHYSICAL_SHUFFLE_MODE_OPTIONS.find(
+        (option) => option.value === String(data.get('physicalShuffleMode') ?? ''),
+      )?.value
+      if (physicalShuffleMode === undefined) {
+        return
+      }
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
@@ -19466,6 +19493,7 @@ export function renderLobbyScreen(
         freeTopicsVipDays,
         registrationVerificationMode,
         antiBadLuckThreshold,
+        physicalShuffleMode,
       })
     })
 

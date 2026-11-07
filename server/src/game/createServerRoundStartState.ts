@@ -8,13 +8,15 @@ import {
   createEmptyTrickState,
   createEmptyWonTricks,
 } from './createServerRoundDefaults.js'
-import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
+import type { ServerAuthoritativeGameState, ServerCard } from './serverGameTypes.js'
 import { getSeatAfterDealer, getSeatBeforeDealer } from './serverPhaseHelpers.js'
 import { startServerCuttingPhase } from './startServerCuttingPhase.js'
 
 export function createServerRoundStartState(
   state: ServerAuthoritativeGameState,
   dealerSeat: Seat,
+  // Тесте от resolveServerNextRoundDeck (null = ново случайно разбъркване).
+  preparedDeck: ServerCard[] | null = null,
 ): ServerAuthoritativeGameState {
   const cutterSeat = getSeatBeforeDealer(dealerSeat)
   const firstBidderSeat = getSeatAfterDealer(dealerSeat)
@@ -45,5 +47,5 @@ export function createServerRoundStartState(
     },
   }
 
-  return startServerCuttingPhase(roundResetState)
+  return startServerCuttingPhase(roundResetState, preparedDeck)
 }

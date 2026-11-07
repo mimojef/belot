@@ -605,7 +605,7 @@ console.log('\n[15] admin settings store')
   const probe = new DatabaseSync(dbPath)
   check('[15a] migration seed: anti_bad_luck_threshold=5, anti_bad_luck_reset_generation=0', raw(probe, 'anti_bad_luck_threshold') === '5' && raw(probe, 'anti_bad_luck_reset_generation') === '0')
   let store = await createAdminSettingsStore(dbPath)
-  check('[15b] default: settings 5, runtime { 5, 0 }', store.getSettings().antiBadLuckThreshold === 5 && JSON.stringify(store.getAntiBadLuckRuntimeConfig()) === JSON.stringify({ threshold: 5, resetGeneration: 0 }))
+  check('[15b] default: settings 5, runtime { 5, 0 }', store.getSettings().antiBadLuckThreshold === 5 && JSON.stringify(store.getAntiBadLuckRuntimeConfig()) === JSON.stringify({ threshold: 5, resetGeneration: 0, physicalShuffleMode: 'RANDOM_INSERT' }))
   check('[15c] runtime config не изтича в AdminSettingsSnapshot (без resetGeneration)', !('resetGeneration' in store.getSettings()) && !('antiBadLuckResetGeneration' in store.getSettings()))
 
   let allValid = true
@@ -652,9 +652,9 @@ console.log('\n[15] admin settings store')
 
   probe.prepare(`UPDATE admin_settings SET setting_value = 'abc' WHERE setting_key = 'anti_bad_luck_threshold'`).run()
   probe.prepare(`UPDATE admin_settings SET setting_value = '-3' WHERE setting_key = 'anti_bad_luck_reset_generation'`).run()
-  check('[15j] повредени стойности в базата → праг 5 (НЕ 0), generation 0', store.getSettings().antiBadLuckThreshold === 5 && JSON.stringify(store.getAntiBadLuckRuntimeConfig()) === JSON.stringify({ threshold: 5, resetGeneration: 0 }))
+  check('[15j] повредени стойности в базата → праг 5 (НЕ 0), generation 0', store.getSettings().antiBadLuckThreshold === 5 && JSON.stringify(store.getAntiBadLuckRuntimeConfig()) === JSON.stringify({ threshold: 5, resetGeneration: 0, physicalShuffleMode: 'RANDOM_INSERT' }))
   probe.prepare(`DELETE FROM admin_settings WHERE setting_key IN ('anti_bad_luck_threshold', 'anti_bad_luck_reset_generation')`).run()
-  check('[15k] липсващи редове → default { 5, 0 }', JSON.stringify(store.getAntiBadLuckRuntimeConfig()) === JSON.stringify({ threshold: 5, resetGeneration: 0 }))
+  check('[15k] липсващи редове → default { 5, 0 }', JSON.stringify(store.getAntiBadLuckRuntimeConfig()) === JSON.stringify({ threshold: 5, resetGeneration: 0, physicalShuffleMode: 'RANDOM_INSERT' }))
   store.close()
   probe.close()
 }

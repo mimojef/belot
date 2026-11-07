@@ -32,11 +32,11 @@ export function runServerPhaseTransition(
       )
     }
 
-    return startNextServerRound(state)
+    return startNextServerRound(state, antiBadLuckConfig)
   }
 
   if (state.phase === 'next-round') {
-    return startNextServerRound(state)
+    return startNextServerRound(state, antiBadLuckConfig)
   }
 
   const advancedState = advanceToNextServerPhase(state)
