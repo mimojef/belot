@@ -819,6 +819,12 @@ export type AuthStore = {
   }) => MarketingRoleChangeResult
   /** Роля на акаунта зад даден профил — само за UI показване (badge), null ако профилът няма акаунт (бот/гост/изтрит). */
   getAccountRoleForProfile: (profileId: string) => AccountRoleValue | null
+  /**
+   * Batch вариант на getAccountRoleForProfile — ЕДНА заявка за целия списък
+   * (не 2 заявки на профил). Същата семантика: само account_id връзката,
+   * без филтри по status/is_temporary. Профили без акаунт липсват от map-а.
+   */
+  getAccountRolesForProfiles: (profileIds: readonly string[]) => Map<string, AccountRoleValue>
   close: () => void
 }
 
@@ -3087,6 +3093,29 @@ export async function createAuthStore(
     return accountRow?.role ?? null
   }
 
+  // Chunk-ване под лимита на SQLite за брой bind параметри (страниците в
+  // "Теми"/"Лафче" са до 200 автора, но helper-ът не разчита на това).
+  const ACCOUNT_ROLES_BATCH_CHUNK_SIZE = 500
+
+  function getAccountRolesForProfiles(profileIds: readonly string[]): Map<string, AccountRoleValue> {
+    const rolesByProfileId = new Map<string, AccountRoleValue>()
+    const uniqueProfileIds = [...new Set(profileIds.filter((id) => id.trim().length > 0))]
+    for (let start = 0; start < uniqueProfileIds.length; start += ACCOUNT_ROLES_BATCH_CHUNK_SIZE) {
+      const chunk = uniqueProfileIds.slice(start, start + ACCOUNT_ROLES_BATCH_CHUNK_SIZE)
+      const placeholders = chunk.map(() => '?').join(',')
+      const rows = database.prepare(`
+        SELECT profiles.profile_id AS profile_id, accounts.role AS role
+        FROM profiles
+        INNER JOIN accounts ON accounts.account_id = profiles.account_id
+        WHERE profiles.profile_id IN (${placeholders});
+      `).all(...chunk) as Array<{ profile_id: string; role: AccountRoleValue }>
+      for (const row of rows) {
+        rolesByProfileId.set(row.profile_id, row.role)
+      }
+    }
+    return rolesByProfileId
+  }
+
   /**
    * Споделена имплементация за setSubadminRole/setChatAdminRole — двете
    * "елевирани" роли (subadmin, chat_admin) са взаимно изключващи се и имат
@@ -3346,6 +3375,7 @@ export async function createAuthStore(
     setTopChatAdminRole,
     setMarketingRole,
     getAccountRoleForProfile,
+    getAccountRolesForProfiles,
     close,
   }
 }

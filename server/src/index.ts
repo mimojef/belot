@@ -314,6 +314,7 @@ import { buildBelotRoomSpectatorsMessage } from './core/buildBelotRoomSpectators
 import { evaluateBelotSpectatorWatchEligibility } from './core/evaluateBelotSpectatorWatchEligibility.js'
 import { isBelotSpectatorFeatureEnabled } from './core/belotSpectatorFeatureFlag.js'
 import { createTopicsPersonalDisabledResponse, isTopicsPersonalServerEnabled } from './core/topicsPersonalFeatureGate.js'
+import { toNameHighlightRole, type NameHighlightRole } from './core/nameHighlightRole.js'
 import {
   createTournamentMatchesLiveTokenSigner,
   createTournamentMatchesViewerRegistry,
@@ -1306,6 +1307,7 @@ const chatStore = await createChatStore(
     },
     roleChecker: {
       isPikaTeamProfile: (profileId) => authStore.getAccountRoleForProfile(profileId) === 'pika_team',
+      getNameHighlightRoles: (profileIds) => getNameHighlightRolesByProfileId(profileIds),
     },
   },
 )
@@ -2339,12 +2341,27 @@ function buildTopicMuteEvidenceAttachmentUrls(
   return buildTopicAttachmentUrls(topicId, storageFilename)
 }
 
+// ТЕКУЩАТА роля на всеки уникален автор, стеснена до ролите с отличителен
+// цвят на ника (core/nameHighlightRole.ts) — derived при четене, както
+// avatar-а. ЕДНА batch заявка за целия списък (getAccountRolesForProfiles),
+// не lookup на автор/съобщение. Профили без такава роля не влизат в map-а →
+// senderNameHighlightRole: null.
+function getNameHighlightRolesByProfileId(profileIds: readonly string[]): Map<string, NameHighlightRole> {
+  const rolesByProfileId = new Map<string, NameHighlightRole>()
+  for (const [profileId, role] of authStore.getAccountRolesForProfiles(profileIds)) {
+    const highlightRole = toNameHighlightRole(role)
+    if (highlightRole !== null) rolesByProfileId.set(profileId, highlightRole)
+  }
+  return rolesByProfileId
+}
+
 function hydrateTopicMessagesWithCurrentAvatars(
   messages: readonly TopicMessageSnapshot[],
 ): TopicMessageBroadcastBase[] {
   const uniqueSenderProfileIds = [...new Set(messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+  const nameHighlightRoleByProfileId = getNameHighlightRolesByProfileId(uniqueSenderProfileIds)
   // Batch lookup — ЕДНА заявка за целия batch sender profile IDs (mute
   // indicator icon брифа §8), не N+1 lookup по съобщение.
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
@@ -2376,6 +2393,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
       senderDisplayName: message.senderDisplayName,
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
       senderRole: message.senderRole,
+      senderNameHighlightRole: nameHighlightRoleByProfileId.get(message.senderProfileId) ?? null,
       body: message.body,
       createdAt: message.createdAt,
       lastActivityAt: message.lastActivityAt,
@@ -14382,6 +14400,7 @@ async function handleTopicMessagesRequest(
   const uniqueSenderProfileIds = [...new Set(page.messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+  const nameHighlightRoleByProfileId = getNameHighlightRolesByProfileId(uniqueSenderProfileIds)
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   // Батово likeCount/replyCount/viewerHasLiked за цялата страница (Етап 3,
@@ -14405,6 +14424,7 @@ async function handleTopicMessagesRequest(
     return {
       ...message,
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+      senderNameHighlightRole: nameHighlightRoleByProfileId.get(message.senderProfileId) ?? null,
       attachment: attachmentRecord
         ? {
             attachmentId: attachmentRecord.storageFilename,
@@ -14557,6 +14577,7 @@ async function handleTopicRepliesRequest(
   const uniqueSenderProfileIds = [...new Set(page.messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
   const avatarUrlByProfileId = new Map(senderProfiles.map((p) => [p.profileId, p.avatarUrl]))
+  const nameHighlightRoleByProfileId = getNameHighlightRolesByProfileId(uniqueSenderProfileIds)
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   const messageIds = page.messages.map((m) => m.messageId)
@@ -14582,6 +14603,7 @@ async function handleTopicRepliesRequest(
     return {
       ...message,
       senderAvatarUrl: avatarUrlByProfileId.get(message.senderProfileId) ?? null,
+      senderNameHighlightRole: nameHighlightRoleByProfileId.get(message.senderProfileId) ?? null,
       attachment: attachmentRecord
         ? {
             attachmentId: attachmentRecord.storageFilename,

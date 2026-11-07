@@ -18,6 +18,7 @@ import type { TournamentMatchAssignment } from '../tournament/tournamentCoordina
 import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 import type { TopicSnapshot } from '../db/topicStore.js'
+import type { NameHighlightRole } from '../core/nameHighlightRole.js'
 import type { LudoEngineEvent } from '../game/ludoEngine/ludoEngineEvents.js'
 import type { LudoColor, LudoGameState, LudoPieceSlot } from '../game/ludoEngine/ludoEngineTypes.js'
 
@@ -2141,6 +2142,8 @@ export type TopicMessageBroadcastSnapshot = {
   senderDisplayName: string
   senderAvatarUrl: string | null
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  /** Derived at read time — ТЕКУЩАТА роля на автора, само ако никът му се оцветява отличително (виж core/nameHighlightRole.ts); иначе null. */
+  senderNameHighlightRole: NameHighlightRole | null
   body: string
   createdAt: string
   lastActivityAt: string
@@ -2183,6 +2186,8 @@ export type TopicReplyBroadcastSnapshot = {
   senderDisplayName: string
   senderAvatarUrl: string | null
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  /** Derived at read time — виж TopicMessageBroadcastSnapshot.senderNameHighlightRole. */
+  senderNameHighlightRole: NameHighlightRole | null
   body: string
   createdAt: string
   editedAt: string | null

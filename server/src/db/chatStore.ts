@@ -3,6 +3,7 @@ import type {
   PlayerPublicProfileSnapshot,
   ProfileId,
 } from '../core/serverTypes.js'
+import type { NameHighlightRole } from '../core/nameHighlightRole.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
 import { dbDateToUtc } from './dbDate.js'
 import { getConfiguredOfficialPikaProfileId } from './normalizeProfileIdentityText.js'
@@ -115,6 +116,9 @@ export type ChatConversationSnapshot = {
   // pika_team служителят гледа собствения си inbox. Client renderer-ите
   // (renderLobbyScreen.ts) трябва да четат ТОВА поле за badge, не kind.
   friendIsPikaTeam: boolean
+  // Per-participant, derived при четене: ТЕКУЩАТА роля на `friend`, само ако
+  // никът му се оцветява отличително (виж core/nameHighlightRole.ts); иначе null.
+  friendNameHighlightRole: NameHighlightRole | null
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
@@ -408,6 +412,13 @@ export type ChatStoreVipStatusChecker = {
 // participant, не conversation.kind).
 export type ChatStoreRoleChecker = {
   isPikaTeamProfile: (profileId: ProfileId) => boolean
+  /**
+   * Ролите на подадените профили, стеснени до ролите с отличителен цвят на
+   * ника — за friendNameHighlightRole. ЕДНА batch заявка за целия списък
+   * (listConversations я вика веднъж за всички разговори). Профил без такава
+   * роля липсва от map-а. Липсващ checker → null навсякъде.
+   */
+  getNameHighlightRoles?: (profileIds: readonly ProfileId[]) => Map<ProfileId, NameHighlightRole>
 }
 
 export type ChatStoreOptions = {
@@ -449,6 +460,15 @@ export async function createChatStore(
       return true
     }
     return roleChecker?.isPikaTeamProfile(profileId) ?? false
+  }
+
+  function getFriendNameHighlightRole(
+    profileId: ProfileId | null,
+    preloaded?: ReadonlyMap<ProfileId, NameHighlightRole>,
+  ): NameHighlightRole | null {
+    if (profileId === null) return null
+    if (preloaded !== undefined) return preloaded.get(profileId) ?? null
+    return roleChecker?.getNameHighlightRoles?.([profileId]).get(profileId) ?? null
   }
 
   const sqliteModule = await import('node:sqlite')
@@ -982,6 +1002,9 @@ export async function createChatStore(
     friendship: FriendshipRow,
     ownProfileId: ProfileId,
     onlineProfileIds?: Set<string>,
+    // Предварително batch-зареден map (listConversations) — без него се прави
+    // единичен lookup само за този разговор.
+    nameHighlightRoleByProfileId?: ReadonlyMap<ProfileId, NameHighlightRole>,
   ): ChatConversationSnapshot | null {
     // Самоизтриване, Етап 2 — разговор с профил, подаден за изтриване, е
     // невидим за другата страна (и за двамата — скритият няма сесия).
@@ -1013,6 +1036,7 @@ export async function createChatStore(
       friendshipId: friendship.friendship_id,
       friend: friendProfile,
       friendIsPikaTeam: isPikaTeamProfile(friendProfile.profileId),
+      friendNameHighlightRole: getFriendNameHighlightRole(friendProfile.profileId, nameHighlightRoleByProfileId),
       lastMessage: lastMessageRow
         ? toMessageSnapshot(lastMessageRow, ownProfileId)
         : null,
@@ -1069,8 +1093,13 @@ export async function createChatStore(
       profileId,
     ) as FriendshipRow[]
 
+    // ЕДНА batch заявка за ролите на всички събеседници, вместо lookup на разговор.
+    const nameHighlightRoleByProfileId = roleChecker?.getNameHighlightRoles?.(
+      friendships.map((friendship) => getFriendProfileId(friendship, profileId)),
+    ) ?? new Map<ProfileId, NameHighlightRole>()
+
     return friendships
-      .map((friendship) => createConversationSnapshot(friendship, profileId, onlineProfileIds))
+      .map((friendship) => createConversationSnapshot(friendship, profileId, onlineProfileIds, nameHighlightRoleByProfileId))
       .filter((conversation): conversation is ChatConversationSnapshot => {
         return conversation !== null
       })

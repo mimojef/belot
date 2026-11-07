@@ -15,6 +15,7 @@ import type { LudoGameState, LudoPieceSlot } from '../games/ludo/engine/ludoEngi
 import type { BundlePackageVisualKey } from '../../../server/src/shared/bundlePackageVisualKeys'
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { sharedServerClock } from './serverClock'
+import type { NicknameHighlightRole } from '../lobby/roleNicknameColor'
 
 export type MatchRoomSnapshot = {
   stakeAmount: number
@@ -407,6 +408,9 @@ export type ChatConversationSnapshot = {
   // от `kind` — kind е symmetric свойство на целия разговор (важи еднакво и
   // за двете страни), докато това поле е за КОНКРЕТНИЯ показан participant.
   friendIsPikaTeam: boolean
+  // Server-derived, per-participant: ТЕКУЩАТА роля на `friend`, само ако
+  // никът му се оцветява отличително (виж lobby/roleNicknameColor.ts).
+  friendNameHighlightRole?: NicknameHighlightRole | null
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
@@ -3048,6 +3052,8 @@ export type TopicMessageSnapshot = {
   /** Derived от canonical profile data при read — ТЕКУЩИЯТ avatar, не snapshot от момента на писане. */
   senderAvatarUrl: string | null
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  /** Derived при четене — ТЕКУЩАТА роля на автора, само ако никът му се оцветява отличително (виж lobby/roleNicknameColor.ts). Optional за съвместимост с по-стар сървър. */
+  senderNameHighlightRole?: NicknameHighlightRole | null
   body: string
   createdAt: string
   lastActivityAt: string
@@ -3077,6 +3083,8 @@ export type TopicReplySnapshot = {
   senderDisplayName: string
   senderAvatarUrl: string | null
   senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  /** Виж TopicMessageSnapshot.senderNameHighlightRole. */
+  senderNameHighlightRole?: NicknameHighlightRole | null
   body: string
   createdAt: string
   editedAt: string | null

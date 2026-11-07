@@ -172,6 +172,7 @@ import type {
   SvaraMatchTimingMessage,
   SvaraParticipantCommand,
 } from '../network/createGameServerClient'
+import type { NicknameHighlightRole } from './roleNicknameColor'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 import { canShowSvaraEntry, fetchSvaraAccess } from '../games/svara/svaraAccess'
 import type { SvaraPageStatus } from '../games/svara/renderSvaraPage'
@@ -1835,8 +1836,9 @@ type InternalLobbyFlowState = {
   // вместо това отваря detail/composer с recipient в този state. Само
   // първият успешен SEND (startVipDmFirstMessage) създава реален
   // friendshipId атомарно заедно със самото съобщение. Back/close просто
-  // нулира това поле — 0 backend write, 0 DB row.
-  topicsPersonalPendingRecipient: { profileId: string; displayName: string } | null
+  // нулира това поле — 0 backend write, 0 DB row. nameHighlightRole — за
+  // ролевия цвят на ника в заглавието още преди първото съобщение.
+  topicsPersonalPendingRecipient: { profileId: string; displayName: string; nameHighlightRole: NicknameHighlightRole | null } | null
 
   // ─── Create Topic popup (Custom Topic Creation) ─────────────────────────
   /** Mirror на tournamentCreatePopupOpen lifecycle-а. */
@@ -16503,6 +16505,23 @@ export function createLobbyFlowController(
     ) ?? null
   }
 
+  // Ролята за цвета на ника на получателя в нов (pending) VIP разговор —
+  // "Лично" се натиска под публикация/отговор в Теми, чийто snapshot вече
+  // носи сървърно изчислената текуща роля на автора (senderNameHighlightRole).
+  // Без допълнителна заявка; първото съобщение връща canonical разговор с
+  // friendNameHighlightRole, който поема оттам нататък.
+  function findTopicAuthorNameHighlightRole(profileId: string): NicknameHighlightRole | null {
+    for (const message of state.topicMessages ?? []) {
+      if (message.senderProfileId === profileId && message.senderNameHighlightRole) return message.senderNameHighlightRole
+    }
+    for (const replies of Object.values(state.topicRepliesByRootId)) {
+      for (const reply of replies ?? []) {
+        if (reply.senderProfileId === profileId && reply.senderNameHighlightRole) return reply.senderNameHighlightRole
+      }
+    }
+    return null
+  }
+
   async function authorizeTopicsPersonalMessageTarget(recipientProfileId: string): Promise<boolean> {
     if (!options.onProfileByIdLoad) return true
 
@@ -16576,7 +16595,11 @@ export function createLobbyFlowController(
       state.currentScreen = 'topics'
       state.topicsMode = 'personal'
       state.topicsPersonalView = 'conversation'
-      state.topicsPersonalPendingRecipient = { profileId: recipientProfileId, displayName: recipientDisplayName }
+      state.topicsPersonalPendingRecipient = {
+        profileId: recipientProfileId,
+        displayName: recipientDisplayName,
+        nameHighlightRole: findTopicAuthorNameHighlightRole(recipientProfileId),
+      }
       state.activeChatFriendshipId = null
       state.chatMessages = []
       state.chatMessagesFriendshipId = null

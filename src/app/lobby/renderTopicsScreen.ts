@@ -14,6 +14,7 @@ import {
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { VIOLET_3D_BUTTON_CLASS } from '../../ui/layout/violet3dButton'
+import { getRoleNicknameColor } from './roleNicknameColor'
 import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 
 // Read-only Етап 1 — root history + navigation. Етап 2 добави real composer
@@ -433,7 +434,12 @@ function renderTopicAuthorBlock(
   messageContext: { messageId: string; isRoot: boolean } | null = null,
   isTopicsSectionMuted = false,
   light = false,
+  senderNameHighlightRole: string | null = null,
 ): string {
+  // Ролевият цвят на ника (top_chat_admin/marketing) има приоритет пред
+  // стандартното оцветяване — само цветът, размер/тегло остават.
+  const roleNameColor = getRoleNicknameColor(senderNameHighlightRole)
+  const authorNameColor = roleNameColor ?? (light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR)
   // MUTE/UNMUTE compact icon бутон — само за модератор, само за активната
   // тема (mute е topic-specific, брифа т.4), скрит за собствения профил на
   // viewer-a (модератор не мутира себе си). Не претрупва обикновения
@@ -490,7 +496,7 @@ function renderTopicAuthorBlock(
             type="button"
             data-topic-message-author="${escapeHtml(senderProfileId)}"
             data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
-            style="border:0;background:transparent;padding:0;cursor:pointer;${light ? `font-family:inherit;font-size:15px;font-weight:800;color:${TOPIC_LIGHT_AUTHOR_COLOR};` : `font-size:16px;font-weight:900;color:${TOPIC_AUTHOR_NAME_COLOR};`}min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            style="border:0;background:transparent;padding:0;cursor:pointer;${light ? `font-family:inherit;font-size:15px;font-weight:800;color:${authorNameColor};` : `font-size:16px;font-weight:900;color:${authorNameColor};`}min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
           >${escapeHtml(senderDisplayName)}</button>
           ${muteIndicator}
           <span style="font-size:12px;color:${light ? '#667085' : 'rgba(248,250,252,0.42)'};white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
@@ -681,7 +687,7 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
   return `
     <div data-topic-reply="${escapeHtml(reply.messageId)}" data-topic-thread-seq="${reply.seq}"${light ? ' class="topic-reply-light topic-light-scope"' : ''}>
       <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 4px 8px 12px;">
-        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted, light)}
+        ${renderTopicAuthorBlock(state, reply.senderProfileId, reply.senderDisplayName, reply.senderAvatarUrl, reply.createdAt, reply.editedAt, { messageId: reply.messageId, isRoot: false }, reply.isTopicsSectionMuted, light, reply.senderNameHighlightRole)}
       </div>
       <div style="margin:-6px 0 6px 58px;">
         ${isEditing
@@ -830,7 +836,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
     <div data-topic-message="${escapeHtml(message.messageId)}" ${cardOpenAttrs}${isThread ? ` data-topic-thread-seq="${message.seq}"` : ''} class="topic-root-card${isThread ? ' topic-root-card-thread' : ' topic-root-card-clickable'}${light ? ' topic-root-card-light topic-light-scope' : ''}${threadUnreadBadge !== null ? ' topic-root-card-has-unread' : ''}">
       ${threadUnreadBadge !== null ? `<span data-topic-thread-unread-badge="${escapeHtml(message.messageId)}" aria-label="${escapeHtml(`${message.unreadCount} непрочетени в разговора`)}" style="position:absolute;top:10px;right:10px;min-width:20px;height:20px;border-radius:10px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;line-height:1;box-shadow:0 0 0 2px ${light ? '#FFFFFF' : 'rgba(0,0,0,0.72)'};z-index:1;">${escapeHtml(threadUnreadBadge)}</span>` : ''}
       <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 12px 0;">
-        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted, light)}
+        ${renderTopicAuthorBlock(state, message.senderProfileId, message.senderDisplayName, message.senderAvatarUrl, message.createdAt, message.editedAt, { messageId: message.messageId, isRoot: true }, message.isTopicsSectionMuted, light, message.senderNameHighlightRole)}
       </div>
       <div style="padding:0 12px ${light ? '8px' : '12px'} 58px;">
         ${isEditing
@@ -957,7 +963,7 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
               type="button"
               data-topic-message-author="${escapeHtml(message.senderProfileId)}"
               data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
-              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:${light ? '800' : '900'};color:${light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:${light ? '800' : '900'};color:${getRoleNicknameColor(message.senderNameHighlightRole) ?? (light ? TOPIC_LIGHT_AUTHOR_COLOR : TOPIC_AUTHOR_NAME_COLOR)};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
             >${escapeHtml(message.senderDisplayName)}</button>
             ${renderTopicAuthorMuteIndicator({
               isMuted: message.isTopicsSectionMuted,
