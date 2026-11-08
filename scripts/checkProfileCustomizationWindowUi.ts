@@ -207,7 +207,7 @@ let vite: ViteDevServer | null = null
 let browser: Browser | null = null
 const windowEl = (page: Page) => page.locator('#profile-customization-window')
 
-const RGB = { white: 'rgb(255, 255, 255)', blue: 'rgb(43, 116, 217)', red: 'rgb(232, 23, 41)', green: 'rgb(20, 137, 30)' }
+const RGB = { white: 'rgb(255, 255, 255)', blue: 'rgb(43, 116, 217)', red: 'rgb(232, 23, 41)', green: 'rgb(20, 137, 30)', pink: 'rgb(220, 64, 142)', orange: 'rgb(198, 90, 0)' }
 
 try {
   const port = await findFreePort()
@@ -250,12 +250,12 @@ try {
 
   console.log('\n[D] Десктоп (тъмна тема) — каталог и обща поръчка')
 
-  await check('[D1] Празен инвентар; 5 цвята с имена (Червен/Син/Зелен/Лилав/Златист), без маркери; празна поръчка с един неактивен "Плати"', async () => {
+  await check('[D1] Празен инвентар; 7 цвята с имена (Червен/Оранжев/Златист/Зелен/Син/Лилав/Розов), без маркери; празна поръчка с един неактивен "Плати"', async () => {
     assert(await page.locator('[data-pc-section]').count() === 4, 'секции')
     assert(await page.locator('[data-pc-inventory-empty="1"]').count() === 1, 'празен инвентар')
     const names = await page.locator('[data-pc-color-option]').allInnerTexts()
-    assert(names.map((name) => name.trim()).sort().join(',') === ['Зелен', 'Златист', 'Лилав', 'Син', 'Червен'].sort().join(','), names.join(','))
-    assert(await page.locator('[data-pc-swatch]').count() === 5 && await page.locator('[data-pc-owned]').count() === 0, '5 квадратчета без маркери')
+    assert(names.map((name) => name.trim()).join(',') === ['Червен', 'Оранжев', 'Златист', 'Зелен', 'Син', 'Лилав', 'Розов'].join(','), names.join(','))
+    assert(await page.locator('[data-pc-swatch]').count() === 7 && await page.locator('[data-pc-owned]').count() === 0, '7 квадратчета без маркери')
     assert(await previewNameColor(page) === RGB.white, 'стандартен ник')
     assert(await cartCount(page) === 0 && await payButton(page).isDisabled(), 'празна поръчка')
     await shot(page, 'desktop-initial')
@@ -529,6 +529,48 @@ try {
     assert(layout.columns > 1 && layout.below !== 'none' && layout.side === 'none' && layout.actions === 'flex', JSON.stringify(layout))
     await desktop.page.close()
   })
+
+  console.log('\n[K] Шести цвят: Розов #DC408E')
+
+  for (const [label, viewport, theme] of [
+    ['десктоп', { width: 1280, height: 900 }, 'dark'],
+    ['390 px', { width: 390, height: 844 }, 'light'],
+    ['320 px', { width: 320, height: 700 }, 'light'],
+  ] as const) {
+    await check(`[K1] ${label}: 7 цвята; Розов е последен, Оранжев е втори — и за ника, и за текста; прегледът показва и двата; цената е 1,99 € / 30 дни; без хоризонтално превъртане`, async () => {
+      const view = await openWindow(viewport, theme)
+      const page = view.page
+      for (const kind of ['nickname_color', 'message_color']) {
+        await openSection(page, kind)
+        const panel = page.locator(`[data-pc-panel="${kind}"]`)
+        assert(await panel.locator('[data-pc-swatch]').count() === 7, `${kind}: 7 цвята`)
+        assert(await panel.locator('[data-pc-swatch]').nth(1).getAttribute('data-pc-swatch') === 'orange-4', `${kind}: Оранжев е втори`)
+        const orangeSwatch = panel.locator('[data-pc-swatch="orange-4"]')
+        assert(await orangeSwatch.getAttribute('aria-label') === 'Оранжев' && await orangeSwatch.evaluate((el) => getComputedStyle(el).backgroundColor) === RGB.orange && await orangeSwatch.isVisible(), `${kind}: оранжево квадратче`)
+        await orangeSwatch.click()
+        const orangePreview = kind === 'nickname_color'
+          ? await previewNameColor(page)
+          : await page.locator('[data-pc-unified-preview="1"] [data-pc-preview-message="1"]').evaluate((el) => getComputedStyle(el).color)
+        assert(orangePreview === RGB.orange, `${kind}: оранжев преглед ${orangePreview}`)
+        await shot(page, `orange-${kind}-${label.replace(/\s/g, '')}`)
+        const last = await panel.locator('[data-pc-swatch]').last().getAttribute('data-pc-swatch')
+        assert(last === 'pink-1', `${kind}: последен ${last}`)
+        const swatch = panel.locator('[data-pc-swatch="pink-1"]')
+        assert(await swatch.getAttribute('aria-label') === 'Розов' && await swatch.evaluate((el) => getComputedStyle(el).backgroundColor) === RGB.pink, `${kind}: квадратче`)
+        assert(await swatch.isVisible(), `${kind}: видимо`)
+        await swatch.click()
+      }
+      assert(await previewNameColor(page) === RGB.pink, 'розов ник в прегледа')
+      const messageColor = await page.locator('[data-pc-unified-preview="1"] [data-pc-preview-message="1"]').evaluate((el) => getComputedStyle(el).color)
+      assert(messageColor === RGB.pink, `розов текст в прегледа ${messageColor}`)
+      assert(await cartCount(page) === 2 && /3,98\s€/.test(await cartTotal(page)), `поръчка ${await cartTotal(page)}`)
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+      assert(overflow <= 0, `хоризонтално превъртане ${overflow}px`)
+      await shot(page, `pink-${label.replace(/\s/g, '')}`)
+      assert(view.errors.length === 0, view.errors.join(' | '))
+      await page.close()
+    })
+  }
 } finally {
   await browser?.close()
   await vite?.close()

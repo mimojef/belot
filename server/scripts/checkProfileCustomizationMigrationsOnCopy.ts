@@ -1,7 +1,7 @@
 /**
  * checkProfileCustomizationMigrationsOnCopy.ts
  *
- * Прилага миграциите 20261107_001/_002 и 20261108_001/_002/_003 (обща поръчка, инвентар, безплатни предоставяния) върху КОПИЕ на съществуваща база
+ * Прилага миграциите 20261107_001/_002 и 20261108_001/_002/_003/_004/_005 (обща поръчка, инвентар, безплатни предоставяния, Розов и Оранжев цвят) върху КОПИЕ на съществуваща база
  * (по подразбиране локалната dev база) — оригиналът само се копира и не се
  * отваря за запис. Проверява целост, FK, запазени данни, индекси, тригери,
  * seed, режим по подразбиране и идемпотентност.
@@ -28,7 +28,7 @@ async function check(label: string, fn: () => Promise<void> | void): Promise<voi
 }
 function assert(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(message) }
 
-const NEW = ['20261107_001_create_profile_customization.sql', '20261107_002_allow_profile_customization_payment_review_issues.sql', '20261108_001_create_profile_customization_orders.sql', '20261108_002_create_profile_customization_inventory.sql', '20261108_003_create_profile_customization_grants.sql']
+const NEW = ['20261107_001_create_profile_customization.sql', '20261107_002_allow_profile_customization_payment_review_issues.sql', '20261108_001_create_profile_customization_orders.sql', '20261108_002_create_profile_customization_inventory.sql', '20261108_003_create_profile_customization_grants.sql', '20261108_004_add_profile_customization_pink_color.sql', '20261108_005_add_profile_customization_orange_color.sql']
 
 console.log('\ncheckProfileCustomizationMigrationsOnCopy')
 const root = await mkdtemp(join(tmpdir(), 'belot-pc-migrations-copy-'))
@@ -76,7 +76,7 @@ try {
     assert(after.prepare(`SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payment_review_issues_status';`).get() !== undefined, 'индекс')
   })
 
-  await check('[E4] Новите таблици, индекси и тригери; seed (4 вида изключени, 21 цвята, 655 емоджита); режим "Само админ"', () => {
+  await check('[E4] Новите таблици, индекси и тригери; seed (4 вида изключени, 23 цвята, 7 в продажба, 655 емоджита); режим "Само админ"', () => {
     for (const t of ['profile_customization_kind_settings', 'profile_customization_colors', 'profile_customization_emojis', 'profile_customization_purchases', 'profile_customization_orders', 'profile_customization_active', 'profile_customization_mode_changes', 'profile_customization_owned_items', 'profile_customization_equipped', 'profile_customization_grants']) {
       assert(after.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;`).get(t) !== undefined, t)
     }
@@ -87,8 +87,13 @@ try {
     assert(after.prepare("SELECT 1 FROM pragma_table_info('profile_customization_purchases') WHERE name = 'order_id';").get() !== undefined, 'order_id колона')
     assert(indexes >= 16, `индекси ${indexes}`)
     assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_kind_settings WHERE sales_enabled = 0;').get() as { c: number }).c === 4, 'видове')
-    assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c === 21, 'цветове')
-    assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors WHERE is_active = 1;').get() as { c: number }).c === 5, '5 цвята в продажба')
+    assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c === 23, 'цветове')
+    const forSale = (after.prepare('SELECT hex FROM profile_customization_colors WHERE is_active = 1 ORDER BY hex;').all() as Array<{ hex: string }>).map((row) => row.hex).join(' ')
+    assert(forSale === '#14891E #2B74D9 #976F08 #9B4BEA #C65A00 #DC408E #E81729', `7 цвята в продажба: ${forSale}`)
+    const orange = after.prepare("SELECT color_id, label, group_key FROM profile_customization_colors WHERE hex = '#C65A00';").get() as { color_id: string; label: string; group_key: string } | undefined
+    assert(orange?.color_id === 'orange-4' && orange.label === 'Оранжев' && orange.group_key === 'orange', JSON.stringify(orange))
+    const pink = after.prepare("SELECT color_id, label, group_key FROM profile_customization_colors WHERE hex = '#DC408E';").get() as { color_id: string; label: string; group_key: string } | undefined
+    assert(pink?.color_id === 'pink-1' && pink.label === 'Розов' && pink.group_key === 'purple', JSON.stringify(pink))
     assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_emojis;').get() as { c: number }).c === 655, 'емоджита')
     assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_mode_changes;').get() as { c: number }).c === 0, 'без запис за режим -> "Само админ"')
   })
@@ -97,8 +102,8 @@ try {
   await check('[E5] Повторно стартиране: нищо не се прилага повторно, seed-ът не се дублира', async () => {
     await ensureServerDatabaseReady({ serverRootOverride: root })
     const again = new DatabaseSync(target)
-    assert((again.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c === 21, 'цветове')
-    assert((again.prepare(`SELECT COUNT(*) AS c FROM server_migrations WHERE filename LIKE '20261107_%' OR filename LIKE '20261108_%';`).get() as { c: number }).c === 5, 'записи')
+    assert((again.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c === 23, 'цветове')
+    assert((again.prepare(`SELECT COUNT(*) AS c FROM server_migrations WHERE filename LIKE '20261107_%' OR filename LIKE '20261108_%';`).get() as { c: number }).c === 7, 'записи')
     again.close()
   })
 

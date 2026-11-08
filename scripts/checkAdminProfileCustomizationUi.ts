@@ -287,10 +287,14 @@ try {
 
   console.log('\n[C] Цветове')
 
-  await check('[C1] 7 групи, 21 цвята, контраст на черно/бяло, преглед на тъмен и светъл фон', async () => {
+  await check('[C1] 7 групи, 23 цвята (21 начални + Розов + Оранжев), контраст на черно/бяло, преглед на тъмен и светъл фон', async () => {
     await page.locator('[data-apc-tab="colors"]').click()
     await page.locator('[data-apc-color="red-1"]').waitFor()
-    assert(await page.locator('[data-apc-color]').count() === 21, 'брой')
+    assert(await page.locator('[data-apc-color]').count() === 23, 'брой')
+    const orange = await page.locator('[data-apc-color="orange-4"]').innerText()
+    assert(orange.includes('на черно 4.86:1') && orange.includes('на бяло 4.32:1') && !orange.includes('нисък контраст'), orange)
+    const pink = await page.locator('[data-apc-color="pink-1"]').innerText()
+    assert(pink.includes('на черно 5.17:1') && pink.includes('на бяло 4.06:1') && !pink.includes('нисък контраст'), pink)
     const text = await page.locator('[data-apc-color="gold-2"]').innerText()
     assert(text.includes('на черно 4.57:1') && text.includes('на бяло 4.59:1'), text)
     assert(!text.includes('нисък контраст'), 'без предупреждение')
@@ -306,7 +310,7 @@ try {
     await page.locator('[data-apc-new-color-label="1"]').fill('<b>Петрол</b>')
     await page.locator('[data-apc-add-color="1"]').click()
     await page.waitForFunction(() => document.querySelector('[data-apc-notice="1"]')?.textContent?.includes('добавен') === true)
-    assert(await page.locator('[data-apc-color]').count() === 22, 'нов цвят')
+    assert(await page.locator('[data-apc-color]').count() === 24, 'нов цвят')
     assert(await panel(page).locator('b:text("Петрол")').count() === 0, 'HTML не е изпълнен')
   })
 

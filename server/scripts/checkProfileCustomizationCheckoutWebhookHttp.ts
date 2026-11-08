@@ -318,12 +318,12 @@ try {
     assert(me.body?.session?.profileCustomizationAvailable === true, me.text.slice(0, 300))
   })
 
-  await check('[U2] Каталог: 4 вида с таблица с цени, 21 цвята, 655 емоджита, няма активни екстри', async () => {
+  await check('[U2] Каталог: 4 вида с таблица с цени, 7 цвята в продажба (вкл. Розов и Оранжев), 655 емоджита, няма активни екстри', async () => {
     const result = await request(port, 'GET', API, undefined, buyer.cookie)
     assert(result.status === 200 && result.body.ok === true, `${result.status} ${result.text.slice(0, 200)}`)
     assert(result.body.kinds.length === 4 && result.body.kinds.every((kind: any) => kind.salesEnabled === false), 'видове (продажбата е изключена)')
     assert(result.body.kinds[0].priceTable.map((row: any) => row.priceCents).join(',') === '199,398,597,796,995,1194', 'цени')
-    assert(result.body.colors.length === 5 && result.body.emojis.length === 655, `${result.body.colors.length}/${result.body.emojis.length}`)
+    assert(result.body.colors.length === 7 && result.body.colors.some((color: any) => color.colorId === 'pink-1' && color.hex === '#DC408E' && color.label === 'Розов') && result.body.colors.some((color: any) => color.colorId === 'orange-4' && color.hex === '#C65A00' && color.label === 'Оранжев') && result.body.emojis.length === 655, `${result.body.colors.length}/${result.body.emojis.length}`)
     assert(Object.values(result.body.active).every((value) => value === null), 'активни')
     assert(result.body.returnOrder === null, 'returnOrder')
   })
@@ -621,10 +621,10 @@ try {
     assert(withDb(iso.databaseFile, (db) => (db.prepare('SELECT COUNT(*) AS c FROM profile_customization_grants;').get() as { c: number }).c) === 0, 'нищо не е предоставено')
   })
 
-  await check('[G2] Каталогът на получателя: истинският ник, ролята, инвентарът и 5 цвята', async () => {
+  await check('[G2] Каталогът на получателя: истинският ник, ролята, инвентарът и 7 цвята', async () => {
     const target = await request(port, 'GET', `/api/admin/profile-customization/targets/${grantTargetId}`, undefined, admin.cookie)
     assert(target.status === 200 && target.body.target.profileId === grantTargetId && typeof target.body.target.displayName === 'string' && target.body.target.displayName.startsWith('Pcwh') && target.body.target.isSelf === false && target.body.target.eligible === true, target.text.slice(0, 300))
-    assert(target.body.colors.length === 5 && Array.isArray(target.body.owned) && target.body.owned.length === 0, 'каталог/инвентар')
+    assert(target.body.colors.length === 7 && Array.isArray(target.body.owned) && target.body.owned.length === 0, 'каталог/инвентар')
     const missing = await request(port, 'GET', '/api/admin/profile-customization/targets/no-such-profile', undefined, admin.cookie)
     assert(missing.status === 404, `липсващ ${missing.status}`)
   })

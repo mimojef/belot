@@ -18,6 +18,7 @@ import { ensureServerDatabaseReady } from '../src/db/ensureServerDatabaseReady.j
 import {
   PROFILE_CUSTOMIZATION_COLOR_GROUPS,
   PROFILE_CUSTOMIZATION_EMOJI_CATEGORIES,
+  PROFILE_CUSTOMIZATION_APPROVED_NEAR_RESERVED_COLORS,
   PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR,
   buildProfileCustomizationPriceTable,
   computeColorDeltaE,
@@ -70,6 +71,10 @@ function assertThrows(fn: () => unknown, fragment: string, message: string): voi
 
 const DAY = 86_400_000
 const T0 = new Date('2027-01-10T12:00:00.000Z')
+/** Шестият цвят (20261108_004), изрично одобрен под прага за близост до служебния. */
+const PINK_HEX = '#DC408E'
+/** Седмият цвят (20261108_005) — над прага за близост, без изключение. */
+const ORANGE_HEX = '#C65A00'
 const at = (days: number): Date => new Date(T0.getTime() + days * DAY)
 const iso = (days: number): string => at(days).toISOString()
 
@@ -244,9 +249,11 @@ try {
     assertEqual((db.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length, 0, 'foreign_key_check')
   })
 
-  await check('[M2] Одобрените 21 цвята = 7 групи × 3; контраст >= 4.5:1 на черно и бяло; далеч от служебния #F72585', () => {
-    const colors = store.listColors({ includeInactive: true })
-    assertEqual(colors.length, 21, 'брой цветове')
+  await check('[M2] Началните 21 цвята = 7 групи × 3; контраст >= 4.5:1 на черно и бяло; далеч от служебния #F72585 (+ одобрените Розов и Оранжев, виж [K1]/[K5])', () => {
+    const allColors = store.listColors({ includeInactive: true })
+    assertEqual(allColors.length, 23, 'брой цветове (21 начални + Розов + Оранжев)')
+    const colors = allColors.filter((color) => color.hex !== PINK_HEX && color.hex !== ORANGE_HEX)
+    assertEqual(colors.length, 21, 'начални цветове')
     for (const group of PROFILE_CUSTOMIZATION_COLOR_GROUPS) {
       assertEqual(colors.filter((color) => color.groupKey === group).length, 3, `група ${group}`)
     }
@@ -297,7 +304,7 @@ try {
 
   await check('[M5] Повторно стартиране не дублира seed-а', async () => {
     await ensureServerDatabaseReady({ serverRootOverride: mainRoot })
-    assertEqual((db.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c, 21, 'цветове')
+    assertEqual((db.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c, 23, 'цветове')
     assertEqual((db.prepare('SELECT COUNT(*) AS c FROM profile_customization_kind_settings;').get() as { c: number }).c, 4, 'видове')
   })
 
@@ -455,15 +462,15 @@ try {
 
   const paletteBuyer = seedProfile('PaletteBuyer')
 
-  await check('[I0] Само 5 цвята в продажба (Червен/Син/Зелен/Лилав/Златист), еднакви за ника и текста; останалите 16 са запазени, но скрити; служебният е отказан', () => {
+  await check('[I0] Само 7 цвята в продажба (Червен/Оранжев/Златист/Зелен/Син/Лилав/Розов), еднакви за ника и текста; останалите 16 са запазени, но скрити; служебният е отказан', () => {
     const publicColors = store.listColors()
-    assertEqual(publicColors.map((color) => color.hex).sort().join(' '), ['#14891E', '#2B74D9', '#976F08', '#9B4BEA', '#E81729'].join(' '), 'публичните цветове')
+    assertEqual(publicColors.map((color) => color.hex).join(' '), '#E81729 #C65A00 #976F08 #14891E #2B74D9 #9B4BEA #DC408E', 'публичните цветове (в този ред)')
     const labels = Object.fromEntries(publicColors.map((color) => [color.hex, color.label]))
-    assert(labels['#E81729'] === 'Червен' && labels['#2B74D9'] === 'Син' && labels['#14891E'] === 'Зелен' && labels['#9B4BEA'] === 'Лилав' && labels['#976F08'] === 'Златист', JSON.stringify(labels))
-    assertEqual(store.listColors({ includeInactive: true }).length, 21, 'каталогът пази всичките 21 (история/админ)')
+    assert(labels['#E81729'] === 'Червен' && labels['#2B74D9'] === 'Син' && labels['#14891E'] === 'Зелен' && labels['#9B4BEA'] === 'Лилав' && labels['#976F08'] === 'Златист' && labels['#DC408E'] === 'Розов' && labels['#C65A00'] === 'Оранжев', JSON.stringify(labels))
+    assertEqual(store.listColors({ includeInactive: true }).length, 23, 'каталогът пази всичките 21 (история/админ) + Розов + Оранжев')
     for (const kind of ['nickname_color', 'message_color']) store.updateKindSettings(kind, { salesEnabled: true })
     for (const kind of ['nickname_color', 'message_color']) {
-      for (const itemId of ['red-1', 'blue-1', 'green-1', 'purple-1', 'gold-1']) {
+      for (const itemId of ['red-1', 'blue-1', 'green-1', 'purple-1', 'gold-1', 'pink-1', 'orange-4']) {
         assert(store.previewPurchase({ profileId: paletteBuyer, kind, itemId, days: 30, now: T0 }).ok, `${kind} ${itemId}`)
       }
       const hidden = store.previewPurchase({ profileId: paletteBuyer, kind, itemId: 'teal-1', days: 30, now: T0 })
@@ -1495,6 +1502,109 @@ try {
     assert(detail?.customization?.totalCents === 796 && detail.customization.paidAt === iso(400) && detail.customization.refundedAmountCents === 50 && detail.customization.refundReviewStatus === 'pending', JSON.stringify(detail?.customization))
     const pending = store.createPendingOrder({ profileId: seedProfile('Payer4b'), items: [{ kind: 'nickname_color', itemId: 'red-1', days: 30 }], now: at(400) })
     assert(pending.ok && store.getAdminPaymentDetail(pending.order.orderId) === null, 'неплатена поръчка не е плащане')
+  })
+
+  // ─────────────────────────────────────────────────────────────────────
+  console.log('\n[K] Шести цвят: Розов #DC408E (20261108_004)')
+
+  for (const kind of ['nickname_color', 'message_color']) store.updateKindSettings(kind, { salesEnabled: true, basePrice30DaysCents: 199 })
+
+  await check('[K1] Каталог: pink-1 / Розов / група purple / в продажба; контраст >= 3:1; изключението е САМО за #DC408E — #F72585 и близките нюанси остават забранени', () => {
+    const pink = store.listColors().find((color) => color.colorId === 'pink-1')
+    assert(pink?.hex === PINK_HEX && pink.label === 'Розов' && pink.groupKey === 'purple' && pink.isActive, JSON.stringify(pink))
+    assert(pink.contrast.meetsMinimum && pink.contrast.onBlack >= 5 && pink.contrast.onWhite >= 4, JSON.stringify(pink.contrast))
+    const deltaE = computeColorDeltaE(PINK_HEX, PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR)
+    assert(deltaE > 15 && deltaE < 20, `ΔE ${deltaE}`)
+    assert(!isReservedOrNearReservedStaffColor(PINK_HEX) && !isReservedOrNearReservedStaffColor('#dc408e'), 'Розов е разрешен')
+    for (const hex of ['#F72585', '#f72585', '#DC408F', '#DD408E', '#E0207A', '#FF1493']) assert(isReservedOrNearReservedStaffColor(hex), `${hex} остава забранен`)
+    for (const hex of ['#DC408F', '#E0207A']) {
+      const added = store.addColor({ hex, label: 'Близък', groupKey: 'red' })
+      assert(!added.ok && added.code === 'reserved_color', `админ не може да добави ${hex}`)
+    }
+  })
+
+  await check('[K2] Ник и текст: всички срокове 30..180 дни на същите цени (1.99 € × дни/30)', () => {
+    const buyer = seedProfile('PinkPreview')
+    for (const kind of ['nickname_color', 'message_color']) {
+      for (const days of [30, 60, 90, 120, 150, 180]) {
+        const preview = store.previewPurchase({ profileId: buyer, kind, itemId: 'pink-1', days, now: T0 })
+        assert(preview.ok && preview.preview.item.value === PINK_HEX && preview.preview.priceCents === 199 * (days / 30) && preview.preview.effect === 'new', `${kind} ${days}: ${JSON.stringify(preview)}`)
+      }
+    }
+  })
+
+  await check('[K3] Покупка (ник + текст в една поръчка) -> в инвентара и се използва; показва се; "Удължи" добавя дни; "Премахни"/"Използвай"', () => {
+    const buyer = seedProfile('PinkBuyer')
+    buyAndPayOrder(buyer, [['nickname_color', 'pink-1', 30], ['message_color', 'pink-1', 60]], at(500))
+    assert(activeRow(buyer, 'nickname_color')?.item_id === 'pink-1' && activeRow(buyer, 'message_color')?.item_id === 'pink-1', 'използва се')
+    const appearance = store.getAppearancesForProfiles([buyer], at(501)).get(buyer)
+    assert(appearance?.nicknameColor === PINK_HEX && appearance.messageColor === PINK_HEX, JSON.stringify(appearance))
+    const untilBefore = ownedRow(buyer, 'nickname_color', 'pink-1')!.active_until
+    const extendPreview = store.previewPurchase({ profileId: buyer, kind: 'nickname_color', itemId: 'pink-1', days: 90, now: at(501) })
+    assert(extendPreview.ok && extendPreview.preview.effect === 'extend', 'удължаване')
+    buyAndPay(buyer, 'nickname_color', 'pink-1', 90, at(501))
+    assertEqual(ownedRow(buyer, 'nickname_color', 'pink-1')!.active_until, new Date(Date.parse(untilBefore) + 90 * DAY).toISOString(), '+90 дни')
+    const removed = store.unequipItem({ profileId: buyer, kind: 'nickname_color', now: at(502) })
+    assert(removed.ok && removed.removed && store.getAppearancesForProfiles([buyer], at(502)).get(buyer)?.nicknameColor == null, 'премахнат')
+    assert(removed.ok && removed.owned.some((item) => item.itemId === 'pink-1' && item.kind === 'nickname_color' && !item.equipped), 'остава в инвентара')
+    const equipped = store.equipItem({ profileId: buyer, kind: 'nickname_color', itemId: 'pink-1', now: at(503) })
+    assert(equipped.ok && store.getAppearancesForProfiles([buyer], at(503)).get(buyer)?.nicknameColor === PINK_HEX, 'отново използван')
+  })
+
+  await check('[K4] Безплатно admin предоставяне на Розов (текст, 180 дни) -> в инвентара, използва се, показва се; без поръчка', () => {
+    const target = seedProfile('PinkGrant')
+    const result = grant(target, [['message_color', 'pink-1', 180]], at(600))
+    assert(result.ok && result.grants.length === 1 && result.grants[0]!.itemValue === PINK_HEX, JSON.stringify(result))
+    assertEqual(store.getAppearancesForProfiles([target], at(601)).get(target)?.messageColor ?? null, PINK_HEX, 'показва се')
+    assertEqual((db.prepare('SELECT COUNT(*) AS c FROM profile_customization_orders WHERE profile_id = ?;').get(target) as { c: number }).c, 0, 'без поръчка')
+  })
+
+  // ─────────────────────────────────────────────────────────────────────
+  console.log('\n[K] Седми цвят: Оранжев #C65A00 (20261108_005)')
+
+  await check('[K5] Каталог: orange-4 / Оранжев / група orange / в продажба; контраст >= 4.3:1 на черно и бяло; далеч от служебния (без изключение)', () => {
+    const orange = store.listColors().find((color) => color.colorId === 'orange-4')
+    assert(orange?.hex === ORANGE_HEX && orange.label === 'Оранжев' && orange.groupKey === 'orange' && orange.isActive, JSON.stringify(orange))
+    assert(orange.contrast.meetsMinimum && orange.contrast.onBlack >= 4.8 && orange.contrast.onWhite >= 4.3, JSON.stringify(orange.contrast))
+    assert(computeColorDeltaE(ORANGE_HEX, PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR) > 60 && !isReservedOrNearReservedStaffColor(ORANGE_HEX), 'далеч от служебния')
+    assert(!PROFILE_CUSTOMIZATION_APPROVED_NEAR_RESERVED_COLORS.includes(ORANGE_HEX) && PROFILE_CUSTOMIZATION_APPROVED_NEAR_RESERVED_COLORS.join(',') === PINK_HEX, 'изключението остава само за Розов')
+  })
+
+  await check('[K6] Оранжев: ник и текст за всички срокове 30..180 дни на същите цени', () => {
+    const buyer = seedProfile('OrangePreview')
+    for (const kind of ['nickname_color', 'message_color']) {
+      for (const days of [30, 60, 90, 120, 150, 180]) {
+        const preview = store.previewPurchase({ profileId: buyer, kind, itemId: 'orange-4', days, now: T0 })
+        assert(preview.ok && preview.preview.item.value === ORANGE_HEX && preview.preview.priceCents === 199 * (days / 30) && preview.preview.effect === 'new', `${kind} ${days}: ${JSON.stringify(preview)}`)
+      }
+    }
+  })
+
+  await check('[K7] Оранжев: покупка (ник + текст) -> използва се и се показва; "Удължи" +60 дни; "Премахни"/"Използвай"; Розов и Оранжев съжителстват в инвентара', () => {
+    const buyer = seedProfile('OrangeBuyer')
+    buyAndPayOrder(buyer, [['nickname_color', 'pink-1', 30]], at(700))
+    buyAndPayOrder(buyer, [['nickname_color', 'orange-4', 30], ['message_color', 'orange-4', 90]], at(701))
+    assert(activeRow(buyer, 'nickname_color')?.item_id === 'orange-4' && activeRow(buyer, 'message_color')?.item_id === 'orange-4', 'използва се')
+    const appearance = store.getAppearancesForProfiles([buyer], at(702)).get(buyer)
+    assert(appearance?.nicknameColor === ORANGE_HEX && appearance.messageColor === ORANGE_HEX, JSON.stringify(appearance))
+    assert(ownedRow(buyer, 'nickname_color', 'pink-1') !== undefined, 'Розов остава притежаван')
+    const untilBefore = ownedRow(buyer, 'nickname_color', 'orange-4')!.active_until
+    buyAndPay(buyer, 'nickname_color', 'orange-4', 60, at(702))
+    assertEqual(ownedRow(buyer, 'nickname_color', 'orange-4')!.active_until, new Date(Date.parse(untilBefore) + 60 * DAY).toISOString(), '+60 дни')
+    const removed = store.unequipItem({ profileId: buyer, kind: 'message_color', now: at(703) })
+    assert(removed.ok && removed.removed && store.getAppearancesForProfiles([buyer], at(703)).get(buyer)?.messageColor == null, 'премахнат')
+    const equipped = store.equipItem({ profileId: buyer, kind: 'message_color', itemId: 'orange-4', now: at(704) })
+    assert(equipped.ok && store.getAppearancesForProfiles([buyer], at(704)).get(buyer)?.messageColor === ORANGE_HEX, 'отново използван')
+    const pinkAgain = store.equipItem({ profileId: buyer, kind: 'nickname_color', itemId: 'pink-1', now: at(704) })
+    assert(pinkAgain.ok && store.getAppearancesForProfiles([buyer], at(704)).get(buyer)?.nicknameColor === PINK_HEX, 'смяна към Розов без загуба на дни')
+  })
+
+  await check('[K8] Безплатно admin предоставяне на Оранжев (ник, 30 дни) -> използва се, показва се; без поръчка', () => {
+    const target = seedProfile('OrangeGrant')
+    const result = grant(target, [['nickname_color', 'orange-4', 30]], at(800))
+    assert(result.ok && result.grants.length === 1 && result.grants[0]!.itemValue === ORANGE_HEX, JSON.stringify(result))
+    assertEqual(store.getAppearancesForProfiles([target], at(801)).get(target)?.nicknameColor ?? null, ORANGE_HEX, 'показва се')
+    assertEqual((db.prepare('SELECT COUNT(*) AS c FROM profile_customization_orders WHERE profile_id = ?;').get(target) as { c: number }).c, 0, 'без поръчка')
   })
 } finally {
   store.close()

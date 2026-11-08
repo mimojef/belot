@@ -127,6 +127,14 @@ export const PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR = '#F72585'
 export const PROFILE_CUSTOMIZATION_RESERVED_COLOR_MIN_DELTA_E = 20
 
 /**
+ * Изрично одобрени от собственика цветове под прага на ΔE (2026-11-08):
+ * Розов #DC408E (ΔE ≈ 16 от служебния, контраст 5.17 на черно / 4.06 на
+ * бяло). Изключението важи само за точно тези стойности — прагът остава за
+ * всички останали, а самият служебен цвят никога не е изключение.
+ */
+export const PROFILE_CUSTOMIZATION_APPROVED_NEAR_RESERVED_COLORS: readonly string[] = ['#DC408E']
+
+/**
  * Минимален контраст и на черен, и на бял фон (WCAG 2.x, 3:1 = AA за
  * удебелен/едър текст). Цвят под прага се приема от админа, но се маркира
  * с предупреждение в админ панела.
@@ -203,8 +211,9 @@ export function computeColorDeltaE(hexA: string, hexB: string): number {
 export function isReservedOrNearReservedStaffColor(hex: string): boolean {
   const normalized = normalizeProfileCustomizationHex(hex)
   if (normalized === null) return false
-  return normalized === PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR
-    || computeColorDeltaE(normalized, PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR) < PROFILE_CUSTOMIZATION_RESERVED_COLOR_MIN_DELTA_E
+  if (normalized === PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR) return true
+  if (PROFILE_CUSTOMIZATION_APPROVED_NEAR_RESERVED_COLORS.includes(normalized)) return false
+  return computeColorDeltaE(normalized, PROFILE_CUSTOMIZATION_RESERVED_STAFF_COLOR) < PROFILE_CUSTOMIZATION_RESERVED_COLOR_MIN_DELTA_E
 }
 
 export const PROFILE_CUSTOMIZATION_COLOR_LABEL_MAX_LENGTH = 40

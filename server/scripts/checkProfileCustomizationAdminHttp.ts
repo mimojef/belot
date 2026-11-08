@@ -5,7 +5,7 @@
  * admin HTTP API /api/admin/profile-customization.
  *
  *  A. Флаг ВКЛЮЧЕН: гост/играч/subadmin -> 403; admin -> 200 с началния
- *     каталог (4 вида, 21 цвята, емоджитата).
+ *     каталог (4 вида, 23 цвята = 21 начални + Розов + Оранжев, емоджитата).
  *  B. Цени: текст "2.49" -> 249 цента, таблицата 30..180 дни е точна;
  *     невалидни цени/стойности -> 400 без промяна.
  *  C. Каталог: служебният #F72585 и близки нюанси -> 400; дубликат -> 409;
@@ -206,11 +206,11 @@ try {
     assert(salesEnabled === 0, 'нищо не е променено')
   })
 
-  await check('[A2] Admin -> 200: 4 вида (изключени), 21 цвята с контраст, емоджита, категории, запазен цвят', async () => {
+  await check('[A2] Admin -> 200: 4 вида (изключени), 23 цвята с контраст (21 начални + Розов + Оранжев), емоджита, категории, запазен цвят', async () => {
     const result = await request(port, 'GET', BASE, undefined, admin)
     assert(result.status === 200 && result.body?.ok === true, `${result.status} ${result.text.slice(0, 200)}`)
     assert(result.body.kinds.length === 4 && result.body.kinds.every((kind: any) => kind.salesEnabled === false && kind.basePrice30DaysCents === 199), 'видове')
-    assert(result.body.colors.length === 21 && result.body.colors.every((color: any) => typeof color.contrast.onBlack === 'number'), 'цветове')
+    assert(result.body.colors.length === 23 && result.body.colors.some((color: any) => color.colorId === 'pink-1' && color.hex === '#DC408E' && color.isActive === true) && result.body.colors.some((color: any) => color.colorId === 'orange-4' && color.hex === '#C65A00' && color.isActive === true) && result.body.colors.every((color: any) => typeof color.contrast.onBlack === 'number'), 'цветове')
     assert(result.body.emojis.length >= 500 && result.body.emojis.length <= 700, `емоджита ${result.body.emojis.length}`)
     assert(result.body.emojiCategories.length === 15 && result.body.colorGroups.length === 7, 'категории/групи')
     assert(result.body.reservedStaffColor === '#F72585', 'запазен цвят')
@@ -309,7 +309,7 @@ try {
     const email = withDb(iso.databaseFile, (db) => (db.prepare(`SELECT email FROM accounts WHERE role = 'admin' AND email LIKE 'pcust-admin-%' LIMIT 1;`).get() as { email: string }).email)
     const adminOff = await login(offPort, email, 'admin-off')
     const get = await request(offPort, 'GET', BASE, undefined, adminOff)
-    assert(get.status === 200 && get.body.access.mode === 'admin_only' && get.body.access.emergencyStop === true && get.body.stripeMode === 'not_configured' && get.body.colors.length === 22, `GET ${get.status} ${get.text.slice(0, 200)}`)
+    assert(get.status === 200 && get.body.access.mode === 'admin_only' && get.body.access.emergencyStop === true && get.body.stripeMode === 'not_configured' && get.body.colors.length === 24, `GET ${get.status} ${get.text.slice(0, 200)}`)
     const patch = await request(offPort, 'PATCH', `${BASE}/kinds/message_color`, { basePrice30Days: '3.00', salesEnabled: true }, adminOff)
     assert(patch.status === 200 && patch.body.settings.basePrice30DaysCents === 300 && patch.body.settings.salesEnabled === true, `PATCH ${patch.status} ${patch.text}`)
     const guest = await request(offPort, 'GET', BASE, undefined, undefined)

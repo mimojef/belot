@@ -112,6 +112,12 @@ const CASES = [
   msg('expired', { senderCustomization: disp({ nicknameColor: '#4A67F7', emojiBefore: '🦋' }, PAST) }),
   msg('restricted', { senderCustomization: disp({ emojiBefore: '🦋' }, FUTURE, false) }),
   msg('unsafe', { senderCustomization: { ...disp({ nicknameColor: 'red;background:url(x)' }), emojiBefore: '<img src=x onerror="window.__xss=1">', emojiBeforeUntil: FUTURE } }),
+  // Шестият цвят Розов #DC408E (20261108_004): ник + текст; и при служебна роля (официалният #F72585 печели само за ника).
+  msg('rose', { senderCustomization: disp({ nicknameColor: '#DC408E', messageColor: '#DC408E' }) }),
+  msg('staffRose', { senderNameHighlightRole: 'pika_team', senderCustomization: disp({ nicknameColor: '#DC408E', messageColor: '#DC408E' }) }),
+  // Седмият цвят Оранжев #C65A00 (20261108_005); и при marketing (официалният #F72585 печели само за ника).
+  msg('amber', { senderCustomization: disp({ nicknameColor: '#C65A00', messageColor: '#C65A00' }) }),
+  msg('staffAmber', { senderNameHighlightRole: 'marketing', senderCustomization: disp({ nicknameColor: '#C65A00', messageColor: '#C65A00' }) }),
 ]
 
 const RGB = {
@@ -125,6 +131,8 @@ const RGB = {
   bodyDark: 'rgb(226, 232, 240)',
   bodyLight: 'rgb(17, 24, 39)',
   purple: 'rgb(155, 75, 234)',
+  rose: 'rgb(220, 64, 142)',
+  amber: 'rgb(198, 90, 0)',
 }
 
 console.log('\ncheckProfileCustomizationDisplayUi')
@@ -228,6 +236,24 @@ try {
       assert(await page.locator('[data-case="off"] b').count() === 0, 'името не е HTML')
     })
 
+    await check(`[T9 ${label}] Розов #DC408E: ник и текст в Лафче, публикации и отговори; при pika_team никът е официалният #F72585, текстът остава розов`, async () => {
+      for (const kind of ['lafche', 'root', 'reply']) {
+        assert(await colorOf(nameButton(page, 'rose', kind)) === RGB.rose, `${kind} ник`)
+        assert(await bodyColor(page, 'rose', kind) === RGB.rose, `${kind} текст`)
+        assert(await colorOf(nameButton(page, 'staffRose', kind)) === RGB.pink, `${kind} служебен ник`)
+        assert(await bodyColor(page, 'staffRose', kind) === RGB.rose, `${kind} служебен текст`)
+      }
+    })
+
+    await check(`[T10 ${label}] Оранжев #C65A00: ник и текст в Лафче, публикации и отговори; при marketing никът е официалният #F72585, текстът остава оранжев`, async () => {
+      for (const kind of ['lafche', 'root', 'reply']) {
+        assert(await colorOf(nameButton(page, 'amber', kind)) === RGB.amber, `${kind} ник`)
+        assert(await bodyColor(page, 'amber', kind) === RGB.amber, `${kind} текст`)
+        assert(await colorOf(nameButton(page, 'staffAmber', kind)) === RGB.pink, `${kind} служебен ник`)
+        assert(await bodyColor(page, 'staffAmber', kind) === RGB.amber, `${kind} служебен текст`)
+      }
+    })
+
     await shot(page, mobile ? 'mobile-topics' : 'desktop-topics')
     assert(errors.length === 0, errors.join(' | '))
   }
@@ -296,6 +322,39 @@ try {
     assert(await textColor(page, 'mobile-chat', 'мое съобщение') === RGB.purple, 'собствено')
     await shot(page, 'mobile-chat')
     assert(errors.length === 0, errors.join(' | '))
+  })
+
+  const roseConversation = (hex = '#DC408E') => ({
+    ...conversation(true),
+    friendCustomization: disp({ nicknameColor: hex, messageColor: hex, emojiBefore: '🦋', emojiAfter: '🦋' }),
+    viewerCustomization: disp({ messageColor: hex }),
+  })
+
+  await check('[C2b] Розов #DC408E в личния чат: десктоп и мобилен — ник в заглавието и текстът на събеседника; собственият текст на мобилен', async () => {
+    for (const mobile of [false, true]) {
+      const scope = mobile ? 'mobile-chat' : 'desktop-chat'
+      const { page, errors } = await openPage(mobile)
+      await page.evaluate(({ c, m }) => (window as any).__displayHarness.renderPersonalChat(c, m), { c: roseConversation(), m: chatMessages })
+      const header = headerName(page, scope)
+      assert(await colorOf(header) === RGB.rose, `${scope} заглавие ${await colorOf(header)}`)
+      assert(await textColor(page, scope, 'от приятел') === RGB.rose, `${scope} събеседник`)
+      if (mobile) assert(await textColor(page, scope, 'мое съобщение') === RGB.rose, 'собствено (мобилен)')
+      await shot(page, `${scope}-rose`)
+      assert(errors.length === 0, errors.join(' | '))
+    }
+  })
+
+  await check('[C2c] Оранжев #C65A00 в личния чат: десктоп и мобилен — ник в заглавието и текстът на събеседника; собственият текст на мобилен', async () => {
+    for (const mobile of [false, true]) {
+      const scope = mobile ? 'mobile-chat' : 'desktop-chat'
+      const { page, errors } = await openPage(mobile)
+      await page.evaluate(({ c, m }) => (window as any).__displayHarness.renderPersonalChat(c, m), { c: roseConversation('#C65A00'), m: chatMessages })
+      assert(await colorOf(headerName(page, scope)) === RGB.amber, `${scope} заглавие`)
+      assert(await textColor(page, scope, 'от приятел') === RGB.amber, `${scope} събеседник`)
+      if (mobile) assert(await textColor(page, scope, 'мое съобщение') === RGB.amber, 'собствено (мобилен)')
+      await shot(page, `${scope}-orange`)
+      assert(errors.length === 0, errors.join(' | '))
+    }
   })
 
   await check('[C3] Изключена функция: личните чатове изглеждат постарому', async () => {
