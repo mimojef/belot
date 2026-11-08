@@ -1,7 +1,7 @@
 /**
  * checkProfileCustomizationMigrationsOnCopy.ts
  *
- * Прилага миграциите 20261107_001/_002 върху КОПИЕ на съществуваща база
+ * Прилага миграциите 20261107_001/_002 и 20261108_001/_002/_003 (обща поръчка, инвентар, безплатни предоставяния) върху КОПИЕ на съществуваща база
  * (по подразбиране локалната dev база) — оригиналът само се копира и не се
  * отваря за запис. Проверява целост, FK, запазени данни, индекси, тригери,
  * seed, режим по подразбиране и идемпотентност.
@@ -28,7 +28,7 @@ async function check(label: string, fn: () => Promise<void> | void): Promise<voi
 }
 function assert(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(message) }
 
-const NEW = ['20261107_001_create_profile_customization.sql', '20261107_002_allow_profile_customization_payment_review_issues.sql']
+const NEW = ['20261107_001_create_profile_customization.sql', '20261107_002_allow_profile_customization_payment_review_issues.sql', '20261108_001_create_profile_customization_orders.sql', '20261108_002_create_profile_customization_inventory.sql', '20261108_003_create_profile_customization_grants.sql']
 
 console.log('\ncheckProfileCustomizationMigrationsOnCopy')
 const root = await mkdtemp(join(tmpdir(), 'belot-pc-migrations-copy-'))
@@ -58,7 +58,7 @@ try {
   await ensureServerDatabaseReady({ serverRootOverride: root })
   const after = new DatabaseSync(target)
 
-  await check('[E1] Двете нови миграции са приложени; integrity_check = ok; foreign_key_check е празен', () => {
+  await check('[E1] Новите миграции са приложени; integrity_check = ok; foreign_key_check е празен', () => {
     const applied = (after.prepare('SELECT filename FROM server_migrations;').all() as Array<{ filename: string }>).map((r) => r.filename)
     for (const name of NEW) assert(applied.includes(name), name)
     assert((after.prepare('PRAGMA integrity_check;').get() as { integrity_check: string }).integrity_check === 'ok', 'integrity')
@@ -77,16 +77,18 @@ try {
   })
 
   await check('[E4] Новите таблици, индекси и тригери; seed (4 вида изключени, 21 цвята, 655 емоджита); режим "Само админ"', () => {
-    for (const t of ['profile_customization_kind_settings', 'profile_customization_colors', 'profile_customization_emojis', 'profile_customization_purchases', 'profile_customization_active', 'profile_customization_mode_changes']) {
+    for (const t of ['profile_customization_kind_settings', 'profile_customization_colors', 'profile_customization_emojis', 'profile_customization_purchases', 'profile_customization_orders', 'profile_customization_active', 'profile_customization_mode_changes', 'profile_customization_owned_items', 'profile_customization_equipped', 'profile_customization_grants']) {
       assert(after.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;`).get(t) !== undefined, t)
     }
     for (const trigger of ['trg_profile_customization_colors_hex_immutable', 'trg_profile_customization_emojis_value_immutable']) {
       assert(after.prepare(`SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?;`).get(trigger) !== undefined, trigger)
     }
     const indexes = (after.prepare(`SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND tbl_name LIKE 'profile_customization_%' AND sql IS NOT NULL;`).get() as { c: number }).c
-    assert(indexes >= 9, `индекси ${indexes}`)
+    assert(after.prepare("SELECT 1 FROM pragma_table_info('profile_customization_purchases') WHERE name = 'order_id';").get() !== undefined, 'order_id колона')
+    assert(indexes >= 16, `индекси ${indexes}`)
     assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_kind_settings WHERE sales_enabled = 0;').get() as { c: number }).c === 4, 'видове')
     assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c === 21, 'цветове')
+    assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors WHERE is_active = 1;').get() as { c: number }).c === 5, '5 цвята в продажба')
     assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_emojis;').get() as { c: number }).c === 655, 'емоджита')
     assert((after.prepare('SELECT COUNT(*) AS c FROM profile_customization_mode_changes;').get() as { c: number }).c === 0, 'без запис за режим -> "Само админ"')
   })
@@ -96,13 +98,13 @@ try {
     await ensureServerDatabaseReady({ serverRootOverride: root })
     const again = new DatabaseSync(target)
     assert((again.prepare('SELECT COUNT(*) AS c FROM profile_customization_colors;').get() as { c: number }).c === 21, 'цветове')
-    assert((again.prepare(`SELECT COUNT(*) AS c FROM server_migrations WHERE filename LIKE '20261107_%';`).get() as { c: number }).c === 2, 'записи')
+    assert((again.prepare(`SELECT COUNT(*) AS c FROM server_migrations WHERE filename LIKE '20261107_%' OR filename LIKE '20261108_%';`).get() as { c: number }).c === 5, 'записи')
     again.close()
   })
 
   await check('[E6] Оригиналната база не е променена', async () => {
     const original = new DatabaseSync(sourceDb, { readOnly: true })
-    const has = original.prepare(`SELECT COUNT(*) AS c FROM server_migrations WHERE filename LIKE '20261107_%';`).get() as { c: number }
+    const has = original.prepare(`SELECT COUNT(*) AS c FROM server_migrations WHERE filename LIKE '20261107_%' OR filename LIKE '20261108_%';`).get() as { c: number }
     const hash = createHash('sha256').update(JSON.stringify(original.prepare(`SELECT name FROM sqlite_master WHERE name LIKE 'profile_customization%';`).all())).digest('hex').slice(0, 8)
     original.close()
     assert(has.c === 0, 'оригиналът няма новите миграции')

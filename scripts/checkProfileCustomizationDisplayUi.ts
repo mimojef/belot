@@ -315,11 +315,15 @@ try {
     emoji_before: { itemId: 'e1', value: '🦋', label: null, activeUntil: FUTURE, remainingDays: 30 },
     emoji_after: { itemId: 'e2', value: '🦋', label: null, activeUntil: FUTURE, remainingDays: 30 },
   }
-  const purchase = (status: string, grantEffect: string | null, extra: Record<string, unknown> = {}) => ({
-    purchaseId: 'p-1', kind: 'nickname_color', kindLabel: 'Цвят на никнейма', itemType: 'color', itemValue: '#2B74D9', itemLabel: 'Синьо',
-    days: 90, priceCents: 597, currency: 'EUR', status, grantEffect, grantedUntil: '2027-02-05T12:00:00.000Z', creditedAt: NOW, ...extra,
-  })
-  const ok = (returnPurchase: unknown, active: unknown = activeNew): PopupScenario => ({ status: 200, body: { ok: true, active, returnPurchase } })
+  /** Поръчка с един ред (досегашните сценарии); extra променя реда. */
+  const purchase = (status: string, grantEffect: string | null, extra: Record<string, unknown> = {}) => {
+    const item = {
+      purchaseId: 'p-1', kind: 'nickname_color', kindLabel: 'Цвят на никнейма', itemType: 'color', itemValue: '#2B74D9', itemLabel: 'Синьо',
+      days: 90, priceCents: 597, status, grantEffect, grantedUntil: '2027-02-05T12:00:00.000Z', ...extra,
+    }
+    return { orderId: 'o-1', status, totalCents: item.priceCents, currency: 'EUR', paidAt: NOW, items: [item] }
+  }
+  const ok = (returnOrder: unknown, active: unknown = activeNew): PopupScenario => ({ status: 200, body: { ok: true, active, returnOrder } })
 
   async function openPopup(mobile: boolean, sessionId: string | null, responses: PopupScenario[], role: string | null = null): Promise<{ page: Page; calls: () => number; setResponses: (r: PopupScenario[]) => void }> {
     const { page } = await openPage(mobile)
@@ -335,6 +339,7 @@ try {
   }
   const popupState = (page: Page) => page.locator('#pcp-title').getAttribute('data-pcp-state')
   const row = (page: Page, key: string) => page.locator(`[data-pcp-row="${key}"]`).innerText()
+  const itemText = (page: Page, kind: string) => page.locator(`[data-pcp-item="${kind}"]`).innerText()
 
   await check('[P1] Забавен webhook: "Проверяваме плащането..." -> после "Успешна покупка!" с точните данни и един общ преглед; само бутон "ОК"', async () => {
     const { page } = await openPopup(false, 'cs_p1', [ok(purchase('pending', null)), ok(purchase('pending', null)), ok(purchase('paid', 'new'))])
@@ -342,12 +347,13 @@ try {
     await page.waitForFunction(() => document.querySelector('#pcp-title')?.getAttribute('data-pcp-state') === 'success', undefined, { timeout: 15_000 })
     assert((await page.locator('#pcp-title').innerText()) === 'Успешна покупка!', 'заглавие')
     assert((await page.locator('[data-pcp-dialog="1"]').innerText()).includes('Персонализацията ти е активирана.'), 'подзаглавие')
-    assert((await row(page, 'kind')).includes('Цвят на никнейма'), 'покупка')
-    assert((await row(page, 'item')).includes('Синьо (#2B74D9)'), 'цвят')
-    assert((await row(page, 'days')).includes('90 дни'), 'период')
-    assert(/5,97\s€/.test(await row(page, 'price')), 'цена')
-    assert((await row(page, 'until')).includes('05.02.2027'), 'дата')
-    assert((await row(page, 'effect')).includes('Нова покупка'), 'вид')
+    const item = await itemText(page, 'nickname_color')
+    assert(item.includes('Цвят на никнейма'), 'покупка')
+    assert(item.includes('Синьо (#2B74D9)'), 'цвят')
+    assert(item.includes('90 дни'), 'период')
+    assert(/5,97\s€/.test(await row(page, 'total')), 'платено')
+    assert(item.includes('05.02.2027'), 'дата')
+    assert(item.includes('Нова покупка'), 'вид')
     assert(await page.locator('[data-pc-unified-preview="1"]').count() === 1, 'един общ преглед')
     assert((await page.locator('[data-pc-unified-preview="1"] [data-pc-preview-name="1"]').evaluate((el) => (el.parentElement as HTMLElement).innerText)).trim() === '🦋 Мишо 🦋', 'ник с двете емоджита')
     assert(await colorOf(page.locator('[data-pc-preview-name="1"]')) === 'rgb(43, 116, 217)', 'цвят в прегледа')
@@ -364,13 +370,14 @@ try {
     const { page } = await openPopup(false, 'cs_p2', [ok(purchase('paid', 'extend', { grantedUntil: '2027-05-06T12:00:00.000Z' }))])
     await page.waitForFunction(() => document.querySelector('#pcp-title')?.getAttribute('data-pcp-state') === 'success')
     assert((await page.locator('#pcp-title').innerText()) === 'Персонализацията ти е удължена!', 'заглавие')
-    assert((await row(page, 'effect')).includes('Удължаване') && (await row(page, 'until')).includes('06.05.2027'), 'вид/дата')
+    const item = await itemText(page, 'nickname_color')
+    assert(item.includes('Удължаване') && item.includes('06.05.2027'), 'вид/дата')
   })
 
   await check('[P3] Замяна: показва новата активна персонализация, не старата', async () => {
     const { page } = await openPopup(false, 'cs_p3', [ok(purchase('paid', 'replace'))])
     await page.waitForFunction(() => document.querySelector('#pcp-title')?.getAttribute('data-pcp-state') === 'success')
-    assert((await row(page, 'effect')).includes('Замяна'), 'вид')
+    assert((await itemText(page, 'nickname_color')).includes('Замяна'), 'вид')
     assert(await colorOf(page.locator('[data-pc-preview-name="1"]')) === 'rgb(43, 116, 217)', 'новият цвят')
   })
 
@@ -433,10 +440,45 @@ try {
     await page.waitForFunction(() => document.querySelector('#pcp-title')?.getAttribute('data-pcp-state') === 'success')
     assert(await page.locator('[data-pcp-dialog="1"]').evaluate((el) => getComputedStyle(el).backgroundColor) === 'rgb(255, 255, 255)', 'светъл фон')
     assert(await colorOf(page.locator('[data-pc-preview-name="1"]')) === RGB.black, 'черен ник')
-    assert((await row(page, 'item')).includes('🦋'), 'емоджи')
+    assert((await itemText(page, 'emoji_before')).includes('🦋'), 'емоджи')
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     assert(overflow <= 0, `хоризонтално превъртане ${overflow}`)
     await shot(page, 'popup-success-mobile')
+  })
+
+  await check('[P10] Поръчка с 3 екстри: ЕДИН попъп с трите артикула, техните срокове/ефекти и общата платена сума; общ преглед с всичко', async () => {
+    const order = {
+      orderId: 'o-multi',
+      status: 'paid',
+      totalCents: 1393,
+      currency: 'EUR',
+      paidAt: NOW,
+      items: [
+        { purchaseId: 'l-1', kind: 'nickname_color', kindLabel: 'Цвят на никнейма', itemType: 'color', itemValue: '#2B74D9', itemLabel: 'Синьо', days: 60, priceCents: 398, status: 'paid', grantEffect: 'extend', grantedUntil: '2027-04-01T12:00:00.000Z' },
+        { purchaseId: 'l-2', kind: 'emoji_before', kindLabel: 'Емоджи пред никнейма', itemType: 'emoji', itemValue: '🦋', itemLabel: null, days: 120, priceCents: 796, status: 'paid', grantEffect: 'new', grantedUntil: '2027-05-10T12:00:00.000Z' },
+        { purchaseId: 'l-3', kind: 'emoji_after', kindLabel: 'Емоджи след никнейма', itemType: 'emoji', itemValue: '🦋', itemLabel: null, days: 30, priceCents: 199, status: 'paid', grantEffect: 'replace', grantedUntil: '2027-02-09T12:00:00.000Z' },
+      ],
+    }
+    for (const mobile of [false, true]) {
+      const { page } = await openPopup(mobile, `cs_p10_${mobile ? 'm' : 'd'}`, [ok(order)])
+      await page.waitForFunction(() => document.querySelector('#pcp-title')?.getAttribute('data-pcp-state') === 'success')
+      assert(await page.locator('#profile-customization-purchase-popup').count() === 1 && await page.locator('#pcp-title').count() === 1, 'точно един попъп')
+      assert((await page.locator('#pcp-title').innerText()) === 'Успешна покупка!' && await page.locator('#pcp-title').getAttribute('data-pcp-count') === '3', 'заглавие')
+      assert((await page.locator('[data-pcp-dialog="1"]').innerText()).includes('Активирани са 3 персонализации с едно плащане.'), 'подзаглавие')
+      assert(await page.locator('[data-pcp-item]').count() === 3, 'три артикула')
+      const nickname = await itemText(page, 'nickname_color')
+      assert(nickname.includes('60 дни') && nickname.includes('Удължаване') && nickname.includes('01.04.2027'), nickname)
+      const before = await itemText(page, 'emoji_before')
+      assert(before.includes('120 дни') && before.includes('Нова покупка') && before.includes('10.05.2027'), before)
+      const after = await itemText(page, 'emoji_after')
+      assert(after.includes('30 дни') && after.includes('Замяна') && after.includes('09.02.2027'), after)
+      assert(/13,93\s€/.test(await row(page, 'total')), 'общо платено')
+      assert(await page.locator('[data-pc-unified-preview="1"]').count() === 1, 'един общ преглед')
+      assert((await page.locator('[data-pc-unified-preview="1"] [data-pc-preview-name="1"]').evaluate((el) => (el.parentElement as HTMLElement).innerText)).trim() === '🦋 Мишо 🦋', 'прегледът показва всичко')
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+      assert(overflow <= 0, `хоризонтално превъртане ${overflow}`)
+      await shot(page, `popup-multi-${mobile ? 'mobile' : 'desktop'}`)
+    }
   })
 } finally {
   await browser?.close()

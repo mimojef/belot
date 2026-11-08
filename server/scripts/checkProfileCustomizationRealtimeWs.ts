@@ -203,10 +203,14 @@ function grantVip(databaseFile: string, profileId: string): void {
 
 function activate(databaseFile: string, profileId: string, kind: string, itemId: string, value: string): void {
   const now = new Date()
-  withDb(databaseFile, (db) => db.prepare(`
-    INSERT INTO profile_customization_active (profile_id, kind, item_id, item_value_snapshot, chain_id, chain_started_at, active_until)
-    VALUES (?, ?, ?, ?, ?, ?, ?);
-  `).run(profileId, kind, itemId, value, randomUUID(), now.toISOString(), new Date(now.getTime() + 86_400_000).toISOString()))
+  // Инвентар (20261108_002): притежаван вариант + "използва се".
+  withDb(databaseFile, (db) => {
+    db.prepare(`
+      INSERT INTO profile_customization_owned_items (profile_id, kind, item_id, item_value_snapshot, chain_id, chain_started_at, active_until)
+      VALUES (?, ?, ?, ?, ?, ?, ?);
+    `).run(profileId, kind, itemId, value, randomUUID(), now.toISOString(), new Date(now.getTime() + 86_400_000).toISOString())
+    db.prepare(`INSERT INTO profile_customization_equipped (profile_id, kind, item_id) VALUES (?, ?, ?);`).run(profileId, kind, itemId)
+  })
 }
 
 const LAFCHE = 'topic-lafche'

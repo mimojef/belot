@@ -2,7 +2,7 @@ import type Stripe from 'stripe'
 import type { CoinPurchaseSnapshot } from '../db/coinPurchaseStore.js'
 import type { VipPurchaseSnapshot } from '../db/vipPurchaseStore.js'
 import type { BundlePurchaseSnapshot } from '../db/bundlePurchaseStore.js'
-import type { ProfileCustomizationPurchaseSnapshot } from '../profileCustomization/profileCustomizationStore.js'
+import type { ProfileCustomizationOrderSnapshot } from '../profileCustomization/profileCustomizationStore.js'
 import { PROFILE_CUSTOMIZATION_KIND_LABELS, getProfileCustomizationItemType } from '../profileCustomization/profileCustomizationCatalog.js'
 import {
   buildBundleCheckoutProductName,
@@ -107,8 +107,14 @@ export function buildBundleCheckoutSessionParams(
 // Персонализация на профила. ВАЖНО за Етап 2: webhook-ът трябва да има
 // собствен клон за purchaseType='profile_customization' ПРЕДИ coin
 // fallback-а (handleStripeWebhookRequest третира непознат тип като coin).
+/**
+ * Една обща поръчка (1..4 екстри) = ЕДНА Stripe Checkout сесия. Всяка екстра
+ * е отделен ред в Checkout (вид, артикул, срок, цена), а Stripe показва и
+ * общата сума. Сумите са от snapshot-а на редовете; webhook-ът сравнява
+ * amount_total с общата сума на поръчката.
+ */
 export function buildProfileCustomizationCheckoutSessionParams(
-  purchase: ProfileCustomizationPurchaseSnapshot,
+  order: ProfileCustomizationOrderSnapshot,
   profileId: string,
   urls: SessionUrls,
 ): Stripe.Checkout.SessionCreateParams {
@@ -116,21 +122,23 @@ export function buildProfileCustomizationCheckoutSessionParams(
     mode: 'payment',
     success_url: urls.successUrl,
     cancel_url: urls.cancelUrl,
-    // „Pika.bg — <вид>: <цвят/емоджи> — <дни>“
-    line_items: [lineItem(purchase.currency, purchase.priceCents, buildProfileCustomizationCheckoutProductName({
-      kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[purchase.kind],
-      itemType: getProfileCustomizationItemType(purchase.kind),
-      itemValue: purchase.itemValue,
-      itemLabel: purchase.itemLabel,
-      days: purchase.days,
-    }))],
+    // „Pika.bg — <вид>: <цвят/емоджи> — <дни>“ за всеки ред
+    line_items: order.lines.map((line) => lineItem(line.currency, line.priceCents, buildProfileCustomizationCheckoutProductName({
+      kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[line.kind],
+      itemType: getProfileCustomizationItemType(line.kind),
+      itemValue: line.itemValue,
+      itemLabel: line.itemLabel,
+      days: line.days,
+    }))),
     metadata: {
       purchaseType: 'profile_customization',
-      purchaseId: purchase.purchaseId,
+      orderId: order.orderId,
+      // Общият pointer, който ползват логовете/payment_review_issues.
+      purchaseId: order.orderId,
       profileId,
-      kind: purchase.kind,
-      itemId: purchase.itemId,
-      days: String(purchase.days),
+      itemCount: String(order.lines.length),
+      kinds: order.lines.map((line) => line.kind).join(','),
+      totalCents: String(order.totalCents),
     },
   }
 }

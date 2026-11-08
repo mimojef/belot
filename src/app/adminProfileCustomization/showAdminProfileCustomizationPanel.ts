@@ -63,19 +63,30 @@ type AdminSnapshot = {
   pendingRefundReviews: number
 }
 
-type PurchaseRow = {
+/** Един ред от поръчката = едно платено право. */
+type OrderLine = {
   purchaseId: string
   kind: Kind
   itemValue: string
   itemLabel: string | null
   days: number
   priceCents: number
-  currency: string
   status: string
   creditedAt: string | null
   grantEffect: 'new' | 'extend' | 'replace' | null
   grantedUntil: string | null
   replacedItemValue: string | null
+  refundedAmountCents: number | null
+}
+
+/** Една Stripe поръчка (1..4 екстри с едно плащане). */
+type PurchaseRow = {
+  orderId: string
+  status: string
+  itemCount: number
+  totalCents: number
+  currency: string
+  paidAt: string | null
   refundedAt: string | null
   refundedAmountCents: number | null
   refundReviewStatus: 'pending' | 'reviewed' | null
@@ -86,6 +97,7 @@ type PurchaseRow = {
   profileId: string | null
   displayName: string | null
   email: string | null
+  lines: OrderLine[]
 }
 
 type ApiResult = { ok: true; data: Record<string, unknown> } | { ok: false; status: number; code: string | null; message: string }
@@ -94,7 +106,25 @@ export type AdminProfileCustomizationPanelDeps = {
   getApiBaseUrl: () => string
 }
 
-type Tab = 'pricing' | 'colors' | 'emojis' | 'purchases'
+type Tab = 'pricing' | 'colors' | 'emojis' | 'purchases' | 'grants'
+
+/** Одит на безплатно предоставените персонализации (един ред = едно право). */
+type GrantRow = {
+  grantId: string
+  batchId: string
+  profileId: string | null
+  targetDisplayName: string | null
+  kind: Kind
+  kindLabel: string
+  itemType: 'color' | 'emoji'
+  itemValue: string
+  itemLabel: string | null
+  days: number
+  grantEffect: 'new' | 'extend'
+  grantedUntil: string
+  grantedByDisplayName: string | null
+  createdAt: string
+}
 
 const HOST_ID = 'admin-profile-customization-panel'
 const PURCHASES_PAGE_SIZE = 50
@@ -178,6 +208,9 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
   let purchasesTotal = 0
   let purchasesStatus = ''
   let purchasesLoading = false
+  let grants: GrantRow[] = []
+  let grantsTotal = 0
+  let grantsLoading = false
 
   // Същата плътност като бъдещия потребителски каталог: 13 на ред на
   // десктоп, 9 на телефон (медийна заявка — inline стиловете не могат).
@@ -240,7 +273,7 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
   // ─── Рендиране ────────────────────────────────────────────────────────
 
   const renderTabs = () => {
-    const tabs: Array<[Tab, string]> = [['pricing', 'Цени и продажба'], ['colors', 'Цветове'], ['emojis', 'Емоджита'], ['purchases', 'Покупки']]
+    const tabs: Array<[Tab, string]> = [['pricing', 'Цени и продажба'], ['colors', 'Цветове'], ['emojis', 'Емоджита'], ['purchases', 'Покупки'], ['grants', 'Предоставени']]
     tabsEl.innerHTML = tabs.map(([key, label]) => {
       const active = key === tab
       return `<button type="button" role="tab" aria-selected="${active}" data-apc-tab="${key}" style="flex:0 0 auto;min-height:36px;padding:0 14px;border-radius:999px;border:1px solid ${active ? '#d4a520' : 'rgba(255,255,255,0.18)'};background:${active ? 'rgba(212,165,32,0.16)' : 'transparent'};color:${active ? '#f4c95b' : '#e2e8f0'};font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap;">${escapeHtml(label)}</button>`
@@ -354,27 +387,34 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
       const user = row.displayName !== null
         ? `${escapeHtml(row.displayName)}${row.email ? ` <span style="${MUTED}">(${escapeHtml(row.email)})</span>` : ''}`
         : `<span style="${MUTED}">Изтрит профил</span>`
-      const kindLabel = snapshot?.kinds.find((kind) => kind.kind === row.kind)?.label ?? row.kind
+      const lines = Array.isArray(row.lines) ? row.lines : []
       const refund = row.refundedAmountCents !== null && row.refundedAmountCents > 0
         ? ` · <span style="color:#fca5a5;">възстановени ${escapeHtml(formatEuro(row.refundedAmountCents))}${row.status !== 'refunded' ? ' (частично)' : ''}</span>`
         : ''
       const reviewReason = row.refundReviewReason === 'refund_failed'
-        ? 'Неуспешно възстановяване: Stripe не е върнал сумата, а правото е анулирано. Нищо не е коригирано автоматично — провери в Stripe и реши ръчно.'
-        : 'Частично възстановяване: правата остават активни.'
+        ? 'Неуспешно възстановяване: Stripe не е върнал сумата, а правата по поръчката са анулирани. Нищо не е коригирано автоматично — провери в Stripe и реши ръчно.'
+        : lines.length > 1
+          ? 'Частично възстановяване на поръчка с няколко екстри: не може да се определи коя е засегната — всички права остават активни.'
+          : 'Частично възстановяване: правата остават активни.'
       const review = row.refundReviewStatus === 'pending'
-        ? `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px;"><span data-apc-review-pending="1" data-apc-review-reason="${escapeHtml(row.refundReviewReason ?? '')}" style="padding:3px 8px;border-radius:999px;border:1px solid #fbbf24;color:#fde68a;font-size:12px;font-weight:800;">Чака преглед</span><span style="font-size:12px;color:#fde68a;flex:1 1 220px;">${escapeHtml(reviewReason)}</span><button type="button" data-apc-mark-reviewed="${escapeHtml(row.purchaseId)}" style="${BTN_SECONDARY}">Маркирай като прегледан</button></div>`
+        ? `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px;"><span data-apc-review-pending="1" data-apc-review-reason="${escapeHtml(row.refundReviewReason ?? '')}" style="padding:3px 8px;border-radius:999px;border:1px solid #fbbf24;color:#fde68a;font-size:12px;font-weight:800;">Чака преглед</span><span style="font-size:12px;color:#fde68a;flex:1 1 220px;">${escapeHtml(reviewReason)}</span><button type="button" data-apc-mark-reviewed="${escapeHtml(row.orderId)}" style="${BTN_SECONDARY}">Маркирай като прегледан</button></div>`
         : row.refundReviewStatus === 'reviewed'
           ? `<div data-apc-reviewed="1" style="font-size:12px;margin-top:6px;${MUTED}">Прегледано${row.refundReviewedByDisplayName ? ` от ${escapeHtml(row.refundReviewedByDisplayName)}` : ''}${row.refundReviewedAt ? ` на ${escapeHtml(formatDate(row.refundReviewedAt))}` : ''} (${row.refundReviewReason === 'refund_failed' ? 'неуспешно възстановяване' : 'частично възстановяване'}).</div>`
           : ''
-      const replaced = row.grantEffect === 'replace' && row.replacedItemValue !== null ? ` (замени ${itemPreview(row.kind, row.replacedItemValue)})` : ''
+      const lineItems = lines.map((line) => {
+        const kindLabel = snapshot?.kinds.find((kind) => kind.kind === line.kind)?.label ?? line.kind
+        const replaced = line.grantEffect === 'replace' && line.replacedItemValue !== null ? ` (замени ${itemPreview(line.kind, line.replacedItemValue)})` : ''
+        return `<li data-apc-order-line="${escapeHtml(line.purchaseId)}" style="list-style:none;font-size:13px;line-height:1.6;padding:2px 0;">${escapeHtml(kindLabel)}: ${itemPreview(line.kind, line.itemValue)}${line.itemLabel ? ` ${escapeHtml(line.itemLabel)}` : ''} · ${line.days} дни · ${escapeHtml(formatEuro(line.priceCents))}${line.grantEffect !== null ? ` · ${escapeHtml(EFFECT_LABELS[line.grantEffect] ?? line.grantEffect)}${replaced}` : ''}${line.grantedUntil !== null ? ` · до ${escapeHtml(formatDate(line.grantedUntil))}` : ''}${line.status !== row.status ? ` · ${escapeHtml(STATUS_LABELS[line.status] ?? line.status)}` : ''}</li>`
+      }).join('')
       return `
-        <li data-apc-purchase="${escapeHtml(row.purchaseId)}" style="list-style:none;${CARD_STYLE}">
+        <li data-apc-purchase="${escapeHtml(row.orderId)}" data-apc-order-items="${lines.length}" style="list-style:none;${CARD_STYLE}">
           <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;margin-bottom:6px;">
             <div style="font-size:14px;font-weight:800;min-width:0;overflow-wrap:anywhere;">${user}</div>
             <span style="font-size:12px;font-weight:800;">${escapeHtml(STATUS_LABELS[row.status] ?? row.status)}</span>
           </div>
-          <div style="font-size:13px;line-height:1.6;">${escapeHtml(kindLabel)}: ${itemPreview(row.kind, row.itemValue)}${row.itemLabel ? ` ${escapeHtml(row.itemLabel)}` : ''} · ${row.days} дни · ${escapeHtml(formatEuro(row.priceCents))}${row.grantEffect !== null ? ` · ${escapeHtml(EFFECT_LABELS[row.grantEffect] ?? row.grantEffect)}${replaced}` : ''}${refund}</div>
-          <div style="font-size:12px;${MUTED}">Създадена ${escapeHtml(formatDate(row.createdAt))}${row.creditedAt !== null ? ` · платена ${escapeHtml(formatDate(row.creditedAt))}` : ''}${row.grantedUntil !== null ? ` · валидна до ${escapeHtml(formatDate(row.grantedUntil))}` : ''} · ID ${escapeHtml(row.purchaseId)}</div>
+          <div style="font-size:13px;font-weight:800;margin-bottom:2px;">${lines.length === 1 ? '1 екстра' : `${lines.length} екстри`} · общо ${escapeHtml(formatEuro(row.totalCents))}${refund}</div>
+          <ul style="margin:0 0 4px;padding:0 0 0 2px;">${lineItems}</ul>
+          <div style="font-size:12px;${MUTED}">Създадена ${escapeHtml(formatDate(row.createdAt))}${row.paidAt !== null ? ` · платена ${escapeHtml(formatDate(row.paidAt))}` : ''} · Поръчка ${escapeHtml(row.orderId)}</div>
           ${review}
         </li>`
     }).join('')
@@ -390,6 +430,29 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
         <span style="font-size:12px;${MUTED}">${purchasesLoading ? 'Зареждане…' : `Показани ${purchases.length} от ${purchasesTotal}`}</span>
       </div>
       <ul style="margin:0;padding:0;">${rows || (purchasesLoading ? '' : `<li style="list-style:none;font-size:14px;${MUTED}">Няма покупки.</li>`)}</ul>
+      ${more}`
+  }
+
+  /** Одит на безплатните предоставяния: кой admin, на кого, кога, какво, дни, нов срок, ефект. Не е плащане. */
+  const renderGrants = (): string => {
+    const rows = grants.map((row) => `
+      <li data-apc-grant="${escapeHtml(row.grantId)}" data-apc-grant-batch="${escapeHtml(row.batchId)}" style="list-style:none;${CARD_STYLE}">
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;margin-bottom:4px;">
+          <div style="font-size:14px;font-weight:800;min-width:0;overflow-wrap:anywhere;">${row.targetDisplayName !== null ? escapeHtml(row.targetDisplayName) : `<span style="${MUTED}">Изтрит профил</span>`}</div>
+          <span style="font-size:12px;font-weight:800;color:#86efac;">Безплатно</span>
+        </div>
+        <div style="font-size:13px;line-height:1.6;">${escapeHtml(row.kindLabel)}: ${itemPreview(row.kind, row.itemValue)}${row.itemLabel ? ` ${escapeHtml(row.itemLabel)}` : ''} · +${row.days} дни · ${escapeHtml(EFFECT_LABELS[row.grantEffect] ?? row.grantEffect)} · валидно до ${escapeHtml(formatDate(row.grantedUntil))}</div>
+        <div style="font-size:12px;${MUTED}">${escapeHtml(formatDate(row.createdAt))} · от ${row.grantedByDisplayName !== null ? escapeHtml(row.grantedByDisplayName) : 'неизвестен admin'} · ${row.profileId !== null ? `профил ${escapeHtml(row.profileId)}` : 'изтрит профил'}</div>
+      </li>`).join('')
+    const more = grants.length < grantsTotal
+      ? `<button type="button" data-apc-grants-more="1" style="${BTN_SECONDARY}" ${grantsLoading ? 'disabled' : ''}>Покажи още</button>`
+      : ''
+    return `
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px;">
+        <button type="button" data-apc-grants-refresh="1" style="${BTN_SECONDARY}">Обнови</button>
+        <span style="font-size:12px;${MUTED}">${grantsLoading ? 'Зареждане…' : `Показани ${grants.length} от ${grantsTotal}`} · безплатните предоставяния не са плащания и не влизат в оборота.</span>
+      </div>
+      <ul style="margin:0;padding:0;">${rows || (grantsLoading ? '' : `<li style="list-style:none;font-size:14px;${MUTED}">Няма предоставяния.</li>`)}</ul>
       ${more}`
   }
 
@@ -454,7 +517,8 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
     bodyEl.innerHTML = tab === 'pricing' ? renderPricing(snapshot)
       : tab === 'colors' ? renderColors(snapshot)
         : tab === 'emojis' ? renderEmojis(snapshot)
-          : renderPurchases()
+          : tab === 'purchases' ? renderPurchases()
+            : renderGrants()
   }
 
   // ─── Данни ────────────────────────────────────────────────────────────
@@ -467,6 +531,24 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
       loadError = null
     } else {
       loadError = result.message
+    }
+    render()
+  }
+
+  const loadGrants = async (append: boolean) => {
+    grantsLoading = true
+    if (!append) grants = []
+    render()
+    const query = new URLSearchParams({ limit: String(PURCHASES_PAGE_SIZE), offset: String(append ? grants.length : 0) })
+    const result = await api('GET', `/grants?${query.toString()}`)
+    if (!host.isConnected) return
+    grantsLoading = false
+    if (result.ok) {
+      const rows = Array.isArray(result.data.rows) ? (result.data.rows as GrantRow[]) : []
+      grants = append ? [...grants, ...rows] : rows
+      grantsTotal = typeof result.data.total === 'number' ? result.data.total : grants.length
+    } else {
+      showNotice(result.message, 'error')
     }
     render()
   }
@@ -533,6 +615,7 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
     showNotice(null)
     render()
     if (tab === 'purchases') void loadPurchases(false)
+    if (tab === 'grants') void loadGrants(false)
   })
 
   bodyEl.addEventListener('input', (event) => {
@@ -673,6 +756,14 @@ export function showAdminProfileCustomizationPanel(deps: AdminProfileCustomizati
       return
     }
 
+    if (target.closest('[data-apc-grants-more="1"]') !== null) {
+      void loadGrants(true)
+      return
+    }
+    if (target.closest('[data-apc-grants-refresh="1"]') !== null) {
+      void loadGrants(false)
+      return
+    }
     if (target.closest('[data-apc-purchases-more="1"]') !== null) {
       void loadPurchases(true)
     }

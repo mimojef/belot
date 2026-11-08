@@ -679,6 +679,13 @@ export async function createProfileDeletionExecutor(
     // Персонализация на профила (20261107_001): платените покупки остават
     // (FK SET NULL); активните екстри се изтриват с профила (CASCADE).
     `UPDATE profile_customization_purchases SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
+    // Общата поръчка (20261108_001) — платежният запис остава (FK SET NULL).
+    `UPDATE profile_customization_orders SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
+    // Безплатни admin предоставяния (20261108_003) — административен одит:
+    // редът остава (FK SET NULL), името на получателя става неутрален етикет.
+    `UPDATE profile_customization_grants SET deleted_profile_id_snapshot = ?1,
+       target_display_name_snapshot = CASE WHEN target_display_name_snapshot IS NULL THEN NULL ELSE ?2 END
+     WHERE profile_id = ?1;`,
     // Подаръци (жълтици/VIP/пакет), платени от ДРУГ потребител за този
     // профил: псевдонимният UUID се snapshot-ва, а името му в чуждия запис
     // се заменя с неутрален етикет (не е платежен идентификатор).
@@ -724,6 +731,9 @@ export async function createProfileDeletionExecutor(
     `UPDATE profile_customization_mode_changes SET changed_by_display_name_snapshot = ?2 WHERE changed_by_profile_id = ?1;`,
     // Кой admin е прегледал refund на покупка — името става неутралният етикет.
     `UPDATE profile_customization_purchases SET refund_reviewed_by_display_name_snapshot = ?2 WHERE refund_reviewed_by_profile_id = ?1;`,
+    `UPDATE profile_customization_orders SET refund_reviewed_by_display_name_snapshot = ?2 WHERE refund_reviewed_by_profile_id = ?1;`,
+    // Кой admin е предоставил персонализация — името става неутралният етикет.
+    `UPDATE profile_customization_grants SET granted_by_display_name_snapshot = ?2 WHERE granted_by_profile_id = ?1;`,
   ].map(prepareWithArity)
 
   // ─── Лични данни без FK (cascade НЕ ги пипа) ─────────────────────────────

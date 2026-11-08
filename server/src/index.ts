@@ -73,7 +73,7 @@ import {
   type ProfileCustomizationAppearance,
   type ProfileCustomizationDisplay,
   type ProfileCustomizationFailure,
-  type ProfileCustomizationPurchaseSnapshot,
+  type ProfileCustomizationOrderSnapshot,
 } from './profileCustomization/profileCustomizationStore.js'
 import { isProfileCustomizationEmergencyStopActive } from './profileCustomization/profileCustomizationFeatureFlag.js'
 import {
@@ -19326,7 +19326,7 @@ async function handleStripeWebhookRequest(
       `[stripe/webhook] checkout.session.expired session=${stripeSession.id} purchaseId=${stripeSession.metadata?.purchaseId ?? ''} type=${stripeSession.metadata?.purchaseType ?? 'coin'}`,
     )
     if (stripeSession.metadata?.purchaseType === 'profile_customization') {
-      profileCustomizationStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
+      profileCustomizationStore.markOrderCanceledByCheckoutSessionId(stripeSession.id)
     } else if (stripeSession.metadata?.purchaseType === 'vip') {
       vipPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
     } else if (stripeSession.metadata?.purchaseType === 'bundle') {
@@ -19349,7 +19349,7 @@ async function handleStripeWebhookRequest(
       sendJsonResponse(res, asyncStatus, { ok: asyncStatus === 200 })
       return true
     }
-    profileCustomizationStore.markPurchaseFailedByCheckoutSessionId(stripeSession.id)
+    profileCustomizationStore.markOrderFailedByCheckoutSessionId(stripeSession.id)
     console.log(`[stripe/webhook] profile customization async payment failed session=${stripeSession.id}`)
   } else if (
     (event.type as string) === 'refund.failed'
@@ -19377,23 +19377,25 @@ async function handleStripeWebhookRequest(
 // ─── Персонализация на профила: webhook ────────────────────────────────────
 
 // checkout.session.completed за purchaseType='profile_customization'.
-// Кредитирането е единствено тук (не от client redirect) — atomic CAS в
-// store-а предпазва от двойно активиране при повторен/конкурентен webhook.
-// Връща HTTP статуса: 500 само при временна грешка (Stripe опитва отново).
+// Една Stripe сесия = една поръчка с 1..4 платени права. Кредитирането е
+// единствено тук (не от client redirect) — една транзакция с CAS в store-а
+// активира всички редове заедно и предпазва от двойно активиране при
+// повторен/конкурентен/забавен webhook. Връща HTTP статуса: 500 само при
+// временна грешка (Stripe опитва отново).
 async function settleProfileCustomizationCheckoutWebhook(
   stripe: Stripe,
   stripeSession: Stripe.Checkout.Session,
   stripeEventId: string,
 ): Promise<200 | 500> {
-  const purchaseId = stripeSession.metadata?.purchaseId ?? ''
+  const orderId = stripeSession.metadata?.orderId ?? stripeSession.metadata?.purchaseId ?? ''
   const checkoutSessionId = stripeSession.id
   const paymentIntentId = typeof stripeSession.payment_intent === 'string'
     ? stripeSession.payment_intent
     : (stripeSession.payment_intent as { id?: string } | null)?.id ?? null
 
-  const result = runFulfillment(() => profileCustomizationStore.fulfillPaidPurchase({
+  const result = runFulfillment(() => profileCustomizationStore.fulfillPaidOrder({
     checkoutSessionId,
-    purchaseId,
+    orderId,
     stripePaymentStatus: stripeSession.payment_status,
     stripeCurrency: (stripeSession.currency ?? '').toUpperCase(),
     stripeAmountTotalCents: stripeSession.amount_total ?? -1,
@@ -19401,23 +19403,24 @@ async function settleProfileCustomizationCheckoutWebhook(
   }))
 
   if (!result.ok) {
-    console.error(`[stripe/webhook] profile customization fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${result.message}`)
+    console.error(`[stripe/webhook] profile customization fulfillPaidOrder failed session=${checkoutSessionId} orderId=${orderId} message=${result.message}`)
     return reportUncreditedPaidCheckout('profile_customization', stripeSession, stripeEventId, result)
   }
 
   if (result.refundedBeforeCredit) {
-    console.log(`[stripe/webhook] profile customization refunded before credit purchaseId=${result.purchase.purchaseId} — nothing activated`)
+    console.log(`[stripe/webhook] profile customization refunded before credit orderId=${result.order.orderId} — nothing activated`)
   } else if (result.alreadyCredited) {
-    console.log(`[stripe/webhook] profile customization already credited session=${checkoutSessionId} purchaseId=${purchaseId}`)
+    console.log(`[stripe/webhook] profile customization already credited session=${checkoutSessionId} orderId=${orderId}`)
   } else {
-    console.log(`[stripe/webhook] profile customization fulfilled purchaseId=${result.purchase.purchaseId} kind=${result.purchase.kind} effect=${result.purchase.grantEffect} until=${result.purchase.grantedUntil}`)
+    const lines = result.order.lines.map((line) => `${line.kind}:${line.grantEffect}:${line.grantedUntil}`).join(',')
+    console.log(`[stripe/webhook] profile customization fulfilled orderId=${result.order.orderId} items=${result.order.lines.length} total=${result.order.totalCents} lines=${lines}`)
   }
 
   const httpStatus: 200 | 500 = settleCreditedWebhookCheckout(checkoutSessionId) ? 200 : 500
 
   // Payment-method enrichment — само за Admin → Персонализация (display-only),
   // никога не влияе на вече направеното кредитиране.
-  const fulfilledPurchaseId = result.purchase.purchaseId
+  const fulfilledPurchaseId = result.order.orderId
   if (paymentIntentId && profileCustomizationStore.needsPaymentMethodSnapshot(fulfilledPurchaseId)) {
     try {
       const paymentIntent = await trackHttpWait('io', stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] }))
@@ -19438,7 +19441,7 @@ async function settleProfileCustomizationCheckoutWebhook(
         cardCountry: details?.card?.country ?? null,
       })
     } catch (error) {
-      console.warn(`[stripe/webhook] profile customization payment method enrichment failed purchaseId=${fulfilledPurchaseId}:`, error instanceof Error ? error.message : String(error))
+      console.warn(`[stripe/webhook] profile customization payment method enrichment failed orderId=${fulfilledPurchaseId}:`, error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -19480,7 +19483,7 @@ async function handleProfileCustomizationRefundStatusChange(
     console.error(`[stripe/webhook] profile customization refund failure not recorded pi=${paymentIntentId}: ${result.message}`)
     return 200
   }
-  console.warn(`[stripe/webhook] profile customization refund ${refund.status} refund=${refund.id} purchaseId=${result.purchase.purchaseId} outcome=${result.outcome} — marked for admin review`)
+  console.warn(`[stripe/webhook] profile customization refund ${refund.status} refund=${refund.id} orderId=${result.order.orderId} outcome=${result.outcome} — marked for admin review`)
   return 200
 }
 
@@ -19525,7 +19528,7 @@ async function handleProfileCustomizationChargeRefunded(
     return result.reason === 'refund_failed' && result.transient === true ? 500 : 200
   }
 
-  console.log(`[stripe/webhook] profile customization refund outcome=${result.outcome} purchaseId=${result.purchase.purchaseId} refunded=${result.purchase.refundedAmountCents ?? 0}/${result.purchase.priceCents}`)
+  console.log(`[stripe/webhook] profile customization refund outcome=${result.outcome} orderId=${result.order.orderId} items=${result.order.lines.length} refunded=${result.order.refundedAmountCents ?? 0}/${result.order.totalCents}`)
   return 200
 }
 
@@ -20612,25 +20615,46 @@ function isProfileCustomizationAdminTestMode(session: { account: { role: string 
   return getProfileCustomizationMode() === 'admin_only' && session.account.role === 'admin'
 }
 
-function serializeProfileCustomizationReturnPurchase(returnPurchase: ProfileCustomizationPurchaseSnapshot | null) {
+function serializeProfileCustomizationReturnOrder(order: ProfileCustomizationOrderSnapshot | null) {
   // Всичко за попъпа след плащането идва от сървърния запис на поръчката
-  // (не от URL/клиента): артикул, срок, реално платената сума, ефект и
-  // крайната дата. Статусът 'paid' означава потвърдено от webhook-а.
-  return returnPurchase === null ? null : {
-    purchaseId: returnPurchase.purchaseId,
-    kind: returnPurchase.kind,
-    kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[returnPurchase.kind],
-    itemType: getProfileCustomizationItemType(returnPurchase.kind),
-    itemValue: returnPurchase.itemValue,
-    itemLabel: returnPurchase.itemLabel,
-    days: returnPurchase.days,
-    priceCents: returnPurchase.priceCents,
-    currency: returnPurchase.currency,
-    status: returnPurchase.status,
-    grantEffect: returnPurchase.grantEffect,
-    grantedUntil: returnPurchase.grantedUntil,
-    creditedAt: returnPurchase.creditedAt,
+  // (не от URL/клиента): артикулите, сроковете, реално платената обща сума,
+  // ефектите и крайните дати. Статусът 'paid' означава потвърдено от webhook-а.
+  return order === null ? null : {
+    orderId: order.orderId,
+    status: order.status,
+    totalCents: order.totalCents,
+    currency: order.currency,
+    paidAt: order.paidAt,
+    items: order.lines.map((line) => ({
+      purchaseId: line.purchaseId,
+      kind: line.kind,
+      kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[line.kind],
+      itemType: getProfileCustomizationItemType(line.kind),
+      itemValue: line.itemValue,
+      itemLabel: line.itemLabel,
+      days: line.days,
+      priceCents: line.priceCents,
+      status: line.status,
+      grantEffect: line.grantEffect,
+      grantedUntil: line.grantedUntil,
+    })),
   }
+}
+
+/** Тялото на POST /checkout: items: [{ kind, itemId, days, acknowledgeReplace? }] (1..4). */
+function parseProfileCustomizationCheckoutItems(body: Record<string, unknown>): Array<{ kind: string; itemId: string; days: number; acknowledgeReplace: boolean }> | null {
+  const items = body.items
+  if (!Array.isArray(items) || items.length === 0 || items.length > 4) return null
+  const parsed: Array<{ kind: string; itemId: string; days: number; acknowledgeReplace: boolean }> = []
+  for (const item of items) {
+    if (!isRecord(item)) return null
+    const kind = getStringField(item, 'kind')
+    const itemId = getStringField(item, 'itemId')
+    const days = typeof item.days === 'number' ? item.days : Number.NaN
+    if (kind.length === 0 || itemId.length === 0) return null
+    parsed.push({ kind, itemId, days, acknowledgeReplace: item.acknowledgeReplace === true })
+  }
+  return parsed
 }
 
 function buildProfileCustomizationClientSnapshot(profileId: string, adminTestMode = false, now: Date = new Date()) {
@@ -20657,7 +20681,9 @@ function buildProfileCustomizationClientSnapshot(profileId: string, adminTestMod
       icon: PROFILE_CUSTOMIZATION_EMOJI_CATEGORY_ICONS[key],
     })),
     durations: PROFILE_CUSTOMIZATION_DURATION_DAYS,
+    // Използваните в момента (по една на вид) и инвентарът "Моите персонализации".
     active: profileCustomizationStore.getProfileActiveItems(profileId, now),
+    owned: profileCustomizationStore.getProfileOwnedItems(profileId, now),
     serverNow: now.toISOString(),
   }
 }
@@ -20687,15 +20713,15 @@ async function handleProfileCustomizationRequest(
     // след Stripe). Само четене, само собствена поръчка по session id — без
     // каталог, без нови покупки, без чужди поръчки.
     const limitedSessionId = requestUrl.searchParams.get('sessionId')?.trim() ?? ''
-    const ownPurchase = req.method === 'GET' && (pathname === basePath || pathname === `${basePath}/`) && limitedSessionId.length > 0
-      ? profileCustomizationStore.findProfilePurchaseByCheckoutSessionId(profileId, limitedSessionId)
+    const ownOrder = req.method === 'GET' && (pathname === basePath || pathname === `${basePath}/`) && limitedSessionId.length > 0
+      ? profileCustomizationStore.findProfileOrderByCheckoutSessionId(profileId, limitedSessionId)
       : null
-    if (ownPurchase !== null) {
+    if (ownOrder !== null) {
       sendJsonResponse(res, 200, {
         ok: true,
         limited: true,
         active: profileCustomizationStore.getProfileActiveItems(profileId),
-        returnPurchase: serializeProfileCustomizationReturnPurchase(ownPurchase),
+        returnOrder: serializeProfileCustomizationReturnOrder(ownOrder),
       })
       return true
     }
@@ -20713,18 +20739,18 @@ async function handleProfileCustomizationRequest(
     // ?sessionId=cs_... — състоянието на поръчката след връщане от Stripe
     // (само собствена поръчка; webhook-ът може да закъснее).
     const returnSessionId = requestUrl.searchParams.get('sessionId')?.trim() ?? ''
-    const returnPurchase = returnSessionId.length > 0
-      ? profileCustomizationStore.findProfilePurchaseByCheckoutSessionId(profileId, returnSessionId)
+    const returnOrder = returnSessionId.length > 0
+      ? profileCustomizationStore.findProfileOrderByCheckoutSessionId(profileId, returnSessionId)
       : null
     sendJsonResponse(res, 200, {
       ok: true,
       ...buildProfileCustomizationClientSnapshot(profileId, adminTestMode),
-      returnPurchase: serializeProfileCustomizationReturnPurchase(returnPurchase),
+      returnOrder: serializeProfileCustomizationReturnOrder(returnOrder),
     })
     return true
   }
 
-  if (subPath !== '/checkout') {
+  if (subPath !== '/checkout' && subPath !== '/equip' && subPath !== '/unequip') {
     sendJsonResponse(res, 404, { ok: false, message: 'Not found' })
     return true
   }
@@ -20744,11 +20770,23 @@ async function handleProfileCustomizationRequest(
     sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
     return true
   }
-  const kind = getStringField(body, 'kind')
-  const itemId = getStringField(body, 'itemId')
-  const days = typeof body.days === 'number' ? body.days : Number.NaN
-  const acknowledgeReplace = body.acknowledgeReplace === true
 
+  // "Използвай" / "Премахни" — безплатна смяна между ПРИТЕЖАВАНИТЕ варианти.
+  // Сървърът проверява, че вариантът е на този профил и не е изтекъл; без
+  // Stripe, без промяна на правата/сроковете, без refund. Аварийният стоп
+  // спира само плащанията.
+  if (subPath === '/equip' || subPath === '/unequip') {
+    const result = subPath === '/equip'
+      ? profileCustomizationStore.equipItem({ profileId, kind: getStringField(body, 'kind'), itemId: getStringField(body, 'itemId') })
+      : profileCustomizationStore.unequipItem({ profileId, kind: getStringField(body, 'kind') })
+    if (!result.ok) {
+      const status = result.code === 'not_owned' ? 404 : result.code === 'expired' ? 409 : 400
+      sendJsonResponse(res, status, { ok: false, code: result.code, message: result.message })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, active: result.active, owned: result.owned })
+    return true
+  }
   // Авариен стоп (PROFILE_CUSTOMIZATION_ENABLED=0) — нови плащания за никого.
   if (isProfileCustomizationEmergencyStopActive()) {
     sendJsonResponse(res, 503, { ok: false, code: 'purchases_halted', message: 'Покупките на персонализация са временно спрени.' })
@@ -20761,18 +20799,33 @@ async function handleProfileCustomizationRequest(
     return true
   }
 
-  const preview = profileCustomizationStore.previewPurchase({ profileId, kind, itemId, days, ignoreSalesToggle: adminTestMode })
-  if (!preview.ok) {
-    sendProfileCustomizationFailure(res, preview)
+  const items = parseProfileCustomizationCheckoutItems(body)
+  if (items === null) {
+    sendJsonResponse(res, 400, { ok: false, code: 'invalid_request', message: 'Избери от 1 до 4 персонализации.' })
     return true
   }
-  // Предупреждението при замяна е задължително и проверено от сървъра:
-  // без изрично потвърждение не се създава плащане, което губи активни дни.
-  if (preview.preview.effect === 'replace' && !acknowledgeReplace) {
+  // Сумата, която потребителят вижда в бутона "Плати" — сървърът я сравнява
+  // със своята (от админ настройката); при разлика не започва плащане.
+  const expectedTotalCents = typeof body.expectedTotalCents === 'number' ? body.expectedTotalCents : null
+
+  const orderInput = {
+    profileId,
+    items: items.map(({ kind, itemId, days }) => ({ kind, itemId, days })),
+    ignoreSalesToggle: adminTestMode,
+  }
+  const preview = profileCustomizationStore.previewOrder(orderInput)
+  if (!preview.ok) {
+    sendJsonResponse(res, preview.code === 'not_found' ? 404 : 400, { ok: false, code: preview.code, kind: preview.kind ?? null, message: preview.message })
+    return true
+  }
+  // Инвентар: всеки ред е или удължаване на притежаван вариант, или нов
+  // вариант в инвентара — никой не губи дни, затова потвърждение за замяна
+  // вече не се изисква (acknowledgeReplace от стари клиенти се игнорира).
+  if (expectedTotalCents === null || expectedTotalCents !== preview.preview.totalCents) {
     sendJsonResponse(res, 409, {
       ok: false,
-      code: 'replace_confirmation_required',
-      message: 'Новата покупка ще замени активната ти персонализация и оставащите дни ще се загубят. Потвърди, за да продължиш.',
+      code: 'price_changed',
+      message: 'Цената се промени. Провери новата обща сума и опитай отново.',
       preview: preview.preview,
     })
     return true
@@ -20784,25 +20837,28 @@ async function handleProfileCustomizationRequest(
     return true
   }
 
-  const pending = profileCustomizationStore.createPendingPurchase({ profileId, kind, itemId, days, ignoreSalesToggle: adminTestMode })
+  const pending = profileCustomizationStore.createPendingOrder(orderInput)
   if (!pending.ok) {
-    sendProfileCustomizationFailure(res, pending)
+    sendJsonResponse(res, pending.code === 'not_found' ? 404 : 400, { ok: false, code: pending.code, kind: pending.kind ?? null, message: pending.message })
     return true
   }
 
   const { successUrl, cancelUrl } = buildProfileCustomizationReturnUrls(process.env)
   const stripe = new Stripe(stripeSecretKey)
+  // obtainBuyCheckoutSession работи с { purchaseId, providerCheckoutSessionId } —
+  // тук "покупката" е цялата поръчка (една сесия за всички редове).
+  const asCheckoutTarget = (order: ProfileCustomizationOrderSnapshot) => ({ purchaseId: order.orderId, providerCheckoutSessionId: order.providerCheckoutSessionId, order })
 
-  // Една платима сесия на pending ред (виж obtainPendingPurchaseCheckoutSession.ts);
-  // webhook-ът търси реда СТРОГО по session id.
+  // Една платима сесия на неплатена поръчка (виж obtainPendingPurchaseCheckoutSession.ts);
+  // webhook-ът търси поръчката СТРОГО по session id.
   const obtained = await obtainBuyCheckoutSession({
     stripe,
-    purchase: pending.purchase,
-    buildCreateParams: (purchase) => buildProfileCustomizationCheckoutSessionParams(purchase, profileId, { successUrl, cancelUrl }),
-    retirePendingPurchase: (purchaseId) => profileCustomizationStore.retirePendingPurchase(purchaseId),
+    purchase: asCheckoutTarget(pending.order),
+    buildCreateParams: (target) => buildProfileCustomizationCheckoutSessionParams(target.order, profileId, { successUrl, cancelUrl }),
+    retirePendingPurchase: (orderId) => profileCustomizationStore.retirePendingOrder(orderId),
     createReplacementPurchase: () => {
-      const replacement = profileCustomizationStore.createPendingPurchase({ profileId, kind, itemId, days, ignoreSalesToggle: adminTestMode })
-      return replacement.ok ? { ok: true as const, purchase: replacement.purchase } : { ok: false as const, message: replacement.message }
+      const replacement = profileCustomizationStore.createPendingOrder(orderInput)
+      return replacement.ok ? { ok: true as const, purchase: asCheckoutTarget(replacement.order) } : { ok: false as const, message: replacement.message }
     },
     logLabel: 'profile-customization/checkout',
   })
@@ -20811,9 +20867,9 @@ async function handleProfileCustomizationRequest(
     return true
   }
 
-  const attached = profileCustomizationStore.attachCheckoutSession(obtained.purchase.purchaseId, obtained.session.id)
+  const attached = profileCustomizationStore.attachOrderCheckoutSession(obtained.purchase.order.orderId, obtained.session.id)
   if (attached === null || attached.providerCheckoutSessionId !== obtained.session.id) {
-    sendJsonResponse(res, 500, { ok: false, message: 'Checkout сесията не беше записана към покупката.' })
+    sendJsonResponse(res, 500, { ok: false, message: 'Checkout сесията не беше записана към поръчката.' })
     return true
   }
 
@@ -20821,8 +20877,8 @@ async function handleProfileCustomizationRequest(
     ok: true,
     checkoutUrl: obtained.session.url,
     checkoutSessionId: obtained.session.id,
-    purchaseId: attached.purchaseId,
-    priceCents: attached.priceCents,
+    orderId: attached.orderId,
+    totalCents: attached.totalCents,
     preview: pending.preview,
   })
   return true
@@ -20864,10 +20920,45 @@ async function handleAdminProfileCustomizationRequest(
     const limit = Number.parseInt(requestUrl.searchParams.get('limit') ?? '50', 10)
     const offset = Number.parseInt(requestUrl.searchParams.get('offset') ?? '0', 10)
     const status = requestUrl.searchParams.get('status')
-    const page = profileCustomizationStore.listAdminPurchases({
+    const page = profileCustomizationStore.listAdminOrders({
       limit: Number.isFinite(limit) ? limit : 50,
       offset: Number.isFinite(offset) ? offset : 0,
       status: status === '' ? null : status,
+    })
+    sendJsonResponse(res, 200, { ok: true, ...page })
+    return true
+  }
+
+  // "Приложи безплатно" — каталогът и инвентарят на ПОЛУЧАТЕЛЯ (чужд или
+  // собствен профил) за прозореца в административен режим. Само пълен admin
+  // (проверено по-горе). Без цени за плащане — продажбата не е условие.
+  const targetMatch = /^\/targets\/([^/]+)$/.exec(subPath)
+  if (targetMatch !== null && req.method === 'GET') {
+    let targetProfileId = ''
+    try { targetProfileId = decodeURIComponent(targetMatch[1] ?? '').trim() } catch { /* невалиден */ }
+    const target = /^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId) ? profileCustomizationStore.getGrantTarget(targetProfileId) : null
+    if (target === null) {
+      sendJsonResponse(res, 404, { ok: false, code: 'not_found', message: 'Профилът не беше намерен.' })
+      return true
+    }
+    sendJsonResponse(res, 200, {
+      ok: true,
+      ...buildProfileCustomizationClientSnapshot(target.profileId, true),
+      adminTestMode: false,
+      returnOrder: null,
+      target: { profileId: target.profileId, displayName: target.displayName, accountRole: target.accountRole, eligible: target.eligible, isSelf: target.profileId === session.profile.profileId },
+    })
+    return true
+  }
+
+  // Одит на безплатните предоставяния (по избор само за един профил).
+  if (subPath === '/grants' && req.method === 'GET') {
+    const limit = Number.parseInt(requestUrl.searchParams.get('limit') ?? '50', 10)
+    const offset = Number.parseInt(requestUrl.searchParams.get('offset') ?? '0', 10)
+    const page = profileCustomizationStore.listGrants({
+      limit: Number.isFinite(limit) ? limit : 50,
+      offset: Number.isFinite(offset) ? offset : 0,
+      profileId: requestUrl.searchParams.get('profileId'),
     })
     sendJsonResponse(res, 200, { ok: true, ...page })
     return true
@@ -20930,6 +21021,44 @@ async function handleAdminProfileCustomizationRequest(
     return true
   }
 
+  // "Приложи безплатно" — само пълен admin (проверено в началото), на чужд
+  // или собствен профил. Без цена, Stripe, жълтици и реални пари. Всички
+  // редове в една транзакция (невалиден ред -> нищо); всеки ред е одит.
+  if (subPath === '/grants') {
+    if (req.method !== 'POST') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    if (body.confirm !== true) {
+      sendJsonResponse(res, 400, { ok: false, code: 'confirmation_required', message: 'Потвърди безплатното предоставяне.' })
+      return true
+    }
+    const targetProfileId = typeof body.targetProfileId === 'string' ? body.targetProfileId.trim() : ''
+    const target = /^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId) ? profileCustomizationStore.getGrantTarget(targetProfileId) : null
+    if (target === null) {
+      sendJsonResponse(res, 404, { ok: false, code: 'not_found', message: 'Профилът не беше намерен.' })
+      return true
+    }
+    const items = parseProfileCustomizationCheckoutItems(body)
+    if (items === null) {
+      sendJsonResponse(res, 400, { ok: false, code: 'invalid_request', message: 'Избери от 1 до 4 персонализации.' })
+      return true
+    }
+    const result = profileCustomizationStore.grantItems({
+      adminProfileId: session.profile.profileId,
+      adminDisplayName: session.profile.displayName ?? null,
+      targetProfileId: target.profileId,
+      items: items.map(({ kind, itemId, days }) => ({ kind, itemId, days })),
+    })
+    if (!result.ok) {
+      sendJsonResponse(res, result.code === 'not_found' ? 404 : 400, { ok: false, code: result.code, kind: result.kind ?? null, message: result.message })
+      return true
+    }
+    console.log(`[profile-customization] free grant batch=${result.batchId} by=${session.profile.profileId ?? 'unknown'} to=${target.profileId} items=${result.grants.map((grant) => `${grant.kind}:${grant.itemId}:${grant.days}:${grant.grantEffect}`).join(',')}`)
+    sendJsonResponse(res, 200, { ok: true, batchId: result.batchId, grants: result.grants, active: result.active, owned: result.owned })
+    return true
+  }
+
   // Частичен refund -> "Маркирай като прегледан".
   const reviewMatch = /^\/purchases\/([^/]+)\/refund-review$/.exec(subPath)
   if (reviewMatch !== null) {
@@ -20943,7 +21072,7 @@ async function handleAdminProfileCustomizationRequest(
       displayName: session.profile.displayName ?? null,
     })
     if (!reviewed) {
-      sendJsonResponse(res, 404, { ok: false, code: 'not_found', message: 'Няма покупка, която чака преглед.' })
+      sendJsonResponse(res, 404, { ok: false, code: 'not_found', message: 'Няма поръчка, която чака преглед.' })
       return true
     }
     sendJsonResponse(res, 200, { ok: true, pendingRefundReviews: profileCustomizationStore.countPendingRefundReviews() })
@@ -23325,7 +23454,15 @@ async function handleAdminPaymentsListRequest(
     .sort((a, b) => (Date.parse(b.creditedAt ?? '') || 0) - (Date.parse(a.creditedAt ?? '') || 0))
     .slice(0, topNFetchLimit)
 
-  const combinedRows: AdminPaymentListRow[] = [...coinTopN.rows, ...vipTopN, ...bundleTopN].sort((a, b) => {
+  // Персонализация: ЕДНА Stripe поръчка (1..4 екстри) = ЕДИН ред с общата
+  // платена сума. Безплатните admin предоставяния не са тук (отделна
+  // таблица). Оборотът е НЕТЕН: възстановената сума не се отчита като приход.
+  const customizationRowsForPeriod = profileCustomizationStore.getAdminPaymentListByPeriod({ period })
+  const customizationTopN = customizationRowsForPeriod
+    .slice(0, topNFetchLimit)
+    .map(({ netCents: _netCents, ...row }) => row)
+
+  const combinedRows: AdminPaymentListRow[] = [...coinTopN.rows, ...vipTopN, ...bundleTopN, ...customizationTopN].sort((a, b) => {
     const aTime = a.creditedAt ? Date.parse(a.creditedAt) : 0
     const bTime = b.creditedAt ? Date.parse(b.creditedAt) : 0
     if (bTime !== aTime) return bTime - aTime
@@ -23338,13 +23475,16 @@ async function handleAdminPaymentsListRequest(
   // period count от summary заявката вътре в coinPurchaseStore, независимо
   // от LIMIT-а подаден тук; vipRowsForPeriod/bundleRowsForPeriod са пълните
   // period набори за съответния source).
-  const total = coinTopN.total + vipRowsForPeriod.length + bundleRowsForPeriod.length
+  const total = coinTopN.total + vipRowsForPeriod.length + bundleRowsForPeriod.length + customizationRowsForPeriod.length
   const combinedTotalsByCurrency: Record<string, number> = { ...coinTopN.totalsByCurrency }
   for (const vipRow of vipRowsForPeriod) {
     combinedTotalsByCurrency[vipRow.currency] = (combinedTotalsByCurrency[vipRow.currency] ?? 0) + vipRow.priceCents
   }
   for (const bundleRow of bundleRowsForPeriod) {
     combinedTotalsByCurrency[bundleRow.currency] = (combinedTotalsByCurrency[bundleRow.currency] ?? 0) + bundleRow.priceCents
+  }
+  for (const customizationRow of customizationRowsForPeriod) {
+    combinedTotalsByCurrency[customizationRow.currency] = (combinedTotalsByCurrency[customizationRow.currency] ?? 0) + customizationRow.netCents
   }
 
   sendJsonResponse(res, 200, {
@@ -23425,10 +23565,12 @@ async function handleAdminPaymentDetailRequest(
   // fallback-а. Затова НЕ е добавен — не решава реален проблем, добавя query
   // param + client wiring само за да отпадне fallback логика, която все пак
   // трябва да остане.
+  const customizationDetail = profileCustomizationStore.getAdminPaymentDetail(purchaseId)
   const detail =
     coinPurchaseStore.getAdminPaymentDetail(purchaseId) ??
     vipPurchaseStore.getAdminPaymentDetail(purchaseId) ??
-    bundlePurchaseStore.getAdminPaymentDetail(purchaseId)
+    bundlePurchaseStore.getAdminPaymentDetail(purchaseId) ??
+    (customizationDetail !== null ? (({ netCents: _netCents, ...row }) => row)(customizationDetail) : null)
   if (!detail) {
     sendJsonResponse(res, 404, { ok: false, message: 'Плащането не е намерено.' })
     return true

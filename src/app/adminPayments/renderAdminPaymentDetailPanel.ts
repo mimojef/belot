@@ -246,10 +246,31 @@ export function renderAdminPaymentDetailPanel(
     row('Скрито от потребител', p.hiddenAt ? escapeHtml(formatSofiaDate(p.hiddenAt)) : '—'),
   ].join(''))
 
+  // Персонализация: всички екстри от ЕДНАТА Stripe поръчка (в стандартния
+  // section/row дизайн), общата платена сума и refund информацията.
+  const customization = p.customization
+  const EFFECT_LABELS: Record<string, string> = { new: 'нова', extend: 'удължаване', replace: 'замяна' }
+  const sectionCustomization = customization !== undefined
+    ? section('Персонализация', [
+        ...customization.items.map((item) => {
+          const visual = item.itemType === 'color'
+            ? `<span style="display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;background:${/^#[0-9A-Fa-f]{6}$/.test(item.itemValue) ? item.itemValue : 'transparent'};"></span> ${escapeHtml(item.itemLabel ?? '')} <span style="font-family:monospace;">${escapeHtml(item.itemValue)}</span>`
+            : `<span style="font-size:16px;">${escapeHtml(item.itemValue)}</span>`
+          return row(item.kindLabel, `${visual} · ${escapeHtml(String(item.days))} дни · <strong>${escapeHtml(formatMoney(item.priceCents, p.currency))}</strong>${item.grantEffect ? ` · ${escapeHtml(EFFECT_LABELS[item.grantEffect] ?? item.grantEffect)}` : ''}${item.grantedUntil ? ` · до ${escapeHtml(formatSofiaDate(item.grantedUntil))}` : ''}${item.status !== 'paid' ? ` · ${escapeHtml(item.status)}` : ''}`)
+        }),
+        row('Обща платена сума', `<strong style="color:#d4a520;">${escapeHtml(formatMoney(customization.totalCents, p.currency))}</strong>`),
+        row('Дата на плащане', customization.paidAt ? escapeHtml(formatSofiaDate(customization.paidAt)) : '—'),
+        row('Refund', customization.refundedAmountCents !== null && customization.refundedAmountCents > 0
+          ? `${escapeHtml(formatMoney(customization.refundedAmountCents, p.currency))}${customization.refundedAt ? ` · ${escapeHtml(formatSofiaDate(customization.refundedAt))}` : ''}${customization.refundReviewStatus === 'pending' ? ' · чака преглед' : customization.refundReviewStatus === 'reviewed' ? ' · прегледан' : ''}`
+          : '—'),
+      ].join(''))
+    : ''
+
   return `
     <section style="padding:0 4px;max-width:760px;" aria-label="Детайли за плащане">
       ${header}
       ${sectionA}
+      ${sectionCustomization}
       ${sectionB}
       ${sectionC}
       ${sectionD}

@@ -82,21 +82,24 @@ const store = await createProfileCustomizationStore(databaseFilePath)
 const sqliteModule = await import('node:sqlite')
 const db = new sqliteModule.DatabaseSync(databaseFilePath, { open: true })
 
-// Една платена покупка за таба "Покупки".
+// Една платена поръчка с ДВЕ екстри (едно плащане) за таба "Покупки".
 {
   const accountId = randomUUID()
   const profileId = randomUUID()
   db.prepare(`INSERT INTO accounts (account_id, email, password_hash) VALUES (?, ?, 'x');`).run(accountId, 'buyer@example.test')
   db.prepare(`INSERT INTO profiles (profile_id, account_id, display_name, normalized_display_name) VALUES (?, ?, 'Купувач<script>', 'купувач');`).run(profileId, accountId)
   store.updateKindSettings('emoji_before', { salesEnabled: true })
-  const created = store.createPendingPurchase({ profileId, kind: 'emoji_before', itemId: 'emoji-0130', days: 90 })
+  const created = store.createPendingOrder({ profileId, items: [{ kind: 'emoji_before', itemId: 'emoji-0130', days: 90 }, { kind: 'nickname_color', itemId: 'green-1', days: 30 }], ignoreSalesToggle: true })
   if (!created.ok) throw new Error(created.message)
-  store.attachCheckoutSession(created.purchase.purchaseId, 'cs_ui')
-  const paid = store.fulfillPaidPurchase({ checkoutSessionId: 'cs_ui', purchaseId: created.purchase.purchaseId, stripePaymentStatus: 'paid', stripeCurrency: 'EUR', stripeAmountTotalCents: created.purchase.priceCents, stripePaymentIntentId: 'pi_ui' })
+  store.attachOrderCheckoutSession(created.order.orderId, 'cs_ui')
+  const paid = store.fulfillPaidOrder({ checkoutSessionId: 'cs_ui', orderId: created.order.orderId, stripePaymentStatus: 'paid', stripeCurrency: 'EUR', stripeAmountTotalCents: created.order.totalCents, stripePaymentIntentId: 'pi_ui' })
   if (!paid.ok) throw new Error(paid.message)
   // Частичен refund -> чака администраторски преглед.
   store.applyRefund({ checkoutSessionId: 'cs_ui', refundedAmountCents: 100, stripeEventId: 'evt_ui_partial' })
   store.updateKindSettings('emoji_before', { salesEnabled: false })
+  // Безплатно предоставяне за таба "Предоставени" (одит, не плащане).
+  const granted = store.grantItems({ adminProfileId: null, adminDisplayName: 'Главен Админ', targetProfileId: profileId, items: [{ kind: 'message_color', itemId: 'purple-1', days: 60 }] })
+  if (!granted.ok) throw new Error(granted.message)
 }
 
 function failureStatus(result: ProfileCustomizationFailure): number {
@@ -151,8 +154,11 @@ async function serveRest(
   body: Record<string, any>,
   json: (status: number, payload: unknown) => Promise<void>,
 ): Promise<void> {
+  if (request.method() === 'GET' && sub === '/grants') {
+    return json(200, { ok: true, ...store.listGrants({ limit: Number(url.searchParams.get('limit') ?? 50), offset: Number(url.searchParams.get('offset') ?? 0) }) })
+  }
   if (request.method() === 'GET' && sub === '/purchases') {
-    return json(200, { ok: true, ...store.listAdminPurchases({ limit: Number(url.searchParams.get('limit') ?? 50), offset: Number(url.searchParams.get('offset') ?? 0), status: url.searchParams.get('status') }) })
+    return json(200, { ok: true, ...store.listAdminOrders({ limit: Number(url.searchParams.get('limit') ?? 50), offset: Number(url.searchParams.get('offset') ?? 0), status: url.searchParams.get('status') }) })
   }
   const kind = /^\/kinds\/([^/]+)$/.exec(sub)
   if (request.method() === 'PATCH' && kind) {
@@ -173,7 +179,7 @@ async function serveRest(
   if (request.method() === 'POST' && review) {
     return store.markRefundReviewed(decodeURIComponent(review[1] as string))
       ? json(200, { ok: true, pendingRefundReviews: store.countPendingRefundReviews() })
-      : json(404, { ok: false, message: 'Няма покупка, която чака преглед.' })
+      : json(404, { ok: false, message: 'Няма поръчка, която чака преглед.' })
   }
   const item = /^\/(colors|emojis)\/([^/]+)$/.exec(sub)
   if (request.method() === 'PATCH' && item) {
@@ -348,11 +354,14 @@ try {
 
   console.log('\n[U] Покупки')
 
-  await check('[U1] Платената покупка се вижда с вид, емоджи, срок, цена и ефект; името е escape-нато', async () => {
+  await check('[U1] Поръчката с две екстри е ЕДНА карта: двата реда (вид, артикул, срок, цена, ефект) и общата сума; името е escape-нато', async () => {
     await page.locator('[data-apc-tab="purchases"]').click()
     await page.locator('[data-apc-purchase]').first().waitFor()
+    assert(await page.locator('[data-apc-purchase]').count() === 1 && await page.locator('[data-apc-purchase]').first().getAttribute('data-apc-order-items') === '2', 'една поръчка с 2 реда')
+    assert(await page.locator('[data-apc-order-line]').count() === 2, 'два реда')
     const text = await page.locator('[data-apc-purchase]').first().innerText()
-    assert(text.includes('Емоджи пред никнейма') && text.includes('90 дни') && text.includes('Платена') && text.includes('Нова') && text.includes('Купувач<script>'), text)
+    assert(text.includes('2 екстри') && /общо 7,96\s€/.test(text) && text.includes('Емоджи пред никнейма') && text.includes('90 дни') && text.includes('Цвят на никнейма') && text.includes('30 дни') && text.includes('Платена') && text.includes('Нова') && text.includes('Купувач<script>'), text)
+    assert(text.includes('възстановени 1,00') && text.includes('частично'), 'частичният refund е на поръчката')
     await shot(page, 'desktop-purchases')
   })
 
@@ -360,9 +369,19 @@ try {
     await page.locator('[data-apc-purchases-status="1"]').selectOption('review_pending')
     await page.locator('[data-apc-mark-reviewed]').first().waitFor()
     assert(await page.locator('[data-apc-review-pending="1"]').count() === 1, 'значка')
+    assert((await page.locator('[data-apc-purchase]').first().innerText()).includes('не може да се определи коя е засегната'), 'обяснение за поръчка с няколко екстри')
     await page.locator('[data-apc-mark-reviewed]').first().click()
     await page.waitForFunction(() => document.querySelector('[data-apc-review-banner="1"]') === null && document.querySelector('[data-apc-mark-reviewed]') === null)
     assert(store.countPendingRefundReviews() === 0, 'в базата')
+  })
+
+  await check('[U1c] Таб "Предоставени": одитът показва получател, admin, артикул, +дни, ефект, нов срок; означено като безплатно (не плащане)', async () => {
+    await page.locator('[data-apc-tab="grants"]').click()
+    await page.locator('[data-apc-grant]').first().waitFor()
+    const text = await page.locator('[data-apc-grant]').first().innerText()
+    assert(text.includes('Купувач<script>') && text.includes('Главен Админ') && text.includes('Цвят на текста') && text.includes('+60 дни') && text.includes('Безплатно') && text.includes('валидно до'), text)
+    assert((await page.locator('#admin-profile-customization-panel').innerText()).includes('не влизат в оборота'), 'пояснение')
+    await shot(page, 'desktop-grants')
   })
 
   await check('[U2] Escape затваря панела; без грешки в страницата', async () => {

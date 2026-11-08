@@ -616,6 +616,8 @@ export type CreateLobbyFlowControllerOptions = {
   onProfileSelfDeleteRequest?: () => void
   /** Персонализация (Етап 2) — "Персонализация" в собствения профил: main.ts отваря прозореца. */
   onProfileCustomizationRequest?: () => void
+  /** Пълен admin, чужд профил: main.ts отваря прозореца в административен режим ("Приложи безплатно"). */
+  onAdminProfileCustomizationGrantRequest?: (profileId: string) => void
   /** Етап 4J — admin меню "Заявки за изтриване": main.ts отваря панела. */
   onAdminProfileDeletionsRequest?: () => void
   /** "Персонализация" (Етап 1) — admin меню: main.ts отваря панела. */
@@ -6554,6 +6556,9 @@ export function createLobbyFlowController(
       },
       onProfileCustomizeClick: () => {
         getPopupCallbacks().onCustomizeClick?.()
+      },
+      onProfileAdminCustomizeClick: (profileId) => {
+        getPopupCallbacks().onAdminCustomizeClick?.(profileId)
       },
       onProfileShopTabClick: (tab) => {
         getPopupCallbacks().onShopTabClick(tab)
@@ -21050,6 +21055,9 @@ export function createLobbyFlowController(
       },
       onCustomizeClick: () => {
         options.onProfileCustomizationRequest?.()
+      },
+      onAdminCustomizeClick: (profileId) => {
+        if (profileId !== null) options.onAdminProfileCustomizationGrantRequest?.(profileId)
       },
       onShopTabClick: (tab) => {
         // Същият път като останалите "отвори магазина на раздел" входове

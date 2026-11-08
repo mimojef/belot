@@ -86,7 +86,32 @@ export type AdminPaymentPeriod = SharedAdminPaymentPeriod
 // vip_purchase_ledger) — тия полета остават null за тях, НИКОГА не се
 // "измислят" за VIP. Bundle редовете имат И yellowCoinsAmount, И vipDays
 // едновременно (единична покупка credit-ва и двете).
-export type AdminPaymentSource = 'coin' | 'vip' | 'bundle'
+// 'profile_customization' — ЕДНА Stripe поръчка за 1..4 персонализации =
+// ЕДИН ред (profileCustomizationStore.getAdminPaymentListByPeriod); без
+// жълтици/VIP дни. Безплатните admin предоставяния НЕ са плащания.
+export type AdminPaymentSource = 'coin' | 'vip' | 'bundle' | 'profile_customization'
+
+/** Само за source 'profile_customization' — редовете на поръчката в "Детайли". */
+export type AdminPaymentCustomizationDetail = {
+  items: Array<{
+    kind: string
+    kindLabel: string
+    itemType: 'color' | 'emoji'
+    itemValue: string
+    itemLabel: string | null
+    days: number
+    priceCents: number
+    status: string
+    grantEffect: string | null
+    grantedUntil: string | null
+  }>
+  totalCents: number
+  paidAt: string | null
+  refundedAt: string | null
+  refundedAmountCents: number | null
+  refundReviewStatus: string | null
+  refundReviewReason: string | null
+}
 
 export type AdminPaymentListRow = {
   source: AdminPaymentSource
@@ -109,7 +134,8 @@ export type AdminPaymentListRow = {
   priceCents: number
   currency: string
   provider: string
-  status: CoinPurchaseStatus
+  // Персонализация: и 'partially_refunded' / 'refunded' (сумата в оборота е нетна).
+  status: CoinPurchaseStatus | 'partially_refunded' | 'refunded'
   providerCheckoutSessionId: string | null
   paymentMethodType: string | null
   walletType: string | null
@@ -162,6 +188,8 @@ export type AdminPaymentDetailRow = {
   currentYellowCoinsBalance: number | null
   recipientProfileId: string | null
   recipientDisplayName: string | null
+  /** Само за source 'profile_customization'. */
+  customization?: AdminPaymentCustomizationDetail
 }
 
 export type AdminPaymentListResult = {

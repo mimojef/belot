@@ -18,7 +18,32 @@ export function isAdminPaymentPeriod(v: unknown): v is AdminPaymentPeriod {
 // domain схема) — тия полета са nullable, НИКОГА "измислени" за VIP. Bundle
 // редовете имат И yellowCoinsAmount, И vipDays едновременно — единична
 // покупка credit-ва и двете.
-export type AdminPaymentSource = 'coin' | 'vip' | 'bundle'
+// 'profile_customization' — ЕДНА Stripe поръчка за 1..4 персонализации =
+// ЕДИН ред ("Персонализация", без жълтици/VIP дни); редовете ѝ са в
+// customization на детайлите.
+export type AdminPaymentSource = 'coin' | 'vip' | 'bundle' | 'profile_customization'
+
+/** Само за source 'profile_customization' — екстрите в поръчката. */
+export type AdminPaymentCustomizationDetail = {
+  items: Array<{
+    kind: string
+    kindLabel: string
+    itemType: 'color' | 'emoji'
+    itemValue: string
+    itemLabel: string | null
+    days: number
+    priceCents: number
+    status: string
+    grantEffect: string | null
+    grantedUntil: string | null
+  }>
+  totalCents: number
+  paidAt: string | null
+  refundedAt: string | null
+  refundedAmountCents: number | null
+  refundReviewStatus: string | null
+  refundReviewReason: string | null
+}
 
 export type AdminPaymentListRow = {
   source: AdminPaymentSource
@@ -107,4 +132,6 @@ export type AdminPaymentDetailRow = {
   currentYellowCoinsBalance: number | null
   recipientProfileId: string | null
   recipientDisplayName: string | null
+  /** Само за source 'profile_customization'. */
+  customization?: AdminPaymentCustomizationDetail
 }

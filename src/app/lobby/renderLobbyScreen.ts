@@ -1236,6 +1236,8 @@ export type RenderLobbyScreenOptions = {
   /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил (НЕ административното изтриване по-горе). */
   onProfileSelfDeleteClick: () => void
   onProfileCustomizeClick?: () => void
+  /** Пълен admin, чужд профил: "Персонализация" -> безплатно предоставяне. */
+  onProfileAdminCustomizeClick?: (profileId: string | null) => void
   /** Собствен профил (светъл, телефон): "+" до баланса / "+ВИП" — отваря магазина на съответния раздел. */
   onProfileShopTabClick: (tab: 'coins' | 'vip') => void
   onProfileRiskRecheckClick: (profileId: string | null) => void
@@ -1993,6 +1995,8 @@ export type ProfilePopupCallbacks = {
   onCampaignViewAllRewardsToggle: (profileId: string | null) => void
   onSelfDeleteClick: () => void
   onCustomizeClick?: () => void
+  /** Пълен admin, чужд профил -> безплатно предоставяне на персонализация. */
+  onAdminCustomizeClick?: (profileId: string | null) => void
   onShopTabClick: (tab: 'coins' | 'vip') => void
 }
 
@@ -2110,6 +2114,12 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     revokeMarketingEl.addEventListener('mouseenter', () => { revokeMarketingEl.style.textDecoration = 'underline' })
     revokeMarketingEl.addEventListener('mouseleave', () => { revokeMarketingEl.style.textDecoration = 'none' })
   }
+  el.querySelectorAll<HTMLElement>('[data-player-profile-admin-customize="1"]').forEach((adminCustomizeEl) => {
+    adminCustomizeEl.addEventListener('click', () => { cb.onAdminCustomizeClick?.(profileId) })
+    adminCustomizeEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); cb.onAdminCustomizeClick?.(profileId) }
+    })
+  })
   const vipGrantOpenEl = el.querySelector<HTMLElement>('[data-player-profile-vip-grant-open="1"]')
   if (vipGrantOpenEl) {
     vipGrantOpenEl.addEventListener('click', () => {
@@ -20206,6 +20216,7 @@ export function renderLobbyScreen(
       onCampaignViewAllRewardsToggle: options.onProfileCampaignViewAllRewardsToggle,
       onSelfDeleteClick: options.onProfileSelfDeleteClick,
       onCustomizeClick: options.onProfileCustomizeClick,
+      onAdminCustomizeClick: options.onProfileAdminCustomizeClick,
       onShopTabClick: options.onProfileShopTabClick,
     },
   )

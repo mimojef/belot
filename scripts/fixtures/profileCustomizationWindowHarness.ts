@@ -7,13 +7,14 @@ import { showProfileCustomizationWindow, type ProfileCustomizationWindowDeps } f
 const navigations: string[] = []
 
 ;(window as unknown as { __customizationHarness: unknown }).__customizationHarness = {
-  open: (theme: 'dark' | 'light', stripeReturn: ProfileCustomizationWindowDeps['stripeReturn'] = null) => {
+  open: (theme: 'dark' | 'light', stripeReturn: ProfileCustomizationWindowDeps['stripeReturn'] = null, adminGrant: ProfileCustomizationWindowDeps['adminGrant'] = null) => {
     showProfileCustomizationWindow({
       getApiBaseUrl: () => '',
       displayName: 'Мишо<b>',
       theme,
       stripeReturn,
       navigateToCheckout: (url) => { navigations.push(url) },
+      adminGrant,
     })
   },
   navigations: () => [...navigations],

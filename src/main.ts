@@ -1136,6 +1136,7 @@ function openAdminProfileDeletionsPanel(): void {
  */
 function openProfileCustomizationWindow(stripeReturn: ProfileCustomizationWindowDeps['stripeReturn'] = null): void {
   if (currentAuthSession === null || currentAuthSession.profileCustomizationAvailable !== true) return
+  const ownProfileId = currentAuthSession.profile.profileId
   showProfileCustomizationWindow({
     getApiBaseUrl,
     displayName: currentAuthSession.profile.displayName,
@@ -1143,6 +1144,31 @@ function openProfileCustomizationWindow(stripeReturn: ProfileCustomizationWindow
     nameHighlightRole: currentAuthSession.account.role,
     stripeReturn,
     navigateToCheckout: (url) => { window.location.assign(url) },
+    // Пълен admin в собствения профил: И "Плати" (реален Stripe), И "Приложи
+    // безплатно (Админ)". Сървърът проверява ролята при всяка заявка.
+    adminGrant: currentAuthSession.account.role === 'admin' && ownProfileId !== null
+      ? { targetProfileId: ownProfileId, isSelf: true }
+      : null,
+  })
+}
+
+/** Пълен admin в ЧУЖД профил: "Персонализация" -> само безплатно предоставяне (без Stripe). */
+function openAdminProfileCustomizationGrantWindow(targetProfileId: string): void {
+  // Само UI предпазител — сървърът проверява ролята при всяка заявка.
+  if (currentAuthSession?.account.role !== 'admin') return
+  if (targetProfileId === currentAuthSession.profile.profileId) {
+    openProfileCustomizationWindow()
+    return
+  }
+  showProfileCustomizationWindow({
+    getApiBaseUrl,
+    // Никът и ролята на получателя идват от сървъра (target в snapshot-а).
+    displayName: '',
+    theme: isLobbyMobileLightFrameActive() ? 'light' : 'dark',
+    nameHighlightRole: null,
+    stripeReturn: null,
+    navigateToCheckout: () => { /* в административен режим няма плащане */ },
+    adminGrant: { targetProfileId, isSelf: false },
   })
 }
 
@@ -7338,6 +7364,7 @@ lobby = createLobbyFlowController({
   onAdminProfileDeletionsRequest: () => openAdminProfileDeletionsPanel(),
   onAdminProfileCustomizationRequest: () => openAdminProfileCustomizationPanel(),
   onProfileCustomizationRequest: () => openProfileCustomizationWindow(),
+  onAdminProfileCustomizationGrantRequest: (profileId) => openAdminProfileCustomizationGrantWindow(profileId),
   onRegisterSubmit: (displayName, email, password, gender) =>
     {
       const validation = validateProfileDisplayName(displayName)

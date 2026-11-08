@@ -3,25 +3,34 @@
 // (миграция 20261107_001_create_profile_customization.sql).
 //
 // Платежният поток е mirror на vipPurchaseStore.ts (същата Stripe
-// инфраструктура, не паралелна): createPendingPurchase -> Stripe Checkout ->
-// fulfillPaidPurchase, извикан САМО от webhook-а за checkout.session.completed.
-// Клиентски redirect не активира нищо.
+// инфраструктура, не паралелна), но за обща поръчка с 1..4 екстри
+// (миграция 20261108_001): createPendingOrder -> ЕДНА Stripe Checkout сесия ->
+// fulfillPaidOrder, извикан САМО от webhook-а за checkout.session.completed.
+// Клиентски redirect не активира нищо. Сумата/плащането/refund-ът/прегледът
+// са на поръчката; всеки ред е отделно платено право със собствен срок.
 //
-// Правила при кредитиране (в ЕДНА BEGIN IMMEDIATE транзакция с CAS
-// pending->paid, така че повторен/конкурентен webhook не кредитира два пъти):
-//   * същият артикул е активен      -> 'extend':  срокът += дните;
-//   * друг артикул е активен         -> 'replace': новият е активен веднага,
-//                                       оставащото време на стария се губи;
-//   * няма активен (или е изтекъл)   -> 'new':     нова верига от сега.
-// Четирите вида са напълно независими (отделен ред в
-// profile_customization_active на (profile_id, kind)).
+// Правила при кредитиране — за всеки ред (в ЕДНА BEGIN IMMEDIATE транзакция
+// за цялата поръчка с CAS pending->paid, така че повторен/конкурентен webhook
+// не кредитира два пъти и няма частично активирана поръчка):
+//   * същият вариант е притежаван и валиден -> 'extend': срокът му += дните
+//                                              (без второ копие в инвентара);
+//   * иначе (не е притежаван или е изтекъл) -> 'new': вариантът се добавя в
+//                                              инвентара с нова верига от сега
+//                                              и автоматично става използван.
+// Инвентар (миграция 20261108_002): всеки притежаван вариант има собствен
+// срок (profile_customization_owned_items); използва се най-много един на
+// вид (profile_customization_equipped). Покупка на друг вариант НЕ губи дни
+// ('replace' остава само в старите записи). "Използвай"/"Премахни" сменят
+// само използвания — безплатно, без промяна на правата и сроковете.
 //
-// Refund (applyRefund): пълното възстановяване маркира покупката 'refunded'.
-// Ако тя е от ТЕКУЩАТА верига, срокът се преизчислява като
-// начало_на_веригата + сума(дни на оставащите платени покупки във веригата) —
-// следващите удължавания запазват всичките си дни, а само възстановените дни
-// изчезват. Покупка от вече заменена верига не променя текущата екстра.
-// Частичното възстановяване се записва, без да променя правата (за преглед).
+// Refund (applyRefund): пълното възстановяване на поръчката маркира нея и
+// всичките ѝ редове 'refunded'. За всеки ред от ТЕКУЩАТА верига срокът се
+// преизчислява като начало_на_веригата + сума(дни на оставащите платени
+// покупки във веригата) — следващите удължавания (и от други поръчки)
+// запазват всичките си дни, а само възстановените дни изчезват. Ред от вече
+// заменена верига не променя текущата екстра. Частичното възстановяване не
+// може да се отнесе еднозначно към конкретна екстра — записва се, без да
+// променя правата, и поръчката чака администраторски преглед.
 //
 // Store-ът не проверява feature flag-а — това е отговорност на HTTP/WS
 // слоя (profileCustomizationFeatureFlag.ts), за да може webhook-ът винаги да
@@ -30,7 +39,8 @@
 import { randomUUID } from 'node:crypto'
 import type { PurchaseFulfillmentFailure } from '../db/purchaseFulfillmentFailure.js'
 import { isTransientDatabaseError } from '../db/classifyFulfillmentError.js'
-import type { PaymentMethodSnapshot } from '../db/coinPurchaseStore.js'
+import type { AdminPaymentDetailRow, AdminPaymentListRow, PaymentMethodSnapshot } from '../db/coinPurchaseStore.js'
+import { buildPeriodWhereClause, type AdminPaymentPeriod } from '../db/sofiaDayBounds.js'
 import {
   PROFILE_CUSTOMIZATION_COLOR_LABEL_MAX_LENGTH,
   PROFILE_CUSTOMIZATION_DAY_MS,
@@ -104,6 +114,12 @@ export type ProfileCustomizationActiveItem = {
   remainingDays: number
 }
 
+/** Притежаван и неизтекъл вариант в "Моите персонализации". */
+export type ProfileCustomizationOwnedItem = ProfileCustomizationActiveItem & {
+  /** true = "Използва се" (най-много един на вид); false = "Наличен". */
+  equipped: boolean
+}
+
 /**
  * Само визуалните стойности — за груповото извличане при показване на
  * съобщения (Етап 3). *Until е изтичането на съответната екстра (ISO) —
@@ -153,8 +169,14 @@ export type ProfileCustomizationRefundReviewStatus = 'pending' | 'reviewed'
 
 export type ProfileCustomizationRefundReviewReason = 'partial_refund' | 'refund_failed'
 
+/**
+ * Един ред от поръчката = едно платено право (вид + артикул + срок). Сумата,
+ * Stripe сесията, refund-ът и прегледът са на ниво поръчка
+ * (ProfileCustomizationOrderSnapshot).
+ */
 export type ProfileCustomizationPurchaseSnapshot = {
   purchaseId: string
+  orderId: string | null
   kind: ProfileCustomizationKind
   itemId: string
   itemValue: string
@@ -163,8 +185,6 @@ export type ProfileCustomizationPurchaseSnapshot = {
   basePrice30DaysCents: number
   priceCents: number
   currency: string
-  provider: string
-  providerCheckoutSessionId: string | null
   status: ProfileCustomizationPurchaseStatus
   creditedAt: string | null
   grantEffect: ProfileCustomizationGrantEffect | null
@@ -172,15 +192,87 @@ export type ProfileCustomizationPurchaseSnapshot = {
   grantedUntil: string | null
   replacedItemValue: string | null
   replacedActiveUntil: string | null
+  /** Само при пълен refund на поръчката (или частичен на поръчка с един ред). */
   refundedAt: string | null
   refundedAmountCents: number | null
-  /** 'pending' = частичен refund, чака администраторски преглед. */
+  createdAt: string
+  updatedAt: string
+}
+
+/** Една Stripe поръчка/плащане с 1..4 отделни платени права. */
+export type ProfileCustomizationOrderSnapshot = {
+  orderId: string
+  status: ProfileCustomizationPurchaseStatus
+  itemCount: number
+  totalCents: number
+  currency: string
+  provider: string
+  providerCheckoutSessionId: string | null
+  paidAt: string | null
+  refundedAt: string | null
+  refundedAmountCents: number | null
+  /** 'pending' = чака администраторски преглед (частичен или неуспешен refund). */
   refundReviewStatus: ProfileCustomizationRefundReviewStatus | null
   refundReviewReason: ProfileCustomizationRefundReviewReason | null
   refundReviewedAt: string | null
   refundReviewedByDisplayName: string | null
   createdAt: string
   updatedAt: string
+  /** Подредени по вид (nickname_color, message_color, emoji_before, emoji_after). */
+  lines: ProfileCustomizationPurchaseSnapshot[]
+}
+
+export type ProfileCustomizationOrderItemInput = { kind: string; itemId: string; days: number }
+
+export type ProfileCustomizationOrderInput = {
+  profileId: string
+  items: readonly ProfileCustomizationOrderItemInput[]
+  now?: Date
+  /** Само за пълен admin в режим "Само админ" (тест без публична продажба). */
+  ignoreSalesToggle?: boolean
+}
+
+/** Безплатно предоставяне от пълен admin (без цена/Stripe/жълтици). */
+export type ProfileCustomizationGrantInput = {
+  /** Кой admin (одит; FK SET NULL при изтриване). */
+  adminProfileId: string | null
+  adminDisplayName: string | null
+  /** Получателят — чужд профил или собственият на admin. */
+  targetProfileId: string
+  items: readonly ProfileCustomizationOrderItemInput[]
+  now?: Date
+}
+
+/** Един ред от одита на предоставянията (= едно предоставено право). */
+export type ProfileCustomizationGrantRecord = {
+  grantId: string
+  /** Общо за редовете от едно "Приложи безплатно". */
+  batchId: string
+  profileId: string | null
+  targetDisplayName: string | null
+  kind: ProfileCustomizationKind
+  kindLabel: string
+  itemType: ProfileCustomizationItemType
+  itemId: string
+  itemValue: string
+  itemLabel: string | null
+  days: number
+  grantEffect: 'new' | 'extend'
+  /** Новата крайна дата на варианта след предоставянето. */
+  grantedUntil: string
+  grantedByProfileId: string | null
+  grantedByDisplayName: string | null
+  createdAt: string
+}
+
+/** Ред за /admin/payments (формата на AdminPaymentListRow + нетната сума за оборота). */
+export type ProfileCustomizationAdminPaymentRow = AdminPaymentListRow & { netCents: number }
+export type ProfileCustomizationAdminPaymentDetail = AdminPaymentDetailRow & { netCents: number }
+
+export type ProfileCustomizationOrderPreview = {
+  lines: ProfileCustomizationPurchasePreview[]
+  totalCents: number
+  currency: 'EUR'
 }
 
 export type ProfileCustomizationFailureCode =
@@ -200,8 +292,14 @@ export type ProfileCustomizationFailureCode =
   | 'invalid_category'
   | 'duplicate'
   | 'not_found'
+  | 'empty_order'
+  | 'too_many_items'
+  | 'duplicate_kind'
+  | 'not_owned'
+  | 'expired'
 
-export type ProfileCustomizationFailure = { ok: false; code: ProfileCustomizationFailureCode; message: string }
+/** kind — при поръчка: видът на реда, който е отказан. */
+export type ProfileCustomizationFailure = { ok: false; code: ProfileCustomizationFailureCode; message: string; kind?: ProfileCustomizationKind }
 
 export type ProfileCustomizationPurchasePreview = {
   kind: ProfileCustomizationKind
@@ -214,33 +312,38 @@ export type ProfileCustomizationPurchasePreview = {
    * Очакваният ефект СПОРЕД ТЕКУЩОТО състояние. Окончателният ефект се
    * определя при кредитирането (между двете състоянието може да се промени).
    */
+  /** 'extend' = вече притежаван валиден вариант; 'new' = добавя се в инвентара. */
   effect: ProfileCustomizationGrantEffect
+  /** Притежаваният валиден вариант, който се удължава (null при 'new'). */
   current: ProfileCustomizationActiveItem | null
-  /** Само при 'replace' — оставащите дни на текущата екстра, които ще се загубят. */
+  /** Винаги 0 — с инвентара покупка на друг вариант не губи дни (старото поле за 'replace'). */
   forfeitedDays: number
   resultingActiveUntil: string
 }
 
-export type FulfillPaidProfileCustomizationPurchaseParams = {
+export type FulfillPaidProfileCustomizationOrderParams = {
   checkoutSessionId: string
-  purchaseId: string
+  /** orderId от Stripe metadata — само кръстосана проверка (търсенето е по session id). */
+  orderId: string
   stripePaymentStatus: string
   stripeCurrency: string
   stripeAmountTotalCents: number
-  /** Записва се веднага, за да може refund да намери покупката и без enrichment. */
+  /** Записва се веднага, за да може refund да намери поръчката и без enrichment. */
   stripePaymentIntentId: string | null
   now?: Date
 }
 
-export type FulfillPaidProfileCustomizationPurchaseResult =
+export type ProfileCustomizationActiveItems = Record<ProfileCustomizationKind, ProfileCustomizationActiveItem | null>
+
+export type FulfillPaidProfileCustomizationOrderResult =
   | {
       ok: true
-      purchase: ProfileCustomizationPurchaseSnapshot
+      order: ProfileCustomizationOrderSnapshot
       payerProfileId: string | null
       alreadyCredited: boolean
-      /** Покупката е възстановена (refund) преди да бъде кредитирана — нищо не е активирано. */
+      /** Поръчката е възстановена (refund) преди да бъде кредитирана — нищо не е активирано. */
       refundedBeforeCredit: boolean
-      active: ProfileCustomizationActiveItem | null
+      active: ProfileCustomizationActiveItems
     }
   | PurchaseFulfillmentFailure
 
@@ -262,13 +365,13 @@ export type ApplyProfileCustomizationRefundResult =
         | 'recorded_before_credit'
         | 'already_refunded'
         | 'recorded_without_grant'
-      purchase: ProfileCustomizationPurchaseSnapshot
-      /** Текущата екстра от този вид след refund-а (null = няма активна). */
-      activeAfter: ProfileCustomizationActiveItem | null
+      order: ProfileCustomizationOrderSnapshot
+      /** Текущите екстри на купувача след refund-а (null = няма активна). */
+      activeAfter: ProfileCustomizationActiveItems
     }
   | { ok: false; reason: 'purchase_not_found' | 'invalid_request' | 'refund_failed'; transient?: boolean; message: string }
 
-export type ProfileCustomizationAdminPurchaseRow = ProfileCustomizationPurchaseSnapshot & {
+export type ProfileCustomizationAdminOrderRow = ProfileCustomizationOrderSnapshot & {
   profileId: string | null
   displayName: string | null
   username: string | null
@@ -316,8 +419,15 @@ export type ProfileCustomizationStore = {
   listEmojis: (options?: { includeInactive?: boolean }) => ProfileCustomizationEmoji[]
   addEmoji: (input: { emoji: string; categoryKey: string }) => { ok: true; emoji: ProfileCustomizationEmoji } | ProfileCustomizationFailure
   updateEmoji: (emojiId: string, patch: ProfileCustomizationEmojiPatch) => { ok: true; emoji: ProfileCustomizationEmoji } | ProfileCustomizationFailure
-  // Активни екстри
+  // Използвани екстри и инвентар
+  /** Използваните в момента (по една на вид, неизтекли). */
   getProfileActiveItems: (profileId: string, now?: Date) => Record<ProfileCustomizationKind, ProfileCustomizationActiveItem | null>
+  /** "Моите персонализации": всички притежавани неизтекли варианти. */
+  getProfileOwnedItems: (profileId: string, now?: Date) => ProfileCustomizationOwnedItem[]
+  /** "Използвай" — само притежаван и неизтекъл вариант; безплатно. */
+  equipItem: (input: { profileId: string; kind: string; itemId: string; now?: Date }) => { ok: true; active: ProfileCustomizationActiveItems; owned: ProfileCustomizationOwnedItem[] } | ProfileCustomizationFailure
+  /** "Премахни" — спира само визуалния ефект; правото остава. */
+  unequipItem: (input: { profileId: string; kind: string; now?: Date }) => { ok: true; removed: boolean; active: ProfileCustomizationActiveItems; owned: ProfileCustomizationOwnedItem[] } | ProfileCustomizationFailure
   /**
    * Групово извличане за показване на съобщения: ЕДНА заявка на до 500
    * профила (не заявка на автор/съобщение). Профил без активни екстри липсва
@@ -330,32 +440,48 @@ export type ProfileCustomizationStore = {
    * реалния поток, без да се включва публичната продажба на екстрата).
    */
   previewPurchase: (input: { profileId: string; kind: string; itemId: string; days: number; now?: Date; ignoreSalesToggle?: boolean }) => { ok: true; preview: ProfileCustomizationPurchasePreview } | ProfileCustomizationFailure
-  createPendingPurchase: (input: { profileId: string; kind: string; itemId: string; days: number; now?: Date; ignoreSalesToggle?: boolean }) => { ok: true; purchase: ProfileCustomizationPurchaseSnapshot; preview: ProfileCustomizationPurchasePreview } | ProfileCustomizationFailure
+  /** 1..4 реда, всеки вид най-много веднъж; цената е от админ настройката. */
+  previewOrder: (input: ProfileCustomizationOrderInput) => { ok: true; preview: ProfileCustomizationOrderPreview } | ProfileCustomizationFailure
+  /**
+   * Видима неплатена поръчка със същите редове (и същите цени) се използва
+   * повторно; иначе тя се скрива (отворената ѝ сесия още може да бъде
+   * платена) и се създава нова.
+   */
+  createPendingOrder: (input: ProfileCustomizationOrderInput) => { ok: true; order: ProfileCustomizationOrderSnapshot; preview: ProfileCustomizationOrderPreview } | ProfileCustomizationFailure
+  getOrderById: (orderId: string) => ProfileCustomizationOrderSnapshot | null
   getPurchaseById: (purchaseId: string) => ProfileCustomizationPurchaseSnapshot | null
-  getPurchaseOwnerProfileId: (purchaseId: string) => string | null
-  listProfilePurchases: (profileId: string) => ProfileCustomizationPurchaseSnapshot[]
-  attachCheckoutSession: (purchaseId: string, checkoutSessionId: string) => ProfileCustomizationPurchaseSnapshot | null
-  retirePendingPurchase: (purchaseId: string) => boolean
-  findByCheckoutSessionId: (checkoutSessionId: string) => ProfileCustomizationPurchaseSnapshot | null
+  attachOrderCheckoutSession: (orderId: string, checkoutSessionId: string) => ProfileCustomizationOrderSnapshot | null
+  retirePendingOrder: (orderId: string) => boolean
+  findOrderByCheckoutSessionId: (checkoutSessionId: string) => ProfileCustomizationOrderSnapshot | null
   /** Само ако сесията е на този профил (връщане от Stripe) — иначе null. */
-  findProfilePurchaseByCheckoutSessionId: (profileId: string, checkoutSessionId: string) => ProfileCustomizationPurchaseSnapshot | null
-  markPurchaseCanceledByCheckoutSessionId: (checkoutSessionId: string) => void
-  markPurchaseFailedByCheckoutSessionId: (checkoutSessionId: string) => void
-  fulfillPaidPurchase: (params: FulfillPaidProfileCustomizationPurchaseParams) => FulfillPaidProfileCustomizationPurchaseResult
+  findProfileOrderByCheckoutSessionId: (profileId: string, checkoutSessionId: string) => ProfileCustomizationOrderSnapshot | null
+  markOrderCanceledByCheckoutSessionId: (checkoutSessionId: string) => void
+  markOrderFailedByCheckoutSessionId: (checkoutSessionId: string) => void
+  fulfillPaidOrder: (params: FulfillPaidProfileCustomizationOrderParams) => FulfillPaidProfileCustomizationOrderResult
   applyRefund: (params: ApplyProfileCustomizationRefundParams) => ApplyProfileCustomizationRefundResult
-  needsPaymentMethodSnapshot: (purchaseId: string) => boolean
-  updatePaymentMethodSnapshot: (purchaseId: string, snapshot: PaymentMethodSnapshot) => void
+  needsPaymentMethodSnapshot: (orderId: string) => boolean
+  updatePaymentMethodSnapshot: (orderId: string, snapshot: PaymentMethodSnapshot) => void
+  // Безплатно предоставяне от admin (ролята се проверява в HTTP слоя)
+  grantItems: (input: ProfileCustomizationGrantInput) => { ok: true; batchId: string; grants: ProfileCustomizationGrantRecord[]; active: ProfileCustomizationActiveItems; owned: ProfileCustomizationOwnedItem[] } | ProfileCustomizationFailure
+  listGrants: (input: { limit: number; offset: number; profileId?: string | null }) => { rows: ProfileCustomizationGrantRecord[]; total: number }
+  getGrantTarget: (profileId: string) => { profileId: string; displayName: string; accountRole: string | null; eligible: boolean } | null
+  // /admin/payments — ЕДИН ред на Stripe поръчка (без безплатните предоставяния)
+  getAdminPaymentListByPeriod: (params: { period: AdminPaymentPeriod; now?: Date }) => ProfileCustomizationAdminPaymentRow[]
+  getAdminPaymentDetail: (orderId: string) => ProfileCustomizationAdminPaymentDetail | null
   // Режим на достъп
   getAccessState: () => ProfileCustomizationAccessState
   /** Записва нов режим (одит: кой/кога). Същият режим -> без нов запис. */
   setAccessMode: (mode: ProfileCustomizationAccessMode, actor: { profileId: string | null; displayName: string | null }) => { changed: boolean; state: ProfileCustomizationAccessState }
   listModeChanges: (limit: number) => ProfileCustomizationModeChange[]
   // Админ
-  listAdminPurchases: (input: { limit: number; offset: number; status?: string | null }) => { rows: ProfileCustomizationAdminPurchaseRow[]; total: number }
+  listAdminOrders: (input: { limit: number; offset: number; status?: string | null }) => { rows: ProfileCustomizationAdminOrderRow[]; total: number }
   getAdminKindStats: (now?: Date) => ProfileCustomizationAdminKindStats[]
   countPendingRefundReviews: () => number
-  /** Записва кой admin е прегледал и кога (само ако покупката чака преглед). */
-  markRefundReviewed: (purchaseId: string, actor?: { profileId: string | null; displayName: string | null }) => boolean
+  /**
+   * Записва кой admin е прегледал и кога (само ако поръчката чака преглед).
+   * id = id на поръчката или на неин ред.
+   */
+  markRefundReviewed: (orderOrPurchaseId: string, actor?: { profileId: string | null; displayName: string | null }) => boolean
   /**
    * Stripe refund е неуспешен/отменен (refund.failed / refund.updated /
    * charge.refund.updated). Нищо не се възстановява автоматично (по-нова
@@ -363,7 +489,7 @@ export type ProfileCustomizationStore = {
    * причина 'refund_failed'. Idempotent по Stripe refund id.
    */
   recordRefundFailure: (params: { checkoutSessionId?: string | null; paymentIntentId?: string | null; stripeRefundId: string; stripeEventId: string; now?: Date }) =>
-    | { ok: true; outcome: 'marked_for_review' | 'already_recorded'; purchase: ProfileCustomizationPurchaseSnapshot }
+    | { ok: true; outcome: 'marked_for_review' | 'already_recorded'; order: ProfileCustomizationOrderSnapshot }
     | { ok: false; reason: 'purchase_not_found' | 'invalid_request'; message: string }
   close: () => void
 }
@@ -411,6 +537,7 @@ type ActiveRow = {
 
 type PurchaseRow = {
   purchase_id: string
+  order_id: string | null
   profile_id: string | null
   kind: ProfileCustomizationKind
   item_id: string
@@ -420,8 +547,6 @@ type PurchaseRow = {
   base_price_30_days_cents_snapshot: number
   price_cents_snapshot: number
   currency: string
-  provider: string
-  provider_checkout_session_id: string | null
   status: ProfileCustomizationPurchaseStatus
   credited_at: string | null
   grant_effect: ProfileCustomizationGrantEffect | null
@@ -431,12 +556,29 @@ type PurchaseRow = {
   replaced_active_until_snapshot: string | null
   refunded_at: string | null
   refunded_amount_cents: number | null
+  created_at: string
+  updated_at: string
+}
+
+type OrderRow = {
+  order_id: string
+  profile_id: string | null
+  item_count: number
+  total_cents: number
+  currency: string
+  provider: string
+  provider_checkout_session_id: string | null
+  status: ProfileCustomizationPurchaseStatus
+  paid_at: string | null
+  refunded_at: string | null
+  refunded_amount_cents: number | null
   refund_review_status: ProfileCustomizationRefundReviewStatus | null
   refund_review_reason: ProfileCustomizationRefundReviewReason | null
   refund_reviewed_at: string | null
   refund_reviewed_by_display_name_snapshot: string | null
   refund_failed_refund_id: string | null
   stripe_payment_intent_id: string | null
+  hidden_at: string | null
   created_at: string
   updated_at: string
 }
@@ -444,13 +586,24 @@ type PurchaseRow = {
 type CatalogItem = { itemId: string; value: string; label: string | null; isActive: boolean }
 
 const PURCHASE_COLUMNS = `
-  purchase_id, profile_id, kind, item_id, item_value_snapshot, item_label_snapshot,
+  purchase_id, order_id, profile_id, kind, item_id, item_value_snapshot, item_label_snapshot,
   days_snapshot, base_price_30_days_cents_snapshot, price_cents_snapshot, currency,
-  provider, provider_checkout_session_id, status, credited_at, grant_effect, chain_id,
+  status, credited_at, grant_effect, chain_id,
   granted_until_snapshot, replaced_item_value_snapshot, replaced_active_until_snapshot,
-  refunded_at, refunded_amount_cents, refund_review_status, refund_review_reason, refund_reviewed_at,
-  refund_reviewed_by_display_name_snapshot, refund_failed_refund_id, stripe_payment_intent_id, created_at, updated_at
+  refunded_at, refunded_amount_cents, created_at, updated_at
 `
+
+const ORDER_COLUMNS = `
+  order_id, profile_id, item_count, total_cents, currency, provider, provider_checkout_session_id,
+  status, paid_at, refunded_at, refunded_amount_cents, refund_review_status, refund_review_reason,
+  refund_reviewed_at, refund_reviewed_by_display_name_snapshot, refund_failed_refund_id,
+  stripe_payment_intent_id, hidden_at, created_at, updated_at
+`
+
+/** Най-много една екстра от вид в поръчка — значи най-много 4 реда. */
+const PROFILE_CUSTOMIZATION_MAX_ORDER_ITEMS = PROFILE_CUSTOMIZATION_KINDS.length
+
+const KIND_ORDER_SQL = `CASE kind WHEN 'nickname_color' THEN 1 WHEN 'message_color' THEN 2 WHEN 'emoji_before' THEN 3 ELSE 4 END`
 
 // SQLite лимитът за bind параметри е много по-висок, но страниците в
 // Лафче/Теми са до 200 автора — chunk-ът е само предпазител.
@@ -473,6 +626,7 @@ function failure(code: ProfileCustomizationFailureCode, message: string): Profil
 function rowToPurchase(row: PurchaseRow): ProfileCustomizationPurchaseSnapshot {
   return {
     purchaseId: row.purchase_id,
+    orderId: row.order_id,
     kind: row.kind,
     itemId: row.item_id,
     itemValue: row.item_value_snapshot,
@@ -481,8 +635,6 @@ function rowToPurchase(row: PurchaseRow): ProfileCustomizationPurchaseSnapshot {
     basePrice30DaysCents: row.base_price_30_days_cents_snapshot,
     priceCents: row.price_cents_snapshot,
     currency: row.currency,
-    provider: row.provider,
-    providerCheckoutSessionId: row.provider_checkout_session_id,
     status: row.status,
     creditedAt: row.credited_at,
     grantEffect: row.grant_effect,
@@ -492,13 +644,39 @@ function rowToPurchase(row: PurchaseRow): ProfileCustomizationPurchaseSnapshot {
     replacedActiveUntil: row.replaced_active_until_snapshot,
     refundedAt: row.refunded_at,
     refundedAmountCents: row.refunded_amount_cents,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToOrder(row: OrderRow, lines: PurchaseRow[]): ProfileCustomizationOrderSnapshot {
+  return {
+    orderId: row.order_id,
+    status: row.status,
+    itemCount: row.item_count,
+    totalCents: row.total_cents,
+    currency: row.currency,
+    provider: row.provider,
+    providerCheckoutSessionId: row.provider_checkout_session_id,
+    paidAt: row.paid_at,
+    refundedAt: row.refunded_at,
+    refundedAmountCents: row.refunded_amount_cents,
     refundReviewStatus: row.refund_review_status ?? null,
     refundReviewReason: row.refund_review_reason ?? null,
     refundReviewedAt: row.refund_reviewed_at ?? null,
     refundReviewedByDisplayName: row.refund_reviewed_by_display_name_snapshot ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lines: lines.map(rowToPurchase),
   }
+}
+
+/** Подпис на редовете — за повторно използване на същата неплатена поръчка. */
+function orderLineSignature(lines: ReadonlyArray<{ kind: string; itemId: string; days: number; priceCents: number; basePrice30DaysCents: number; value: string }>): string {
+  return lines
+    .map((line) => `${line.kind}|${line.itemId}|${line.days}|${line.priceCents}|${line.basePrice30DaysCents}|${line.value}`)
+    .sort()
+    .join('\n')
 }
 
 function rowToColor(row: ColorRow): ProfileCustomizationColor {
@@ -629,21 +807,32 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     WHERE emoji_id = ?;
   `)
 
-  // ─── Statements: активни екстри ────────────────────────────────────────
-  const ACTIVE_COLUMNS = 'profile_id, kind, item_id, item_value_snapshot, item_label_snapshot, chain_id, chain_started_at, active_until'
-  const selectActiveRowsForProfileStatement = database.prepare(`
-    SELECT ${ACTIVE_COLUMNS} FROM profile_customization_active WHERE profile_id = ?;
+  // ─── Statements: инвентар (притежавани) и използвани екстри ────────────
+  // (миграция 20261108_002). profile_customization_active вече не се пише.
+  const OWNED_COLUMNS = 'profile_id, kind, item_id, item_value_snapshot, item_label_snapshot, chain_id, chain_started_at, active_until'
+  const selectOwnedRowStatement = database.prepare(`
+    SELECT ${OWNED_COLUMNS} FROM profile_customization_owned_items WHERE profile_id = ? AND kind = ? AND item_id = ?;
   `)
-  const selectActiveRowStatement = database.prepare(`
-    SELECT ${ACTIVE_COLUMNS} FROM profile_customization_active WHERE profile_id = ? AND kind = ?;
+  const selectOwnedRowsForProfileStatement = database.prepare(`
+    SELECT ${OWNED_COLUMNS} FROM profile_customization_owned_items
+    WHERE profile_id = ? AND active_until > ?
+    ORDER BY ${KIND_ORDER_SQL}, active_until DESC, item_id;
   `)
-  const upsertActiveRowStatement = database.prepare(`
-    INSERT INTO profile_customization_active (
+  const selectEquippedRowsForProfileStatement = database.prepare(`
+    SELECT ${OWNED_COLUMNS.split(',').map((column) => `o.${column.trim()}`).join(', ')}
+    FROM profile_customization_equipped e
+    JOIN profile_customization_owned_items o ON o.profile_id = e.profile_id AND o.kind = e.kind AND o.item_id = e.item_id
+    WHERE e.profile_id = ?;
+  `)
+  const selectEquippedItemIdStatement = database.prepare(`
+    SELECT item_id FROM profile_customization_equipped WHERE profile_id = ? AND kind = ?;
+  `)
+  const upsertOwnedRowStatement = database.prepare(`
+    INSERT INTO profile_customization_owned_items (
       profile_id, kind, item_id, item_value_snapshot, item_label_snapshot,
-      chain_id, chain_started_at, active_until, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(profile_id, kind) DO UPDATE SET
-      item_id = excluded.item_id,
+      chain_id, chain_started_at, active_until, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(profile_id, kind, item_id) DO UPDATE SET
       item_value_snapshot = excluded.item_value_snapshot,
       item_label_snapshot = excluded.item_label_snapshot,
       chain_id = excluded.chain_id,
@@ -651,18 +840,35 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       active_until = excluded.active_until,
       updated_at = excluded.updated_at;
   `)
-  const updateActiveUntilStatement = database.prepare(`
-    UPDATE profile_customization_active SET active_until = ?, updated_at = ?
-    WHERE profile_id = ? AND kind = ? AND chain_id = ?;
+  const updateOwnedUntilStatement = database.prepare(`
+    UPDATE profile_customization_owned_items SET active_until = ?, updated_at = ?
+    WHERE profile_id = ? AND kind = ? AND item_id = ? AND chain_id = ?;
   `)
-  const deleteActiveRowStatement = database.prepare(`
-    DELETE FROM profile_customization_active WHERE profile_id = ? AND kind = ? AND chain_id = ?;
+  const deleteOwnedRowStatement = database.prepare(`
+    DELETE FROM profile_customization_owned_items WHERE profile_id = ? AND kind = ? AND item_id = ? AND chain_id = ?;
   `)
+  const upsertEquippedStatement = database.prepare(`
+    INSERT INTO profile_customization_equipped (profile_id, kind, item_id, equipped_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(profile_id, kind) DO UPDATE SET item_id = excluded.item_id, equipped_at = excluded.equipped_at;
+  `)
+  const deleteEquippedStatement = database.prepare(`
+    DELETE FROM profile_customization_equipped WHERE profile_id = ? AND kind = ?;
+  `)
+  // Срокът на веригата = платените дни + безплатно предоставените дни
+  // (20261108_003). Refund отнема само платените — предоставените остават.
   const sumPaidChainDaysStatement = database.prepare(`
-    SELECT COALESCE(SUM(days_snapshot), 0) AS total_days
-    FROM profile_customization_purchases
-    WHERE chain_id = ? AND status = 'paid';
+    SELECT
+      (SELECT COALESCE(SUM(days_snapshot), 0) FROM profile_customization_purchases WHERE chain_id = ?1 AND status = 'paid')
+      + (SELECT COALESCE(SUM(days), 0) FROM profile_customization_grants WHERE chain_id = ?1) AS total_days;
   `)
+  const insertGrantStatement = database.prepare(`
+    INSERT INTO profile_customization_grants (
+      grant_id, batch_id, profile_id, target_display_name_snapshot, kind, item_id, item_value_snapshot,
+      item_label_snapshot, days, grant_effect, chain_id, granted_until_snapshot,
+      granted_by_profile_id, granted_by_display_name_snapshot, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+  `)
+  const selectProfileDisplayNameStatement = database.prepare(`SELECT display_name FROM profiles WHERE profile_id = ?;`)
 
   // ─── Statements: покупки ───────────────────────────────────────────────
   const selectEligibleProfileStatement = database.prepare(`
@@ -675,57 +881,65 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     LIMIT 1;
   `)
   const selectPurchaseStatement = database.prepare(`SELECT ${PURCHASE_COLUMNS} FROM profile_customization_purchases WHERE purchase_id = ?;`)
-  const selectPurchaseBySessionStatement = database.prepare(`SELECT ${PURCHASE_COLUMNS} FROM profile_customization_purchases WHERE provider_checkout_session_id = ?;`)
-  const selectPurchaseByPaymentIntentStatement = database.prepare(`
+  const selectOrderLinesStatement = database.prepare(`
     SELECT ${PURCHASE_COLUMNS} FROM profile_customization_purchases
+    WHERE order_id = ?
+    ORDER BY ${KIND_ORDER_SQL}, purchase_id;
+  `)
+  const selectOrderStatement = database.prepare(`SELECT ${ORDER_COLUMNS} FROM profile_customization_orders WHERE order_id = ?;`)
+  const selectOrderBySessionStatement = database.prepare(`SELECT ${ORDER_COLUMNS} FROM profile_customization_orders WHERE provider_checkout_session_id = ?;`)
+  const selectOrderByPaymentIntentStatement = database.prepare(`
+    SELECT ${ORDER_COLUMNS} FROM profile_customization_orders
     WHERE stripe_payment_intent_id = ?
     ORDER BY created_at DESC LIMIT 1;
   `)
-  const selectProfilePurchasesStatement = database.prepare(`
-    SELECT ${PURCHASE_COLUMNS} FROM profile_customization_purchases
-    WHERE profile_id = ?
-    ORDER BY created_at DESC LIMIT 50;
-  `)
-  const selectPendingPurchaseStatement = database.prepare(`
-    SELECT ${PURCHASE_COLUMNS} FROM profile_customization_purchases
-    WHERE profile_id = ? AND kind = ? AND item_id = ? AND days_snapshot = ?
-      AND status = 'pending' AND hidden_at IS NULL
+  const selectVisiblePendingOrderStatement = database.prepare(`
+    SELECT ${ORDER_COLUMNS} FROM profile_customization_orders
+    WHERE profile_id = ? AND status = 'pending' AND hidden_at IS NULL
     ORDER BY created_at DESC LIMIT 1;
   `)
-  const insertPendingPurchaseStatement = database.prepare(`
+  const insertPendingOrderStatement = database.prepare(`
+    INSERT INTO profile_customization_orders (
+      order_id, profile_id, item_count, total_cents, currency, provider, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'EUR', 'stripe', 'pending', ?, ?);
+  `)
+  const insertPendingLineStatement = database.prepare(`
     INSERT INTO profile_customization_purchases (
-      purchase_id, profile_id, kind, item_id, item_value_snapshot, item_label_snapshot,
+      purchase_id, order_id, profile_id, kind, item_id, item_value_snapshot, item_label_snapshot,
       days_snapshot, base_price_30_days_cents_snapshot, price_cents_snapshot, currency,
       provider, status, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'EUR', 'stripe', 'pending', ?, ?);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EUR', 'stripe', 'pending', ?, ?);
   `)
-  const retirePendingStatement = database.prepare(`
+  const retirePendingOrderStatement = database.prepare(`
+    UPDATE profile_customization_orders
+    SET hidden_at = ?, updated_at = ?
+    WHERE order_id = ? AND status = 'pending' AND hidden_at IS NULL;
+  `)
+  const retirePendingLinesStatement = database.prepare(`
     UPDATE profile_customization_purchases
     SET hidden_at = ?, updated_at = ?
-    WHERE purchase_id = ? AND status = 'pending' AND hidden_at IS NULL;
+    WHERE order_id = ? AND status = 'pending' AND hidden_at IS NULL;
   `)
-  const attachCheckoutSessionStatement = database.prepare(`
-    UPDATE profile_customization_purchases
+  const attachOrderCheckoutSessionStatement = database.prepare(`
+    UPDATE profile_customization_orders
     SET provider_checkout_session_id = ?, updated_at = ?
-    WHERE purchase_id = ? AND status = 'pending';
+    WHERE order_id = ? AND status = 'pending';
   `)
-  const markCanceledBySessionStatement = database.prepare(`
-    UPDATE profile_customization_purchases SET status = 'canceled', updated_at = ?
-    WHERE provider_checkout_session_id = ? AND status = 'pending';
+  const setOrderStatusFromPendingStatement = database.prepare(`
+    UPDATE profile_customization_orders SET status = ?, updated_at = ?
+    WHERE order_id = ? AND status = 'pending';
   `)
-  const markFailedBySessionStatement = database.prepare(`
-    UPDATE profile_customization_purchases SET status = 'failed', updated_at = ?
-    WHERE provider_checkout_session_id = ? AND status = 'pending';
+  const setLinesStatusFromPendingStatement = database.prepare(`
+    UPDATE profile_customization_purchases SET status = ?, updated_at = ?
+    WHERE order_id = ? AND status = 'pending';
   `)
   // CAS — само един от N конкурентни/повторени webhook-а минава
   // (WHERE status = 'pending'); губещите виждат changes = 0.
-  const markPaidStatement = database.prepare(`
-    UPDATE profile_customization_purchases
-    SET status = 'paid', credited_at = ?, grant_effect = ?, chain_id = ?, granted_until_snapshot = ?,
-        replaced_item_value_snapshot = ?, replaced_active_until_snapshot = ?,
-        stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?), updated_at = ?,
+  const markOrderPaidStatement = database.prepare(`
+    UPDATE profile_customization_orders
+    SET status = 'paid', paid_at = ?, stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?), updated_at = ?,
         -- Частичен refund, пристигнал ПРЕДИ кредитирането: правата се
-        -- активират, но покупката задължително чака преглед.
+        -- активират, но поръчката задължително чака преглед.
         refund_review_status = CASE
           WHEN COALESCE(refunded_amount_cents, 0) > 0 AND refund_review_status IS NULL THEN 'pending'
           ELSE refund_review_status
@@ -734,25 +948,35 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
           WHEN COALESCE(refunded_amount_cents, 0) > 0 AND refund_review_status IS NULL THEN 'partial_refund'
           ELSE refund_review_reason
         END
+    WHERE order_id = ? AND status = 'pending';
+  `)
+  const markLinePaidStatement = database.prepare(`
+    UPDATE profile_customization_purchases
+    SET status = 'paid', credited_at = ?, grant_effect = ?, chain_id = ?, granted_until_snapshot = ?,
+        replaced_item_value_snapshot = ?, replaced_active_until_snapshot = ?, updated_at = ?
     WHERE purchase_id = ? AND status = 'pending';
   `)
-  const markRefundReviewedStatement = database.prepare(`
-    UPDATE profile_customization_purchases
-    SET refund_review_status = 'reviewed', refund_reviewed_at = ?, updated_at = ?,
-        refund_reviewed_by_profile_id = ?, refund_reviewed_by_display_name_snapshot = ?
-    WHERE purchase_id = ? AND refund_review_status = 'pending';
-  `)
-  const markRefundedBeforeCreditStatement = database.prepare(`
-    UPDATE profile_customization_purchases
+  const markOrderRefundedBeforeCreditStatement = database.prepare(`
+    UPDATE profile_customization_orders
     SET status = 'refunded', stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?), updated_at = ?
-    WHERE purchase_id = ? AND status = 'pending';
+    WHERE order_id = ? AND status = 'pending';
   `)
-  const markRefundStatement = database.prepare(`
+  const markLineRefundedStatement = database.prepare(`
     UPDATE profile_customization_purchases
+    SET status = 'refunded', refunded_at = COALESCE(refunded_at, ?), refunded_amount_cents = price_cents_snapshot, updated_at = ?
+    WHERE purchase_id = ?;
+  `)
+  const markLinePartialRefundStatement = database.prepare(`
+    UPDATE profile_customization_purchases
+    SET refunded_at = COALESCE(refunded_at, ?), refunded_amount_cents = ?, updated_at = ?
+    WHERE purchase_id = ?;
+  `)
+  const markOrderRefundStatement = database.prepare(`
+    UPDATE profile_customization_orders
     SET status = ?, refunded_at = COALESCE(refunded_at, ?), refunded_amount_cents = ?,
         refund_stripe_event_id = ?, updated_at = ?,
         -- NULL = без промяна; 'pending' = частичен refund чака преглед (нова
-        -- по-голяма частична сума връща вече прегледана покупка за преглед).
+        -- по-голяма частична сума връща вече прегледана поръчка за преглед).
         refund_review_status = COALESCE(?, refund_review_status),
         -- При ново маркиране за преглед: причината и нулиране на предишния
         -- преглед (кой/кога) — иначе без промяна.
@@ -760,17 +984,23 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
         refund_reviewed_at = CASE WHEN ? IS NULL THEN refund_reviewed_at ELSE NULL END,
         refund_reviewed_by_profile_id = CASE WHEN ? IS NULL THEN refund_reviewed_by_profile_id ELSE NULL END,
         refund_reviewed_by_display_name_snapshot = CASE WHEN ? IS NULL THEN refund_reviewed_by_display_name_snapshot ELSE NULL END
-    WHERE purchase_id = ?;
+    WHERE order_id = ?;
+  `)
+  const markRefundReviewedStatement = database.prepare(`
+    UPDATE profile_customization_orders
+    SET refund_review_status = 'reviewed', refund_reviewed_at = ?, updated_at = ?,
+        refund_reviewed_by_profile_id = ?, refund_reviewed_by_display_name_snapshot = ?
+    WHERE order_id = ? AND refund_review_status = 'pending';
   `)
   const markRefundFailedStatement = database.prepare(`
-    UPDATE profile_customization_purchases
+    UPDATE profile_customization_orders
     SET refund_review_status = 'pending', refund_review_reason = 'refund_failed',
         refund_failed_refund_id = ?, refund_failed_at = ?, refund_stripe_event_id = ?, updated_at = ?,
         refund_reviewed_at = NULL, refund_reviewed_by_profile_id = NULL, refund_reviewed_by_display_name_snapshot = NULL
-    WHERE purchase_id = ?;
+    WHERE order_id = ?;
   `)
   const updatePaymentMethodSnapshotStatement = database.prepare(`
-    UPDATE profile_customization_purchases
+    UPDATE profile_customization_orders
     SET
       stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?),
       stripe_charge_id         = COALESCE(stripe_charge_id, ?),
@@ -780,11 +1010,11 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       card_last4               = COALESCE(card_last4, ?),
       card_country             = COALESCE(card_country, ?),
       updated_at               = ?
-    WHERE purchase_id = ?;
+    WHERE order_id = ?;
   `)
   const needsPaymentMethodSnapshotStatement = database.prepare(`
-    SELECT 1 FROM profile_customization_purchases
-    WHERE purchase_id = ? AND (stripe_charge_id IS NULL OR payment_method_type IS NULL)
+    SELECT 1 FROM profile_customization_orders
+    WHERE order_id = ? AND (stripe_charge_id IS NULL OR payment_method_type IS NULL)
     LIMIT 1;
   `)
 
@@ -827,8 +1057,9 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     return (selectPurchaseStatement.get(purchaseId) as PurchaseRow | undefined) ?? null
   }
 
-  function getLiveActiveRow(profileId: string, kind: ProfileCustomizationKind, nowIso: string): ActiveRow | null {
-    const row = selectActiveRowStatement.get(profileId, kind) as ActiveRow | undefined
+  /** Притежаван и неизтекъл вариант (профил + вид + артикул). */
+  function getLiveOwnedRow(profileId: string, kind: ProfileCustomizationKind, itemId: string, nowIso: string): ActiveRow | null {
+    const row = selectOwnedRowStatement.get(profileId, kind, itemId) as ActiveRow | undefined
     return row && row.active_until > nowIso ? row : null
   }
 
@@ -869,11 +1100,12 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     const item = resolveCatalogItem(kind, itemId)
     if (item === null) return failure('item_not_found', 'Избраният артикул не съществува.')
 
-    const current = getLiveActiveRow(profileId, kind, nowIso)
-    const isExtensionOfCurrent = current !== null && current.item_id === item.itemId
-    // Скрит артикул не се продава на нови купувачи, но собственикът на
-    // активния артикул може да го удължи ("Удължи").
-    if (!item.isActive && !isExtensionOfCurrent) {
+    // Същият вариант, който потребителят вече притежава (валиден) -> удължаване.
+    const owned = getLiveOwnedRow(profileId, kind, item.itemId, nowIso)
+    const isExtensionOfOwned = owned !== null
+    // Скрит артикул не се продава на нови купувачи, но притежателят на
+    // валиден вариант може да го удължи ("Удължи").
+    if (!item.isActive && !isExtensionOfOwned) {
       return failure('item_not_for_sale', 'Този артикул вече не се продава.')
     }
     if (getProfileCustomizationItemType(kind) === 'color' && isReservedOrNearReservedStaffColor(item.value)) {
@@ -883,16 +1115,11 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     const basePrice30DaysCents = settings.base_price_30_days_cents
     const priceCents = computeProfileCustomizationPriceCents(basePrice30DaysCents, days)
 
-    let effect: ProfileCustomizationGrantEffect = 'new'
-    let resultingActiveUntil = addDays(nowIso, days)
-    let forfeitedDays = 0
-    if (current !== null && isExtensionOfCurrent) {
-      effect = 'extend'
-      resultingActiveUntil = addDays(current.active_until, days)
-    } else if (current !== null) {
-      effect = 'replace'
-      forfeitedDays = computeProfileCustomizationRemainingDays(current.active_until, now)
-    }
+    // Инвентар: различен вариант се ДОБАВЯ (нищо не се губи) — 'replace'
+    // вече не се създава; съществува само в старите записи.
+    const effect: ProfileCustomizationGrantEffect = isExtensionOfOwned ? 'extend' : 'new'
+    const resultingActiveUntil = owned !== null ? addDays(owned.active_until, days) : addDays(nowIso, days)
+    const forfeitedDays = 0
 
     return {
       profileId,
@@ -909,7 +1136,7 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
         priceCents,
         currency: 'EUR',
         effect,
-        current: current !== null ? rowToActiveItem(current, now) : null,
+        current: owned !== null ? rowToActiveItem(owned, now) : null,
         forfeitedDays,
         resultingActiveUntil,
       },
@@ -1058,8 +1285,9 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     return { ok: true, emoji: rowToEmoji(selectEmojiStatement.get(row.emoji_id) as EmojiRow) }
   }
 
-  // ─── Активни екстри ────────────────────────────────────────────────────
+  // ─── Използвани екстри и инвентар ──────────────────────────────────────
 
+  /** Използваните в момента (най-много една на вид); изтекъл използван -> null (без автоматична замяна). */
   function getProfileActiveItems(profileId: string, now: Date = new Date()): Record<ProfileCustomizationKind, ProfileCustomizationActiveItem | null> {
     const result: Record<ProfileCustomizationKind, ProfileCustomizationActiveItem | null> = {
       nickname_color: null,
@@ -1070,10 +1298,64 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     const normalizedProfileId = normalizeId(profileId)
     if (normalizedProfileId.length === 0) return result
     const nowIso = now.toISOString()
-    for (const row of selectActiveRowsForProfileStatement.all(normalizedProfileId) as ActiveRow[]) {
+    for (const row of selectEquippedRowsForProfileStatement.all(normalizedProfileId) as ActiveRow[]) {
       if (row.active_until > nowIso) result[row.kind] = rowToActiveItem(row, now)
     }
     return result
+  }
+
+  /** "Моите персонализации": всички притежавани и неизтекли варианти + дали се използват. */
+  function getProfileOwnedItems(profileId: string, now: Date = new Date()): ProfileCustomizationOwnedItem[] {
+    const normalizedProfileId = normalizeId(profileId)
+    if (normalizedProfileId.length === 0) return []
+    const nowIso = now.toISOString()
+    const equipped = new Map((selectEquippedRowsForProfileStatement.all(normalizedProfileId) as ActiveRow[]).map((row) => [row.kind, row.item_id]))
+    return (selectOwnedRowsForProfileStatement.all(normalizedProfileId, nowIso) as ActiveRow[]).map((row) => ({
+      ...rowToActiveItem(row, now),
+      equipped: equipped.get(row.kind) === row.item_id,
+    }))
+  }
+
+  /**
+   * "Използвай": прави притежаван и неизтекъл вариант използван (предишният
+   * от същия вид става "Наличен"). Безплатно — правата/сроковете не се пипат.
+   */
+  function equipItem(input: { profileId: string; kind: string; itemId: string; now?: Date }): { ok: true; active: ProfileCustomizationActiveItems; owned: ProfileCustomizationOwnedItem[] } | ProfileCustomizationFailure {
+    const profileId = normalizeId(input.profileId)
+    const itemId = normalizeId(input.itemId)
+    if (profileId.length === 0 || itemId.length === 0) return failure('invalid_request', 'Невалидна заявка.')
+    if (!isProfileCustomizationKind(input.kind)) return failure('invalid_kind', 'Невалиден вид персонализация.')
+    const now = input.now ?? new Date()
+    const nowIso = now.toISOString()
+    // Проверка + запис в една транзакция (конкурентен refund/изтичане).
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const owned = selectOwnedRowStatement.get(profileId, input.kind, itemId) as ActiveRow | undefined
+      if (!owned) {
+        rollbackQuietly()
+        return failure('not_owned', 'Не притежаваш тази персонализация.')
+      }
+      if (owned.active_until <= nowIso) {
+        rollbackQuietly()
+        return failure('expired', 'Срокът на тази персонализация е изтекъл.')
+      }
+      upsertEquippedStatement.run(profileId, input.kind, itemId, nowIso)
+      database.exec('COMMIT;')
+    } catch (error) {
+      rollbackQuietly()
+      throw error
+    }
+    return { ok: true, active: getProfileActiveItems(profileId, now), owned: getProfileOwnedItems(profileId, now) }
+  }
+
+  /** "Премахни": спира само визуалния ефект; правото и срокът остават, без refund. */
+  function unequipItem(input: { profileId: string; kind: string; now?: Date }): { ok: true; removed: boolean; active: ProfileCustomizationActiveItems; owned: ProfileCustomizationOwnedItem[] } | ProfileCustomizationFailure {
+    const profileId = normalizeId(input.profileId)
+    if (profileId.length === 0) return failure('invalid_request', 'Невалидна заявка.')
+    if (!isProfileCustomizationKind(input.kind)) return failure('invalid_kind', 'Невалиден вид персонализация.')
+    const now = input.now ?? new Date()
+    const result = deleteEquippedStatement.run(profileId, input.kind) as { changes?: number }
+    return { ok: true, removed: (result.changes ?? 0) > 0, active: getProfileActiveItems(profileId, now), owned: getProfileOwnedItems(profileId, now) }
   }
 
   function getAppearancesForProfiles(profileIds: readonly string[], now: Date = new Date()): Map<string, ProfileCustomizationAppearance> {
@@ -1083,10 +1365,12 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     for (let start = 0; start < uniqueProfileIds.length; start += APPEARANCE_BATCH_CHUNK_SIZE) {
       const chunk = uniqueProfileIds.slice(start, start + APPEARANCE_BATCH_CHUNK_SIZE)
       const placeholders = chunk.map(() => '?').join(',')
+      // САМО използваният вариант на вид (и само ако не е изтекъл).
       const rows = database.prepare(`
-        SELECT profile_id, kind, item_value_snapshot, active_until
-        FROM profile_customization_active
-        WHERE profile_id IN (${placeholders}) AND active_until > ?;
+        SELECT e.profile_id, e.kind, o.item_value_snapshot, o.active_until
+        FROM profile_customization_equipped e
+        JOIN profile_customization_owned_items o ON o.profile_id = e.profile_id AND o.kind = e.kind AND o.item_id = e.item_id
+        WHERE e.profile_id IN (${placeholders}) AND o.active_until > ?;
       `).all(...chunk, nowIso) as Array<{ profile_id: string; kind: ProfileCustomizationKind; item_value_snapshot: string; active_until: string }>
       for (const row of rows) {
         const appearance = appearances.get(row.profile_id) ?? emptyAppearance()
@@ -1114,7 +1398,7 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     return appearances
   }
 
-  // ─── Покупки ───────────────────────────────────────────────────────────
+  // ─── Покупки (поръчки с 1..4 реда) ─────────────────────────────────────
 
   function previewPurchase(input: { profileId: string; kind: string; itemId: string; days: number; now?: Date; ignoreSalesToggle?: boolean }): { ok: true; preview: ProfileCustomizationPurchasePreview } | ProfileCustomizationFailure {
     const resolved = resolvePurchaseRequest(input)
@@ -1122,43 +1406,124 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     return { ok: true, preview: resolved.preview }
   }
 
-  function createPendingPurchase(input: { profileId: string; kind: string; itemId: string; days: number; now?: Date; ignoreSalesToggle?: boolean }): { ok: true; purchase: ProfileCustomizationPurchaseSnapshot; preview: ProfileCustomizationPurchasePreview } | ProfileCustomizationFailure {
-    const resolved = resolvePurchaseRequest(input)
+  /**
+   * Валидира цялата поръчка: 1..4 реда, всеки вид най-много веднъж, всеки ред
+   * поотделно (продажба, артикул, срок, запазен цвят). Обща сума = сумата на
+   * редовете (всеки = база × дни/30) — клиентът никога не подава цена.
+   */
+  function resolveOrderRequest(input: ProfileCustomizationOrderInput): { profileId: string; lines: ResolvedPurchaseRequest[]; preview: ProfileCustomizationOrderPreview } | ProfileCustomizationFailure {
+    if (!Array.isArray(input.items)) return failure('invalid_request', 'Невалидна заявка за покупка.')
+    if (input.items.length === 0) return failure('empty_order', 'Избери поне една персонализация.')
+    if (input.items.length > PROFILE_CUSTOMIZATION_MAX_ORDER_ITEMS) {
+      return failure('too_many_items', `Една поръчка може да съдържа най-много ${PROFILE_CUSTOMIZATION_MAX_ORDER_ITEMS} персонализации.`)
+    }
+    const seenKinds = new Set<string>()
+    const lines: ResolvedPurchaseRequest[] = []
+    for (const rawItem of input.items as readonly unknown[]) {
+      if (typeof rawItem !== 'object' || rawItem === null) return failure('invalid_request', 'Невалидна заявка за покупка.')
+      const item = rawItem as Record<string, unknown>
+      const kind = typeof item.kind === 'string' ? item.kind : ''
+      if (seenKinds.has(kind)) {
+        return { ...failure('duplicate_kind', 'Всяка персонализация може да присъства само веднъж в поръчката.'), ...(isProfileCustomizationKind(kind) ? { kind } : {}) }
+      }
+      seenKinds.add(kind)
+      const resolved = resolvePurchaseRequest({
+        profileId: input.profileId,
+        kind,
+        itemId: typeof item.itemId === 'string' ? item.itemId : '',
+        days: typeof item.days === 'number' ? item.days : Number.NaN,
+        now: input.now,
+        ignoreSalesToggle: input.ignoreSalesToggle,
+      })
+      if ('ok' in resolved) {
+        if (!isProfileCustomizationKind(kind)) return resolved
+        return { ...resolved, message: `${PROFILE_CUSTOMIZATION_KIND_LABELS[kind]}: ${resolved.message}`, kind }
+      }
+      lines.push(resolved)
+    }
+    lines.sort((a, b) => PROFILE_CUSTOMIZATION_KINDS.indexOf(a.kind) - PROFILE_CUSTOMIZATION_KINDS.indexOf(b.kind))
+    const totalCents = lines.reduce((sum, line) => sum + line.priceCents, 0)
+    return {
+      profileId: lines[0]!.profileId,
+      lines,
+      preview: { lines: lines.map((line) => line.preview), totalCents, currency: 'EUR' },
+    }
+  }
+
+  function previewOrder(input: ProfileCustomizationOrderInput): { ok: true; preview: ProfileCustomizationOrderPreview } | ProfileCustomizationFailure {
+    const resolved = resolveOrderRequest(input)
     if ('ok' in resolved) return resolved
-    const { profileId, kind, days, item, basePrice30DaysCents, priceCents, preview } = resolved
+    return { ok: true, preview: resolved.preview }
+  }
+
+  function getOrderRow(orderId: string): OrderRow | null {
+    return (selectOrderStatement.get(orderId) as OrderRow | undefined) ?? null
+  }
+
+  function getOrderLines(orderId: string): PurchaseRow[] {
+    return selectOrderLinesStatement.all(orderId) as PurchaseRow[]
+  }
+
+  function orderSnapshot(row: OrderRow): ProfileCustomizationOrderSnapshot {
+    return rowToOrder(row, getOrderLines(row.order_id))
+  }
+
+  function createPendingOrder(input: ProfileCustomizationOrderInput): { ok: true; order: ProfileCustomizationOrderSnapshot; preview: ProfileCustomizationOrderPreview } | ProfileCustomizationFailure {
+    const resolved = resolveOrderRequest(input)
+    if ('ok' in resolved) return resolved
+    const { profileId, lines, preview } = resolved
     const nowIso = (input.now ?? new Date()).toISOString()
-    const purchaseId = randomUUID()
-    let resultPurchaseId: string = purchaseId
+    const requestedSignature = orderLineSignature(lines.map((line) => ({
+      kind: line.kind,
+      itemId: line.item.itemId,
+      days: line.days,
+      priceCents: line.priceCents,
+      basePrice30DaysCents: line.basePrice30DaysCents,
+      value: line.item.value,
+    })))
+    let resultOrderId: string = randomUUID()
 
     try {
-      // Mirror на vipPurchaseStore.createPendingPurchase: видим pending ред за
-      // същия артикул/срок се преизползва САМО при същата цена и същия
-      // snapshot на артикула; иначе се скрива (отворена Stripe сесия за него
-      // може още да завърши по първоначалните условия) и се създава нов.
+      // Mirror на vipPurchaseStore.createPendingPurchase, но за цялата
+      // поръчка: видима неплатена поръчка със СЪЩИТЕ редове и цени се
+      // използва повторно; иначе се скрива (отворената ѝ Stripe сесия може
+      // още да завърши по първоначалните условия) и се създава нова.
       database.exec('BEGIN IMMEDIATE;')
-      const existing = selectPendingPurchaseStatement.get(profileId, kind, item.itemId, days) as PurchaseRow | undefined
-      if (
-        existing
-        && existing.price_cents_snapshot === priceCents
-        && existing.base_price_30_days_cents_snapshot === basePrice30DaysCents
-        && existing.item_value_snapshot === item.value
-      ) {
-        resultPurchaseId = existing.purchase_id
+      const existing = selectVisiblePendingOrderStatement.get(profileId) as OrderRow | undefined
+      const existingSignature = existing !== undefined
+        ? orderLineSignature(getOrderLines(existing.order_id).map((line) => ({
+            kind: line.kind,
+            itemId: line.item_id,
+            days: line.days_snapshot,
+            priceCents: line.price_cents_snapshot,
+            basePrice30DaysCents: line.base_price_30_days_cents_snapshot,
+            value: line.item_value_snapshot,
+          })))
+        : null
+      if (existing !== undefined && existingSignature === requestedSignature && existing.total_cents === preview.totalCents) {
+        resultOrderId = existing.order_id
       } else {
-        if (existing) retirePendingStatement.run(nowIso, nowIso, existing.purchase_id)
-        insertPendingPurchaseStatement.run(
-          purchaseId,
-          profileId,
-          kind,
-          item.itemId,
-          item.value,
-          item.label,
-          days,
-          basePrice30DaysCents,
-          priceCents,
-          nowIso,
-          nowIso,
-        )
+        if (existing !== undefined) {
+          retirePendingOrderStatement.run(nowIso, nowIso, existing.order_id)
+          retirePendingLinesStatement.run(nowIso, nowIso, existing.order_id)
+        }
+        insertPendingOrderStatement.run(resultOrderId, profileId, lines.length, preview.totalCents, nowIso, nowIso)
+        for (const line of lines) {
+          insertPendingLineStatement.run(
+            randomUUID(),
+            resultOrderId,
+            profileId,
+            line.kind,
+            line.item.itemId,
+            line.item.value,
+            line.item.label,
+            line.days,
+            line.basePrice30DaysCents,
+            line.priceCents,
+            nowIso,
+            nowIso,
+          )
+        }
       }
       database.exec('COMMIT;')
     } catch (error) {
@@ -1166,9 +1531,14 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       throw error
     }
 
-    const row = getPurchaseRow(resultPurchaseId)
+    const row = getOrderRow(resultOrderId)
     if (row === null) return failure('not_found', 'Поръчката не беше записана.')
-    return { ok: true, purchase: rowToPurchase(row), preview }
+    return { ok: true, order: orderSnapshot(row), preview }
+  }
+
+  function getOrderById(orderId: string): ProfileCustomizationOrderSnapshot | null {
+    const row = getOrderRow(normalizeId(orderId))
+    return row ? orderSnapshot(row) : null
   }
 
   function getPurchaseById(purchaseId: string): ProfileCustomizationPurchaseSnapshot | null {
@@ -1176,89 +1546,111 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     return row ? rowToPurchase(row) : null
   }
 
-  function getPurchaseOwnerProfileId(purchaseId: string): string | null {
-    return getPurchaseRow(normalizeId(purchaseId))?.profile_id ?? null
+  function attachOrderCheckoutSession(orderId: string, checkoutSessionId: string): ProfileCustomizationOrderSnapshot | null {
+    attachOrderCheckoutSessionStatement.run(checkoutSessionId, new Date().toISOString(), orderId)
+    return getOrderById(orderId)
   }
 
-  function listProfilePurchases(profileId: string): ProfileCustomizationPurchaseSnapshot[] {
-    const normalizedProfileId = normalizeId(profileId)
-    if (normalizedProfileId.length === 0) return []
-    return (selectProfilePurchasesStatement.all(normalizedProfileId) as PurchaseRow[]).map(rowToPurchase)
-  }
-
-  function attachCheckoutSession(purchaseId: string, checkoutSessionId: string): ProfileCustomizationPurchaseSnapshot | null {
-    attachCheckoutSessionStatement.run(checkoutSessionId, new Date().toISOString(), purchaseId)
-    return getPurchaseById(purchaseId)
-  }
-
-  function retirePendingPurchase(purchaseId: string): boolean {
+  function retirePendingOrder(orderId: string): boolean {
     const nowIso = new Date().toISOString()
-    const result = retirePendingStatement.run(nowIso, nowIso, purchaseId) as { changes?: number }
-    return (result.changes ?? 0) > 0
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const result = retirePendingOrderStatement.run(nowIso, nowIso, orderId) as { changes?: number }
+      retirePendingLinesStatement.run(nowIso, nowIso, orderId)
+      database.exec('COMMIT;')
+      return (result.changes ?? 0) > 0
+    } catch (error) {
+      rollbackQuietly()
+      throw error
+    }
   }
 
-  function findByCheckoutSessionId(checkoutSessionId: string): ProfileCustomizationPurchaseSnapshot | null {
-    const row = selectPurchaseBySessionStatement.get(checkoutSessionId) as PurchaseRow | undefined
-    return row ? rowToPurchase(row) : null
+  function findOrderByCheckoutSessionId(checkoutSessionId: string): ProfileCustomizationOrderSnapshot | null {
+    const row = selectOrderBySessionStatement.get(checkoutSessionId) as OrderRow | undefined
+    return row ? orderSnapshot(row) : null
   }
 
-  function markPurchaseCanceledByCheckoutSessionId(checkoutSessionId: string): void {
-    markCanceledBySessionStatement.run(new Date().toISOString(), checkoutSessionId)
+  function findProfileOrderByCheckoutSessionId(profileId: string, checkoutSessionId: string): ProfileCustomizationOrderSnapshot | null {
+    const row = selectOrderBySessionStatement.get(checkoutSessionId.trim()) as OrderRow | undefined
+    return row && row.profile_id !== null && row.profile_id === normalizeId(profileId) ? orderSnapshot(row) : null
   }
 
-  function markPurchaseFailedByCheckoutSessionId(checkoutSessionId: string): void {
-    markFailedBySessionStatement.run(new Date().toISOString(), checkoutSessionId)
+  /** Неплатена поръчка -> canceled/failed заедно с редовете ѝ (само от 'pending'). */
+  function closePendingOrderBySession(checkoutSessionId: string, status: 'canceled' | 'failed'): void {
+    const row = selectOrderBySessionStatement.get(checkoutSessionId) as OrderRow | undefined
+    if (!row || row.status !== 'pending') return
+    const nowIso = new Date().toISOString()
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const result = setOrderStatusFromPendingStatement.run(status, nowIso, row.order_id) as { changes?: number }
+      if ((result.changes ?? 0) > 0) setLinesStatusFromPendingStatement.run(status, nowIso, row.order_id)
+      database.exec('COMMIT;')
+    } catch (error) {
+      rollbackQuietly()
+      throw error
+    }
   }
 
-  function failureContext(row: PurchaseRow): Pick<PurchaseFulfillmentFailure, 'purchaseId' | 'payerProfileId' | 'expectedAmountCents' | 'expectedCurrency'> {
+  function markOrderCanceledByCheckoutSessionId(checkoutSessionId: string): void {
+    closePendingOrderBySession(checkoutSessionId, 'canceled')
+  }
+
+  function markOrderFailedByCheckoutSessionId(checkoutSessionId: string): void {
+    closePendingOrderBySession(checkoutSessionId, 'failed')
+  }
+
+  function failureContext(row: OrderRow): Pick<PurchaseFulfillmentFailure, 'purchaseId' | 'payerProfileId' | 'expectedAmountCents' | 'expectedCurrency'> {
     return {
-      purchaseId: row.purchase_id,
+      purchaseId: row.order_id,
       payerProfileId: row.profile_id,
-      expectedAmountCents: row.price_cents_snapshot,
+      expectedAmountCents: row.total_cents,
       expectedCurrency: row.currency,
     }
   }
 
-  function currentActiveItem(row: PurchaseRow, now: Date): ProfileCustomizationActiveItem | null {
-    if (row.profile_id === null) return null
-    const active = getLiveActiveRow(row.profile_id, row.kind, now.toISOString())
-    return active ? rowToActiveItem(active, now) : null
+  function activeItemsFor(profileId: string | null, now: Date): ProfileCustomizationActiveItems {
+    return profileId === null ? getProfileActiveItems('', now) : getProfileActiveItems(profileId, now)
   }
 
-  function alreadyCreditedResult(row: PurchaseRow, now: Date): FulfillPaidProfileCustomizationPurchaseResult {
+  function alreadyCreditedResult(row: OrderRow, now: Date, refundedBeforeCredit = false): FulfillPaidProfileCustomizationOrderResult {
     return {
       ok: true,
-      purchase: rowToPurchase(row),
+      order: orderSnapshot(row),
       payerProfileId: row.profile_id,
       alreadyCredited: true,
-      refundedBeforeCredit: false,
-      active: currentActiveItem(row, now),
+      refundedBeforeCredit,
+      active: activeItemsFor(row.profile_id, now),
     }
   }
 
-  function fulfillPaidPurchase(params: FulfillPaidProfileCustomizationPurchaseParams): FulfillPaidProfileCustomizationPurchaseResult {
+  /**
+   * Кредитиране на цялата поръчка — САМО от webhook-а. Една BEGIN IMMEDIATE
+   * транзакция: CAS на поръчката pending->paid, после всеки ред (CAS
+   * pending->paid + активната екстра). Грешка в който и да е ред връща
+   * всичко назад — няма частично активирана поръчка. Повторен/закъснял
+   * webhook вижда 'paid' и не кредитира втори път.
+   */
+  function fulfillPaidOrder(params: FulfillPaidProfileCustomizationOrderParams): FulfillPaidProfileCustomizationOrderResult {
     const now = params.now ?? new Date()
     const nowIso = now.toISOString()
 
-    // Търсене СТРОГО по checkout session id (UNIQUE) — purchaseId от
-    // metadata е само кръстосана проверка (mirror на vipPurchaseStore).
+    // Търсене СТРОГО по checkout session id (UNIQUE) — orderId от metadata е
+    // само кръстосана проверка.
     if (!params.checkoutSessionId) {
       return { ok: false, reason: 'purchase_not_found', message: 'Липсва checkout session id.' }
     }
-    const row = selectPurchaseBySessionStatement.get(params.checkoutSessionId) as PurchaseRow | undefined
+    const row = selectOrderBySessionStatement.get(params.checkoutSessionId) as OrderRow | undefined
     if (!row) {
-      return { ok: false, reason: 'purchase_not_found', message: 'Покупката не беше намерена за тази checkout сесия.' }
+      return { ok: false, reason: 'purchase_not_found', message: 'Поръчката не беше намерена за тази checkout сесия.' }
     }
-    if (params.purchaseId && row.purchase_id !== params.purchaseId) {
-      return { ok: false, reason: 'purchase_id_mismatch', message: 'Несъответствие между checkout сесията и purchaseId.', ...failureContext(row) }
+    if (params.orderId && row.order_id !== params.orderId) {
+      return { ok: false, reason: 'purchase_id_mismatch', message: 'Несъответствие между checkout сесията и orderId.', ...failureContext(row) }
     }
 
-    // Повторна доставка след кредитиране (вкл. по-късно възстановена покупка)
+    // Повторна доставка след кредитиране (вкл. по-късно възстановена поръчка)
     // — потвърждава се idempotent, без повторна проверка и без нов ефект.
-    if (row.credited_at !== null) return alreadyCreditedResult(row, now)
-    if (row.status === 'refunded') {
-      return { ok: true, purchase: rowToPurchase(row), payerProfileId: row.profile_id, alreadyCredited: true, refundedBeforeCredit: true, active: currentActiveItem(row, now) }
-    }
+    if (row.paid_at !== null) return alreadyCreditedResult(row, now)
+    if (row.status === 'refunded') return alreadyCreditedResult(row, now, true)
 
     if (params.stripePaymentStatus !== 'paid') {
       return { ok: false, reason: 'not_paid', message: `Stripe payment_status "${params.stripePaymentStatus}" не е "paid".` }
@@ -1266,11 +1658,16 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     if (params.stripeCurrency.toUpperCase() !== row.currency.toUpperCase()) {
       return { ok: false, reason: 'currency_mismatch', ...failureContext(row), message: `Валутата от Stripe (${params.stripeCurrency}) не съвпада с очакваната (${row.currency}).` }
     }
-    if (params.stripeAmountTotalCents !== row.price_cents_snapshot) {
-      return { ok: false, reason: 'amount_mismatch', ...failureContext(row), message: `Платената сума от Stripe (${params.stripeAmountTotalCents}) не съвпада с очакваната цена (${row.price_cents_snapshot}).` }
+    const lines = getOrderLines(row.order_id)
+    const linesTotal = lines.reduce((sum, line) => sum + line.price_cents_snapshot, 0)
+    if (lines.length !== row.item_count || linesTotal !== row.total_cents) {
+      return { ok: false, reason: 'amount_mismatch', ...failureContext(row), message: `Редовете на поръчката (${lines.length}, ${linesTotal}) не съвпадат с общата сума (${row.item_count}, ${row.total_cents}).` }
+    }
+    if (params.stripeAmountTotalCents !== row.total_cents) {
+      return { ok: false, reason: 'amount_mismatch', ...failureContext(row), message: `Платената сума от Stripe (${params.stripeAmountTotalCents}) не съвпада с очакваната обща сума (${row.total_cents}).` }
     }
     if (row.status !== 'pending') {
-      return { ok: false, reason: 'not_creditable', ...failureContext(row), message: `Покупката е в статус "${row.status}" и не може да бъде кредитирана.` }
+      return { ok: false, reason: 'not_creditable', ...failureContext(row), message: `Поръчката е в статус "${row.status}" и не може да бъде кредитирана.` }
     }
     if (row.profile_id === null) {
       return { ok: false, reason: 'not_creditable', ...failureContext(row), message: 'Профилът на купувача вече не съществува. Плащането не е кредитирано — необходим е ръчен преглед.' }
@@ -1278,63 +1675,42 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     const profileId = row.profile_id
     const paymentIntentId = params.stripePaymentIntentId?.trim() || null
 
-    let activeAfter: ProfileCustomizationActiveItem | null = null
     let refundedBeforeCredit = false
     try {
       database.exec('BEGIN IMMEDIATE;')
       // Пресен прочит вътре в транзакцията (конкурентен webhook/refund).
-      const fresh = getPurchaseRow(row.purchase_id) as PurchaseRow
+      const fresh = getOrderRow(row.order_id) as OrderRow
 
-      if (fresh.status === 'pending' && fresh.refunded_at !== null && (fresh.refunded_amount_cents ?? 0) >= fresh.price_cents_snapshot) {
+      if (fresh.status === 'pending' && fresh.refunded_at !== null && (fresh.refunded_amount_cents ?? 0) >= fresh.total_cents) {
         // Пълен refund пристигна ПРЕДИ checkout.session.completed — нищо не
-        // се активира, поръчката приключва като възстановена.
-        markRefundedBeforeCreditStatement.run(paymentIntentId, nowIso, fresh.purchase_id)
+        // се активира, поръчката и редовете приключват като възстановени.
+        markOrderRefundedBeforeCreditStatement.run(paymentIntentId, nowIso, fresh.order_id)
+        for (const line of getOrderLines(fresh.order_id)) {
+          if (line.status === 'pending') markLineRefundedStatement.run(nowIso, nowIso, line.purchase_id)
+        }
         refundedBeforeCredit = true
       } else {
-        const current = getLiveActiveRow(profileId, fresh.kind, nowIso)
-        let effect: ProfileCustomizationGrantEffect
-        let chainId: string
-        let chainStartedAt: string
-        let activeUntil: string
-        let replacedValue: string | null = null
-        let replacedUntil: string | null = null
-        if (current !== null && current.item_id === fresh.item_id) {
-          effect = 'extend'
-          chainId = current.chain_id
-          chainStartedAt = current.chain_started_at
-          activeUntil = addDays(current.active_until, fresh.days_snapshot)
-        } else {
-          effect = current !== null ? 'replace' : 'new'
-          if (current !== null) {
-            replacedValue = current.item_value_snapshot
-            replacedUntil = current.active_until
-          }
-          chainId = randomUUID()
-          chainStartedAt = nowIso
-          activeUntil = addDays(nowIso, fresh.days_snapshot)
-        }
-
-        const cas = markPaidStatement.run(
-          nowIso, effect, chainId, activeUntil, replacedValue, replacedUntil, paymentIntentId, nowIso, fresh.purchase_id,
-        ) as { changes?: number }
+        const cas = markOrderPaidStatement.run(nowIso, paymentIntentId, nowIso, fresh.order_id) as { changes?: number }
         if ((cas.changes ?? 0) === 0) {
           rollbackQuietly()
-          const after = getPurchaseRow(row.purchase_id)
-          if (after?.credited_at) return alreadyCreditedResult(after, now)
-          return { ok: false, reason: 'credit_failed', transient: true, message: 'Покупката вече беше обработена от друг процес.' }
+          const after = getOrderRow(row.order_id)
+          if (after?.paid_at) return alreadyCreditedResult(after, now)
+          return { ok: false, reason: 'credit_failed', transient: true, message: 'Поръчката вече беше обработена от друг процес.' }
         }
 
-        upsertActiveRowStatement.run(
-          profileId,
-          fresh.kind,
-          fresh.item_id,
-          fresh.item_value_snapshot,
-          fresh.item_label_snapshot,
-          chainId,
-          chainStartedAt,
-          activeUntil,
-          nowIso,
-        )
+        for (const line of getOrderLines(fresh.order_id)) {
+          if (line.status !== 'pending') {
+            throw new Error(`Редът ${line.purchase_id} е в статус "${line.status}" — поръчката не е кредитирана.`)
+          }
+          // Инвентар: виж creditOwnedItem (общо с безплатното предоставяне).
+          const credited = creditOwnedItem(profileId, line.kind, line.item_id, line.item_value_snapshot, line.item_label_snapshot, line.days_snapshot, nowIso)
+          const lineCas = markLinePaidStatement.run(
+            nowIso, credited.effect, credited.chainId, credited.activeUntil, null, null, nowIso, line.purchase_id,
+          ) as { changes?: number }
+          if ((lineCas.changes ?? 0) === 0) {
+            throw new Error(`Редът ${line.purchase_id} вече е обработен — поръчката не е кредитирана.`)
+          }
+        }
       }
       database.exec('COMMIT;')
     } catch (error) {
@@ -1348,12 +1724,297 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       }
     }
 
-    const fulfilled = getPurchaseRow(row.purchase_id)
+    const fulfilled = getOrderRow(row.order_id)
     if (fulfilled === null) {
-      return { ok: false, reason: 'credit_failed', transient: true, message: 'Персонализацията беше активирана, но покупката не може да се прочете.' }
+      return { ok: false, reason: 'credit_failed', transient: true, message: 'Персонализацията беше активирана, но поръчката не може да се прочете.' }
     }
-    activeAfter = currentActiveItem(fulfilled, now)
-    return { ok: true, purchase: rowToPurchase(fulfilled), payerProfileId: fulfilled.profile_id, alreadyCredited: false, refundedBeforeCredit, active: activeAfter }
+    return {
+      ok: true,
+      order: orderSnapshot(fulfilled),
+      payerProfileId: fulfilled.profile_id,
+      alreadyCredited: false,
+      refundedBeforeCredit,
+      active: activeItemsFor(fulfilled.profile_id, now),
+    }
+  }
+
+  /**
+   * Анулира правото на един ред (пълен refund на поръчката) — само в
+   * притежавания вариант, от който е редът, и само ако редът е от
+   * ТЕКУЩАТА му верига (иначе вариантът вече е бил изтекъл и купен наново).
+   * Срокът = начало на веригата + сума(дни на оставащите платени редове във
+   * веригата): другите удължавания на същия вариант (и от други поръчки)
+   * запазват всичките си дни; другите варианти не се пипат. Нула дни ->
+   * вариантът изчезва от инвентара (и от "използва се" — FK CASCADE), без
+   * автоматично използване на друг.
+   */
+  function revokeLineGrant(line: PurchaseRow, nowIso: string): void {
+    if (line.profile_id === null || line.chain_id === null) return
+    const owned = selectOwnedRowStatement.get(line.profile_id, line.kind, line.item_id) as ActiveRow | undefined
+    if (!owned || owned.chain_id !== line.chain_id) return
+    const remainingDays = (sumPaidChainDaysStatement.get(line.chain_id) as { total_days: number }).total_days
+    if (remainingDays <= 0) {
+      deleteOwnedRowStatement.run(line.profile_id, line.kind, line.item_id, line.chain_id)
+    } else {
+      updateOwnedUntilStatement.run(addDays(owned.chain_started_at, remainingDays), nowIso, line.profile_id, line.kind, line.item_id, line.chain_id)
+    }
+  }
+
+  /**
+   * Добавя дни към притежаван вариант — ОБЩО за платен ред и за безплатно
+   * предоставяне (извиква се вътре в транзакцията на извикващия):
+   *   * същият вариант е притежаван и валиден -> 'extend': срокът += дните
+   *     в СЪЩАТА верига (без второ копие);
+   *   * иначе -> 'new': нова верига от сега и вариантът автоматично става
+   *     използван (предишният от същия вид остава "Наличен").
+   * Другите притежавани варианти не се пипат — никой не губи дни.
+   */
+  function creditOwnedItem(profileId: string, kind: ProfileCustomizationKind, itemId: string, value: string, label: string | null, days: number, nowIso: string): { effect: 'new' | 'extend'; chainId: string; activeUntil: string } {
+    const owned = getLiveOwnedRow(profileId, kind, itemId, nowIso)
+    const effect: 'new' | 'extend' = owned !== null ? 'extend' : 'new'
+    const chainId = owned !== null ? owned.chain_id : randomUUID()
+    const chainStartedAt = owned !== null ? owned.chain_started_at : nowIso
+    const activeUntil = owned !== null ? addDays(owned.active_until, days) : addDays(nowIso, days)
+    upsertOwnedRowStatement.run(profileId, kind, itemId, value, label, chainId, chainStartedAt, activeUntil, nowIso, nowIso)
+    if (effect === 'new') upsertEquippedStatement.run(profileId, kind, itemId, nowIso)
+    return { effect, chainId, activeUntil }
+  }
+
+  // ─── Безплатно предоставяне от admin ───────────────────────────────────
+
+  type GrantRowDb = {
+    grant_id: string
+    batch_id: string
+    profile_id: string | null
+    target_display_name_snapshot: string | null
+    current_display_name: string | null
+    kind: ProfileCustomizationKind
+    item_id: string
+    item_value_snapshot: string
+    item_label_snapshot: string | null
+    days: number
+    grant_effect: 'new' | 'extend'
+    granted_until_snapshot: string
+    granted_by_profile_id: string | null
+    granted_by_display_name_snapshot: string | null
+    created_at: string
+  }
+
+  function rowToGrant(row: GrantRowDb): ProfileCustomizationGrantRecord {
+    return {
+      grantId: row.grant_id,
+      batchId: row.batch_id,
+      profileId: row.profile_id,
+      targetDisplayName: row.current_display_name ?? row.target_display_name_snapshot,
+      kind: row.kind,
+      kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[row.kind],
+      itemType: getProfileCustomizationItemType(row.kind),
+      itemId: row.item_id,
+      itemValue: row.item_value_snapshot,
+      itemLabel: row.item_label_snapshot,
+      days: row.days,
+      grantEffect: row.grant_effect,
+      grantedUntil: row.granted_until_snapshot,
+      grantedByProfileId: row.granted_by_profile_id,
+      grantedByDisplayName: row.granted_by_display_name_snapshot,
+      createdAt: row.created_at,
+    }
+  }
+
+  const GRANT_SELECT = `
+    SELECT g.grant_id, g.batch_id, g.profile_id, g.target_display_name_snapshot, p.display_name AS current_display_name,
+           g.kind, g.item_id, g.item_value_snapshot, g.item_label_snapshot, g.days, g.grant_effect,
+           g.granted_until_snapshot, g.granted_by_profile_id, g.granted_by_display_name_snapshot, g.created_at
+    FROM profile_customization_grants g
+    LEFT JOIN profiles p ON p.profile_id = g.profile_id
+  `
+
+  /**
+   * "Приложи безплатно" — само извикващият HTTP слой проверява пълната роля
+   * admin. Същата валидация като поръчката (1..4 реда, по един вид, артикул
+   * в продажба или притежаван от получателя, запазен цвят, срок), но без
+   * цена/Stripe/жълтици. Всички редове в ЕДНА транзакция: невалиден ред ->
+   * нищо не се прилага. Всеки ред е и одит (кой/на кого/кога/какво/дни/нов
+   * срок/ефект).
+   */
+  function grantItems(input: ProfileCustomizationGrantInput): { ok: true; batchId: string; grants: ProfileCustomizationGrantRecord[]; active: ProfileCustomizationActiveItems; owned: ProfileCustomizationOwnedItem[] } | ProfileCustomizationFailure {
+    const now = input.now ?? new Date()
+    const nowIso = now.toISOString()
+    // ignoreSalesToggle: предоставянето не зависи от публичната продажба.
+    const resolved = resolveOrderRequest({ profileId: input.targetProfileId, items: input.items, now, ignoreSalesToggle: true })
+    if ('ok' in resolved) return resolved
+    const { profileId, lines } = resolved
+    const batchId = randomUUID()
+    const targetName = (selectProfileDisplayNameStatement.get(profileId) as { display_name: string | null } | undefined)?.display_name ?? null
+    const adminName = input.adminDisplayName?.trim().slice(0, 80) || null
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      for (const line of lines) {
+        const credited = creditOwnedItem(profileId, line.kind, line.item.itemId, line.item.value, line.item.label, line.days, nowIso)
+        insertGrantStatement.run(
+          randomUUID(), batchId, profileId, targetName, line.kind, line.item.itemId, line.item.value, line.item.label,
+          line.days, credited.effect, credited.chainId, credited.activeUntil, input.adminProfileId, adminName, nowIso,
+        )
+      }
+      database.exec('COMMIT;')
+    } catch (error) {
+      rollbackQuietly()
+      throw error
+    }
+    const grants = (database.prepare(`${GRANT_SELECT} WHERE g.batch_id = ? ORDER BY ${KIND_ORDER_SQL.replace('kind', 'g.kind')};`).all(batchId) as GrantRowDb[]).map(rowToGrant)
+    return { ok: true, batchId, grants, active: getProfileActiveItems(profileId, now), owned: getProfileOwnedItems(profileId, now) }
+  }
+
+  /** Получател на предоставяне: името, ролята на акаунта (служебният цвят има приоритет) и допустим ли е. */
+  function getGrantTarget(profileId: string): { profileId: string; displayName: string; accountRole: string | null; eligible: boolean } | null {
+    const id = normalizeId(profileId)
+    if (id.length === 0) return null
+    const row = database.prepare(`
+      SELECT p.profile_id, p.display_name, a.role
+      FROM profiles p LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE p.profile_id = ?;
+    `).get(id) as { profile_id: string; display_name: string; role: string | null } | undefined
+    if (!row) return null
+    return { profileId: row.profile_id, displayName: row.display_name, accountRole: row.role ?? null, eligible: selectEligibleProfileStatement.get(id) !== undefined }
+  }
+
+  function listGrants(input: { limit: number; offset: number; profileId?: string | null }): { rows: ProfileCustomizationGrantRecord[]; total: number } {
+    const limit = Math.min(Math.max(Number.isSafeInteger(input.limit) ? input.limit : 50, 1), 200)
+    const offset = Math.max(Number.isSafeInteger(input.offset) ? input.offset : 0, 0)
+    const profileId = typeof input.profileId === 'string' && input.profileId.trim() !== '' ? normalizeId(input.profileId) : null
+    const where = profileId !== null ? 'WHERE g.profile_id = ?' : ''
+    const params = profileId !== null ? [profileId] : []
+    const total = (database.prepare(`SELECT COUNT(*) AS c FROM profile_customization_grants g ${where};`).get(...params) as { c: number }).c
+    const rows = (database.prepare(`${GRANT_SELECT} ${where} ORDER BY g.created_at DESC, g.batch_id DESC, g.grant_id LIMIT ? OFFSET ?;`).all(...params, limit, offset) as GrantRowDb[]).map(rowToGrant)
+    return { rows, total }
+  }
+
+  // ─── Общата страница "Плащания" (/admin/payments) ──────────────────────
+
+  type PaymentOrderRow = OrderRow & {
+    account_id: string | null
+    username: string | null
+    display_name: string | null
+    email: string | null
+    profile_kind: string | null
+    payment_method_type: string | null
+    wallet_type: string | null
+    card_brand: string | null
+    card_last4: string | null
+    card_country: string | null
+    stripe_charge_id: string | null
+  }
+
+  const PAYMENT_ORDER_SELECT = `
+    SELECT ${ORDER_COLUMNS.split(',').map((column) => `pco.${column.trim()}`).join(', ')},
+           p.account_id, p.username, p.display_name, a.email, p.profile_kind,
+           pco.payment_method_type, pco.wallet_type, pco.card_brand, pco.card_last4, pco.card_country, pco.stripe_charge_id
+    FROM profile_customization_orders pco
+    LEFT JOIN profiles p ON p.profile_id = pco.profile_id
+    LEFT JOIN accounts a ON a.account_id = p.account_id
+  `
+
+  /** Нетно получена сума: платена обща сума минус възстановеното (не под 0). */
+  function netCents(row: OrderRow): number {
+    return Math.max(row.total_cents - (row.refunded_amount_cents ?? 0), 0)
+  }
+
+  function paymentStatus(row: OrderRow): 'paid' | 'partially_refunded' | 'refunded' {
+    if (row.status === 'refunded') return 'refunded'
+    return (row.refunded_amount_cents ?? 0) > 0 ? 'partially_refunded' : 'paid'
+  }
+
+  function toPaymentListRow(row: PaymentOrderRow) {
+    return {
+      source: 'profile_customization' as const,
+      purchaseId: row.order_id,
+      profileId: row.profile_id ?? null,
+      accountId: row.account_id ?? null,
+      username: row.username ?? null,
+      displayName: row.display_name ?? null,
+      email: row.email ?? null,
+      profileKind: row.profile_kind ?? null,
+      packageKey: null,
+      packageTitle: 'Персонализация',
+      yellowCoinsAmount: null,
+      vipDays: null,
+      // Реално платената обща сума на поръчката (всички редове заедно).
+      priceCents: row.total_cents,
+      currency: row.currency.toUpperCase(),
+      provider: row.provider,
+      status: paymentStatus(row),
+      providerCheckoutSessionId: row.provider_checkout_session_id ?? null,
+      paymentMethodType: row.payment_method_type ?? null,
+      walletType: row.wallet_type ?? null,
+      cardBrand: row.card_brand ?? null,
+      cardLast4: row.card_last4 ?? null,
+      cardCountry: row.card_country ?? null,
+      createdAt: row.created_at,
+      creditedAt: row.paid_at,
+      hiddenAt: null,
+      recipientProfileId: null,
+      recipientDisplayName: null,
+      netCents: netCents(row),
+    }
+  }
+
+  /**
+   * ЕДНА Stripe поръчка = ЕДИН ред (обща сума, не по ред на екстра). Само
+   * реално платени поръчки (paid_at — кредитирани от webhook-а), вкл. по-късно
+   * възстановените (статус 'refunded'/'partially_refunded'; netCents е
+   * сумата за оборота). Периодът е по датата на плащане (Sofia дни, същият
+   * buildPeriodWhereClause като другите източници). Безплатните admin
+   * предоставяния са в отделна таблица и НЕ участват.
+   */
+  function getAdminPaymentListByPeriod(params: { period: AdminPaymentPeriod; now?: Date }) {
+    // paid_at е ISO ("…T…Z"), а границите са "YYYY-MM-DD HH:MM:SS" UTC —
+    // сравнява се в същия формат.
+    const column = "replace(substr(pco.paid_at, 1, 19), 'T', ' ')"
+    const { sql, params: whereParams } = buildPeriodWhereClause(params.period, params.now ?? new Date(), column)
+    const rows = database.prepare(`
+      ${PAYMENT_ORDER_SELECT}
+      WHERE pco.paid_at IS NOT NULL AND pco.status IN ('paid', 'refunded') AND ${sql}
+      ORDER BY pco.paid_at DESC, pco.order_id DESC;
+    `).all(...whereParams) as PaymentOrderRow[]
+    return rows.map(toPaymentListRow)
+  }
+
+  function getAdminPaymentDetail(orderId: string) {
+    const row = database.prepare(`${PAYMENT_ORDER_SELECT} WHERE pco.order_id = ? AND pco.paid_at IS NOT NULL;`).get(normalizeId(orderId)) as PaymentOrderRow | undefined
+    if (!row) return null
+    const lines = getOrderLines(row.order_id)
+    return {
+      ...toPaymentListRow(row),
+      stripePaymentIntentId: row.stripe_payment_intent_id ?? null,
+      stripeChargeId: row.stripe_charge_id ?? null,
+      updatedAt: row.updated_at,
+      currentYellowCoinsBalance: null,
+      customization: {
+        items: lines.map((line) => ({
+          kind: line.kind,
+          kindLabel: PROFILE_CUSTOMIZATION_KIND_LABELS[line.kind],
+          itemType: getProfileCustomizationItemType(line.kind),
+          itemValue: line.item_value_snapshot,
+          itemLabel: line.item_label_snapshot,
+          days: line.days_snapshot,
+          priceCents: line.price_cents_snapshot,
+          status: line.status,
+          grantEffect: line.grant_effect,
+          grantedUntil: line.granted_until_snapshot,
+        })),
+        totalCents: row.total_cents,
+        paidAt: row.paid_at,
+        refundedAt: row.refunded_at,
+        refundedAmountCents: row.refunded_amount_cents,
+        refundReviewStatus: row.refund_review_status ?? null,
+        refundReviewReason: row.refund_review_reason ?? null,
+      },
+    }
+  }
+
+  function locateOrder(sessionId: string | null, paymentIntentId: string | null): OrderRow | undefined {
+    return (sessionId !== null ? (selectOrderBySessionStatement.get(sessionId) as OrderRow | undefined) : undefined)
+      ?? (paymentIntentId !== null ? (selectOrderByPaymentIntentStatement.get(paymentIntentId) as OrderRow | undefined) : undefined)
   }
 
   function applyRefund(params: ApplyProfileCustomizationRefundParams): ApplyProfileCustomizationRefundResult {
@@ -1368,54 +2029,53 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       return { ok: false, reason: 'invalid_request', message: 'Невалидна възстановена сума.' }
     }
 
-    const located = (sessionId !== null ? (selectPurchaseBySessionStatement.get(sessionId) as PurchaseRow | undefined) : undefined)
-      ?? (paymentIntentId !== null ? (selectPurchaseByPaymentIntentStatement.get(paymentIntentId) as PurchaseRow | undefined) : undefined)
+    const located = locateOrder(sessionId, paymentIntentId)
     if (!located) {
-      return { ok: false, reason: 'purchase_not_found', message: 'Покупката за това възстановяване не е намерена.' }
+      return { ok: false, reason: 'purchase_not_found', message: 'Поръчката за това възстановяване не е намерена.' }
     }
 
     let outcome: Extract<ApplyProfileCustomizationRefundResult, { ok: true }>['outcome']
     try {
       database.exec('BEGIN IMMEDIATE;')
-      const row = getPurchaseRow(located.purchase_id) as PurchaseRow
+      const row = getOrderRow(located.order_id) as OrderRow
       // Stripe праща кумулативната сума — по-малка/равна стойност от вече
       // записаната е повторна или закъсняла доставка.
       const refundedAmount = Math.max(params.refundedAmountCents, row.refunded_amount_cents ?? 0)
-      const isFull = refundedAmount >= row.price_cents_snapshot
+      const isFull = refundedAmount >= row.total_cents
+      const lines = getOrderLines(row.order_id)
 
       if (row.status === 'refunded') {
         outcome = 'already_refunded'
       } else if (row.status === 'paid' && isFull) {
-        markRefundStatement.run('refunded', nowIso, refundedAmount, params.stripeEventId, nowIso, null, null, null, null, null, row.purchase_id)
-        outcome = 'revoked'
-        // Само ако покупката е от ТЕКУЩАТА верига на профила — иначе вече е
-        // заменена и текущата екстра (валидна, следваща покупка) не се пипа.
-        if (row.profile_id !== null && row.chain_id !== null) {
-          const active = selectActiveRowStatement.get(row.profile_id, row.kind) as ActiveRow | undefined
-          if (active && active.chain_id === row.chain_id) {
-            const remainingDays = (sumPaidChainDaysStatement.get(row.chain_id) as { total_days: number }).total_days
-            if (remainingDays <= 0) {
-              deleteActiveRowStatement.run(row.profile_id, row.kind, row.chain_id)
-            } else {
-              updateActiveUntilStatement.run(addDays(active.chain_started_at, remainingDays), nowIso, row.profile_id, row.kind, row.chain_id)
-            }
-          }
+        // Пълен refund: всички права от ТАЗИ поръчка се отменят (по реда на
+        // веригата им), без да се засягат по-нови валидни покупки.
+        markOrderRefundStatement.run('refunded', nowIso, refundedAmount, params.stripeEventId, nowIso, null, null, null, null, null, row.order_id)
+        for (const line of lines) {
+          if (line.status !== 'paid') continue
+          markLineRefundedStatement.run(nowIso, nowIso, line.purchase_id)
+          revokeLineGrant(line, nowIso)
         }
+        outcome = 'revoked'
       } else if (row.status === 'paid') {
-        // Частично възстановяване: правата остават, но покупката задължително
-        // чака администраторски преглед (само при НОВА, по-голяма сума —
-        // повторена доставка не връща вече прегледана покупка за преглед).
+        // Частично възстановяване: Stripe не казва за коя екстра е — правата
+        // остават, а поръчката задължително чака администраторски преглед
+        // (само при НОВА, по-голяма сума — повторена доставка не връща вече
+        // прегледана поръчка за преглед).
         const increased = refundedAmount > (row.refunded_amount_cents ?? 0)
         const reviewMark = increased ? 'pending' : null
-        markRefundStatement.run('paid', nowIso, refundedAmount, params.stripeEventId, nowIso, reviewMark, increased ? 'partial_refund' : null, reviewMark, reviewMark, reviewMark, row.purchase_id)
+        markOrderRefundStatement.run('paid', nowIso, refundedAmount, params.stripeEventId, nowIso, reviewMark, increased ? 'partial_refund' : null, reviewMark, reviewMark, reviewMark, row.order_id)
+        // Поръчка с един ред: сумата се отнася еднозначно към него (за статистиката).
+        if (lines.length === 1 && lines[0]!.status === 'paid') {
+          markLinePartialRefundStatement.run(nowIso, refundedAmount, nowIso, lines[0]!.purchase_id)
+        }
         outcome = 'partial_recorded'
       } else if (row.status === 'pending') {
         // Refund преди checkout.session.completed — кредитирането ще го
         // види и няма да активира нищо (при пълна сума).
-        markRefundStatement.run('pending', nowIso, refundedAmount, params.stripeEventId, nowIso, null, null, null, null, null, row.purchase_id)
+        markOrderRefundStatement.run('pending', nowIso, refundedAmount, params.stripeEventId, nowIso, null, null, null, null, null, row.order_id)
         outcome = 'recorded_before_credit'
       } else {
-        markRefundStatement.run(row.status, nowIso, refundedAmount, params.stripeEventId, nowIso, null, null, null, null, null, row.purchase_id)
+        markOrderRefundStatement.run(row.status, nowIso, refundedAmount, params.stripeEventId, nowIso, null, null, null, null, null, row.order_id)
         outcome = 'recorded_without_grant'
       }
       database.exec('COMMIT;')
@@ -1429,15 +2089,15 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       }
     }
 
-    const updated = getPurchaseRow(located.purchase_id) as PurchaseRow
-    return { ok: true, outcome, purchase: rowToPurchase(updated), activeAfter: currentActiveItem(updated, now) }
+    const updated = getOrderRow(located.order_id) as OrderRow
+    return { ok: true, outcome, order: orderSnapshot(updated), activeAfter: activeItemsFor(updated.profile_id, now) }
   }
 
-  function needsPaymentMethodSnapshot(purchaseId: string): boolean {
-    return needsPaymentMethodSnapshotStatement.get(purchaseId) !== undefined
+  function needsPaymentMethodSnapshot(orderId: string): boolean {
+    return needsPaymentMethodSnapshotStatement.get(orderId) !== undefined
   }
 
-  function updatePaymentMethodSnapshot(purchaseId: string, snapshot: PaymentMethodSnapshot): void {
+  function updatePaymentMethodSnapshot(orderId: string, snapshot: PaymentMethodSnapshot): void {
     updatePaymentMethodSnapshotStatement.run(
       snapshot.stripePaymentIntentId,
       snapshot.stripeChargeId,
@@ -1447,7 +2107,7 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       snapshot.cardLast4,
       snapshot.cardCountry,
       new Date().toISOString(),
-      purchaseId,
+      orderId,
     )
   }
 
@@ -1509,17 +2169,18 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
 
   // ─── Админ ─────────────────────────────────────────────────────────────
 
-  function listAdminPurchases(input: { limit: number; offset: number; status?: string | null }): { rows: ProfileCustomizationAdminPurchaseRow[]; total: number } {
+  function listAdminOrders(input: { limit: number; offset: number; status?: string | null }): { rows: ProfileCustomizationAdminOrderRow[]; total: number } {
     const limit = Math.min(Math.max(Number.isSafeInteger(input.limit) ? input.limit : 50, 1), 200)
     const offset = Math.max(Number.isSafeInteger(input.offset) ? input.offset : 0, 0)
     const status = typeof input.status === 'string' && (ADMIN_PURCHASE_STATUSES as readonly string[]).includes(input.status) ? input.status : null
-    // По подразбиране без скритите (заменени) pending редове — те не са поръчки на потребителя.
+    // По подразбиране без скритите (заменени) неплатени поръчки — те не са
+    // поръчки на потребителя (платена скрита поръчка се показва).
     const where = input.status === 'review_pending'
-      ? "WHERE pcp.refund_review_status = 'pending'"
-      : status !== null ? 'WHERE pcp.status = ?' : 'WHERE pcp.hidden_at IS NULL'
+      ? "WHERE pco.refund_review_status = 'pending'"
+      : status !== null ? 'WHERE pco.status = ?' : "WHERE (pco.hidden_at IS NULL OR pco.status <> 'pending')"
     const whereParams = input.status !== 'review_pending' && status !== null ? [status] : []
-    const total = (database.prepare(`SELECT COUNT(*) AS c FROM profile_customization_purchases pcp ${where};`).get(...whereParams) as { c: number }).c
-    type AdminRow = PurchaseRow & {
+    const total = (database.prepare(`SELECT COUNT(*) AS c FROM profile_customization_orders pco ${where};`).get(...whereParams) as { c: number }).c
+    type AdminRow = OrderRow & {
       display_name: string | null
       username: string | null
       email: string | null
@@ -1528,19 +2189,35 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       card_last4: string | null
     }
     const rows = database.prepare(`
-      SELECT ${PURCHASE_COLUMNS.split(',').map((column) => `pcp.${column.trim()}`).join(', ')},
-             p.display_name, p.username, a.email, pcp.payment_method_type, pcp.card_brand, pcp.card_last4
-      FROM profile_customization_purchases pcp
-      LEFT JOIN profiles p ON p.profile_id = pcp.profile_id
+      SELECT ${ORDER_COLUMNS.split(',').map((column) => `pco.${column.trim()}`).join(', ')},
+             p.display_name, p.username, a.email, pco.payment_method_type, pco.card_brand, pco.card_last4
+      FROM profile_customization_orders pco
+      LEFT JOIN profiles p ON p.profile_id = pco.profile_id
       LEFT JOIN accounts a ON a.account_id = p.account_id
       ${where}
-      ORDER BY pcp.created_at DESC, pcp.purchase_id DESC
+      ORDER BY pco.created_at DESC, pco.order_id DESC
       LIMIT ? OFFSET ?;
     `).all(...whereParams, limit, offset) as AdminRow[]
+    // Редовете на показаните поръчки — ЕДНА заявка за страницата (без N+1).
+    const linesByOrder = new Map<string, PurchaseRow[]>()
+    if (rows.length > 0) {
+      const placeholders = rows.map(() => '?').join(',')
+      const lineRows = database.prepare(`
+        SELECT ${PURCHASE_COLUMNS} FROM profile_customization_purchases
+        WHERE order_id IN (${placeholders})
+        ORDER BY ${KIND_ORDER_SQL}, purchase_id;
+      `).all(...rows.map((row) => row.order_id)) as PurchaseRow[]
+      for (const line of lineRows) {
+        if (line.order_id === null) continue
+        const list = linesByOrder.get(line.order_id) ?? []
+        list.push(line)
+        linesByOrder.set(line.order_id, list)
+      }
+    }
     return {
       total,
       rows: rows.map((row) => ({
-        ...rowToPurchase(row),
+        ...rowToOrder(row, linesByOrder.get(row.order_id) ?? []),
         profileId: row.profile_id,
         displayName: row.display_name ?? null,
         username: row.username ?? null,
@@ -1553,23 +2230,33 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
   }
 
   function countPendingRefundReviews(): number {
-    return (database.prepare("SELECT COUNT(*) AS c FROM profile_customization_purchases WHERE refund_review_status = 'pending';").get() as { c: number }).c
+    return (database.prepare("SELECT COUNT(*) AS c FROM profile_customization_orders WHERE refund_review_status = 'pending';").get() as { c: number }).c
   }
 
-  function markRefundReviewed(purchaseId: string, actor?: { profileId: string | null; displayName: string | null }): boolean {
+  /** id на поръчка или на неин ред -> id на поръчката. */
+  function resolveOrderId(orderOrPurchaseId: string): string | null {
+    const id = normalizeId(orderOrPurchaseId)
+    if (id.length === 0) return null
+    if (getOrderRow(id) !== null) return id
+    return getPurchaseRow(id)?.order_id ?? null
+  }
+
+  function markRefundReviewed(orderOrPurchaseId: string, actor?: { profileId: string | null; displayName: string | null }): boolean {
+    const orderId = resolveOrderId(orderOrPurchaseId)
+    if (orderId === null) return false
     const nowIso = new Date().toISOString()
     const result = markRefundReviewedStatement.run(
       nowIso,
       nowIso,
       actor?.profileId ?? null,
       actor?.displayName?.trim().slice(0, 80) || null,
-      normalizeId(purchaseId),
+      orderId,
     ) as { changes?: number }
     return (result.changes ?? 0) > 0
   }
 
   function recordRefundFailure(params: { checkoutSessionId?: string | null; paymentIntentId?: string | null; stripeRefundId: string; stripeEventId: string; now?: Date }):
-    | { ok: true; outcome: 'marked_for_review' | 'already_recorded'; purchase: ProfileCustomizationPurchaseSnapshot }
+    | { ok: true; outcome: 'marked_for_review' | 'already_recorded'; order: ProfileCustomizationOrderSnapshot }
     | { ok: false; reason: 'purchase_not_found' | 'invalid_request'; message: string } {
     const sessionId = params.checkoutSessionId?.trim() || null
     const paymentIntentId = params.paymentIntentId?.trim() || null
@@ -1577,24 +2264,20 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     if ((sessionId === null && paymentIntentId === null) || refundId.length === 0) {
       return { ok: false, reason: 'invalid_request', message: 'Липсва идентификатор на плащането или на refund-а.' }
     }
-    const row = (sessionId !== null ? (selectPurchaseBySessionStatement.get(sessionId) as PurchaseRow | undefined) : undefined)
-      ?? (paymentIntentId !== null ? (selectPurchaseByPaymentIntentStatement.get(paymentIntentId) as PurchaseRow | undefined) : undefined)
-    if (!row) return { ok: false, reason: 'purchase_not_found', message: 'Покупката за този refund не е намерена.' }
+    const row = locateOrder(sessionId, paymentIntentId)
+    if (!row) return { ok: false, reason: 'purchase_not_found', message: 'Поръчката за този refund не е намерена.' }
     // Повторна доставка за същия refund — без промяна (и без да отваря отново вече прегледан случай).
     if (row.refund_failed_refund_id === refundId) {
-      return { ok: true, outcome: 'already_recorded', purchase: rowToPurchase(row) }
+      return { ok: true, outcome: 'already_recorded', order: orderSnapshot(row) }
     }
     const nowIso = (params.now ?? new Date()).toISOString()
-    markRefundFailedStatement.run(refundId, nowIso, params.stripeEventId, nowIso, row.purchase_id)
-    return { ok: true, outcome: 'marked_for_review', purchase: rowToPurchase(getPurchaseRow(row.purchase_id) as PurchaseRow) }
-  }
-
-  function findProfilePurchaseByCheckoutSessionId(profileId: string, checkoutSessionId: string): ProfileCustomizationPurchaseSnapshot | null {
-    const row = selectPurchaseBySessionStatement.get(checkoutSessionId.trim()) as PurchaseRow | undefined
-    return row && row.profile_id !== null && row.profile_id === normalizeId(profileId) ? rowToPurchase(row) : null
+    markRefundFailedStatement.run(refundId, nowIso, params.stripeEventId, nowIso, row.order_id)
+    return { ok: true, outcome: 'marked_for_review', order: orderSnapshot(getOrderRow(row.order_id) as OrderRow) }
   }
 
   function getAdminKindStats(now: Date = new Date()): ProfileCustomizationAdminKindStats[] {
+    // По редове (отделните права). Частичен refund на поръчка с няколко реда
+    // не се отнася към конкретен вид (виж applyRefund) — остава на поръчката.
     const purchaseRows = database.prepare(`
       SELECT kind,
              SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_count,
@@ -1605,7 +2288,11 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
       GROUP BY kind;
     `).all() as Array<{ kind: ProfileCustomizationKind; paid_count: number; paid_total: number; refunded_count: number; refunded_total: number }>
     const activeRows = database.prepare(`
-      SELECT kind, COUNT(*) AS c FROM profile_customization_active WHERE active_until > ? GROUP BY kind;
+      SELECT e.kind AS kind, COUNT(*) AS c
+      FROM profile_customization_equipped e
+      JOIN profile_customization_owned_items o ON o.profile_id = e.profile_id AND o.kind = e.kind AND o.item_id = e.item_id
+      WHERE o.active_until > ?
+      GROUP BY e.kind;
     `).all(now.toISOString()) as Array<{ kind: ProfileCustomizationKind; c: number }>
     const purchasesByKind = new Map(purchaseRows.map((row) => [row.kind, row]))
     const activeByKind = new Map(activeRows.map((row) => [row.kind, row.c]))
@@ -1632,29 +2319,37 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     addEmoji,
     updateEmoji,
     getProfileActiveItems,
+    getProfileOwnedItems,
+    equipItem,
+    unequipItem,
     getAppearancesForProfiles,
     previewPurchase,
-    createPendingPurchase,
+    previewOrder,
+    createPendingOrder,
+    getOrderById,
     getPurchaseById,
-    getPurchaseOwnerProfileId,
-    listProfilePurchases,
-    attachCheckoutSession,
-    retirePendingPurchase,
-    findByCheckoutSessionId,
-    markPurchaseCanceledByCheckoutSessionId,
-    markPurchaseFailedByCheckoutSessionId,
-    fulfillPaidPurchase,
+    attachOrderCheckoutSession,
+    retirePendingOrder,
+    findOrderByCheckoutSessionId,
+    findProfileOrderByCheckoutSessionId,
+    markOrderCanceledByCheckoutSessionId,
+    markOrderFailedByCheckoutSessionId,
+    fulfillPaidOrder,
     applyRefund,
     needsPaymentMethodSnapshot,
     updatePaymentMethodSnapshot,
+    grantItems,
+    listGrants,
+    getGrantTarget,
+    getAdminPaymentListByPeriod,
+    getAdminPaymentDetail,
     getAccessState,
     setAccessMode,
     listModeChanges,
-    listAdminPurchases,
+    listAdminOrders,
     countPendingRefundReviews,
     markRefundReviewed,
     recordRefundFailure,
-    findProfilePurchaseByCheckoutSessionId,
     getAdminKindStats,
     close: () => database.close(),
   }

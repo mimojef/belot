@@ -209,7 +209,11 @@ function renderRow(row: AdminPaymentListRow): string {
       <td style="${tdStyle}">${escapeHtml(methodLabel)}</td>
       <td style="${tdStyle};font-variant-numeric:tabular-nums;">${escapeHtml(cardDisplay)}</td>
       <td style="${tdStyle}">
-        <span style="background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid rgba(34,197,94,0.3);
+        <span style="${row.status === 'refunded'
+          ? 'background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.3);'
+          : row.status === 'partially_refunded'
+            ? 'background:rgba(245,158,11,0.12);color:#f59e0b;border:1px solid rgba(245,158,11,0.3);'
+            : 'background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid rgba(34,197,94,0.3);'}
           border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;">${escapeHtml(row.status)}</span>
       </td>
       <td style="${tdStyle};font-family:monospace;font-size:11px;max-width:160px;">

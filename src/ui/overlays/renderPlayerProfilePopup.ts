@@ -1130,7 +1130,7 @@ function renderProfileHero(
           <button type="button" ${LIGHT_PRIMARY_3D_CLASS_ATTR} data-player-profile-shop-vip="1" style="${actionButton}border:0;color:#FFFFFF;">
             <span style="color:#FFD54A;display:flex;">${lucideIcon(LUCIDE_CROWN, 16, 2.4)}</span>+VIP
           </button>
-          <button type="button" data-player-profile-edit="1" style="${actionButton}border:1px solid #D9CCFA;background:#FFFFFF;color:#6941C6;">
+          <button type="button" ${LIGHT_PRIMARY_3D_CLASS_ATTR} data-player-profile-edit="1" style="${actionButton}border:0;color:#FFFFFF;">
             ${lucideIcon(LUCIDE_SQUARE_PEN, 15, 2.4)}Редакция
           </button>
           ${canSelfDelete ? `
@@ -1139,7 +1139,7 @@ function renderProfileHero(
             </button>
           ` : ''}
           ${own.canCustomize ? `
-            <button type="button" data-player-profile-customize="1" style="${actionButton}grid-column:1 / -1;border:1px solid #D9CCFA;background:#F9F5FF;color:#6941C6;">
+            <button type="button" ${LIGHT_PRIMARY_3D_CLASS_ATTR} data-player-profile-customize="1" style="${actionButton}grid-column:1 / -1;border:0;color:#FFFFFF;">
               ${lucideIcon(LUCIDE_PALETTE, 15, 2.4)}Персонализация
             </button>
           ` : ''}
@@ -2521,6 +2521,33 @@ function renderForeignAdminTitleControls(
             ${renderTopChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderMarketingRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderVipGrantTrigger(profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen)}
+            ${renderCustomizationGrantTrigger(profileId, isOwnProfile, viewerIsFullAdmin)}
+  `
+}
+
+/**
+ * "Персонализация" за ЧУЖД профил — само пълен admin (сървърът проверява
+ * ролята при всяка заявка). Отваря прозореца в административен режим
+ * ("Приложи безплатно", без Stripe). Собственият профил има свой бутон.
+ */
+function renderCustomizationGrantTrigger(profileId: string | null, isOwnProfile: boolean, viewerIsFullAdmin: boolean): string {
+  if (isOwnProfile || !viewerIsFullAdmin || !profileId) return ''
+  return `
+    <span
+      data-player-profile-admin-customize="1"
+      role="button"
+      tabindex="0"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        color:#d4a520;
+        font-size:14px;
+        font-weight:900;
+        cursor:pointer;
+        white-space:nowrap;
+      "
+    >Персонализация</span>
   `
 }
 

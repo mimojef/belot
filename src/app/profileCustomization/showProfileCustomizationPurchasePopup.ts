@@ -1,10 +1,11 @@
-// "Персонализация на профила", Етап 3 — попъп след връщане от Stripe Checkout.
+// "Персонализация на профила" — ЕДИН попъп след връщане от Stripe Checkout
+// за цялата поръчка (1..4 екстри с едно плащане), не отделен попъп за всяка.
 //
 // Сигурност: redirect-ът от Stripe НЕ доказва плащане. Попъпът знае само
-// checkout session id-то; всичко останало (артикул, срок, платена сума,
-// статус, крайна дата, ефект) идва от сървъра — GET /api/profile-customization
-// ?sessionId=… връща САМО собствена поръчка. Успех се показва единствено при
-// статус 'paid' (кредитирано от webhook-а). Докато webhook-ът не е обработен:
+// checkout session id-то; всичко останало (артикули, срокове, обща платена
+// сума, статус, крайни дати, ефекти) идва от сървъра — GET
+// /api/profile-customization?sessionId=… връща САМО собствена поръчка. Успех
+// се показва единствено при статус 'paid' (кредитирано от webhook-а). Докато webhook-ът не е обработен:
 // "Проверяваме плащането..." + ограничена автоматична проверка и бутон
 // "Провери отново" (без ново плащане). Без фалшив успех/отказ.
 //
@@ -18,7 +19,7 @@ import { getRoleNicknameColor } from '../lobby/roleNicknameColor'
 
 type Kind = 'nickname_color' | 'message_color' | 'emoji_before' | 'emoji_after'
 
-type ReturnPurchase = {
+type ReturnOrderItem = {
   purchaseId: string
   kind: Kind
   kindLabel: string
@@ -27,17 +28,24 @@ type ReturnPurchase = {
   itemLabel: string | null
   days: number
   priceCents: number
-  currency: string
-  status: 'pending' | 'paid' | 'canceled' | 'failed' | 'refunded'
+  status: string
   grantEffect: 'new' | 'extend' | 'replace' | null
   grantedUntil: string | null
+}
+
+type ReturnOrder = {
+  orderId: string
+  status: 'pending' | 'paid' | 'canceled' | 'failed' | 'refunded'
+  totalCents: number
+  currency: string
+  items: ReturnOrderItem[]
 }
 
 type ActiveItem = { value: string; activeUntil: string } | null
 
 type Snapshot = {
   active: Record<Kind, ActiveItem>
-  returnPurchase: ReturnPurchase | null
+  returnOrder: ReturnOrder | null
 }
 
 export type ProfileCustomizationPurchasePopupDeps = {
@@ -169,16 +177,33 @@ export function showProfileCustomizationPurchasePopup(deps: ProfileCustomization
     )
   }
 
-  const renderSuccess = (purchase: ReturnPurchase, snapshot: Snapshot) => {
-    const extended = purchase.grantEffect === 'extend'
-    const item = purchase.itemType === 'color'
-      ? `<span style="display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;background:${/^#[0-9A-Fa-f]{6}$/.test(purchase.itemValue) ? purchase.itemValue : 'transparent'};box-shadow:inset 0 0 0 1px rgba(0,0,0,0.2);"></span> ${escapeHtml(purchase.itemLabel ?? purchase.itemValue)} (${escapeHtml(purchase.itemValue)})`
-      : `<span style="font-size:18px;">${escapeHtml(purchase.itemValue)}</span>`
+  const itemHtml = (item: ReturnOrderItem): string => item.itemType === 'color'
+    ? `<span style="display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;background:${/^#[0-9A-Fa-f]{6}$/.test(item.itemValue) ? item.itemValue : 'transparent'};box-shadow:inset 0 0 0 1px rgba(0,0,0,0.2);"></span> ${escapeHtml(item.itemLabel ?? item.itemValue)} (${escapeHtml(item.itemValue)})`
+    : `<span style="font-size:18px;">${escapeHtml(item.itemValue)}</span>`
+
+  const renderSuccess = (order: ReturnOrder, snapshot: Snapshot) => {
+    const items = order.items
+    const allExtended = items.length > 0 && items.every((item) => item.grantEffect === 'extend')
+    const single = items.length === 1
+    const title = single && allExtended ? 'Персонализацията ти е удължена!' : 'Успешна покупка!'
+    const subtitle = single
+      ? (allExtended ? 'Новата крайна дата включва и оставащите дни от предишната покупка.' : 'Персонализацията ти е активирана.')
+      : `Активирани са ${items.length} персонализации с едно плащане.`
     const value = (kind: Kind) => snapshot.active[kind]?.value ?? null
-    const row = (label: string, html: string, key: string) => `<div data-pcp-row="${key}" style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid ${t.border};font-size:14px;"><span style="color:${t.muted};">${escapeHtml(label)}</span><span style="font-weight:800;text-align:right;overflow-wrap:anywhere;">${html}</span></div>`
+    const lines = items.map((item) => `
+      <li data-pcp-item="${escapeHtml(item.kind)}" data-pcp-item-effect="${escapeHtml(item.grantEffect ?? '')}" style="list-style:none;padding:8px 0;border-top:1px solid ${t.border};font-size:14px;line-height:1.45;">
+        <div style="display:flex;justify-content:space-between;gap:12px;">
+          <span style="font-weight:900;">${escapeHtml(item.kindLabel)}</span>
+          <span style="font-weight:800;text-align:right;overflow-wrap:anywhere;">${itemHtml(item)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:12px;font-size:13px;color:${t.muted};">
+          <span>${item.days} дни · ${escapeHtml(EFFECT_LABELS[item.grantEffect ?? ''] ?? '—')}</span>
+          <span data-pcp-item-until="1" style="flex:0 0 auto;white-space:nowrap;">активна до <b style="color:${t.text};">${escapeHtml(formatDate(item.grantedUntil))}</b></span>
+        </div>
+      </li>`).join('')
     host.innerHTML = frame(`
-      <h2 id="pcp-title" data-pcp-state="success" data-pcp-effect="${purchase.grantEffect ?? ''}" style="margin:0 0 4px;font-size:22px;font-weight:900;color:${t.accent};text-align:center;">${extended ? 'Персонализацията ти е удължена!' : 'Успешна покупка!'}</h2>
-      <p style="margin:0 0 14px;font-size:14px;color:${t.muted};text-align:center;">${extended ? 'Новата крайна дата включва и оставащите дни от предишната покупка.' : 'Персонализацията ти е активирана.'}</p>
+      <h2 id="pcp-title" data-pcp-state="success" data-pcp-count="${items.length}" style="margin:0 0 4px;font-size:22px;font-weight:900;color:${t.accent};text-align:center;">${escapeHtml(title)}</h2>
+      <p style="margin:0 0 14px;font-size:14px;color:${t.muted};text-align:center;">${escapeHtml(subtitle)}</p>
       ${renderUnifiedCustomizationPreview({
         displayName: deps.displayName,
         theme: deps.theme,
@@ -188,13 +213,10 @@ export function showProfileCustomizationPurchasePopup(deps: ProfileCustomization
         emojiBefore: value('emoji_before'),
         emojiAfter: value('emoji_after'),
       })}
-      <div style="margin-top:14px;">
-        ${row('Покупка', escapeHtml(purchase.kindLabel), 'kind')}
-        ${row(purchase.itemType === 'color' ? 'Цвят' : 'Емоджи', item, 'item')}
-        ${row('Период', `${purchase.days} дни`, 'days')}
-        ${row('Платено', escapeHtml(formatEuro(purchase.priceCents, purchase.currency)), 'price')}
-        ${row('Активен до', escapeHtml(formatDate(purchase.grantedUntil)), 'until')}
-        ${row('Вид', escapeHtml(EFFECT_LABELS[purchase.grantEffect ?? ''] ?? '—'), 'effect')}
+      <ul data-pcp-items="1" style="margin:14px 0 0;padding:0;">${lines}</ul>
+      <div data-pcp-row="total" style="display:flex;justify-content:space-between;gap:12px;padding:8px 0 0;border-top:1px solid ${t.border};font-size:15px;">
+        <span style="color:${t.muted};">Общо платено</span>
+        <span data-pcp-total="${order.totalCents}" style="font-weight:900;">${escapeHtml(formatEuro(order.totalCents, order.currency))}</span>
       </div>
       ${okButton}`)
     host.querySelector<HTMLButtonElement>('[data-pcp-ok="1"]')?.focus()
@@ -232,18 +254,18 @@ export function showProfileCustomizationPurchasePopup(deps: ProfileCustomization
       renderMessage('unavailable', 'Поръчката не може да бъде проверена', 'Ако си платил, персонализацията ще бъде активирана след потвърждение от Stripe. При въпроси се свържи с поддръжката.', 'muted', false)
       return
     }
-    const purchase = result.snapshot.returnPurchase
-    if (purchase === null) {
+    const order = result.snapshot.returnOrder ?? null
+    if (order === null) {
       finish()
       renderMessage('not_found', 'Поръчката не е намерена', 'Не открихме поръчка за този профил. Ако си платил, свържи се с поддръжката.', 'err', false)
       return
     }
-    if (purchase.status === 'paid') {
+    if (order.status === 'paid') {
       finish()
-      renderSuccess(purchase, result.snapshot)
+      renderSuccess(order, result.snapshot)
       return
     }
-    if (purchase.status === 'pending') {
+    if (order.status === 'pending') {
       attempts += 1
       if (attempts >= AUTO_CHECK_MAX_ATTEMPTS && !manual) {
         renderChecking(true)
@@ -257,7 +279,7 @@ export function showProfileCustomizationPurchasePopup(deps: ProfileCustomization
       return
     }
     finish()
-    if (purchase.status === 'refunded') {
+    if (order.status === 'refunded') {
       renderMessage('refunded', 'Плащането е възстановено', 'Сумата е върната и персонализацията не е активирана.', 'err', false)
     } else {
       renderMessage('not_paid', 'Плащането не е завършено', 'Нищо не е таксувано и нищо не е променено.', 'err', false)
