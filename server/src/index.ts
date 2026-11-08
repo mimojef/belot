@@ -23089,20 +23089,24 @@ async function handleAdminMissionsRequest(
 // покупки за деня). Трите store-а изчисляват period boundaries независимо
 // (СЪЩИЯТ shared buildPeriodWhereClause от sofiaDayBounds.ts) — тук само
 // сумираме count/totalCents per period, без нова timezone логика.
-function combineAdminPaymentStats(
-  coin: AdminPaymentStats,
-  vip: AdminPaymentStats,
-  bundle: AdminPaymentStats,
-): AdminPaymentStats {
-  function combinePeriod(a: PaymentPeriodStats, b: PaymentPeriodStats, c: PaymentPeriodStats): PaymentPeriodStats {
-    return { count: a.count + b.count + c.count, totalCents: a.totalCents + b.totalCents + c.totalCents }
+// Персонализацията остана невидима тук по същата причина (липсваше като
+// източник), докато /admin/payments вече я включваше: една Stripe поръчка =
+// 1 плащане с НЕТНАТА сума (profileCustomizationStore.getAdminPaymentStats
+// ползва същия филтър като списъка). Безплатните admin предоставяния не са
+// плащания и не участват.
+function combineAdminPaymentStats(...sources: AdminPaymentStats[]): AdminPaymentStats {
+  function combinePeriod(key: keyof AdminPaymentStats): PaymentPeriodStats {
+    return sources.reduce<PaymentPeriodStats>(
+      (sum, source) => ({ count: sum.count + source[key].count, totalCents: sum.totalCents + source[key].totalCents }),
+      { count: 0, totalCents: 0 },
+    )
   }
   return {
-    today: combinePeriod(coin.today, vip.today, bundle.today),
-    yesterday: combinePeriod(coin.yesterday, vip.yesterday, bundle.yesterday),
-    last7days: combinePeriod(coin.last7days, vip.last7days, bundle.last7days),
-    thisMonth: combinePeriod(coin.thisMonth, vip.thisMonth, bundle.thisMonth),
-    allTime: combinePeriod(coin.allTime, vip.allTime, bundle.allTime),
+    today: combinePeriod('today'),
+    yesterday: combinePeriod('yesterday'),
+    last7days: combinePeriod('last7days'),
+    thisMonth: combinePeriod('thisMonth'),
+    allTime: combinePeriod('allTime'),
   }
 }
 
@@ -23139,6 +23143,7 @@ async function handleAdminStatsRequest(
     coinPurchaseStore.getAdminPaymentStats(),
     vipPurchaseStore.getAdminPaymentStats(),
     bundlePurchaseStore.getAdminPaymentStats(),
+    profileCustomizationStore.getAdminPaymentStats(),
   )
 
   const visitors = siteVisitStore.getVisitorSummary()

@@ -39,7 +39,7 @@
 import { randomUUID } from 'node:crypto'
 import type { PurchaseFulfillmentFailure } from '../db/purchaseFulfillmentFailure.js'
 import { isTransientDatabaseError } from '../db/classifyFulfillmentError.js'
-import type { AdminPaymentDetailRow, AdminPaymentListRow, PaymentMethodSnapshot } from '../db/coinPurchaseStore.js'
+import type { AdminPaymentDetailRow, AdminPaymentListRow, AdminPaymentStats, PaymentMethodSnapshot, PaymentPeriodStats } from '../db/coinPurchaseStore.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod } from '../db/sofiaDayBounds.js'
 import {
   PROFILE_CUSTOMIZATION_COLOR_LABEL_MAX_LENGTH,
@@ -467,6 +467,8 @@ export type ProfileCustomizationStore = {
   getGrantTarget: (profileId: string) => { profileId: string; displayName: string; accountRole: string | null; eligible: boolean } | null
   // /admin/payments — ЕДИН ред на Stripe поръчка (без безплатните предоставяния)
   getAdminPaymentListByPeriod: (params: { period: AdminPaymentPeriod; now?: Date }) => ProfileCustomizationAdminPaymentRow[]
+  /** Обобщени карти (Админ → Информация): брой платени поръчки + нетна сума по период. */
+  getAdminPaymentStats: (now?: Date) => AdminPaymentStats
   getAdminPaymentDetail: (orderId: string) => ProfileCustomizationAdminPaymentDetail | null
   // Режим на достъп
   getAccessState: () => ProfileCustomizationAccessState
@@ -1966,17 +1968,52 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
    * buildPeriodWhereClause като другите източници). Безплатните admin
    * предоставяния са в отделна таблица и НЕ участват.
    */
-  function getAdminPaymentListByPeriod(params: { period: AdminPaymentPeriod; now?: Date }) {
+  /**
+   * Общият филтър за "платена поръчка в периода" — ползват го и списъкът в
+   * /admin/payments, и обобщените карти в Админ → Информация, за да не се
+   * разминават броят и сумите.
+   */
+  function buildPaidOrderPeriodWhere(period: AdminPaymentPeriod, now: Date): { sql: string; params: string[] } {
     // paid_at е ISO ("…T…Z"), а границите са "YYYY-MM-DD HH:MM:SS" UTC —
     // сравнява се в същия формат.
     const column = "replace(substr(pco.paid_at, 1, 19), 'T', ' ')"
-    const { sql, params: whereParams } = buildPeriodWhereClause(params.period, params.now ?? new Date(), column)
+    const { sql, params } = buildPeriodWhereClause(period, now, column)
+    return { sql: `pco.paid_at IS NOT NULL AND pco.status IN ('paid', 'refunded') AND ${sql}`, params }
+  }
+
+  function getAdminPaymentListByPeriod(params: { period: AdminPaymentPeriod; now?: Date }) {
+    const { sql, params: whereParams } = buildPaidOrderPeriodWhere(params.period, params.now ?? new Date())
     const rows = database.prepare(`
       ${PAYMENT_ORDER_SELECT}
-      WHERE pco.paid_at IS NOT NULL AND pco.status IN ('paid', 'refunded') AND ${sql}
+      WHERE ${sql}
       ORDER BY pco.paid_at DESC, pco.order_id DESC;
     `).all(...whereParams) as PaymentOrderRow[]
     return rows.map(toPaymentListRow)
+  }
+
+  /**
+   * Обобщение за Админ → Информация: брой = платени поръчки (една Stripe
+   * поръчка с няколко екстри = 1 плащане), сума = НЕТНА (обща сума минус
+   * възстановеното, не под 0) — същото като редовете/сумата в /admin/payments.
+   */
+  function getAdminPaymentStats(now: Date = new Date()): AdminPaymentStats {
+    function query(period: AdminPaymentPeriod): PaymentPeriodStats {
+      const { sql, params } = buildPaidOrderPeriodWhere(period, now)
+      const row = database.prepare(`
+        SELECT COUNT(*) AS count,
+               COALESCE(SUM(MAX(pco.total_cents - COALESCE(pco.refunded_amount_cents, 0), 0)), 0) AS net_cents
+        FROM profile_customization_orders pco
+        WHERE ${sql};
+      `).get(...params) as { count: number; net_cents: number }
+      return { count: row.count, totalCents: row.net_cents }
+    }
+    return {
+      today: query('today'),
+      yesterday: query('yesterday'),
+      last7days: query('last7days'),
+      thisMonth: query('thisMonth'),
+      allTime: query('allTime'),
+    }
   }
 
   function getAdminPaymentDetail(orderId: string) {
@@ -2342,6 +2379,7 @@ export async function createProfileCustomizationStore(databaseFilePath: string):
     listGrants,
     getGrantTarget,
     getAdminPaymentListByPeriod,
+    getAdminPaymentStats,
     getAdminPaymentDetail,
     getAccessState,
     setAccessMode,
