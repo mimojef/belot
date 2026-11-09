@@ -12,7 +12,8 @@ export type RenderMatchmakingRoomScreenParams = {
   entryAmount: number
   localPlayer: MatchmakingRoomPlayer
   joinedPlayers?: MatchmakingRoomPlayer[]
-  countdownRemainingMs: number
+  // null = чакаме първия отговор от сървъра → „--:--“
+  countdownRemainingMs: number | null
   countdownTotalMs?: number
   statusText?: string
   titleText?: string
@@ -73,6 +74,18 @@ function escapeHtml(value: string): string {
 
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
+}
+
+// Показва се, докато клиентът чака първия matchmaking_joined/status —
+// продължителността е server-authoritative (админ настройка / чакаща маса).
+export const MATCHMAKING_COUNTDOWN_PENDING_TEXT = '--:--'
+
+// 180 → "03:00", 59 → "00:59" (общият таймер на случайната маса).
+export function formatMatchmakingCountdown(countdownSeconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(countdownSeconds))
+  const minutes = Math.floor(safeSeconds / 60)
+  const seconds = safeSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
 function getInitialLetter(value: string): string {
@@ -242,7 +255,7 @@ function renderMobileMatchmakingRoomScreen(
   params: RenderMatchmakingRoomScreenParams,
   positionedSlots: PositionedMatchmakingRoomSlot[],
   occupiedSlots: number,
-  countdownSeconds: number,
+  countdownText: string,
   progressDegrees: number,
 ): string {
   return `
@@ -389,17 +402,10 @@ function renderMobileMatchmakingRoomScreen(
         }
 
         .mm-countdown-number {
-          font-size:30px;
+          font-size:20px;
           line-height:1;
           font-weight:900;
           letter-spacing:0;
-        }
-
-        .mm-countdown-unit {
-          margin-left:3px;
-          font-size:11px;
-          line-height:1;
-          font-weight:900;
         }
 
         .mm-mobile-search-copy {
@@ -765,8 +771,7 @@ function renderMobileMatchmakingRoomScreen(
               aria-hidden="true"
             >
               <div data-matchmaking-countdown-text="1" class="mm-mobile-ring-text">
-                <span class="mm-countdown-number">${countdownSeconds}</span>
-                <span class="mm-countdown-unit">сек</span>
+                <span class="mm-countdown-number">${countdownText}</span>
               </div>
             </div>
             <div class="mm-mobile-search-copy">
@@ -821,12 +826,13 @@ export function renderMatchmakingRoomScreen(
   params: RenderMatchmakingRoomScreenParams,
 ): string {
   const countdownTotalMs = Math.max(1, params.countdownTotalMs ?? DEFAULT_COUNTDOWN_TOTAL_MS)
-  const countdownRemainingMs = Math.max(
-    0,
-    Math.min(params.countdownRemainingMs, countdownTotalMs),
-  )
-  const countdownSeconds = Math.ceil(countdownRemainingMs / 1000)
-  const progressDegrees = (countdownRemainingMs / countdownTotalMs) * 360
+  const countdownRemainingMs = params.countdownRemainingMs === null
+    ? null
+    : Math.max(0, Math.min(params.countdownRemainingMs, countdownTotalMs))
+  const countdownText = countdownRemainingMs === null
+    ? MATCHMAKING_COUNTDOWN_PENDING_TEXT
+    : formatMatchmakingCountdown(Math.ceil(countdownRemainingMs / 1000))
+  const progressDegrees = countdownRemainingMs === null ? 360 : (countdownRemainingMs / countdownTotalMs) * 360
   const positionedSlots = createPositionedSlots(params)
   const occupiedSlots = positionedSlots.filter(({ slot }) => slot.kind !== 'empty').length
   const isPhoneLayout = isPhoneLayoutViewport()
@@ -835,7 +841,7 @@ export function renderMatchmakingRoomScreen(
       params,
       positionedSlots,
       occupiedSlots,
-      countdownSeconds,
+      countdownText,
       progressDegrees,
     )
   }
@@ -1132,19 +1138,11 @@ export function renderMatchmakingRoomScreen(
 
         .mm-countdown-number {
           display:inline-block;
-          font-size:80px;
+          font-size:52px;
           line-height:0.88;
           font-weight:900;
           letter-spacing:0;
           text-shadow:0 4px 10px rgba(0,0,0,0.50);
-        }
-
-        .mm-countdown-unit {
-          display:inline-block;
-          margin-left:8px;
-          font-size:28px;
-          line-height:1;
-          font-weight:900;
         }
 
         .mm-stake-section {
@@ -1330,8 +1328,7 @@ export function renderMatchmakingRoomScreen(
             ></div>
 
             <div data-matchmaking-countdown-text="1" class="mm-side-countdown">
-              <span class="mm-countdown-number">${countdownSeconds}</span>
-              <span class="mm-countdown-unit">сек</span>
+              <span class="mm-countdown-number">${countdownText}</span>
             </div>
           </div>
 

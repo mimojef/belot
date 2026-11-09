@@ -400,9 +400,9 @@ import { createMatchmakingQueueEntry } from './matchmaking/createMatchmakingQueu
 import { getQueueEntryByConnectionId } from './matchmaking/getQueueEntryByConnectionId.js'
 import { getSearchingEntriesByStake } from './matchmaking/getSearchingEntriesByStake.js'
 import { isQueueEntryExpired } from './matchmaking/isQueueEntryExpired.js'
+import { getSharedTableTimer } from './matchmaking/getSharedTableTimer.js'
 import type { MatchmakingState } from './matchmaking/matchmakingState.js'
 import {
-  MATCHMAKING_WAIT_MS,
   SUPPORTED_MATCH_STAKES,
   setSupportedMatchStakes,
   type MatchStake,
@@ -497,6 +497,7 @@ import type {
   LudoRoomSnapshot,
   PrivateRoomSnapshot,
   PrivateGamesListMessage,
+  MatchmakingWaitingCountsMessage,
   PrivateGameScoreUpdatedMessage,
   TournamentMatchLiveScoreMessage,
   TournamentMatchesChangedMessage,
@@ -8425,6 +8426,38 @@ function getQueueCountsByStake(): Record<string, number> {
   return counts
 }
 
+// Значката с броя чакащи реални играчи на каретата в лобито. Опашката съдържа
+// само хора в статус 'searching' (ботове никога не влизат в нея; матчнатите,
+// напусналите и прекъсналите се махат от нея), затова getQueueCountsByStake е
+// точният брой. Изчислява се от паметта — без SQL. Праща се до всички
+// свързани клиенти САМО при реална промяна; обектите са в реда на
+// SUPPORTED_MATCH_STAKES, така че JSON ключът е стабилен.
+let lastMatchmakingWaitingCountsKey = JSON.stringify({})
+
+function buildMatchmakingWaitingCountsMessage(): MatchmakingWaitingCountsMessage {
+  return { type: 'matchmaking_waiting_counts', counts: getQueueCountsByStake() }
+}
+
+function broadcastMatchmakingWaitingCountsIfChanged(): void {
+  const message = buildMatchmakingWaitingCountsMessage()
+  const key = JSON.stringify(message.counts)
+
+  if (key === lastMatchmakingWaitingCountsKey) {
+    return
+  }
+
+  lastMatchmakingWaitingCountsKey = key
+
+  // До всички свързани (не само lobby connections) — играч, който се връща
+  // от игра в лобито, вече има актуалните бройки, без допълнителна заявка.
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status !== 'connected') {
+      continue
+    }
+    safeSendToConnection(conn.id, message)
+  }
+}
+
 function createQueuedPlayerPreview(entry: MatchmakingQueueEntry): {
   id: string
   name: string
@@ -8482,7 +8515,24 @@ function removeConnectionFromMatchmaking(connectionId: ConnectionId): boolean {
 
   activityCounters.incrementRooms('matchmakingLeave')
   broadcastMatchmakingStatusForStake(existingEntry.stake)
+  // Отказ / напускане / прекъсване / смяна на залог — веднага, без да чака tick.
+  broadcastMatchmakingWaitingCountsIfChanged()
   return true
+}
+
+// Продължителност за НОВА случайна маса по текущата админ настройка
+// („Белот — изчакване на случайна маса“). Вика се само при създаване на маса
+// (join_matchmaking) — вече чакащите пазят своя waitDurationMs. Ниво > 7:
+// 60 сек, без ботове — настройката не ги засяга.
+function getNewRandomTableWaitMs(stake: MatchStake): number {
+  if ((matchRoomsStore.getRoom(stake)?.minLevel ?? 1) > 7) {
+    return 60000
+  }
+  return getBelotRandomTableWaitMs()
+}
+
+function getBelotRandomTableWaitMs(): number {
+  return adminSettingsStore.getSettings().belotRandomTableWaitSeconds * 1000
 }
 
 function sendMatchmakingStatusToConnection(
@@ -8513,7 +8563,8 @@ function sendMatchmakingStatusToConnection(
         selectionSeed: createMatchmakingBotSelectionSeed(stake, searchingEntries),
         minLevel: stakeMinLevel,
       }).map((profile) => profile.identity.displayName)
-  const totalDurationMs = ownEntry.expiresAt - ownEntry.joinedAt
+  // Продължителността на конкретната маса (фиксирана при създаването ѝ).
+  const totalDurationMs = oldestEntry?.waitDurationMs ?? ownEntry.waitDurationMs
 
   safeSendToConnection(connectionId, {
     type: 'matchmaking_status',
@@ -8554,6 +8605,11 @@ function processMatchmaking(): void {
     processMatchmakingUnsafe()
   } catch (error) {
     console.error('[matchmaking] processing error', error)
+  } finally {
+    // Хваща всяка промяна на опашката (join, мач с 4 души или с ботове,
+    // изтичане, неуспешен залог) — само сравнение в паметта; изпраща се
+    // единствено ако бройките реално са се променили.
+    broadcastMatchmakingWaitingCountsIfChanged()
   }
 }
 
@@ -19588,6 +19644,7 @@ async function handleAdminSettingsRequest(
       'pikaTeamDailyGiftLimit',
       'marketingDailyGiftLimit',
       'freeTopicsVipDays',
+      'belotRandomTableWaitSeconds',
     ] as const
     for (const key of numericFieldKeys) {
       if (key in body && getNumberField(body, key) === null) {
@@ -19660,6 +19717,9 @@ async function handleAdminSettingsRequest(
       pikaTeamDailyGiftLimit: getNumberField(body, 'pikaTeamDailyGiftLimit') ?? undefined,
       marketingDailyGiftLimit: getNumberField(body, 'marketingDailyGiftLimit') ?? undefined,
       freeTopicsVipDays: getNumberField(body, 'freeTopicsVipDays') ?? undefined,
+      // Цели секунди 20..600 — store-ът отказва всичко друго (400). Важи само
+      // за НОВИ случайни маси; чакащите пазят своя таймер.
+      belotRandomTableWaitSeconds: getNumberField(body, 'belotRandomTableWaitSeconds') ?? undefined,
       registrationVerificationMode: nextRegistrationVerificationMode,
       antiBadLuckThreshold: nextAntiBadLuckThreshold,
       physicalShuffleMode: nextPhysicalShuffleMode,
@@ -24698,7 +24758,7 @@ async function handleHttpRequest(
       ok: true,
       service: 'belot-v2-server',
       matchmaking: {
-        waitMs: MATCHMAKING_WAIT_MS,
+        waitMs: getBelotRandomTableWaitMs(),
         queuedPlayersByStake: getQueueCountsByStake(),
       },
       gameRuntime: gameRuntimeHealth,
@@ -25454,6 +25514,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
   // този конкретен connection пропусна предходен broadcast, той винага
   // получава текущата истина при самото отваряне на socket-а.
   sendJsonMessage(socket, buildActiveCampaignThemeMessage())
+  // Текущият брой чакащи на всеки залог (значките в лобито) — покрива и
+  // reconnect/refresh; после идват само обновявания при промяна.
+  sendJsonMessage(socket, buildMatchmakingWaitingCountsMessage())
 
   if (connection.profileId !== null) {
     if (!sendSessionInGameIfNeeded(connection.id, connection.profileId)) {
@@ -27047,14 +27110,18 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             ),
             minLevel: matchRoomsStore.getRoom(existingEntry.stake)?.minLevel ?? 1,
           }).map((profile) => profile.identity.displayName)
+          // Общият краен момент на масата = expiresAt на най-стария чакащ
+          // (същото като sendMatchmakingStatusToConnection/getReadyEntriesForStake).
+          const tableEntry = searchingEntries[0] ?? existingEntry
 
           safeSendToConnection(connection.id, {
             type: 'matchmaking_joined',
             stake: existingEntry.stake,
             queuedPlayers: searchingEntries.length,
             requiredPlayers: MATCH_PLAYERS_REQUIRED,
-            countdownEndsAt: existingEntry.expiresAt,
-            remainingMs: Math.max(0, existingEntry.expiresAt - Date.now()),
+            countdownEndsAt: tableEntry.expiresAt,
+            remainingMs: Math.max(0, tableEntry.expiresAt - Date.now()),
+            totalDurationMs: tableEntry.waitDurationMs,
             previewBotDisplayNames,
             queuedPlayerPreviews: createQueuedPlayerPreviews(searchingEntries, connection.id),
           })
@@ -27067,7 +27134,6 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           removeConnectionFromMatchmaking(connection.id)
         }
 
-        const stakeMinLevelForEntry = matchRoomsStore.getRoom(message.stake)?.minLevel ?? 1
         const nextEntry = createMatchmakingQueueEntry({
           connectionId: connection.id,
           playerId: stablePlayerConnection.playerId ?? stablePlayerConnection.id,
@@ -27075,7 +27141,12 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           publicProfile,
           displayName: publicProfile.displayName,
           stake: message.stake,
-          waitMs: stakeMinLevelForEntry > 7 ? 60000 : 20000,
+          // Фиксиран таймер на масата: влизащият наследява крайния момент и
+          // продължителността на вече чакащите (напускане или промяна на
+          // админ настройката не ги местят). Празна опашка → нова маса по
+          // текущата настройка.
+          tableTimer: getSharedTableTimer(matchmakingState.queueEntries, message.stake),
+          waitMs: getNewRandomTableWaitMs(message.stake),
         })
 
         matchmakingState = {
@@ -27111,15 +27182,18 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
               ),
               minLevel: joinedStakeMinLevel,
             }).map((profile) => profile.identity.displayName)
+        // Общият краен момент на масата = expiresAt на най-стария чакащ —
+        // присъединяването на нов играч не рестартира/удължава таймера.
+        const tableEntry = searchingEntries[0] ?? queuedEntryAfterStakeCollection
 
         safeSendToConnection(connection.id, {
           type: 'matchmaking_joined',
           stake: queuedEntryAfterStakeCollection.stake,
           queuedPlayers: searchingEntries.length,
           requiredPlayers: MATCH_PLAYERS_REQUIRED,
-          countdownEndsAt: queuedEntryAfterStakeCollection.expiresAt,
-          remainingMs: Math.max(0, queuedEntryAfterStakeCollection.expiresAt - Date.now()),
-          totalDurationMs: queuedEntryAfterStakeCollection.expiresAt - queuedEntryAfterStakeCollection.joinedAt,
+          countdownEndsAt: tableEntry.expiresAt,
+          remainingMs: Math.max(0, tableEntry.expiresAt - Date.now()),
+          totalDurationMs: tableEntry.waitDurationMs,
           previewBotDisplayNames,
           queuedPlayerPreviews: createQueuedPlayerPreviews(searchingEntries, connection.id),
         })
@@ -31075,7 +31149,7 @@ startupTimeline.measure('httpServer.listen', () => httpServer.listen(PORT, HOST,
   console.log(`[ws] WebSocket endpoint is ws://localhost:${PORT}/ws`)
   console.log('[http] Health check: /health')
   console.log(
-    `[matchmaking] stakes=${SUPPORTED_MATCH_STAKES.join(', ')} | wait=${MATCHMAKING_WAIT_MS}ms`,
+    `[matchmaking] stakes=${SUPPORTED_MATCH_STAKES.join(', ')} | wait=${getBelotRandomTableWaitMs()}ms (admin setting)`,
   )
   console.log(
     `[game-runtime] passive hook enabled | tick=${GAME_RUNTIME_TICK_MS}ms`,

@@ -34,6 +34,10 @@ export type MatchmakingQueueEntry = {
   stakePaid: boolean
   joinedAt: number
   expiresAt: number
+  // Пълната продължителност на масата, фиксирана при създаването ѝ (админ
+  // настройката към онзи момент) — наследява се заедно с expiresAt, за да
+  // показва прогрес пръстенът продължителността на конкретната маса.
+  waitDurationMs: number
   status: MatchmakingStatus
 }
 
@@ -60,14 +64,18 @@ export type PendingMatchGroup = {
   seatAssignments: MatchSeatAssignment[]
 }
 
-export const MATCHMAKING_WAIT_MS = 20000
+// Default shared wait for a random Belot table. The live value comes from the
+// admin setting belotRandomTableWaitSeconds (adminSettingsStore.ts) and is
+// fixed per table at creation; later joiners inherit the table's expiresAt and
+// waitDurationMs (getSharedTableTimer), so they never restart or extend it.
+export const MATCHMAKING_WAIT_MS = 180_000
 
 // Duration of the bot-fill window before oldest entry expires.
-// With MATCHMAKING_WAIT_MS=20000 this opens the bot-fill window at t=17s.
+// With MATCHMAKING_WAIT_MS=180000 this opens the bot-fill window at t=177s.
 export const MATCHMAKING_BOT_FILL_WINDOW_MS = 3000
 
 // How many bots are allowed per elapsed second inside the bot-fill window.
-// One bot is unlocked per second: t=17s→1 bot, t=18s→2 bots, t=19s→3 bots.
+// One bot is unlocked per second: t=177s→1 bot, t=178s→2 bots, t=179s→3 bots.
 // A room is only created when humans + allowedBots === 4 (full table).
 export const MATCHMAKING_BOT_FILL_RATE_MS = 1000
 

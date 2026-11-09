@@ -1342,6 +1342,15 @@ export type PrivateRoomsListMessage = {
   rooms: PrivateRoomSnapshot[]
 }
 
+// Брой РЕАЛНИ играчи, чакащи на всеки залог на случайните маси в Белот
+// (значката на каретата в лобито). Само бройки — без имена/ID. Залог без
+// чакащи липсва в обекта (= 0). Праща се при отваряне на WS и при реална
+// промяна (виж broadcastMatchmakingWaitingCountsIfChanged в index.ts).
+export type MatchmakingWaitingCountsMessage = {
+  type: 'matchmaking_waiting_counts'
+  counts: Record<string, number>
+}
+
 export type LudoRoomPlayerSnapshot = {
   profileId: string
   displayName: string
@@ -1882,6 +1891,7 @@ export type ServerMessage =
   | TableGiftItemSentMessage
   | TableGiftSendResultMessage
   | PrivateRoomsListMessage
+  | MatchmakingWaitingCountsMessage
   | LudoRoomsListMessage
   | LudoGamesListMessage
   | LudoRoomUpdatedMessage

@@ -223,6 +223,28 @@ const ADMIN_PHYSICAL_SHUFFLE_MODE_OPTIONS: ReadonlyArray<{ value: AdminSettingsS
   { value: 'RANDOM_INSERT', label: 'Случайно вмъкване' },
   { value: 'ALTERNATING_ENDS', label: 'Редуване горе–долу' },
 ]
+// "Белот — изчакване на случайна маса" — mirror на server границите
+// (adminSettingsStore.ts); сървърът re-validate-ва независимо.
+const ADMIN_BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS = 20
+const ADMIN_BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS = 600
+
+function isValidAdminRandomTableWaitSeconds(value: number): boolean {
+  return Number.isInteger(value)
+    && value >= ADMIN_BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS
+    && value <= ADMIN_BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS
+}
+
+// 180 → "03:00 (3 мин)", 95 → "01:35 (1 мин 35 сек)".
+function formatAdminRandomTableWaitPreview(seconds: number): string {
+  if (!isValidAdminRandomTableWaitSeconds(seconds)) {
+    return `Цяло число от ${ADMIN_BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS} до ${ADMIN_BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS}`
+  }
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  const clock = `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
+  const words = [minutes > 0 ? `${minutes} мин` : '', rest > 0 ? `${rest} сек` : ''].filter(Boolean).join(' ')
+  return `${clock} (${words})`
+}
 
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
@@ -983,6 +1005,8 @@ export type LobbyScreenState = {
   privateRoomsCreatePopupOpen: boolean
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
+  /** Брой реални чакащи по залог (ключ = String(stakeAmount)); липсващ = 0. */
+  matchmakingWaitingCounts?: Record<string, number>
   myPrivateRoom: PrivateRoomSnapshot | null
   privateRoomsLifecycleTab: 'waiting' | 'playing' | 'finished'
   privateGamesPlaying: PrivateRoomMatchSnapshot[]
@@ -5201,6 +5225,55 @@ function renderHeroSection(
   `
 }
 
+// Значка с броя РЕАЛНИ чакащи играчи на залога (горе вдясно на карето).
+// Рендерира се винаги, скрита при 0 — applyStakeWaitingBadges() само сменя
+// цифрата/видимостта при matchmaking_waiting_counts, без пълен render.
+function getStakeWaitingBadgeDigit(count: number | undefined): string {
+  const safeCount = Number.isInteger(count) && (count as number) > 0 ? (count as number) : 0
+  return safeCount === 0 ? '' : String(Math.min(safeCount, 9))
+}
+
+// desktop: златна 26px с тъмен контур (тъмните карета); mobile: лилава 18px
+// в цветовете на .lobby-violet-btn („Играй“) за светлия мобилен дизайн.
+const STAKE_WAITING_BADGE_VARIANT_STYLE = {
+  desktop: `
+    width:26px;height:26px;
+    background:linear-gradient(135deg,#f4c95b 0%,#c98f13 100%);
+    box-shadow:0 0 0 2px #080808,0 2px 6px rgba(0,0,0,0.45);
+    color:#080808;font-size:14px;font-weight:900;`,
+  mobile: `
+    width:18px;height:18px;
+    background:linear-gradient(180deg,#8961F0 0%,#7950E8 55%,#6C43DD 100%);
+    box-shadow:0 1px 3px rgba(52,22,140,0.35);
+    color:#FFFFFF;font-size:11px;font-weight:800;`,
+} as const
+
+function renderStakeWaitingBadge(
+  stakeAmount: number,
+  count: number | undefined,
+  top: number,
+  right: number,
+  variant: keyof typeof STAKE_WAITING_BADGE_VARIANT_STYLE = 'desktop',
+): string {
+  const digit = getStakeWaitingBadgeDigit(count)
+  return `<span data-lobby-stake-waiting-badge="${stakeAmount}" aria-label="${digit === '' ? '' : `Чакащи играчи: ${digit}`}" style="
+    position:absolute;top:${top}px;right:${right}px;z-index:3;
+    border-radius:50%;box-sizing:border-box;${STAKE_WAITING_BADGE_VARIANT_STYLE[variant]}
+    line-height:1;font-family:Arial,Helvetica,sans-serif;
+    font-variant-numeric:tabular-nums;pointer-events:none;
+    display:${digit === '' ? 'none' : 'flex'};align-items:center;justify-content:center;
+  ">${digit}</span>`
+}
+
+export function applyStakeWaitingBadges(root: ParentNode, counts: Readonly<Record<string, number>>): void {
+  root.querySelectorAll<HTMLElement>('[data-lobby-stake-waiting-badge]').forEach((badge) => {
+    const digit = getStakeWaitingBadgeDigit(counts[badge.dataset.lobbyStakeWaitingBadge ?? ''])
+    if (badge.textContent !== digit) badge.textContent = digit
+    badge.style.display = digit === '' ? 'none' : 'flex'
+    badge.setAttribute('aria-label', digit === '' ? '' : `Чакащи играчи: ${digit}`)
+  })
+}
+
 function renderStakeSection(
   selectedStake: MatchStake,
   canStartSearch: boolean,
@@ -5211,6 +5284,7 @@ function renderStakeSection(
   useMobileLayout = false,
   isGuestSession = false,
   guestTrialStake: MatchStake = 5000,
+  waitingCounts: Readonly<Record<string, number>> = {},
 ): string {
   const rooms = matchRooms.filter((r) => r.isEnabled)
 
@@ -5261,6 +5335,14 @@ function renderStakeSection(
           opacity:${isLocked ? '0.72' : isDisabled && !isSelected ? '0.7' : '1'};
         "
       >
+        ${renderStakeWaitingBadge(
+          room.stakeAmount,
+          waitingCounts[String(room.stakeAmount)],
+          // Горе вдясно; при „ИЗБРАНО ★“ — под него, при 🔒 — вляво от него.
+          isSelected ? 34 : 8,
+          isSelected ? 10 : isLocked ? 42 : 8,
+        )}
+
         ${!isLocked && !useMobileLayout ? `
           <img src="/assets/lobby/spade-watermark.png" alt=""
             style="
@@ -7493,6 +7575,7 @@ function renderGuestMobileLobbyBelotSection(
   matchRoomsLoading: boolean,
   guestTrialStake: MatchStake = 5000,
   isGuestSession = true,
+  waitingCounts: Readonly<Record<string, number>> = {},
 ): string {
   const rooms = matchRooms.filter((room) => room.isEnabled)
 
@@ -7524,11 +7607,12 @@ function renderGuestMobileLobbyBelotSection(
     return `
       <article data-lobby-guest-table-card="${room.stakeAmount}" style="
         flex:0 0 calc((100% - 10px) / 2);min-width:0;box-sizing:border-box;scroll-snap-align:start;
-        background:#FFFFFF;border-radius:12px;padding:8px;
+        position:relative;background:#FFFFFF;border-radius:12px;padding:8px;
         border:${isSelected ? `2px solid ${GUEST_LOBBY_VIOLET}` : '1px solid rgba(20,20,43,0.05)'};
         box-shadow:${GUEST_LOBBY_CARD_SHADOW};display:flex;flex-direction:column;gap:9px;
       ">
         ${renderGuestLobbyMediaSlot('belot-table', '2 / 1', GUEST_LOBBY_BELOT_TABLE_IMAGE_URL)}
+        ${renderStakeWaitingBadge(room.stakeAmount, waitingCounts[String(room.stakeAmount)], 12, 12, 'mobile')}
         <dl style="margin:0;padding:0 2px;display:grid;gap:6px;">
           ${renderGuestLobbyTableStat('icon-tournaments', 'Награда', renderGuestLobbyCoinAmount(room.prizeAmount))}
           ${renderGuestLobbyTableStat('icon-card-entry', 'Вход', renderGuestLobbyCoinAmount(room.stakeAmount))}
@@ -7848,7 +7932,7 @@ function renderGuestMobileLobbyMain(state: LobbyScreenState, canStartSearch: boo
     <main data-lobby-guest-mobile-main="1">
       ${isMember ? renderMemberMobileLobbyProfileCard(state, profileName) : renderGuestMobileLobbyAuthCard(state.signupBonusYellowCoins ?? 0)}
       ${isMember ? '' : renderGuestMobileLobbyPostsBanner(state)}
-      ${renderGuestMobileLobbyBelotSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, 5000, !isMember)}
+      ${renderGuestMobileLobbyBelotSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, 5000, !isMember, state.matchmakingWaitingCounts)}
       ${renderGuestMobileLobbyBelotPrivateRow(getPrivateRoomsBadgeCount(state.privateRooms), isMember)}
       ${renderGuestMobileLobbyLudoSection(isMember)}
       ${renderGuestMobileLobbyLudoPrivateRow(isMember)}
@@ -12510,6 +12594,9 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // Само fallback докато state.adminSettings се зарежда — консистентен със
     // server DEFAULT_SETTINGS (adminSettingsStore.ts, 'RANDOM_INSERT').
     physicalShuffleMode: 'RANDOM_INSERT',
+    // Само fallback докато state.adminSettings се зарежда — консистентен със
+    // server DEFAULT_SETTINGS (adminSettingsStore.ts, 180).
+    belotRandomTableWaitSeconds: 180,
   }
   const adminPackages = state.adminCoinPackages
   const adminBundlePackages = state.adminBundlePackages
@@ -12680,6 +12767,21 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Важи само при Anti Bad Luck праг 0. Вместо ново пълно разбъркване, следващото раздаване започва от събраните взятки на предишното (при всички пас — от ръцете и неразданите карти), размесени с 3–6 прехвърляния на пакети от 6–16 карти. „Случайно вмъкване“ — пакет отгоре или отдолу се вмъква на случайно място в тестето. „Редуване горе–долу“ — пакетите се местят последователно отгоре долу и отдолу горе. Първото раздаване на мача е с обичайното случайно разбъркване; цепенето остава реално. Промяната важи от следващото раздаване, без restart.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Белот — изчакване на случайна маса</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Време за изчакване (секунди)
+              <input name="belotRandomTableWaitSeconds" type="number" min="${ADMIN_BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS}" max="${ADMIN_BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS}" step="1" required value="${settings.belotRandomTableWaitSeconds}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+            <div style="display:grid;gap:7px;align-content:end;">
+              <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.56);">Минути и секунди</div>
+              <div data-lobby-admin-random-table-wait-preview="1" style="height:44px;display:flex;align-items:center;font-size:15px;font-weight:800;color:#f8fafc;">${escapeHtml(formatAdminRandomTableWaitPreview(settings.belotRandomTableWaitSeconds))}</div>
+            </div>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Колко време случайна маса в Белот изчаква реални играчи, преди свободните места да се запълнят с ботове (един по един през последните 3 секунди). Цели секунди от ${ADMIN_BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS} до ${ADMIN_BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS}. Промяната важи веднага за всяка НОВА маса, без restart; вече чакащите маси запазват своя краен момент. Не засяга масите с ниво над 7 (60 сек, без ботове), частните маси и другите игри.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -17587,7 +17689,7 @@ export function renderLobbyScreen(
               ${state.profile.profileId !== null
                 ? renderHeroSection(state, profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
                 : renderGuestHeroCard(state, state.signupBonusYellowCoins ?? 0, isPhoneLayout)}
-              ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, isPhoneLayout, state.profile.profileId === null)}
+              ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, isPhoneLayout, state.profile.profileId === null, undefined, state.matchmakingWaitingCounts)}
               ${renderBottomSection(
                 state.lobbyPackages,
                 state.profile.profileId !== null,
@@ -19562,6 +19664,12 @@ export function renderLobbyScreen(
       if (physicalShuffleMode === undefined) {
         return
       }
+      // Цели секунди 20..600 (input-ът е required/min/max/step=1, сървърът
+      // re-validate-ва). Невалидна стойност → submit-ът се отказва.
+      const belotRandomTableWaitSeconds = Number(data.get('belotRandomTableWaitSeconds'))
+      if (!isValidAdminRandomTableWaitSeconds(belotRandomTableWaitSeconds)) {
+        return
+      }
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
@@ -19575,8 +19683,24 @@ export function renderLobbyScreen(
         registrationVerificationMode,
         antiBadLuckThreshold,
         physicalShuffleMode,
+        belotRandomTableWaitSeconds,
       })
     })
+
+  // Live „Минути и секунди“ преглед до полето за изчакване на случайна маса.
+  const adminRandomTableWaitInput = root.querySelector<HTMLInputElement>(
+    '[data-lobby-admin-settings-form="1"] input[name="belotRandomTableWaitSeconds"]',
+  )
+  const adminRandomTableWaitPreview = root.querySelector<HTMLElement>(
+    '[data-lobby-admin-random-table-wait-preview="1"]',
+  )
+  adminRandomTableWaitInput?.addEventListener('input', () => {
+    if (adminRandomTableWaitPreview) {
+      adminRandomTableWaitPreview.textContent = formatAdminRandomTableWaitPreview(
+        adminRandomTableWaitInput.value.trim() === '' ? Number.NaN : Number(adminRandomTableWaitInput.value),
+      )
+    }
+  })
 
   root
     .querySelector<HTMLFormElement>('[data-lobby-admin-coin-package-form="1"]')

@@ -64,6 +64,7 @@ function makeEntry(id: string, joinedAtOffset: number, profileId: string | null 
     stakePaid: false,
     joinedAt,
     expiresAt: joinedAt + MATCHMAKING_WAIT_MS,
+    waitDurationMs: MATCHMAKING_WAIT_MS,
     status: 'searching',
   }
 }

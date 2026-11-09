@@ -10,6 +10,7 @@ import {
   type MatchStake,
   type MatchmakingQueueEntry,
 } from './matchmakingTypes.js'
+import type { SharedTableTimer } from './getSharedTableTimer.js'
 
 type CreateMatchmakingQueueEntryOptions = {
   connectionId: ConnectionId
@@ -19,6 +20,10 @@ type CreateMatchmakingQueueEntryOptions = {
   publicProfile?: PlayerPublicProfileSnapshot | null
   stake: MatchStake
   waitMs?: number
+  // Общият таймер на вече чакащата маса (виж getSharedTableTimer). Ако
+  // крайният му момент е в бъдещето, новият запис наследява и него, и
+  // продължителността му вместо собствени waitMs.
+  tableTimer?: SharedTableTimer | null
 }
 
 function normalizeDisplayName(value: string): string {
@@ -35,6 +40,10 @@ export function createMatchmakingQueueEntry(
   options: CreateMatchmakingQueueEntryOptions,
 ): MatchmakingQueueEntry {
   const now = Date.now()
+  const waitMs = options.waitMs ?? MATCHMAKING_WAIT_MS
+  const tableTimer = options.tableTimer && options.tableTimer.expiresAt > now
+    ? options.tableTimer
+    : { expiresAt: now + waitMs, waitDurationMs: waitMs }
 
   return {
     entryId: randomUUID(),
@@ -46,7 +55,8 @@ export function createMatchmakingQueueEntry(
     stake: options.stake,
     stakePaid: false,
     joinedAt: now,
-    expiresAt: now + (options.waitMs ?? MATCHMAKING_WAIT_MS),
+    expiresAt: tableTimer.expiresAt,
+    waitDurationMs: tableTimer.waitDurationMs,
     status: 'searching',
   }
 }

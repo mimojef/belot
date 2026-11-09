@@ -2,7 +2,7 @@
  * checkMatchmakingBotFillWindow.ts
  *
  * Verifies staged bot-fill behaviour in getReadyEntriesForStake:
- * - bot-fill window opens at t=17s (MATCHMAKING_WAIT_MS - MATCHMAKING_BOT_FILL_WINDOW_MS)
+ * - bot-fill window opens at t=177s (MATCHMAKING_WAIT_MS - MATCHMAKING_BOT_FILL_WINDOW_MS)
  * - one bot is unlocked per MATCHMAKING_BOT_FILL_RATE_MS (1s) elapsed since window opened
  * - room is created only when humans + allowedBots === 4 (full table)
  * - a real human joining between steps reduces the bot count needed
@@ -21,7 +21,10 @@
  * [12] 1 human, t=18.001s → not ready: allowedBots=2, 1+2=3 < 4
  * [13] real human joins between steps: 2→3 humans at t=17.5s → need only 1 more bot → not ready (1+3=still 3+1=4 at t=17.5s? Let's check)
  * [14] production case: 2 humans at t=1s → NOT ready
- * [15] constants sanity: WAIT=20000, WINDOW=3000, RATE=1000 → window opens at 17000ms
+ * [15] constants sanity: WAIT=180000, WINDOW=3000, RATE=1000 → window opens at 177000ms
+ *
+ * Labels below use the original 20s timeline (t=17s ≙ BOT_FILL_START); the
+ * checks themselves are relative to MATCHMAKING_WAIT_MS.
  */
 
 import { getReadyEntriesForStake } from '../src/matchmaking/getReadyEntriesForStake.js'
@@ -46,7 +49,7 @@ function check(label: string, condition: boolean): void {
 }
 
 const STAKE = 5000
-const BOT_FILL_START = MATCHMAKING_WAIT_MS - MATCHMAKING_BOT_FILL_WINDOW_MS // 17000
+const BOT_FILL_START = MATCHMAKING_WAIT_MS - MATCHMAKING_BOT_FILL_WINDOW_MS // 177000
 
 function makeEntry(id: string, joinedAtOffset: number, baseNow: number): MatchmakingQueueEntry {
   const joinedAt = baseNow + joinedAtOffset
@@ -61,6 +64,7 @@ function makeEntry(id: string, joinedAtOffset: number, baseNow: number): Matchma
     stakePaid: false,
     joinedAt,
     expiresAt: joinedAt + MATCHMAKING_WAIT_MS,
+    waitDurationMs: MATCHMAKING_WAIT_MS,
     status: 'searching',
   }
 }
@@ -118,7 +122,7 @@ const BASE = 1_700_000_000_000
 
 // [6] 2 humans at t=20.5s (past expiry) → ready, allowedBots capped at 2 (open seats)
 {
-  const now = BASE + 20_500
+  const now = BASE + MATCHMAKING_WAIT_MS + 500
   const r = getReadyEntriesForStake([
     makeEntry('A', 0, BASE),
     makeEntry('B', 1_000, BASE),
@@ -190,7 +194,7 @@ const BASE = 1_700_000_000_000
   const r = getReadyEntriesForStake([
     makeEntry('A', 0, BASE),
     makeEntry('B', 1_000, BASE),
-    makeEntry('C', 17_000, BASE), // joined at t=17s (inside window)
+    makeEntry('C', BOT_FILL_START, BASE), // joined when the window opened (inside window)
   ], STAKE, now)
   check('[13] 3rd human joins at t=17s → ready at t=17.5s with maxBots=1 (only 1 bot needed)', r.entries.length === 3)
   check('[13] maxBots=1', r.maxBots === 1)
@@ -209,10 +213,10 @@ const BASE = 1_700_000_000_000
 // [15] constants sanity
 check(
   `[15] WAIT=${MATCHMAKING_WAIT_MS} WINDOW=${MATCHMAKING_BOT_FILL_WINDOW_MS} RATE=${MATCHMAKING_BOT_FILL_RATE_MS} → window at ${BOT_FILL_START}ms`,
-  MATCHMAKING_WAIT_MS === 20_000 &&
+  MATCHMAKING_WAIT_MS === 180_000 &&
   MATCHMAKING_BOT_FILL_WINDOW_MS === 3_000 &&
   MATCHMAKING_BOT_FILL_RATE_MS === 1_000 &&
-  BOT_FILL_START === 17_000,
+  BOT_FILL_START === 177_000,
 )
 
 console.log(`\n${passed} passed, ${failed} failed`)

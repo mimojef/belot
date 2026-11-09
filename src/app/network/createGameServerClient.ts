@@ -516,6 +516,8 @@ export type AdminSettingsSnapshot = {
   antiBadLuckThreshold: 0 | 5 | 6 | 7 | 8 | 9 | 10
   /** "Метод на размесване" — 'RANDOM_INSERT' (Случайно вмъкване, default) | 'ALTERNATING_ENDS' (Редуване горе–долу). Прилага се само при antiBadLuckThreshold 0. SERVER-AUTHORITATIVE (enum валидация в server/src/db/adminSettingsStore.ts); само admin панела го чете/пише. */
   physicalShuffleMode: 'RANDOM_INSERT' | 'ALTERNATING_ENDS'
+  /** "Белот — изчакване на случайна маса" — цели секунди 20..600, default 180. SERVER-AUTHORITATIVE (валидация в server/src/db/adminSettingsStore.ts); важи само за НОВИ случайни маси — чакащите пазят своя таймер. */
+  belotRandomTableWaitSeconds: number
 }
 
 export type AdminPaymentPeriodStats = {
@@ -2276,6 +2278,12 @@ export type PrivateRoomsListMessage = {
   rooms: PrivateRoomSnapshot[]
 }
 
+/** Брой реални играчи, чакащи на всеки залог на случайните маси (значката на каретата). Залог без чакащи липсва (= 0). Виж server/src/protocol/messageTypes.ts. */
+export type MatchmakingWaitingCountsMessage = {
+  type: 'matchmaking_waiting_counts'
+  counts: Record<string, number>
+}
+
 // ─── Свара (Етап 2Б.3.7.2) — сървърни съобщения ────────────────────────────
 export type SvaraMatchTimingMessage = {
   type: 'svara_match_timing'
@@ -3466,6 +3474,7 @@ export type ServerMessage =
   | TableGiftItemSentMessage
   | TableGiftSendResultMessage
   | PrivateRoomsListMessage
+  | MatchmakingWaitingCountsMessage
   | SvaraMatchTimingMessage
   | SvaraCommandResultMessage
   | SvaraCommandErrorMessage

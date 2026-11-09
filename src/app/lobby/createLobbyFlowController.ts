@@ -17,6 +17,8 @@ import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload, Marketi
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 import { LUDO_GAME_SCREEN_Z_INDEX } from '../games/ludo/ludoLayerHierarchy'
 import {
+  MATCHMAKING_COUNTDOWN_PENDING_TEXT,
+  formatMatchmakingCountdown,
   renderMatchmakingRoomScreen,
   type MatchmakingRoomPlayer,
 } from './renderMatchmakingRoomScreen'
@@ -78,6 +80,7 @@ import {
   syncTopicThreadSentinelsDom,
   syncTopicThreadOwnReplyNoticeDom,
   syncTopicThreadDividerDom,
+  applyStakeWaitingBadges,
   type TopicThreadViewState,
   type TopicMessageNodeCallbacks,
   type AvatarCropSelection,
@@ -2341,6 +2344,8 @@ type InternalLobbyFlowState = {
   privateRoomsCreatePopupOpen: boolean
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
+  // Брой реални чакащи по залог (значките на каретата) — от matchmaking_waiting_counts.
+  matchmakingWaitingCounts: Record<string, number>
   myPrivateRoom: PrivateRoomSnapshot | null
   // Чакащи/Играещи/Приключили — независим tab от privateRoomsTab (all/mine
   // филтъра вътре в "Чакащи"). Local UI state, persist-ва докато потребителят
@@ -2697,7 +2702,7 @@ type InternalLobbyFlowState = {
 }
 
 const DEFAULT_REQUIRED_PLAYERS = 4
-const DEFAULT_COUNTDOWN_MS = 20000
+const DEFAULT_COUNTDOWN_MS = 180000
 // Синтетичен ключ за chatUploadingFriendshipIds/chatDraftByFriendshipId,
 // докато pending vip_dm compose context (§7 в task spec-а) все още няма
 // реален friendshipId — не може да се сблъска с истински UUID friendshipId.
@@ -3154,6 +3159,7 @@ function createInitialState(): InternalLobbyFlowState {
     belotSpectatorVipClaimSubmitting: false,
     belotSpectatorVipClaimErrorText: null,
     privateRooms: [],
+    matchmakingWaitingCounts: {},
     myPrivateRoom: null,
     privateRoomInvite: null,
     privateRoomInviteQueue: [],
@@ -5217,18 +5223,17 @@ export function createLobbyFlowController(
       return false
     }
 
-    const remainingMs = clamp(
-      getLobbyRemainingMs(state) ?? state.totalCountdownMs,
-      0,
-      state.totalCountdownMs,
-    )
-    const countdownSeconds = Math.ceil(remainingMs / 1000)
-    const progressDegrees = (remainingMs / state.totalCountdownMs) * 360
+    const serverRemainingMs = getLobbyRemainingMs(state)
+    const remainingMs = serverRemainingMs === null
+      ? null
+      : clamp(serverRemainingMs, 0, state.totalCountdownMs)
+    // -1 = „--:--“ (чакаме първия отговор от сървъра).
+    const countdownSeconds = remainingMs === null ? -1 : Math.ceil(remainingMs / 1000)
+    const progressDegrees = remainingMs === null ? 360 : (remainingMs / state.totalCountdownMs) * 360
 
     if (lastRenderedCountdownSecond !== countdownSeconds) {
       countdownTextElement.innerHTML = `
-        <span class="mm-countdown-number">${countdownSeconds}</span>
-        <span class="mm-countdown-unit">сек</span>
+        <span class="mm-countdown-number">${countdownSeconds < 0 ? MATCHMAKING_COUNTDOWN_PENDING_TEXT : formatMatchmakingCountdown(countdownSeconds)}</span>
       `
       lastRenderedCountdownSecond = countdownSeconds
     }
@@ -6041,6 +6046,7 @@ export function createLobbyFlowController(
       privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
       privateRoomsTab: state.privateRoomsTab,
       privateRooms: state.privateRooms,
+      matchmakingWaitingCounts: state.matchmakingWaitingCounts,
       myPrivateRoom: state.myPrivateRoom,
       privateRoomsLifecycleTab: state.privateRoomsLifecycleTab,
       privateGamesPlaying: state.privateGamesPlaying,
@@ -19565,17 +19571,17 @@ export function createLobbyFlowController(
       return
     }
 
-    const stakeRoom = state.matchRooms.find((r) => r.stakeAmount === stake)
-    const optimisticCountdownMs = (stakeRoom?.minLevel ?? 1) > 7 ? 60000 : DEFAULT_COUNTDOWN_MS
-
     state.errorText = null
     state.isSearching = true
     state.currentScreen = 'matchmaking-room'
     state.queuedPlayers = 1
     state.requiredPlayers = DEFAULT_REQUIRED_PLAYERS
-    state.remainingMs = optimisticCountdownMs
-    state.countdownEndsAt = Date.now() + optimisticCountdownMs
-    state.totalCountdownMs = optimisticCountdownMs
+    // Без локално предположение за таймера: продължителността идва от админ
+    // настройката (или от вече чакащата маса) на сървъра. До първото
+    // matchmaking_joined/status таймерът показва „--:--“, не стара/грешна стойност.
+    state.remainingMs = null
+    state.countdownEndsAt = null
+    state.totalCountdownMs = DEFAULT_COUNTDOWN_MS
     state.serverPreviewBotDisplayNames = []
     state.serverQueuedPlayerPreviews = []
     clearServerRoomSnapshot()
@@ -19588,11 +19594,10 @@ export function createLobbyFlowController(
   }
 
   function paintMatchmakingRoom(): void {
-    const remainingMs = clamp(
-      getLobbyRemainingMs(state) ?? state.totalCountdownMs,
-      0,
-      state.totalCountdownMs,
-    )
+    const serverRemainingMs = getLobbyRemainingMs(state)
+    const remainingMs = serverRemainingMs === null
+      ? null
+      : clamp(serverRemainingMs, 0, state.totalCountdownMs)
     const displayedQueuedPlayers = getDisplayedQueuedPlayers()
 
     const selectedMatchRoom = state.matchRooms.find((r) => r.stakeAmount === state.selectedStake)
@@ -23675,6 +23680,15 @@ export function createLobbyFlowController(
     if (message.type === 'private_rooms_list') {
       state.privateRooms = message.rooms
       render()
+      return true
+    }
+
+    if (message.type === 'matchmaking_waiting_counts') {
+      state.matchmakingWaitingCounts = message.counts
+      // Без пълен render() (не прекъсва скрол/попъпи и не пипа игровия UI) —
+      // само значките на вече показаните карета; следващият render ги
+      // рисува от state.
+      applyStakeWaitingBadges(options.root, message.counts)
       return true
     }
 

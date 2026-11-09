@@ -82,6 +82,14 @@ export type AdminSettingsSnapshot = {
    * следващото раздаване, без restart. Никога в snapshot към клиент.
    */
   physicalShuffleMode: ServerPhysicalShuffleMode
+  /**
+   * "Белот — изчакване на случайна маса" (Admin -> Настройки) —
+   * SERVER-AUTHORITATIVE, цели секунди 20..600, default 180. Чете се САМО при
+   * създаване на нова случайна маса (join_matchmaking в index.ts) — вече
+   * чакащите маси пазят своя expiresAt/waitDurationMs. Не засяга стаите с
+   * ниво > 7 (60 сек, без ботове), частните маси и другите игри.
+   */
+  belotRandomTableWaitSeconds: number
 }
 
 export type AdminSettingsStore = {
@@ -156,6 +164,9 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // Липсващ ред (не е нужна seed migration) или невалидна запазена стойност
   // → RANDOM_INSERT („Случайно вмъкване“ е методът по подразбиране).
   physicalShuffleMode: SERVER_PHYSICAL_SHUFFLE_DEFAULT_MODE,
+  // Липсващ ред (не е нужна seed migration) → 180 сек. Трябва да остане
+  // РАВЕН на MATCHMAKING_WAIT_MS (matchmaking/matchmakingTypes.ts).
+  belotRandomTableWaitSeconds: 180,
 }
 
 const SETTING_KEYS = {
@@ -170,7 +181,11 @@ const SETTING_KEYS = {
   registrationVerificationMode: 'registration_verification_mode',
   antiBadLuckThreshold: 'anti_bad_luck_threshold',
   physicalShuffleMode: 'physical_shuffle_mode',
+  belotRandomTableWaitSeconds: 'belot_random_table_wait_seconds',
 } as const
+
+const BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS = 20
+const BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS = 600
 
 // Вътрешен (не admin-editable) ключ — виж getAntiBadLuckRuntimeConfig.
 const ANTI_BAD_LUCK_RESET_GENERATION_KEY = 'anti_bad_luck_reset_generation'
@@ -244,6 +259,14 @@ function parseStoredPhysicalShuffleMode(value: string | undefined): ServerPhysic
   return isServerPhysicalShuffleMode(value) ? value : DEFAULT_SETTINGS.physicalShuffleMode
 }
 
+// Запазената стойност е TEXT — само точен десетичен запис в диапазона;
+// всичко друго (повредена/ръчно редактирана стойност) → default 180.
+function parseStoredBelotRandomTableWaitSeconds(value: string | undefined): number {
+  const parsed = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN
+  return normalizeSettingNumber(parsed, BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS, BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS)
+    ?? DEFAULT_SETTINGS.belotRandomTableWaitSeconds
+}
+
 function parseStoredResetGeneration(value: string | undefined): number {
   const parsed = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0
@@ -285,7 +308,8 @@ export async function createAdminSettingsStore(
       'free_topics_vip_days',
       'registration_verification_mode',
       'anti_bad_luck_threshold',
-      'physical_shuffle_mode'
+      'physical_shuffle_mode',
+      'belot_random_table_wait_seconds'
     );
   `)
 
@@ -358,6 +382,9 @@ export async function createAdminSettingsStore(
       ),
       antiBadLuckThreshold: parseStoredAntiBadLuckThreshold(values.get(SETTING_KEYS.antiBadLuckThreshold) ?? ''),
       physicalShuffleMode: parseStoredPhysicalShuffleMode(values.get(SETTING_KEYS.physicalShuffleMode)),
+      belotRandomTableWaitSeconds: parseStoredBelotRandomTableWaitSeconds(
+        values.get(SETTING_KEYS.belotRandomTableWaitSeconds),
+      ),
     }
   }
 
@@ -418,6 +445,14 @@ export async function createAdminSettingsStore(
       input.physicalShuffleMode === undefined
         ? undefined
         : normalizePhysicalShuffleMode(input.physicalShuffleMode)
+    const nextBelotRandomTableWaitSeconds =
+      input.belotRandomTableWaitSeconds === undefined
+        ? undefined
+        : normalizeSettingNumber(
+            input.belotRandomTableWaitSeconds,
+            BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS,
+            BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS,
+          )
 
     if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
       return {
@@ -496,6 +531,13 @@ export async function createAdminSettingsStore(
       }
     }
 
+    if (input.belotRandomTableWaitSeconds !== undefined && nextBelotRandomTableWaitSeconds === null) {
+      return {
+        ok: false,
+        message: `Времето за изчакване на случайна маса трябва да е цяло число между ${BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS} и ${BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS} секунди.`,
+      }
+    }
+
     // Всички записи на един PATCH — една BEGIN IMMEDIATE транзакция (atomic):
     // особено прагът + reset generation при превключване към 0 трябва да се
     // видят заедно или изобщо.
@@ -558,6 +600,10 @@ export async function createAdminSettingsStore(
 
       if (nextPhysicalShuffleMode !== undefined) {
         upsertSettingStatement.run(SETTING_KEYS.physicalShuffleMode, nextPhysicalShuffleMode)
+      }
+
+      if (nextBelotRandomTableWaitSeconds !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.belotRandomTableWaitSeconds, String(nextBelotRandomTableWaitSeconds))
       }
 
       database.exec('COMMIT;')
