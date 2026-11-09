@@ -491,11 +491,24 @@ export async function createTournamentCoordinator(
   // трябва да СПРЕ blocking изискването, не да го поддържа). Reuse-ва
   // същите статуси като selectActiveEntryForAccountStatement в
   // tournamentEconomyStore.ts ("one active tournament per account" guard-а).
+  //
+  // Статусът на ТУРНИРА също се проверява (същото определение за активност
+  // като selectActiveEntriesForAccountStatement при записване): загубилият
+  // финала остава 'finalist' завинаги, а 'confirmed' записи остават и в
+  // отменени/failed турнири — без JOIN-а такива стари редове блокираха
+  // Свара и пращаха tournament_active_participation за приключил турнир.
+  // ORDER BY: вече започнал турнир има приоритет пред 'open' регистрация
+  // (профилът може да е записан и в бъдещ scheduled турнир) — login push-ът
+  // и spectator фактите трябва да виждат турнира, който реално се играе.
   const selectActiveEntryTournamentIdStatement = prepare(`
-    SELECT tournament_id
-    FROM tournament_entries
-    WHERE profile_id = ?
-      AND status IN ('confirmed', 'finalist')
+    SELECT te.tournament_id
+    FROM tournament_entries te
+    JOIN tournaments t
+      ON t.tournament_id = te.tournament_id
+    WHERE te.profile_id = ?
+      AND te.status IN ('confirmed', 'finalist')
+      AND t.status IN ('open', 'starting', 'semifinal_in_progress', 'final_in_progress')
+    ORDER BY CASE WHEN t.status = 'open' THEN 1 ELSE 0 END ASC, te.created_at ASC
     LIMIT 1;
   `)
 

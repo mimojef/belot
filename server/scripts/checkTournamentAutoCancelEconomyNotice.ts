@@ -276,7 +276,10 @@ function freshProfile(balance = 100_000): string {
   assert(tournamentResult.ok, `tournament creation failed: ${JSON.stringify(tournamentResult)}`)
   const tournamentId = tournamentResult.ok ? tournamentResult.tournament.tournamentId : ''
   const a = freshProfile()
-  economyStore.joinTournamentSoloAtomically(tournamentId, a)
+  // Записването е ПРЕДИ началния час (сървърно време) — от 20261109
+  // регистрацията за scheduled турнир се затваря точно в scheduled_start_at.
+  const joinA = economyStore.joinTournamentSoloAtomically(tournamentId, a, { now: new Date('2019-12-31T23:59:00.000Z') })
+  assert(joinA.ok, `seed join failed: ${JSON.stringify(joinA)}`)
 
   const cancelResult = economyStore.autoCancelScheduledTournamentAtomically(tournamentId, new Date('2020-01-01T00:05:00.000Z'), 'scheduled_start_not_ready')
   check('[3] auto-cancel succeeds for underfilled scheduled tournament', cancelResult.ok === true, JSON.stringify(cancelResult))

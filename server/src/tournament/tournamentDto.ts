@@ -422,6 +422,25 @@ export type ToTournamentSummaryDtoInput = {
   viewerIsAdmin?: boolean
   // Реалният текущ кръг (resolveActiveTournamentRoundType) — само за statusLabel.
   activeRoundType?: TournamentRoundType | null
+  // Сървърно време за snapshot-а (по подразбиране Date.now()) — само за
+  // тестове с фиксиран час.
+  nowMs?: number
+}
+
+// Огледало на server-side guard-овете isScheduledRegistrationClosed и
+// isFillExpired (tournamentEconomyStore.ts): регистрацията е отворена до
+// последната милисекунда преди началния час / fill срока — без буфер.
+// Решава се по сървърното време на snapshot-а, не по клиентския часовник.
+function isRegistrationClosedByTime(tournament: TournamentRecord, nowMs: number): boolean {
+  if (tournament.startMode === 'scheduled' && tournament.scheduledStartAt !== null) {
+    const startMs = new Date(tournament.scheduledStartAt).getTime()
+    if (Number.isFinite(startMs) && startMs <= nowMs) return true
+  }
+  if (tournament.startMode === 'fill' && tournament.fillExpiresAt !== null) {
+    const fillExpiresMs = new Date(tournament.fillExpiresAt).getTime()
+    if (Number.isFinite(fillExpiresMs) && fillExpiresMs <= nowMs) return true
+  }
+  return false
 }
 
 function computeViewerParticipation(input: ToTournamentSummaryDtoInput): TournamentViewerParticipationDto {
@@ -434,6 +453,8 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
   const isFull = occupiedPlacesCount >= tournament.playerCapacity
   const canRejoin =
     viewerEntryStatus === null || REJOINABLE_VIEWER_ENTRY_STATUSES.includes(viewerEntryStatus)
+  const isRegistrationOpen =
+    tournament.status === 'open' && !isRegistrationClosedByTime(tournament, input.nowMs ?? Date.now())
 
   return {
     isParticipant,
@@ -441,16 +462,17 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
     joinedAs: input.viewerEntryJoinedAs ?? null,
     canJoinSolo:
       viewerProfileId !== null &&
-      tournament.status === 'open' &&
+      isRegistrationOpen &&
       !isParticipant &&
       !isFull &&
       canRejoin,
     // Shuffle mode (§3/§4 в shuffle mode task spec-а): предварителни двойки
     // не са позволени, докато окончателният shuffle не е извършен — огледално
-    // на server-side guard-а в createPartnerInviteAtomically.
+    // на server-side guard-а в createPartnerInviteAtomically. Няма времеви
+    // буфер преди старта — само реалното затваряне в началния час.
     canInvitePartner:
       viewerProfileId !== null &&
-      tournament.status === 'open' &&
+      isRegistrationOpen &&
       occupiedPlacesCount < tournament.playerCapacity &&
       (isParticipant || canRejoin) &&
       !(tournament.shuffleEnabled && tournament.teamsShuffledAt === null),

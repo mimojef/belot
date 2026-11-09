@@ -319,7 +319,13 @@ export type PartnerInviteMutationResult =
         | 'invalid_invitee'
         | 'self_invite'
         | 'already_participant'
+        /** САМИЯТ действащ профил (inviter при create, invitee при accept)
+         * вече участва в друг активен турнир. */
         | 'already_participating_elsewhere'
+        /** Само при create: ПОКАНЕНИЯТ партньор вече участва в друг активен
+         * турнир (различно от 'already_participating_elsewhere', за да може
+         * съобщението да казва чие е участието). */
+        | 'partner_participating_elsewhere'
         /** Виж JoinTournamentSoloResult-а по-горе за пълния коментар —
          * идентична семантика тук: засегнатият профил (inviter при create
          * flow, invitee при accept flow) има друга 'open' scheduled
@@ -471,7 +477,7 @@ export type TournamentEconomyStore = {
     inviteId: TournamentPartnerInviteId,
     inviterProfileId: ProfileId,
   ) => PartnerInviteMutationResult
-  expireDuePartnerInvitesAtomically: (tournamentId?: TournamentId) => number
+  expireDuePartnerInvitesAtomically: (tournamentId?: TournamentId, now?: Date) => number
   startTournamentAtomically: (
     tournamentId: TournamentId,
     now: Date,
@@ -730,15 +736,45 @@ function shuffleInPlace<T>(items: T[]): void {
   }
 }
 
-function computePartnerInviteExpiresAt(tournament: TournamentRow, nowMs = Date.now()): string | null {
-  if (tournament.start_mode === 'fill') {
-    return new Date(nowMs + 60 * 60 * 1000).toISOString()
-  }
+const FILL_MODE_PARTNER_INVITE_TTL_MS = 60 * 60 * 1000
+
+function getScheduledStartMs(tournament: TournamentRow): number | null {
   if (tournament.scheduled_start_at === null) return null
   const scheduledMs = new Date(dbDateToUtc(tournament.scheduled_start_at)).getTime()
-  const expiresMs = scheduledMs - 30 * 60 * 1000
-  if (!Number.isFinite(expiresMs) || expiresMs <= nowMs) return null
-  return new Date(expiresMs).toISOString()
+  return Number.isFinite(scheduledMs) ? scheduledMs : null
+}
+
+// Регистрацията (самостоятелно записване, изпращане и приемане на покана) в
+// scheduled турнир е отворена ДО последната милисекунда ПРЕДИ
+// scheduled_start_at: 19:59:59.999 — позволено, 20:00:00.000 — затворено.
+// Сравнението е спрямо сървърното време (`now` на caller-а), никога спрямо
+// клиентския часовник. Нужно е отделно от status==='open', защото
+// scheduler-ът стартира турнира на следващия си tick (до 5 сек след часа) —
+// без тази проверка в този прозорец биха влизали нови участници.
+function isScheduledRegistrationClosed(tournament: TournamentRow, nowMs: number): boolean {
+  if (tournament.start_mode !== 'scheduled') return false
+  const scheduledMs = getScheduledStartMs(tournament)
+  return scheduledMs !== null && scheduledMs <= nowMs
+}
+
+// Срок на партньорска покана:
+//  - scheduled: ТОЧНО началният час — без буфер. Покана, неприета до
+//    старта, изтича атомарно в стартовата транзакция (виж
+//    startTournamentAtomicallyLocal) и сама по себе си не блокира старта.
+//  - fill: 60 мин от изпращането, но не след fill_expires_at (след него
+//    приемането така или иначе е невъзможно — isFillExpired).
+// null => scheduled турнир без начален час или вече настъпил старт.
+function computePartnerInviteExpiresAt(tournament: TournamentRow, nowMs: number): string | null {
+  if (tournament.start_mode === 'fill') {
+    const ttlExpiresMs = nowMs + FILL_MODE_PARTNER_INVITE_TTL_MS
+    const fillExpiresMs = tournament.fill_expires_at !== null
+      ? new Date(dbDateToUtc(tournament.fill_expires_at)).getTime()
+      : Number.NaN
+    return new Date(Number.isFinite(fillExpiresMs) ? Math.min(ttlExpiresMs, fillExpiresMs) : ttlExpiresMs).toISOString()
+  }
+  const scheduledMs = getScheduledStartMs(tournament)
+  if (scheduledMs === null || scheduledMs <= nowMs) return null
+  return new Date(scheduledMs).toISOString()
 }
 
 // Server-authoritative guard: fill-mode турнирите имат фиксиран 1-час
@@ -1260,8 +1296,21 @@ export async function createTournamentEconomyStore(
            responded_at
     FROM tournament_partner_invites
     WHERE status = 'pending'
-      AND datetime(expires_at) <= CURRENT_TIMESTAMP
+      AND julianday(expires_at) <= julianday(?)
       AND (? IS NULL OR tournament_id = ?)
+    ORDER BY expires_at ASC;
+  `)
+
+  // Всички още чакащи покани на един турнир — ползва се САМО от стартовата
+  // транзакция на scheduled турнир, след като началният час е настъпил
+  // (тогава никоя покана вече не е валидна, независимо от expires_at —
+  // напр. покана отпреди преместване на началния час по-рано).
+  const selectPendingInvitesForTournamentStatement = database.prepare(`
+    SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
+           status, expires_at, popup_dismissed_at, notification_read_at, created_at,
+           responded_at
+    FROM tournament_partner_invites
+    WHERE status = 'pending' AND tournament_id = ?
     ORDER BY expires_at ASC;
   `)
 
@@ -1820,12 +1869,28 @@ export async function createTournamentEconomyStore(
     }
   }
 
-  function expireDuePartnerInvitesInCurrentTransaction(tournamentId?: TournamentId): number {
+  // Сравнението е с милисекундна точност (julianday) спрямо сървърното
+  // `nowMs` на caller-а — покана с expires_at = 20:00:00.000 е валидна в
+  // 19:59:59.999 и изтича в 20:00:00.000.
+  function expireDuePartnerInvitesInCurrentTransaction(
+    tournamentId?: TournamentId,
+    nowMs: number = Date.now(),
+  ): number {
     const tournamentParam = tournamentId ?? null
     const rows = selectDuePendingInvitesStatement.all(
+      new Date(nowMs).toISOString(),
       tournamentParam,
       tournamentParam,
     ) as TournamentPartnerInviteRow[]
+    return expirePendingInviteRowsInCurrentTransaction(rows)
+  }
+
+  function expireAllPendingInvitesForTournamentInCurrentTransaction(tournamentId: TournamentId): number {
+    const rows = selectPendingInvitesForTournamentStatement.all(tournamentId) as TournamentPartnerInviteRow[]
+    return expirePendingInviteRowsInCurrentTransaction(rows)
+  }
+
+  function expirePendingInviteRowsInCurrentTransaction(rows: TournamentPartnerInviteRow[]): number {
     let expired = 0
     for (const invite of rows) {
       const result = resolvePartnerInviteStatement.run(
@@ -1916,12 +1981,17 @@ export async function createTournamentEconomyStore(
     return null
   }
 
+  // actor: кой изпълнява действието. 'inviter' (create flow) — поканеният е
+  // ДРУГ играч, затова активно участие другаде се връща като
+  // 'partner_participating_elsewhere'. 'invitee' (accept flow) — поканеният
+  // е самият действащ профил → 'already_participating_elsewhere'.
   function validateInvitee(
     tournamentId: TournamentId,
     inviterProfileId: ProfileId,
     inviteeProfileId: ProfileId,
     nowMs: number,
     joiningTournament: JoiningTournamentInfo,
+    actor: 'inviter' | 'invitee',
   ): PartnerInviteMutationResult | null {
     if (inviterProfileId === inviteeProfileId) return { ok: false, reason: 'self_invite' }
     const invitee = selectProfileEligibilityStatement.get(inviteeProfileId) as
@@ -1933,20 +2003,23 @@ export async function createTournamentEconomyStore(
     if (unavailable.code === 'blocked') return { ok: false, reason: 'blocked' }
     if (unavailable.code === 'already_in_tournament') return { ok: false, reason: 'already_participant' }
     if (unavailable.code === 'active_tournament') {
-      return (
+      const failure =
         mapActiveEntryBlockToPartnerInviteFailure(
           unavailable.activeEntryBlock ?? { blocked: true, reason: 'already_participating_elsewhere' },
         ) ?? { ok: false, reason: 'already_participating_elsewhere' }
-      )
+      if (actor === 'inviter' && failure.reason === 'already_participating_elsewhere') {
+        return { ok: false, reason: 'partner_participating_elsewhere' }
+      }
+      return failure
     }
     if (unavailable.code === 'participation_blocked') return { ok: false, reason: 'participation_blocked' }
     return { ok: false, reason: 'invalid_invitee' }
   }
 
-  function expireDuePartnerInvitesAtomicallyLocal(tournamentId?: TournamentId): number {
+  function expireDuePartnerInvitesAtomicallyLocal(tournamentId?: TournamentId, nowMs: number = Date.now()): number {
     try {
       database.exec('BEGIN IMMEDIATE;')
-      const expired = expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+      const expired = expireDuePartnerInvitesInCurrentTransaction(tournamentId, nowMs)
       database.exec('COMMIT;')
       return expired
     } catch (error) {
@@ -2279,7 +2352,7 @@ export async function createTournamentEconomyStore(
     const nowIso = now.toISOString()
     try {
       database.exec('BEGIN IMMEDIATE;')
-      expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+      expireDuePartnerInvitesInCurrentTransaction(tournamentId, now.getTime())
 
       const tournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
       if (tournament === undefined) {
@@ -2297,6 +2370,16 @@ export async function createTournamentEconomyStore(
           return getStartedTournamentResult(tournamentId, true)
         }
         return { ok: false, reason: 'tournament_not_open' }
+      }
+
+      // Scheduled старт: в началния час регистрацията е затворена, значи
+      // никоя чакаща покана вече не може да бъде приета. Изтича атомарно ТУК,
+      // в същата транзакция и ПРЕДИ проверката за готовност — така самото ѝ
+      // наличие никога не е причина за not_ready/отмяна. Поканилият остава
+      // платен самостоятелен участник (resetFormingTeamToSolo); дали турнирът
+      // е пълен се решава само от реално потвърдените участници.
+      if (isScheduledRegistrationClosed(tournament, now.getTime())) {
+        expireAllPendingInvitesForTournamentInCurrentTransaction(tournamentId)
       }
 
       const confirmedEntries = selectConfirmedEntriesWithDebitLedgerStatement.all(tournamentId) as {
@@ -2634,7 +2717,7 @@ export async function createTournamentEconomyStore(
     const nowIso = now.toISOString()
     try {
       database.exec('BEGIN IMMEDIATE;')
-      expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+      expireDuePartnerInvitesInCurrentTransaction(tournamentId, now.getTime())
       const tournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
       if (tournament === undefined) {
         database.exec('ROLLBACK;')
@@ -2948,8 +3031,8 @@ export async function createTournamentEconomyStore(
       return getReservedPendingPlaces(tournamentId)
     },
 
-    expireDuePartnerInvitesAtomically(tournamentId?: TournamentId): number {
-      return expireDuePartnerInvitesAtomicallyLocal(tournamentId)
+    expireDuePartnerInvitesAtomically(tournamentId?: TournamentId, now?: Date): number {
+      return expireDuePartnerInvitesAtomicallyLocal(tournamentId, (now ?? new Date()).getTime())
     },
 
     startTournamentAtomically(
@@ -2992,7 +3075,14 @@ export async function createTournamentEconomyStore(
         tournamentId,
         inviterProfileId,
       ) as TournamentPartnerInviteRow | undefined
-      if (existingPending !== undefined) {
+      // Идемпотентен fast path само за все още ВАЛИДНА покана — изтекла по
+      // време (но още немаркирана) минава през транзакцията по-долу, която я
+      // маркира и връща реалната причина (напр. затворена регистрация).
+      if (
+        existingPending !== undefined &&
+        new Date(dbDateToUtc(existingPending.expires_at)).getTime() > nowMs &&
+        !isScheduledRegistrationClosed(tournamentRow, nowMs)
+      ) {
         return {
           ok: true,
           invite: toTournamentPartnerInviteRecord(existingPending),
@@ -3004,7 +3094,7 @@ export async function createTournamentEconomyStore(
       let result: PartnerInviteMutationResult
       try {
         database.exec('BEGIN IMMEDIATE;')
-        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId, nowMs)
 
         const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as
           | TournamentRow
@@ -3021,6 +3111,10 @@ export async function createTournamentEconomyStore(
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_fill_expired' }
         }
+        if (isScheduledRegistrationClosed(freshTournament, nowMs)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_open' }
+        }
         if (freshTournament.shuffle_enabled === 1 && freshTournament.teams_shuffled_at === null) {
           // Shuffle mode (§3/§4 в shuffle mode task spec-а): предварителни
           // двойки не са позволени преди окончателното разбъркване —
@@ -3029,13 +3123,13 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'shuffle_mode_no_partner_invites' }
         }
 
-        const expiresAt = computePartnerInviteExpiresAt(freshTournament)
+        const expiresAt = computePartnerInviteExpiresAt(freshTournament, nowMs)
         if (expiresAt === null) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'invite_window_closed' }
         }
 
-        const inviteeValidation = validateInvitee(tournamentId, inviterProfileId, inviteeProfileId, nowMs, freshTournament)
+        const inviteeValidation = validateInvitee(tournamentId, inviterProfileId, inviteeProfileId, nowMs, freshTournament, 'inviter')
         if (inviteeValidation !== null) {
           database.exec('ROLLBACK;')
           return inviteeValidation
@@ -3095,6 +3189,22 @@ export async function createTournamentEconomyStore(
 
         const hasConfirmedInviterEntry =
           inviterEntry !== undefined && inviterEntry.status === 'confirmed'
+
+        // Активното участие на поканилия другаде се проверява ПРЕДИ
+        // капацитета (същия ред като solo join-а): ако поканилият по принцип
+        // не може да участва, "няма достатъчно места" е подвеждаща причина.
+        // Вече confirmed в ТОЗИ турнир → вече е минал guard-а при записването.
+        const inviterActiveEntries = hasConfirmedInviterEntry
+          ? []
+          : (selectActiveEntriesForAccountStatement.all(inviterProfileId) as ActiveAccountEntryRow[])
+        const inviterBlockFailure = mapActiveEntryBlockToPartnerInviteFailure(
+          resolveActiveEntryBlock(inviterActiveEntries, nowMs, freshTournament),
+        )
+        if (inviterBlockFailure !== null) {
+          database.exec('ROLLBACK;')
+          return inviterBlockFailure
+        }
+
         const neededPlaces = hasConfirmedInviterEntry ? 1 : 2
         const capacity = freshTournament.player_capacity
         const occupiedPlaces = getOccupiedPlaces(tournamentId)
@@ -3121,17 +3231,6 @@ export async function createTournamentEconomyStore(
             database.exec('ROLLBACK;')
             return { ok: false, reason: 'requires_password' }
           }
-        }
-
-        const inviterActiveEntries = hasConfirmedInviterEntry
-          ? []
-          : (selectActiveEntriesForAccountStatement.all(inviterProfileId) as ActiveAccountEntryRow[])
-        const inviterBlockFailure = mapActiveEntryBlockToPartnerInviteFailure(
-          resolveActiveEntryBlock(inviterActiveEntries, nowMs, freshTournament),
-        )
-        if (inviterBlockFailure !== null) {
-          database.exec('ROLLBACK;')
-          return inviterBlockFailure
         }
 
         // Item 3 "partner invite creation as inviter" (§"ВСИЧКИ ENTRY PATHS
@@ -3241,7 +3340,7 @@ export async function createTournamentEconomyStore(
       const nowMs = now.getTime()
       try {
         database.exec('BEGIN IMMEDIATE;')
-        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId, nowMs)
         const inviteRow = selectPendingInviteByIdStatement.get(inviteId, tournamentId) as
           | TournamentPartnerInviteRow
           | undefined
@@ -3252,6 +3351,17 @@ export async function createTournamentEconomyStore(
         if (inviteRow.invitee_profile_id !== inviteeProfileId) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'not_invitee' }
+        }
+        if (inviteRow.status === 'expired') {
+          // Покана към scheduled турнир изтича точно в началния час — при
+          // опит за приемане след него по-ясната причина е затворената
+          // регистрация, не "поканата вече е обработена".
+          const tournamentForExpired = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+          if (tournamentForExpired !== undefined && isScheduledRegistrationClosed(tournamentForExpired, nowMs)) {
+            // Маркирането като 'expired' от expireDue по-горе се запазва.
+            database.exec('COMMIT;')
+            return { ok: false, reason: 'tournament_not_open' }
+          }
         }
         if (inviteRow.status === 'accepted') {
           database.exec('ROLLBACK;')
@@ -3281,6 +3391,10 @@ export async function createTournamentEconomyStore(
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_fill_expired' }
         }
+        if (isScheduledRegistrationClosed(freshTournament, nowMs)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_open' }
+        }
         if (new Date(dbDateToUtc(inviteRow.expires_at)).getTime() <= nowMs) {
           resolvePartnerInviteStatement.run('expired', inviteId, tournamentId)
           resetFormingTeamToSolo(tournamentId, inviteRow.team_id, inviteRow.inviter_profile_id)
@@ -3303,6 +3417,7 @@ export async function createTournamentEconomyStore(
           inviteeProfileId,
           nowMs,
           freshTournament,
+          'invitee',
         )
         if (inviteeValidation !== null) {
           database.exec('ROLLBACK;')
@@ -3517,7 +3632,7 @@ export async function createTournamentEconomyStore(
 
       try {
         database.exec('BEGIN IMMEDIATE;')
-        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId, nowMs)
 
         const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as
           | TournamentRow
@@ -3534,6 +3649,10 @@ export async function createTournamentEconomyStore(
         if (isFillExpired(freshTournament, nowMs)) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_fill_expired' }
+        }
+        if (isScheduledRegistrationClosed(freshTournament, nowMs)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_open' }
         }
         if (freshTournament.shuffle_enabled === 1 && freshTournament.teams_shuffled_at !== null) {
           // Shuffle mode (§9 в shuffle mode task spec-а): roster-ът е финален

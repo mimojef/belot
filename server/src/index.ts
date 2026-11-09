@@ -17234,7 +17234,10 @@ const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   invalid_invitee: 'Избраният профил не може да бъде поканен.',
   self_invite: 'Не можеш да поканиш себе си.',
   already_participant: 'Този играч вече участва в турнира.',
-  already_participating_elsewhere: 'Играчът вече има активно турнирно участие.',
+  // Действащият профил (inviter при create, invitee при accept).
+  already_participating_elsewhere: 'Вече участваш в друг активен турнир.',
+  // Поканеният партньор (само при create).
+  partner_participating_elsewhere: 'Играчът вече има активно турнирно участие.',
   registered_tournament_starts_soon: 'Остава по-малко от час до старта на турнир, в който сте записан.',
   scheduled_tournament_time_conflict: 'Не можете да се запишете. Имате друг турнир, който започва на по-малко от 60 минути от този.',
   already_has_pending_invite: 'Вече има активна покана.',

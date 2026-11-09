@@ -112,7 +112,10 @@ const validateInviteeReasons = [
   'invalid_invitee',
   'blocked',
   'already_participant',
+  // accept flow (действащият е поканеният)
   'already_participating_elsewhere',
+  // create flow (поканеният е друг играч)
+  'partner_participating_elsewhere',
 ]
 for (const reason of validateInviteeReasons) {
   check(

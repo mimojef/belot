@@ -84,7 +84,10 @@ export async function createTournamentScheduler(
     WHERE status = 'open'
       AND start_mode = 'scheduled'
       AND scheduled_start_at IS NOT NULL
-      AND datetime(scheduled_start_at) <= datetime(?)
+      -- julianday: милисекундна точност. Турнир с начало 20:00:00.500 не
+      -- бива да стартира в 20:00:00.100 — регистрацията е отворена до
+      -- самия начален час (isScheduledRegistrationClosed в economy store-а).
+      AND julianday(scheduled_start_at) <= julianday(?)
     ORDER BY scheduled_start_at ASC
     LIMIT ?;
   `)
@@ -135,7 +138,7 @@ export async function createTournamentScheduler(
     WHERE status = 'open'
       AND start_mode = 'fill'
       AND fill_expires_at IS NOT NULL
-      AND datetime(fill_expires_at) <= datetime(?)
+      AND julianday(fill_expires_at) <= julianday(?)
     ORDER BY fill_expires_at ASC
     LIMIT ?;
   `)
@@ -156,7 +159,7 @@ export async function createTournamentScheduler(
     lastTickAt = tickNow.toISOString()
     processedLastTick = 0
     try {
-      deps.economyStore.expireDuePartnerInvitesAtomically()
+      deps.economyStore.expireDuePartnerInvitesAtomically(undefined, tickNow)
 
       // Shuffle mode scheduled tournaments (§2/§13 в "scheduled shuffle
       // timing" task spec-а): вече НЯМА отделен T-15 pre-shuffle стъпка тук —
