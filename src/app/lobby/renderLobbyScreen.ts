@@ -1896,6 +1896,15 @@ let mobileMenuOpen = false
 let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
 let stakesFirstCardIndex = -1
 let stakesAnimFrame = 0
+// Крайна позиция на текущата анимация със стрелките (null = няма анимация).
+let stakesAnimTargetLeft: number | null = null
+
+// Desktop списъкът със случайните маси (мобилното лоби за гости/регистрирани
+// е в [data-lobby-guest-carousel] и има собствена логика).
+function findDesktopStakesScrollEl(root: ParentNode): HTMLElement | null {
+  const scrollEl = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
+  return scrollEl && !scrollEl.closest('[data-lobby-guest-carousel="1"]') ? scrollEl : null
+}
 let inviteCountdownTimer: ReturnType<typeof setInterval> | null = null
 let savedAdminSupportMobileListScrollTop = 0
 let lobbyChatBodyScrollLockPrevious: {
@@ -17273,6 +17282,14 @@ export function renderLobbyScreen(
     savedAdminSupportMobileListScrollTop = currentAdminSupportMobileListEl.scrollTop
   }
   // stakesFirstCardIndex се пази като модулна променлива — не се чете от scrollLeft
+  // Desktop хоризонтален списък със случайните маси: позицията се пази при
+  // ре-рендер в лобито (частни маси, профил, ...). null = списъкът не е бил в
+  // DOM-а (нов вход в лобито / refresh) → започва от най-ниския залог. При
+  // недовършена анимация със стрелките се пази крайната ѝ позиция.
+  const prevDesktopStakesScrollEl = findDesktopStakesScrollEl(root)
+  const savedDesktopStakesScrollLeft = prevDesktopStakesScrollEl === null
+    ? null
+    : (stakesAnimTargetLeft ?? prevDesktopStakesScrollEl.scrollLeft)
   const prevSearchEl = root.querySelector<HTMLInputElement>('[data-lobby-players-search="1"]')
   const wasSearchFocused = prevSearchEl !== null && document.activeElement === prevSearchEl
   const savedSearchCaret = wasSearchFocused ? prevSearchEl.selectionStart : null
@@ -18128,11 +18145,15 @@ export function renderLobbyScreen(
       const duration = 320
       const startTime = performance.now()
       const ease = (t: number) => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
+      stakesAnimTargetLeft = targetLeft
       const step = (now: number) => {
         const t = Math.min((now - startTime) / duration, 1)
         scrollEl.scrollLeft = startLeft + diff * ease(t)
         if (t < 1) stakesAnimFrame = requestAnimationFrame(step)
-        else scrollEl.scrollLeft = targetLeft
+        else {
+          scrollEl.scrollLeft = targetLeft
+          stakesAnimTargetLeft = null
+        }
       }
       stakesAnimFrame = requestAnimationFrame(step)
     }
@@ -22267,6 +22288,8 @@ export function renderLobbyScreen(
   }
 
   cancelAnimationFrame(stakesAnimFrame)
+  // Прекъснатата анимация вече е отразена в savedDesktopStakesScrollLeft.
+  stakesAnimTargetLeft = null
 
   const stakesScrollEl = root.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
   if (stakesScrollEl) {
@@ -22278,20 +22301,16 @@ export function renderLobbyScreen(
     } else if (allStakeCards.length > 0) {
       if (isPhoneLayout) {
         stakesScrollEl.scrollLeft = 0
+      } else if (savedDesktopStakesScrollLeft === null) {
+        // Desktop, нов вход в лобито / refresh: най-левата маса (най-ниският
+        // залог), независимо от нивото/ранга/баланса на играча.
+        stakesFirstCardIndex = 0
+        stakesScrollEl.scrollLeft = 0
       } else {
-        const playerLevel = state.profile.level ?? 1
-        const enabledRooms = state.matchRooms.filter((r) => r.isEnabled)
-        const highestUnlockedIndex = enabledRooms.reduce((best, room, i) => {
-          if (playerLevel < room.minLevel) {
-            return best
-          }
-
-          return best < 0 || room.stakeAmount > enabledRooms[best].stakeAmount ? i : best
-        }, -1)
-        stakesFirstCardIndex = highestUnlockedIndex >= 4 ? highestUnlockedIndex - 4 : 0
-        const idx = Math.max(0, Math.min(stakesFirstCardIndex, allStakeCards.length - 1))
+        // Desktop, ре-рендер в лобито: запазената позиция, в рамките на
+        // валидния диапазон (ако броят/ширината на масите са се променили).
         const maxScroll = Math.max(0, stakesScrollEl.scrollWidth - stakesScrollEl.clientWidth)
-        stakesScrollEl.scrollLeft = Math.max(0, Math.min(allStakeCards[idx].offsetLeft - 2, maxScroll))
+        stakesScrollEl.scrollLeft = Math.max(0, Math.min(savedDesktopStakesScrollLeft, maxScroll))
       }
     }
   }
