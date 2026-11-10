@@ -7684,20 +7684,85 @@ function readGuestTablesCarouselAnchor(root: ParentNode): { stake: string | null
   return { stake: first?.dataset.lobbyGuestTableCard ?? null, scrollLeft: scroller.scrollLeft }
 }
 
+// Анимацията на карусела е ръчна (rAF), както desktop animateTo: нативният
+// scrollTo({ behavior: 'smooth' }) прескача мигновено, когато браузърът е с
+// изключен smooth scrolling (Windows без анимации, „Премахване на анимациите“
+// на телефона, по-стар WebKit) — тогава картите не се плъзгат, сменят се само
+// цифрите. Анимацията (цел, начало, време) е модулна — след ре-рендер новият
+// carousel продължава същата крива, без рестарт и без връщане.
+type GuestCarouselTarget = { stake: string | null; left: number }
+type GuestCarouselAnim = { target: GuestCarouselTarget; startLeft: number; startTime: number }
+const GUEST_CAROUSEL_ANIM_MS = 320
+const GUEST_CAROUSEL_SNAP = 'x mandatory'
+let guestCarouselAnimFrame = 0
+let guestCarouselAnim: GuestCarouselAnim | null = null
+
 function attachGuestTablesCarousel(root: ParentNode, anchor: { stake: string | null; scrollLeft: number } | null): void {
+  cancelAnimationFrame(guestCarouselAnimFrame)
   const carousel = root.querySelector<HTMLElement>('[data-lobby-guest-carousel="1"]')
   const scroller = carousel?.querySelector<HTMLElement>('[data-lobby-stakes-scroll="1"]')
-  if (!carousel || !scroller) return
+  if (!carousel || !scroller) {
+    guestCarouselAnim = null
+    return
+  }
   const prev = carousel.querySelector<HTMLButtonElement>('[data-lobby-guest-carousel-arrow="prev"]')
   const next = carousel.querySelector<HTMLButtonElement>('[data-lobby-guest-carousel-arrow="next"]')
   const getCards = () => Array.from(scroller.querySelectorAll<HTMLElement>('[data-lobby-guest-table-card]'))
   const maxScroll = () => Math.max(0, scroller.scrollWidth - scroller.clientWidth)
+  const clampLeft = (left: number) => Math.max(0, Math.min(left, maxScroll()))
+  // Позиция за цел: по залога (ако масата още е в списъка), иначе по пиксели.
+  const resolveLeft = (target: GuestCarouselTarget) => {
+    const card = target.stake === null ? undefined : getCards().find((c) => c.dataset.lobbyGuestTableCard === target.stake)
+    return clampLeft(card ? card.offsetLeft : target.left)
+  }
 
-  if (anchor) {
+  // Snap-ът се изключва по време на анимацията — иначе всяко междинно
+  // scrollLeft се „залепя“ обратно към най-близката карта.
+  const finishAnimation = () => {
+    cancelAnimationFrame(guestCarouselAnimFrame)
+    guestCarouselAnim = null
+    scroller.style.scrollSnapType = GUEST_CAROUSEL_SNAP
+  }
+
+  const runAnimation = (anim: GuestCarouselAnim) => {
+    cancelAnimationFrame(guestCarouselAnimFrame)
+    guestCarouselAnim = anim
+    scroller.style.scrollSnapType = 'none'
+    const targetLeft = resolveLeft(anim.target)
+    const ease = (t: number) => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
+    const frame = (now: number) => {
+      const t = Math.max(0, Math.min((now - anim.startTime) / GUEST_CAROUSEL_ANIM_MS, 1))
+      scroller.scrollLeft = anim.startLeft + (targetLeft - anim.startLeft) * ease(t)
+      if (t < 1) guestCarouselAnimFrame = requestAnimationFrame(frame)
+      else {
+        scroller.scrollLeft = targetLeft
+        finishAnimation()
+      }
+    }
+    guestCarouselAnimFrame = requestAnimationFrame(frame)
+  }
+
+  const animateTo = (target: GuestCarouselTarget) => {
+    const startLeft = scroller.scrollLeft
+    if (Math.abs(resolveLeft(target) - startLeft) < 1) {
+      finishAnimation()
+      return
+    }
+    runAnimation({ target, startLeft, startTime: performance.now() })
+  }
+
+  const pendingAnim = anchor ? guestCarouselAnim : null
+  if (pendingAnim && anchor) {
+    // Ре-рендер по средата на анимация: от точната текуща позиция (без
+    // връщане към първата видима карта); кривата продължава по-долу.
+    scroller.style.scrollSnapType = 'none'
+    scroller.scrollLeft = clampLeft(anchor.scrollLeft)
+  } else if (anchor) {
     const anchorCard = anchor.stake === null ? undefined : getCards().find((card) => card.dataset.lobbyGuestTableCard === anchor.stake)
     const target = anchorCard ? anchorCard.offsetLeft : anchor.scrollLeft
-    scroller.scrollLeft = Math.max(0, Math.min(target, maxScroll()))
+    scroller.scrollLeft = clampLeft(target)
   }
+  guestCarouselAnim = null
 
   const sync = () => {
     const max = maxScroll()
@@ -7705,13 +7770,18 @@ function attachGuestTablesCarousel(root: ParentNode, anchor: { stake: string | n
     if (next) next.style.display = scroller.scrollLeft < max - 1 ? 'flex' : 'none'
   }
 
+  // Карти-позиции (последната двойка — до края), с залога за всяка.
+  const getStops = () => getCards().map((card) => ({ stake: card.dataset.lobbyGuestTableCard ?? null, left: Math.min(card.offsetLeft, maxScroll()) }))
+
+  // Бързи последователни натискания продължават от текущата цел, не от
+  // междинната позиция — всяко натискане е точно една карта.
   const step = (direction: 1 | -1) => {
-    const current = scroller.scrollLeft
-    const offsets = getCards().map((card) => Math.min(card.offsetLeft, maxScroll()))
+    const current = guestCarouselAnim ? resolveLeft(guestCarouselAnim.target) : scroller.scrollLeft
+    const stops = getStops()
     const target = direction === 1
-      ? offsets.find((left) => left > current + 1)
-      : [...offsets].reverse().find((left) => left < current - 1)
-    scroller.scrollTo({ left: target ?? (direction === 1 ? maxScroll() : 0), behavior: 'smooth' })
+      ? stops.find((stop) => stop.left > current + 1)
+      : [...stops].reverse().find((stop) => stop.left < current - 1)
+    animateTo(target ?? { stake: null, left: direction === 1 ? maxScroll() : 0 })
   }
 
   // Довършване на snap-а: след като превъртането спре (и пръстът не е на
@@ -7721,20 +7791,22 @@ function attachGuestTablesCarousel(root: ParentNode, anchor: { stake: string | n
   let isTouching = false
   let settleTimer = 0
   const settle = () => {
-    if (isTouching) return
+    if (isTouching || guestCarouselAnim) return
     const current = scroller.scrollLeft
-    const offsets = getCards().map((card) => Math.min(card.offsetLeft, maxScroll()))
-    if (offsets.length === 0) return
-    const nearest = offsets.reduce((best, left) => Math.abs(left - current) < Math.abs(best - current) ? left : best)
-    if (Math.abs(nearest - current) > 1) scroller.scrollTo({ left: nearest, behavior: 'smooth' })
+    const stops = getStops()
+    if (stops.length === 0) return
+    const nearest = stops.reduce((best, stop) => Math.abs(stop.left - current) < Math.abs(best.left - current) ? stop : best)
+    if (Math.abs(nearest.left - current) > 1) animateTo(nearest)
   }
   const scheduleSettle = () => {
     window.clearTimeout(settleTimer)
     settleTimer = window.setTimeout(settle, 140)
   }
+  // Пръст на екрана по време на анимация — плъзгането поема управлението.
   scroller.addEventListener('touchstart', () => {
     isTouching = true
     window.clearTimeout(settleTimer)
+    if (guestCarouselAnim) finishAnimation()
   }, { passive: true })
   const onTouchEnd = () => {
     isTouching = false
@@ -7758,6 +7830,7 @@ function attachGuestTablesCarousel(root: ParentNode, anchor: { stake: string | n
   // самия scroller; при нов брой маси целият карусел се рендира наново.
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(sync).observe(scroller)
   sync()
+  if (pendingAnim) runAnimation(pendingAnim)
 }
 
 function guestLobbyPlayButtonStyle(): string {
