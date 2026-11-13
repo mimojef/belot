@@ -16,8 +16,8 @@
 - **Етап 2б (LiveKit backend) е commit-нат: `e58d292`.** Детайли: раздели 8А–8Б.
 - **Етап 2в (след прегледа, 2026-11-13), commit-нат `fdb8697`:** единният mute забранява говоренето (2.8, 8А.6А), индивидуално заглушаване за Етап 3 (2.8А), изолация на средите с `VOICE_ROOM_NAMESPACE` (8А.6Б), WS интеграционен тест.
 - **Реални тестове срещу LiveKit v1.13.11 — изпълнени (2026-11-13): 13 PASS, 3 INFO, 0 FAIL** (раздел 13.1). Инструмент: `ops/voice-livekit-it/`.
-- **Последна backend корекция, без commit — чака финален преглед:** постоянно наблюдение на оттеглени имена с неясен CreateRoom (8А.6В, миграция `20261113_002`) и изисквания за микрофона за Етап 3 (2.11А).
-- **Етап 3 НЕ е започнат.** Започва се само след изрично одобрение от собственика.
+- **Последна backend корекция — commit-ната `7fa9fa9`:** постоянно наблюдение на оттеглени имена с неясен CreateRoom (8А.6В, миграция `20261113_002`) и изисквания за микрофона за Етап 3 (2.11А).
+- **Етап 3 (frontend voice controller) — одобрен (ревизия 2 + корекция за ROOM_DELETED), commit-нат като „feat(voice): add lazy frontend voice controller“** (раздел 14, одобрените решения — 14.15). Няма визуален интерфейс. Етап 4 НЕ е започнат; нищо не е внедрено.
 - Нищо не е внедрено в production. Режимът на гласовия чат е **„Изключен“** по подразбиране.
 
 **Приоритет на източниците при противоречие:**
@@ -45,7 +45,8 @@
 - Базов HEAD преди гласовия чат: `6b3b9cb` („fix(lobby): animate mobile carousel arrow navigation“).
 - Новият мобилен дизайн е изцяло влят в `v2-clean-architecture` (merge `f61954a`, 2026-11-04) и е в production.
 - Commit на Етап 2а: `f19e3d3` „feat(voice): add voice chat backend foundation“. Съдържа само backend основата и този документ.
-- Етап 2б (некомитнат): официален `livekit-server-sdk@2.19.2` (pin), LiveKit API клиент, токени, участия с право за говорене, session binding, ротация, reconciliation, игрови куки и тестове. **Няма frontend и UI.**
+- Етап 2б (`e58d292`, `fdb8697`, `7fa9fa9`): официален `livekit-server-sdk@2.19.2` (pin), LiveKit API клиент, токени, участия с право за говорене, session binding, ротация, reconciliation, игрови куки и тестове.
+- Етап 3 (commit „feat(voice): add lazy frontend voice controller“): `livekit-client@2.23.0` (точен pin, само в lazy chunk), `src/app/voice/*` (в основния bundle само `voiceFacade.ts`), минимална интеграция в `main.ts`, тестове `scripts/checkVoiceController.ts` и `scripts/checkVoiceBundle.mjs`. **Без UI.**
 
 ---
 
@@ -1151,7 +1152,7 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
 | Етап | Съдържание | Критерии за приемане |
 |---|---|---|
 | **2б** | LiveKit backend (раздел 8А) — **имплементиран, чака преглед** | fake Twirp тестове ✓; race тестове ✓; декодирани JWT ✓; реален тест срещу LiveKit v1.13.11 ✓ (раздел 13.1) |
-| **3** | Frontend voice controller: lazy SDK, state machine, audio sink, permissions, reconnect, cleanup, диагностика; временен debug бутон зад admin флаг | два таба с различни профили: connect, listen, mute, rotation, leave; 0 дублирани audio елементи и listeners; chunk извън precache; главният bundle ±1 KB |
+| **3** | Frontend voice controller (раздел 14) — **одобрен и commit-нат**; без debug бутон (само `window.__pikaVoice` в dev) | fake adapter тестове 52/52 ✓; 0 дублирани audio елементи/listeners/таймери ✓; ≤1 стая ✓; chunk извън precache ✓; главният bundle **+1.9 KB gzip / ~+1.1–1.3 KB brotli — приет от собственика** (14.9, 14.15); реални браузъри — **предстои** (14.10) |
 | **4** | Мобилен UI: лоби, създаване, popup-и, чакалня, бутон и панел, speaking микрофончета, всички състояния | Playwright screenshots (2.14); одобрение на всеки екран; touch regression (`b4f2271`) с активен глас |
 | **5** | Desktop UI | screenshots 1280×800, 1366×768, 1920×1080 |
 | **6** | Admin dashboard + failure handling | спрян LiveKit → играта е без разлика в event loop lag (`eventLoopHealth`) и времената на ходовете; dashboard показва „недостъпна“ |
@@ -1241,3 +1242,206 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
 - non-VIP → `canPublish:false`;
 - ротация при напускане: старият клиент е изключен, новият влиза след `ready:true`;
 - 120 s и lease.
+
+---
+
+## 14. Етап 3 — frontend voice controller (одобрен и commit-нат 2026-11-13)
+
+Общ controller за мобилна и desktop версия. **Без визуален интерфейс** — Етапи 4/5 само четат `VoiceSnapshot` и викат действията. Дизайнът на игровите екрани, текстовият mute и backend договорът **не са променяни**.
+
+**Ревизия 2 (след прегледа):**
+- controller-ът е преместен в lazy chunk-а и в основния bundle остава само типизиран посредник (14.2);
+- изрично е обработен autoplay при първото включване (14.12);
+- capture-ът се запазва при контролирана ротация и никога няма автоматичен нов capture (14.5);
+- проверен е overhead-ът при нормален WS трафик (14.13).
+
+**Корекция преди commit:** `ROOM_DELETED`, пристигнал преди `voice_table_updated`, погрешно губеше валидния capture, защото LiveKit го спираше сам. Сега capture-ът се запазва и при двата реда на събитията. SDK-то вече никога не прави сам нов capture (14.5).
+
+### 14.1 Файлове
+| Файл | Bundle | Роля |
+|---|---|---|
+| `src/app/voice/voiceFacade.ts` | **основен** | `createLazyVoiceController()` — същият тип `VoiceController`; само `import type`; пази контекст, WS състояние и намерение за включване; зарежда runtime-а с `import()` само при изрично действие |
+| `src/app/voice/voiceRuntime.ts` | lazy | входна точка на chunk-а: sink + LiveKit адаптер + controller + HTTPS транспорт (`fetch`, `credentials:'include'`, `cache:'no-store'`) |
+| `src/app/voice/createVoiceController.ts` | lazy | state machine, presence/lease, token, микрофон, reconnect, ротация, 120 s, заглушаване, говорещи, cleanup |
+| `src/app/voice/liveKitVoiceAdapter.ts` | lazy | **единственият** импорт на `livekit-client`; Room опции, audio sink, микрофон, запазване на capture при ротация, грешки, устройства |
+| `src/app/voice/voiceAdapter.ts` | lazy | интерфейс към LiveKit (`VoiceAdapter`, `VoiceConnectedRoom`, `VoiceRetainedMicrophone`, `VoiceMicrophoneError`) |
+| `src/app/voice/voiceAudioSink.ts` | lazy | един скрит `div[data-voice-audio-sink]` в `body` (извън innerHTML прерисуванията), елементи по trackSid — без дубликати |
+| `src/app/voice/voiceProtocol.ts` | lazy | клиентско огледало на backend договора |
+| `src/main.ts` | основен | създаване на посредника, WS куки (`onOpen`/`onClose`/`onMessage`/`session_*`), `resolveVoiceContext()`, синхронизация на контекста — най-много една на microtask, `pageshow`/`pagehide` |
+| `src/app/network/createGameServerClient.ts` | основен | типове `voiceEnabled`/`voiceTableId`, voice съобщения в union-ите, `sendVoicePresence()` |
+| `src/app/lobby/createLobbyFlowController.ts` | основен | `onBeforeRender` кука и `getMyPrivateRoom()` (смяна на екран в лобито става без WS съобщение) |
+| `vite.config.ts` | — | всички модули от `src/app/voice/` без `voiceFacade.ts`, плюс livekit-client/@livekit, отиват в `assets/voice-*`; изключени са в `globIgnores` |
+| `scripts/checkVoiceController.ts` | — | 48 теста с fake adapter, fake HTTPS/presence и ръчен часовник: controller + посредник |
+| `scripts/checkVoiceBundle.mjs` | — | проверка на production build-а: voice chunks, precache, статични зависимости, размери спрямо baseline |
+| `package.json` / `package-lock.json` | — | `livekit-client` **2.23.0**, точен pin. Зависимости: `@livekit/protocol` 1.52.1, `@livekit/mutex` 1.1.1, `@bufbuild/protobuf` 1.10.1, `jose`, `loglevel`, `sdp-transform`, `events`, `typed-emitter` |
+
+### 14.2 Архитектура — lazy посредник + един controller
+- `main.ts` създава посредника `createLazyVoiceController({ sendPresence, apiBaseUrl })`.
+- Докато потребителят не натисне „Само слушай“ или „Включи микрофона“, посредникът не зарежда нищо: няма presence, HTTPS, таймери и SDK. Това важи за обикновени маси, voice OFF, лоби, сядане на гласова маса и целия WS трафик.
+- Snapshot-ът преди зареждането е минимален: `idle`/`connecting`/`unavailable`/`disabled`, участниците са „неизвестно“.
+- **Първото изрично действие** върви така:
+  1. намерението се записва и статусът става `connecting` веднага;
+  2. `import('./voiceRuntime')` зарежда един chunk, двойното натискане води до едно зареждане;
+  3. създава се **един** controller за целия живот на страницата;
+  4. той получава **актуалния** контекст (не този от натискането) и актуалното състояние на игровия WS;
+  5. намерението се изпълнява само ако е още валидно – същата маса, на екрана на масата.
+- **Отмяна по време на зареждането:** напускане, лоби/магазин, друга маса, край на масата, изместена сесия/бан/изтриване (`endSession`), `voice_access_ended`, `pagehide` и `dispose` отменят намерението. „Изключи микрофона“ по време на зареждането превръща включването в слушане. Admin mute идва авторитетно с presence ack-а.
+- Неуспешно зареждане на chunk-а дава „Гласовият чат временно е недостъпен.“; „Опитай отново“ зарежда наново. Ако включването е било отменено междувременно, грешка не се показва.
+- След зареждането посредникът предава всичко 1:1. Следващите включвания подготвят стаята **синхронно в жеста**.
+- Контекстът идва само от авторитетни snapshot-и:
+  - `room_snapshot` (`voiceTableId` само при `yourSeat !== null`; зрител → `none`);
+  - или `lobby.getMyPrivateRoom()` + текущия екран (`private-room-waiting` → `waiting`, иначе `off_table`).
+
+### 14.3 State machine
+Статусите са: `disabled` · `idle` · `connecting` · `connected_listening` · `connected_speaking` · `connected_muted` · `reconnecting` · `rotating` · `disconnecting` · `unavailable` · `error`.
+
+Отделно от статуса се следят: `speak` (от backend), `wantsToSpeak`, `microphone` (`off`/`requesting`/`live`), `playbackBlocked`, `canRestore`, `uiError`, `microphoneDevicesChanged`, `locallyMutedProfileIds`, `participants`, `speakingProfileIds`.
+- Контекст `none` → `disabled` (пълен cleanup). Гласова маса → `idle`. **Никога автоматично включване:** нито при сядане, VIP, край на mute, refresh, нито при връщане от лоби или магазин.
+- Operation generations: `sessionSeq` (сесия) и `micSeq` (микрофон). След всяко `await` има проверка; остаряла операция не свързва и не включва микрофон, а ако все пак е получила поток, веднага го спира.
+- **≤1 стая (засилено в ревизия 2):** всяко изключване на стара стая се проследява (`teardown`). Новата стая се подготвя едва когато старата е напълно изключена – при бърз join → leave → join, ротация и реконект за права. Тестът брои всяко нарушение (`violations = 0`).
+
+### 14.4 Протокол (без промени в backend договора)
+- `voice_presence {voiceTableId, clientInstanceId, onTableScreen}` по WS. `clientInstanceId` е нов при всяко зареждане на страницата (`v` + 36 hex).
+- Ack `voice_presence_result` (таймаут 5 s); `renewAfterMs` (20 s) идва от сървъра; lease е 60 s.
+- `POST /api/voice/token`:
+  - JWT живее само в локална променлива до `connect`;
+  - retry с backoff, уважава `retryAfterMs` (`voice_rotation_pending`, `voice_starting`, `voice_unavailable`);
+  - при `presence_required`/`invalid_session` → нов presence и нов опит.
+- `POST /api/voice/speak-access` се вика преди всеки изричен опит за микрофон:
+  - `updated`/`already_allowed` → микрофон;
+  - `request_new_token` → кратък реконект с нов токен;
+  - `vip_required`/`muted` → съобщение, **без getUserMedia**.
+- `voice_table_updated` (нова генерация) → ротация; `voice_access_ended` → пълен cleanup; `voice_speak_access_updated` → прилагане на mute/unmute.
+
+### 14.5 Микрофон
+- **Room опции:**
+  - `audioCaptureDefaults {echoCancellation, noiseSuppression, autoGainControl: true, channelCount: 1}`;
+  - `publishDefaults {audioPreset: speech, dtx, red}`;
+  - **`stopLocalTrackOnUnpublish: false`** (LiveKit никога не спира сам локалния capture — адаптерът решава), `adaptiveStream:false`, `dynacast:false`, `disconnectOnPageLeave`.
+- **Собствен capture:** `getUserMedia` се вика само от адаптера при изрично действие, после `publishTrack(MediaStreamTrack, {source: Microphone})`, т.е. като user-provided track.
+  - Така SDK-то **никога не прави сам нов capture**. Иначе LiveKit вика `restartTrack()` при „track ended“ и при пълен reconnect след sleep, а това може да остави осиротял capture или да включи друго устройство.
+  - Както при LiveKit, след собствения capture се вика `startAudio()` (iOS AudioSession).
+- **Изключване** (доброволно, mute, напускане, 120 s, cleanup) = `unpublishTrack(track, true)` + `mediaStreamTrack.stop()`, така че индикаторът на браузъра изгасва.
+  - Адаптерът помни собствения си capture и го спира, дори ако сървърът вече е махнал публикацията (`LocalTrackUnpublished` при свързана стая, без повторна публикация).
+  - При всяко прекъсване на стаята, освен `ROOM_DELETED` с жив capture, capture-ът се спира: мрежа, премахване, page leave.
+- **Ротация — запазване на валидния capture до 20 s** (одобрено, 14.15). Важи само за незасегнат говорещ: жив capture, `wantsToSpeak`, `speak.canSpeak`. Двата реда на събитията водят до един и същ резултат:
+  - `voice_table_updated{ready:false}` **първо**: capture-ът се откача **преди** нашия disconnect (`unpublishTrack(track, false)` – публикацията се премахва синхронно). Закъснелият `ROOM_DELETED` на старата стая е остаряло събитие и не отменя нищо: евентуален handle само се освобождава, без втора ротация.
+  - `ROOM_DELETED` **първо**: адаптерът не спира живия capture, а го предава в събитието (`onDisconnected('room_deleted', retained)`). Controller-ът започва ротацията със същите правила. Последващото `voice_table_updated{ready:false}` не започва втора ротация (`rotating`); закъсняло `ready:false` за вече активната генерация се игнорира.
+  - В новата генерация се публикува **същият** `MediaStreamTrack` – без нов getUserMedia и без нов permission prompt. Задържането е ограничено до **20 s**, после capture-ът се освобождава и потребителят остава слушател.
+  - Освобождава се веднага при: mute, „Изключи микрофона“, напускане, лоби, изместена сесия/бан, край на масата (`voice_access_ended`/disabled), изгубено устройство, dispose или остаряла ротация. Ако не е жив при публикуването → слушане + „Микрофонът е недостъпен.“.
+- **Временен LiveKit reconnect** (`Reconnecting` → `Reconnected`, вкл. официалния пълен reconnect) **запазва състоянието на микрофона**: същият track, без нов capture. Ако повторната публикация не успее, capture-ът се спира и потребителят става слушател.
+- **Окончателна загуба на връзката** (`connection_lost` след неуспешния официален reconnect) → възстановяване **като слушател**; микрофонът се включва изрично, с нова backend проверка (одобрено, 14.15). Същото важи за `ROOM_DELETED` с вече прекратен capture.
+- **Никога автоматичен нов capture.** Единственият capture след нов токен е при изрично „Включи микрофона“ (`request_new_token`).
+- **Грешки** (при всички слушането продължава):
+
+  | Причина | Съобщение |
+  |---|---|
+  | NotFound | „Не е открит микрофон.“ |
+  | PermissionDenied | „Разрешете достъпа до микрофона в настройките на браузъра.“ |
+  | DeviceInUse/Other | „Микрофонът е недостъпен.“ |
+  | mute | „Микрофонът е блокиран.“ + „Имате активно наказание за чат. Можете да слушате останалите участници.“ |
+  | non-VIP | „Говоренето е VIP привилегия.“ |
+  | сървър/мрежа | „Гласовият чат временно е недостъпен.“ |
+- **Устройства:** ново устройство (`MediaDevicesChanged`) → само `microphoneDevicesChanged`. Изгубено устройство/`TrackEvent.Ended` → публикуването спира, `mic_unavailable`. **Никога автоматично превключване** към друго устройство.
+
+### 14.6 Права, mute, заглушаване, говорещи
+- VIP и правото за говорене идват само от backend (`speak`); клиентът не изчислява VIP. Срокът (`mutedUntil`) е видим само за самия играч; чужди наказания не се показват.
+- Административен mute по време на говорене → микрофонът спира веднага (включително запазения при ротация), `wantsToSpeak=false`. След unmute **няма** автоматично включване.
+- Индивидуално заглушаване:
+  - работи само локално (`RemoteAudioTrack.setVolume(0)`), по **profileId**, затова оцелява смяна на епохата и ротация;
+  - изчиства се при смяна или напускане на масата;
+  - не се праща към backend и не може за себе си;
+  - преди първото включване е no-op (участниците още са неизвестни).
+- Говорещи: `ActiveSpeakersChanged` → веднага; край след **400 ms** задържане; отделен listener, без state emit.
+
+### 14.7 Reconnect, ротация, lease, 120 s
+- Официалният LiveKit reconnect: `reconnecting` → обратно, без нова стая.
+- При окончателна загуба: нови опити след 2/5/10 s с **нов токен**, после `unavailable` + „Опитай отново“; след връщане – само слушане (14.5).
+- Ротация:
+  - старата стая се изключва напълно **преди** новата;
+  - изчаква се `ready`, взима се нов токен;
+  - говорещият запазва capture-а (14.5), слушателят остава слушател, доброволно изключеният остава изключен, наказаният остава слушател.
+- `room_deleted` → ротация; `removed`/`duplicate_identity` → `idle` без reconnect.
+- Lease се подновява на 20 s **само** докато гласът е в употреба на екрана на масата.
+- Игровият WS пада → **един** 120 s таймер; повторните неуспешни опити не го рестартират. При възстановяване presence се праща веднага и таймерът се отменя. След 120 s: прекъсване, освободен микрофон, `canRestore`, без автоматично връщане.
+
+### 14.8 Lifecycle и cleanup
+- Чакалня → игра → финален екран → „Преиграй“: без прекъсване.
+- „Изчакай в лоби“ / магазин / профил: presence `onTableScreen:false`, гласът и микрофонът спират, мястото и правото остават. Връщане → без автоматично включване.
+- „Към лобито“ / напускане → пълен cleanup.
+- `session_displaced` / `session_banned` / `session_deleted` и `voice_access_ended` (`banned`, `voice_off`, `table_released`…) → незабавен пълен cleanup без reconnect, включително по време на lazy зареждането.
+- `pagehide` → прекъсване, без dispose (заради bfcache); `pageshow(persisted)` → idle + `canRestore`.
+- Cleanup обхваща стаята, микрофона, запазения capture, audio елементите, всички таймери и listener-и. Проверено е в тестовете с брояч на таймери и capture-и.
+
+### 14.9 Bundle и service worker (production build извън repo-то, `scripts/checkVoiceBundle.mjs`)
+| | Baseline (`7fa9fa9`) | Ревизия 1 | **Ревизия 2 (lazy controller)** |
+|---|---|---|---|
+| Главен bundle raw | 2,894,279 B | 2,912,114 B (+17,835) | **2,899,240 B (+4,961)** |
+| Главен bundle gzip | 582,496 B | 588,545 B (+6,049) | **584,408 B (+1,912)** |
+| Главен bundle brotli | 403,525 B | 408,090 B (+4,565) | **404,627 B (+1,102)** |
+| Voice chunks | — | `voice-liveKitVoiceAdapter` 537,700 B (gzip 138,512), **статично импортира главния bundle** | `voice-voiceRuntime` 555,895 B (gzip 144,701, brotli 120,159), **без статични зависимости** |
+| Precache | 400 файла, 29,376.72 KiB | 400 файла, 29,394.13 KiB | 400 файла, 29,381.57 KiB |
+- `sw.js`: 0 voice записа. Главният bundle е в precache-а; нито един precache-нат chunk не импортира статично voice chunk. Главният bundle: 0 `livekit`, 0 `RTCPeerConnection`, 0 `getUserMedia`; има само името на chunk-а в `import()`.
+- **Приет от собственика (14.15): +1,912 B gzip / +1,102 B brotli — без допълнителни оптимизации за размер.** След корекцията за ROOM_DELETED (само в lazy chunk-а) главният bundle е със същия raw размер (+4,961 B); gzip +1,909 B, brotli варира ±~250 B между build-ове заради content hash имената в bundle-а. Voice chunk-ът: 556,764 B (gzip 144,982, brotli 120,385).
+- Първоначалната цел ≤1 KB gzip не е напълно постигната: 1.9 KB gzip / 1.1 KB brotli (от 6.0 / 4.6 KB).
+  - Остатъкът: посредникът ~1.3–1.4 KB gzip (минималното състояние преди зареждане, защитата от races, snapshot-ът) и интеграцията в `main.ts` ~0.34 KB (контекст от snapshot-ите).
+  - По-нататъшно намаляване би изисквало да махнем защитата преди зареждането или typed snapshot-а – не е направено по указанието „без прекомерно усложняване“.
+  - Направени съкращения: HTTPS транспортът е в runtime-а; локалното заглушаване преди първото включване е премахнато.
+
+### 14.10 План за реални browser тестове (Етап 7 — mock тестовете НЕ доказват Safari/Chrome/PWA)
+Среда: локален dev backend + локална dev база + тестови профили (admin+VIP, VIP, non-VIP), режим „Само админ“, **без production потребители, база или реални маси**. LiveKit е в отделен `VOICE_ROOM_NAMESPACE=dev`.
+| Среда | Сценарии |
+|---|---|
+| Desktop Chrome, Edge, Firefox | <ul><li>DevTools Network: voice chunk **не** се тегли при сядане/игра, тегли се при първото „Само слушай“</li><li>два таба/профила: listen без permission prompt; VIP микрофон; non-VIP отказ без prompt</li><li>disable → индикаторът изгасва; mute/unmute от админ</li><li>ротация: индикаторът не мига, без нов prompt</li><li>„Изчакай в лоби“ и връщане; refresh; затваряне на таб; изместена сесия</li></ul> |
+| Без микрофон / отказан / зает | <ul><li>съобщения A–C, слушането продължава</li><li>включване на USB микрофон → само сигнал</li><li>изваждане по време на разговор и по време на ротация</li></ul> |
+| iOS Safari + iOS PWA | <ul><li>**първо (lazy) „Само слушай“ на бавна мрежа → „Включи звука“ → звук след натискане**</li><li>второ включване без „Включи звука“</li><li>първо включване на микрофона ×10</li><li>заключване на екрана, обаждане, фон/преден план, bfcache</li></ul> |
+| Android Chrome + PWA | Bluetooth слушалки, Wi-Fi↔4G (без автоматичен нов capture след пълно прекъсване), фон, заключване |
+| Общи | <ul><li>ехо (EC/NS/AGC); 4 говорят едновременно</li><li>120 s без игрова връзка (DevTools offline)</li><li>0 дублирани `<audio>` в `[data-voice-audio-sink]`</li><li>Performance профил на игра с голям WS трафик без глас: без voice работа</li></ul> |
+
+### 14.11 Оставащи рискове
+- Реалното поведение на iOS Safari/PWA (autoplay, AudioSession, фон) може да се провери само на реални устройства.
+- **Autoplay при първото включване:** жестът изтича по време на мрежовото зареждане на chunk-а (~145 KB gzip), затова на iOS Safari най-вероятно ще трябва „Включи звука“ (14.12). Ако реалните тестове покажат лош UX, следващата стъпка е „отключен“ `<audio>` елемент, създаден в самия жест и даден на LiveKit (`track.attach(element)`). Не е направено без реални данни.
+- **Ротация с запазен capture:** `unpublishTrack(track, false)` + `publishTrack(MediaStreamTrack)` в нова `Room` е официален API, но не е проверен срещу реален LiveKit/браузър. Fallback-ът е безопасен: слушане и освобождаване. Индикаторът на браузъра свети до 20 s без публикуване по време на ротация.
+- **Без автоматичен нов capture след окончателна загуба на връзката** — одобрено от собственика (14.15): говорещият се възстановява като слушател и включва микрофона изрично.
+- **ROOM_DELETED преди voice_table_updated** (предаване на capture-а от `Disconnected`) и `stopLocalTrackOnUnpublish:false` са проверени само с fake adapter и по кода на livekit-client 2.23.0 (`handleDisconnect`, `unpublishTrack`, `republishAllTracks`, `handleTrackEnded`). В реалните тестове (Етап 7) трябва да се провери: ротация по двата реда; индикаторът не изгасва и няма нов prompt; admin mute → индикаторът изгасва (сървърно unpublish); изваждане на микрофона → без превключване към друго устройство.
+- LiveKit JWT не се анулират от RemoveParticipant/revokeTokenTs (13.1). Остатъчният риск при пълно прекъсване или спиране на браузъра е приет (lease 60 s + backend ротация).
+- Контекстът в лобито зависи от `onBeforeRender`; бъдещи екрани извън лобито и активната маса трябва да викат `syncVoiceContext()`.
+- Главният bundle расте с +1.9 KB gzip (14.9).
+
+### 14.12 Autoplay при първото (lazy) включване
+Сценарий:
+1. SDK-то не е заредено.
+2. Потребителят натиска „Само слушай“; статусът става `connecting` веднага.
+3. Chunk-ът се зарежда асинхронно и `startAudio()` при подготовката на стаята се вика **извън** жеста.
+
+Поведение:
+- Браузърът може да откаже → `canPlaybackAudio=false`. Връзката **остава активна** (`connected_listening`). Отказът преди свързване не се показва (няма „Включи звука“ по време на `connecting`).
+- При свързване `playbackBlocked = !canPlaybackAudio()`; после се следи `AudioPlaybackStatusChanged` (неуспешен `play()` на отдалечен track).
+- Бъдещият UI показва „Включи звука“ при `playbackBlocked`. Нов жест → `unlockAudio()` → `room.startAudio()` → `playbackBlocked=false`.
+- Следващите включвания (controller-ът вече е в паметта) подготвят стаята и `startAudio()` **синхронно в жеста**.
+- SDK-то **не** се зарежда предварително за всички потребители.
+
+### 14.13 Performance при игровия WS трафик
+- `onMessage`:
+  - гласовите съобщения се разпознават с една `Set.has`;
+  - синхронизацията на контекста е **най-много една на microtask** (`isVoiceContextSyncQueued`), вместо една на съобщение;
+  - `resolveVoiceContext()` е евтин (без DOM); за обикновена маса или voice OFF връща `{kind:'none'}` след няколко проверки.
+- Посредникът сравнява контекста по стойност. Еднакъв контекст → **без** notifications, presence, voice операции и прерисуване – преди и след зареждането. Тест LZ2: 1,000 повторения × 5 несвързани съобщения → 0 notifications.
+- Voice OFF и обикновени маси: нищо не се зарежда, няма таймери, presence и HTTPS (тест LZ1).
+
+### 14.14 Тестове
+- `node server/node_modules/tsx/dist/cli.mjs scripts/checkVoiceController.ts` → **52 passed, 0 failed** (48 + RD1–RD4: ROOM_DELETED и ред на събитията при ротация, временен reconnect):
+  - 33 за controller-а (R1 е обновен заради 14.5);
+  - LZ1–LZ7 за посредника (lazy, races, autoplay, performance);
+  - RM1–RM8 за микрофона при ротация и инварианта ≤1 стая.
+- Mutation проверка: 8 временни влошавания → 7 хванати. Оцелялото е двойна защита: освобождаването при mute става и през `stopMicrophone()`.
+- `tsc --noEmit -p tsconfig.json` (frontend) ✓; тестът е проверен отделно със `--strict` ✓.
+- `node scripts/checkVoiceBundle.mjs <dist> <baseline>` върху production build → OK. Същата проверка върху ревизия 1 дава 2 FAIL (статична зависимост на voice chunk-а от главния bundle).
+
+### 14.15 Одобрени решения на собственика (2026-11-13)
+1. **Ревизия 2 на Етап 3 е одобрена.**
+2. **Bundle:** ръстът на основния bundle с +1,912 B gzip / +1,102 B brotli е приет. Без допълнителни оптимизации за размер.
+3. **Окончателна загуба на LiveKit връзката:** потребителят се възстановява **като слушател** и включва микрофона изрично (нова backend проверка). Няма автоматичен нов capture.
+4. **Временен (нормален) LiveKit reconnect** запазва състоянието на микрофона.
+5. **Контролирана ротация** запазва валидния съществуващ capture до **20 s**, независимо от реда на `ROOM_DELETED` и `voice_table_updated` (14.5, тестове RD1–RD3).
+6. **Никога автоматичен нов capture**, нито от controller-а, нито от SDK-то.

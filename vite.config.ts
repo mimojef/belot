@@ -43,17 +43,30 @@ function isSvaraChunk(moduleIds: readonly string[]): boolean {
   return moduleIds.some((id) => SVARA_CHUNK_MODULE_PATTERN.test(id))
 }
 
+// Гласов чат (Етап 3): voice runtime-ът (controller + LiveKit адаптер +
+// livekit-client/@livekit/*) се зарежда САМО с dynamic import от voiceFacade
+// -> chunks с префикс "voice-", изключени от PWA precache-а (globIgnores) —
+// потребител, който не включва гласа, не ги изтегля нито при отваряне, нито
+// през service worker-а. voiceFacade.ts е единственият гласов модул в
+// основния bundle.
+const VOICE_CHUNK_MODULE_PATTERN = /[\\/](?:node_modules[\\/](?:livekit-client|@livekit)[\\/]|src[\\/]app[\\/]voice[\\/](?!voiceFacade\.ts))/
+
+function isVoiceChunk(moduleIds: readonly string[]): boolean {
+  return moduleIds.some((id) => VOICE_CHUNK_MODULE_PATTERN.test(id))
+}
+
 export default defineConfig({
   build: {
     rolldownOptions: {
       output: {
         // facadeModuleId покрива и фасадните re-export chunks на pixi.js
         // (WebGLRenderer/WebGPURenderer), които нямат собствени модули.
-        chunkFileNames: (chunk) => (
-          isSvaraChunk([...chunk.moduleIds, chunk.facadeModuleId ?? ''])
-            ? 'assets/svara-[name]-[hash].js'
-            : 'assets/[name]-[hash].js'
-        ),
+        chunkFileNames: (chunk) => {
+          const moduleIds = [...chunk.moduleIds, chunk.facadeModuleId ?? '']
+          if (isSvaraChunk(moduleIds)) return 'assets/svara-[name]-[hash].js'
+          if (isVoiceChunk(moduleIds)) return 'assets/voice-[name]-[hash].js'
+          return 'assets/[name]-[hash].js'
+        },
       },
     },
   },
@@ -105,7 +118,7 @@ export default defineConfig({
       },
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,svg,png,webp,mp3,woff2}'],
-        globIgnores: ['index.html', 'assets/svara-*'],
+        globIgnores: ['index.html', 'assets/svara-*', 'assets/voice-*'],
         injectionPoint: 'self.__WB_MANIFEST',
         // "Подари авоари" feature добавка бутна главния bundle леко над
         // default 2 MiB precache лимита (2095KB baseline -> 2100KB). Вдигнат

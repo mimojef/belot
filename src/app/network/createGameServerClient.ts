@@ -15,6 +15,7 @@ import type { LudoGameState, LudoPieceSlot } from '../games/ludo/engine/ludoEngi
 import type { BundlePackageVisualKey } from '../../../server/src/shared/bundlePackageVisualKeys'
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { sharedServerClock } from './serverClock'
+import type { VoicePresenceClientMessage, VoiceServerMessage } from '../voice/voiceProtocol'
 import type { NicknameHighlightRole } from '../lobby/roleNicknameColor'
 import type { ProfileCustomizationDisplay } from '../profileCustomization/customizationDisplay'
 
@@ -891,6 +892,8 @@ export type CoinHidePurchaseResponse =
     }
 
 export type ClientMessage =
+  // Гласов чат — presence/lease (без токени).
+  | VoicePresenceClientMessage
   | {
       type: 'ping'
     }
@@ -1489,6 +1492,9 @@ export type PrivateRoomSnapshot = {
   canManualStart: boolean
   // "Покани партньор". Optional — стар сървър по време на deploy не го праща.
   partnerReservation?: PrivateRoomPartnerReservationSnapshot | null
+  // Гласов чат (Етап 2б). voiceTableId идва само към седнал играч.
+  voiceEnabled?: boolean
+  voiceTableId?: string | null
 }
 
 export type PrivateRoomPartnerReservationSnapshot = {
@@ -2006,6 +2012,8 @@ export type RoomSnapshotMessage = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  // Гласов чат (Етап 2б): само към играч на мястото си; null = масата е без глас.
+  voiceTableId?: string | null
   tournamentId?: string | null
   tournamentMatchId?: string | null
   tournamentRoundType?: TournamentRoundType | null
@@ -3438,6 +3446,7 @@ export type TopicThreadSeenUpdatedMessage = {
 }
 
 export type ServerMessage =
+  | VoiceServerMessage
   | ConnectedMessage
   | PongMessage
   | ErrorMessage
@@ -3685,6 +3694,8 @@ export type GameServerClient = {
   /** Милисекунди от последното съобщение (или open) на текущия OPEN socket; null без такъв. */
   getMsSinceLastServerMessage: () => number | null
   isConnected: () => boolean
+  /** Гласов чат: voice_presence (presence/lease). false = WS не е отворен (нищо не е изпратено). */
+  sendVoicePresence: (message: VoicePresenceClientMessage) => boolean
   ping: () => void
   createRoom: (displayName?: string) => void
   joinRoom: (roomId: string, displayName?: string) => void
@@ -4368,6 +4379,11 @@ export function createGameServerClient(
     abandonUnresponsiveSocket,
     getMsSinceLastServerMessage,
     isConnected,
+    sendVoicePresence: (message: VoicePresenceClientMessage): boolean => {
+      if (!isConnected()) return false
+      send(message)
+      return true
+    },
     ping,
     createRoom,
     joinRoom,

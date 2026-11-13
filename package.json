@@ -168,6 +168,7 @@
     }
   },
   "dependencies": {
+    "livekit-client": "2.23.0",
     "pixi.js": "8.22.0"
   }
 }

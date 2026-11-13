@@ -480,6 +480,12 @@ export type CreateLobbyFlowControllerOptions = {
   getApiBaseUrl?: () => string
   getIsInGame?: () => boolean
   /**
+   * Гласов чат (Етап 3): вика се в началото на всеки render() — единственият
+   * сигнал за смяна на екрана в лобито ("Изчакай в лоби", магазин), която не
+   * минава през WS съобщение. Не променя render-а.
+   */
+  onBeforeRender?: () => void
+  /**
    * Фаза 9.1 — true докато main.ts's showStripeCoinRewardOverlay (транзитна
    * "+X" coin purchase анимация) е still активна, вкл. hold+fade-out фазата,
    * не само brояча. Проверява се в isSafeToShowCampaignRewardCongratulations,
@@ -1574,6 +1580,8 @@ export type LobbyFlowController = {
   render: () => void
   destroy: () => void
   getCurrentScreen: () => LobbySocialScreen
+  /** Гласов чат (Етап 3): текущата частна маса (чакалнята), в която седи играчът. */
+  getMyPrivateRoom: () => PrivateRoomSnapshot | null
   // Auto-return STATE A/B (§ "A → B AUTO NAVIGATION") — за да не rest-не
   // излишно STATE A в STATE A (loading flash), caller-ът (main.ts's
   // tournament_match_assigned handler) трябва да провери "показвам ли ВЕЧЕ
@@ -20609,6 +20617,7 @@ export function createLobbyFlowController(
   setProfileCustomizationExpiryHandler(() => { render() })
 
   function render(): void {
+    options.onBeforeRender?.()
     // Известията за частната маса — изолирано от root-а (виж syncPrivateRoomNoticeHost).
     syncPrivateRoomNoticeHost()
     // „Теми“ — напусната нишка (назад, друга тема, друг екран, изтрит root):
@@ -24799,6 +24808,7 @@ export function createLobbyFlowController(
       doHideInitialOverlay()
     },
     getCurrentScreen: () => state.currentScreen,
+    getMyPrivateRoom: () => state.myPrivateRoom,
     getCurrentTournamentDetailId: () => (state.currentScreen === 'tournament-detail' ? state.tournamentDetailId : null),
     getSpectatingBelotRoomId: () => state.spectatingBelotRoomId,
     getPendingBelotSpectatorRoomId: () => state.pendingBelotSpectatorRoomId,

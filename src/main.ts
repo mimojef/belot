@@ -169,6 +169,9 @@ import {
   type RegistrationVerificationPageState,
 } from './app/registrationVerification/renderRegistrationVerificationPage'
 import { VIOLET_3D_BUTTON_CLASS, ensureViolet3dButtonStyles } from './ui/layout/violet3dButton'
+import type { VoiceContext, VoiceController } from './app/voice/createVoiceController'
+import { createLazyVoiceController } from './app/voice/voiceFacade'
+import type { RoomSnapshotMessage } from './app/network/createGameServerClient'
 
 // Общият 3D стил на основните виолетови бутони в светлия мобилен дизайн —
 // веднъж, преди първия рендер (класът се слага само в светлите клонове).
@@ -491,6 +494,13 @@ let showOfflineConnectionOverlay: () => void = () => {
 }
 let hideOfflineConnectionOverlay: () => void = () => {}
 let currentAuthSession: AuthSession | null = null
+// Гласов чат (Етап 3) — един controller за цялото приложение. Създава се
+// преди WS клиента (виж createAppVoiceController); до тогава куките са no-op.
+let voiceController: VoiceController | null = null
+/** Най-много една отложена синхронизация на контекста (microtask) наведнъж. */
+let isVoiceContextSyncQueued = false
+/** Последният room_snapshot на активната маса — само voiceTableId и местата. */
+let voiceRoomSnapshot: { roomId: string; voiceTableId: string | null; yourSeat: string | null; seats: RoomSnapshotMessage['seats'] } | null = null
 
 const SESSION_CACHE_KEY = 'pika_session_cache'
 
@@ -7301,6 +7311,7 @@ async function respondTournamentPartnerInviteRequest(
 
 lobby = createLobbyFlowController({
   root: rootElement,
+  onBeforeRender: () => syncVoiceContext(),
   suppressRendering: _isStandaloneDedicatedPath,
   joinMatchmaking: (stake, displayName) => {
     client.joinMatchmaking(stake, displayName)
@@ -8684,8 +8695,11 @@ const muteEndNoticePopup = createMuteEndNoticePopupController({
   },
 })
 
+voiceController = createAppVoiceController()
+
 client = createGameServerClient({
   onOpen: () => {
+    voiceController?.setGameConnection(true)
     clearReconnectTimer()
     reconnectAttempt = 0
 
@@ -8820,6 +8834,8 @@ client = createGameServerClient({
     requestPwaUpdateApplyAttempt()
   },
   onClose: () => {
+    // Гласов чат: 120 s клиентски защитен таймер (само ако гласът е в употреба).
+    voiceController?.setGameConnection(false)
     if (isSessionDisplaced || isPageUnloading || isModerationForcedExitPending || isSelfDeletionExitPending) {
       return
     }
@@ -8902,6 +8918,17 @@ client = createGameServerClient({
     }
   },
   onMessage: (message) => {
+    // Гласов чат (Етап 3): собствените съобщения + проследяване на контекста.
+    // Контекстът се преизчислява СЛЕД синхронната обработка (microtask) —
+    // лобито/активната маса вече са приложили съобщението.
+    if (message.type === 'room_snapshot') {
+      voiceRoomSnapshot = { roomId: message.roomId, voiceTableId: message.voiceTableId ?? null, yourSeat: message.yourSeat, seats: message.seats }
+    }
+    if (voiceController !== null && voiceController.handleServerMessage(message)) return
+    if (!isVoiceContextSyncQueued) {
+      isVoiceContextSyncQueued = true
+      queueMicrotask(syncVoiceContext)
+    }
     // Известия за приключил мют — глобален popup над лоби/чакалня/активна
     // игра; не минава през lobby/activeRoom controller-ите и не пипа
     // gameplay state. Обработват се преди всичко останало.
@@ -8924,12 +8951,14 @@ client = createGameServerClient({
     }
 
     if (message.type === 'session_displaced') {
+      voiceController?.endSession('displaced')
       isSessionDisplaced = true
       showSessionDisplacedOverlay()
       return
     }
 
     if (message.type === 'session_banned') {
+      voiceController?.endSession('banned')
       // Immediate/deferred-then-fired ban enforcement за online профил
       // (round 4 брифа §3/§5) — споделеният 20-сек countdown popup
       // (showModerationForcedExitPopup), НЕ старото login-time PROFILE_BANNED
@@ -8980,6 +9009,7 @@ client = createGameServerClient({
     }
 
     if (message.type === 'session_deleted') {
+      voiceController?.endSession('deleted')
       // Immediate/deferred-then-fired access cutoff за online профил, тъкмо
       // hard-deleted от admin (round 4 брифа §4/§6) — същият споделен
       // 20-сек countdown popup mechanism. Виж коментара при session_banned
@@ -10333,6 +10363,66 @@ void loadGuestTrialStatus().finally(() => {
     void checkNetworkHealth()
   }, 3000)
 })()
+// ─── Гласов чат (Етап 3) — минимална техническа интеграция ─────────────────
+// Само контекст и транспорт; визуалният интерфейс е за Етапи 4/5. Тук е
+// само минималният посредник (voiceFacade) — controller-ът и livekit-client
+// са в lazy chunk assets/voice-* и се зареждат при изрично включване.
+
+function createAppVoiceController(): VoiceController {
+  const controller = createLazyVoiceController({
+    sendPresence: (message) => client.sendVoicePresence(message),
+    // HTTPS транспортът (token/speak-access) е в lazy runtime-а.
+    apiBaseUrl: getApiBaseUrl,
+  })
+  window.addEventListener('pageshow', (event) => controller.onPageShow(event.persisted))
+  window.addEventListener('pagehide', () => controller.onPageHide())
+  if (import.meta.env.DEV) {
+    // Само за ръчно тестване в dev (без токени в snapshot-а).
+    ;(window as unknown as { __pikaVoice?: VoiceController }).__pikaVoice = controller
+  }
+  return controller
+}
+
+/** Контекстът на гласа — само от авторитетните snapshot-и на клиента; евтино, без DOM. */
+function resolveVoiceContext(): VoiceContext {
+  const selfProfileId = currentAuthSession?.profile.profileId ?? null
+  if (selfProfileId === null || lobby === undefined || activeRoom === undefined) return { kind: 'none' }
+  if (activeRoom.hasActiveRoom()) {
+    if (activeRoom.isSpectatorView()) return { kind: 'none' }
+    const snapshot = voiceRoomSnapshot
+    if (snapshot === null || snapshot.roomId !== activeRoom.getCurrentRoomId() || snapshot.voiceTableId === null || snapshot.yourSeat === null) {
+      return { kind: 'none' }
+    }
+    return {
+      kind: 'table',
+      voiceTableId: snapshot.voiceTableId,
+      screen: 'game',
+      selfProfileId,
+      seats: snapshot.seats.map((seat) => ({ profileId: seat.profileId, isBot: seat.isBot })),
+    }
+  }
+  const privateRoom = lobby.getMyPrivateRoom()
+  const voiceTableId = privateRoom?.voiceTableId ?? null
+  if (privateRoom === null || voiceTableId === null) return { kind: 'none' }
+  return {
+    kind: 'table',
+    voiceTableId,
+    screen: lobby.getCurrentScreen() === 'private-room-waiting' ? 'waiting' : 'off_table',
+    selfProfileId,
+    seats: privateRoom.slots.map((slot) => ({ profileId: slot.occupant?.profileId ?? null, isBot: slot.occupant?.isBot ?? false })),
+  }
+}
+
+function syncVoiceContext(): void {
+  isVoiceContextSyncQueued = false
+  if (voiceController === null) return
+  try {
+    voiceController.setContext(resolveVoiceContext())
+  } catch {
+    // Гласът никога не прекъсва лобито/играта.
+  }
+}
+
 }
 
 function showLandingOverlay(): void {
@@ -10466,3 +10556,4 @@ function showLandingOverlay(): void {
     }
   })
 }
+
