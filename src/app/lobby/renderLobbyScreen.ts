@@ -1003,6 +1003,12 @@ export type LobbyScreenState = {
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
   privateRoomsCreatePopupOpen: boolean
+  // Гласов чат (Етап 4) — „Нова маса“ (само светлият мобилен вариант).
+  privateRoomVoiceCreateOption: { visible: boolean; canCreate: boolean; reason: 'vip_required' | null } | null
+  privateRoomVoiceVipPopupOpen: boolean
+  privateRoomVoiceVipClaimSubmitting: boolean
+  privateRoomVoiceVipClaimErrorText: string | null
+  privateRoomVoiceCreateFallbackText: string | null
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
   /** Брой реални чакащи по залог (ключ = String(stakeAmount)); липсващ = 0. */
@@ -1588,7 +1594,13 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsLifecycleTabChange: (tab: 'waiting' | 'playing' | 'finished') => void
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
-  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean) => void
+  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean, voiceEnabled?: boolean) => void
+  onPrivateRoomVoiceVipOpen?: () => void
+  onPrivateRoomVoiceVipClose?: () => void
+  onPrivateRoomVoiceVipClaimLaunchGift?: () => void
+  onPrivateRoomVoiceVipGoToShop?: () => void
+  onPrivateRoomVoiceFallbackCreate?: () => void
+  onPrivateRoomVoiceFallbackCancel?: () => void
   /** Клик върху ред в списъка — само preview navigation, не изпраща join_private_room; реалният seat claim минава през конкретния "+" на waiting-room екрана. */
   onPrivateRoomJoin: (privateRoomId: string) => void
   /** Клик върху зает seat/avatar в списъка "Частни маси" — отваря съществуващия profile popup flow (не влиза в масата). */
@@ -14736,6 +14748,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
               ${isMine ? `<div style="font-size:10.5px;font-weight:800;letter-spacing:0.04em;color:#6941C6;margin-bottom:3px;">ТВОЯТА МАСА</div>` : ''}
               <div style="display:flex;align-items:center;gap:6px;min-width:0;">
                 <span style="min-width:0;font-size:15px;font-weight:800;line-height:1.3;color:#111827;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${hostNameHtml}</span>
+                ${room.voiceEnabled === true ? renderPrivateRoomListVoiceBadge(true) : ''}
                 ${room.manualStart ? `<span style="flex:0 0 auto;font-size:10.5px;font-weight:800;color:#6941C6;background:#F4F0FF;border:1px solid #D9CCFF;border-radius:999px;padding:2px 7px;white-space:nowrap;">Ръчен старт</span>` : ''}
               </div>
               <div style="${PRIVATE_ROOMS_LIGHT_META_STYLE}margin-top:3px;">
@@ -14774,6 +14787,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
             ${isMine ? `<div style="font-size:10px;font-weight:800;letter-spacing:0.04em;color:#f4c95b;margin-bottom:2px;">ТВОЯТА МАСА</div>` : ''}
             <div style="font-size:14px;font-weight:700;color:#fff;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
               <span>${hostNameHtml}</span>
+              ${room.voiceEnabled === true ? renderPrivateRoomListVoiceBadge(false) : ''}
               ${room.manualStart ? `<span style="font-size:10px;font-weight:800;letter-spacing:0.03em;color:#a78bfa;background:rgba(167,139,250,0.14);border:1px solid rgba(167,139,250,0.35);border-radius:5px;padding:2px 6px;white-space:nowrap;">Ръчен старт</span>` : ''}
             </div>
             <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
@@ -15005,6 +15019,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
 
   const popupsHtml = `
     ${renderPrivateRoomsCreatePopup(state, light)}
+    ${light ? renderPrivateRoomVoiceCreatePopups(state) : ''}
     ${renderPrivateRoomJoinConfirmPopup(state.privateRoomJoinSlotPopup, light)}
     ${renderPrivateRoomBlockedPopup(state.privateRoomBlockedPopupText)}
     ${renderPrivateRoomCreatorBlockedPopup(state.privateRoomCreatorBlockedPopupOpen, light)}
@@ -15087,6 +15102,92 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
   `
 }
 
+// Lucide "mic" за реда „Гласов чат“ (Етап 4).
+const PRIVATE_ROOM_VOICE_MIC_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
+const PRIVATE_ROOM_VOICE_LOCK_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
+
+/**
+ * Гласов чат (Етап 4) — обозначение в списъка с частни маси: плътен виолетов
+ * pill с бял микрофон, със същата височина като „Ръчен старт“ и до него —
+ * ясен индикатор, а не декорация. Само за маси, създадени с гласов чат.
+ */
+function renderPrivateRoomListVoiceBadge(light: boolean): string {
+  const icon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" style="display:block;"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
+  // Височината = тази на „Ръчен старт“ във всеки вариант (редът не се разтяга).
+  const surface = light
+    ? 'width:30px;height:20px;border-radius:999px;background:#7950E8;border:1px solid #6941C6;color:#FFFFFF;box-shadow:0 1px 2px rgba(105,65,198,0.25);'
+    : 'width:30px;height:19px;border-radius:5px;background:#8B5CF6;border:1px solid #A78BFA;color:#FFFFFF;box-shadow:0 0 0 1px rgba(0,0,0,0.25);'
+  return `<span data-private-room-voice-badge="1" role="img" aria-label="Гласов чат" title="Гласов чат" style="flex:0 0 auto;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;${surface}">${icon}</span>`
+}
+
+/**
+ * Гласов чат (Етап 4) — опцията във „Нова маса“: изключена по подразбиране,
+ * без запомняне. Скрита при режим „Изключен“, „Само админ“ за не-админ и
+ * докато видимостта не е заредена. Без VIP — заключен ред, който отваря VIP
+ * прозореца (не е поле на формата).
+ */
+function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState): string {
+  const option = state.privateRoomVoiceCreateOption
+  if (option === null || !option.visible) return ''
+  const vipBadge = '<span style="display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:999px;background:#FEF0C7;color:#93370D;font-size:10px;font-weight:800;letter-spacing:0.04em;">VIP</span>'
+  const title = `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:#6941C6;display:inline-flex;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>Гласов чат ${vipBadge}</span>`
+  const hint = 'Разговор с микрофон между играчите на масата'
+  if (!option.canCreate) {
+    return `
+      <button type="button" data-private-room-voice-vip="1" style="display:flex;align-items:flex-start;gap:10px;width:100%;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#FFFFFF;cursor:pointer;text-align:left;font-family:inherit;">
+        <span style="width:18px;height:18px;margin:1px 0 0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;color:#98A2B3;">${PRIVATE_ROOM_VOICE_LOCK_ICON}</span>
+        <span style="min-width:0;display:grid;gap:2px;">
+          <span style="font-size:14px;font-weight:700;line-height:1.3;color:#111827;">${title}</span>
+          <span style="font-size:12px;font-weight:500;line-height:1.35;color:#667085;">Създаването на гласова маса е VIP привилегия.</span>
+        </span>
+      </button>
+    `
+  }
+  return `
+    <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#FFFFFF;cursor:pointer;user-select:none;">
+      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1" style="width:18px;height:18px;margin:1px 0 0;flex-shrink:0;cursor:pointer;accent-color:#7950E8;">
+      <span style="min-width:0;display:grid;gap:2px;">
+        <span style="font-size:14px;font-weight:700;line-height:1.3;color:#111827;">${title}</span>
+        <span style="font-size:12px;font-weight:500;line-height:1.35;color:#667085;">${hint}</span>
+      </span>
+    </label>
+  `
+}
+
+function renderPrivateRoomVoiceCreatePopups(state: LobbyScreenState): string {
+  // Общият VIP прозорец е с z-index 1200, а „Нова маса“ — 9500: обвивката
+  // (позиционирана, със собствен z-index) го поставя НАД формата, без да се
+  // променя общият компонент.
+  const vipPopupHtml = renderVipRequiredPopup({
+    open: state.privateRoomVoiceVipPopupOpen,
+    namespace: 'private-room-voice',
+    featureLabel: 'Създаването на гласова маса',
+    hasClaimedLaunchGift: state.topicsVipGate ? state.topicsVipGate.hasClaimedLaunchGift : null,
+    launchGiftDays: state.topicsVipGate ? state.topicsVipGate.launchGiftDays : null,
+    claimSubmitting: state.privateRoomVoiceVipClaimSubmitting,
+    claimErrorText: state.privateRoomVoiceVipClaimErrorText,
+    light: true,
+  })
+  const vipPopup = vipPopupHtml === '' ? '' : `<div style="position:relative;z-index:9600;">${vipPopupHtml}</div>`
+  const fallbackText = state.privateRoomVoiceCreateFallbackText
+  const fallback = fallbackText === null ? '' : `
+    <div data-private-room-voice-fallback-backdrop="1" style="${PRIVATE_ROOMS_LIGHT_POPUP_BACKDROP_STYLE}z-index:9600;">
+      <div role="dialog" aria-modal="true" aria-label="Гласов чат" style="${PRIVATE_ROOMS_LIGHT_POPUP_CARD_STYLE}width:360px;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+          <span style="width:34px;height:34px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#F4F0FF;border:1px solid #D9CCFF;color:#6941C6;flex:0 0 auto;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>
+          <h2 style="margin:0;color:#17233C;font-size:18px;font-weight:800;line-height:1.25;">Гласов чат</h2>
+        </div>
+        <p style="margin:0 0 16px;font-size:14px;line-height:1.5;color:#475467;">${escapeHtml(fallbackText)}</p>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <button type="button" data-private-room-voice-fallback-create="1" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="${PRIVATE_ROOMS_LIGHT_PRIMARY_BUTTON_STYLE}height:46px;border-radius:10px;font-size:15px;">Създай без гласов чат</button>
+          <button type="button" data-private-room-voice-fallback-cancel="1" style="${PRIVATE_ROOMS_LIGHT_SECONDARY_BUTTON_STYLE}height:44px;border-radius:10px;font-size:15px;color:#344054;">Отказ</button>
+        </div>
+      </div>
+    </div>
+  `
+  return vipPopup + fallback
+}
+
 function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): string {
   if (!state.privateRoomsCreatePopupOpen) return ''
 
@@ -15129,6 +15230,7 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
           ${checkboxRow('name="isLocked"', 'Заключена маса', 'Само с покана')}
           ${checkboxRow('name="manualStart"', 'Ръчен старт от създателя', 'Маса 4/4 чака бутон „СТАРТ“')}
           ${checkboxRow('name="invitePartner" data-private-room-invite-partner-checkbox="1"', 'Покани партньор', 'Мястото до вас се пази за поканен приятел')}
+          ${renderPrivateRoomVoiceCreateRow(state)}
           <div>
             <div style="${fieldLabelStyle}">Време за изчакване на играчи</div>
             <select name="waitMinutes" style="${selectStyle}">
@@ -21668,6 +21770,7 @@ export function renderLobbyScreen(
       const isLocked = (data.get('isLocked') ?? null) !== null
       const manualStart = (data.get('manualStart') ?? null) !== null
       const invitePartner = (data.get('invitePartner') ?? null) !== null
+      const voiceEnabled = (data.get('voiceEnabled') ?? null) !== null
       const rawWaitMinutes = Number(data.get('waitMinutes'))
       const waitMinutes: 5 | 10 | 15 | 30 = [5, 10, 15, 30].includes(rawWaitMinutes)
         ? (rawWaitMinutes as 5 | 10 | 15 | 30)
@@ -21676,8 +21779,25 @@ export function renderLobbyScreen(
       const humanTurnTimeoutMs: HumanTurnTimeoutMs = isHumanTurnTimeoutMs(rawHumanTurnTimeoutMs)
         ? rawHumanTurnTimeoutMs
         : DEFAULT_HUMAN_TURN_TIMEOUT_MS
-      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner)
+      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled)
     })
+
+  // Гласов чат (Етап 4) — VIP прозорец и изричният избор при отказ на сървъра.
+  root.querySelector<HTMLButtonElement>('[data-private-room-voice-vip="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomVoiceVipOpen?.())
+  root.querySelector<HTMLElement>('[data-private-room-voice-vip-popup-backdrop="1"]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) options.onPrivateRoomVoiceVipClose?.()
+  })
+  root.querySelector<HTMLButtonElement>('[data-private-room-voice-vip-popup-close="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomVoiceVipClose?.())
+  root.querySelector<HTMLButtonElement>('[data-private-room-voice-vip-popup-claim="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomVoiceVipClaimLaunchGift?.())
+  root.querySelector<HTMLButtonElement>('[data-private-room-voice-vip-popup-go-to-shop="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomVoiceVipGoToShop?.())
+  root.querySelector<HTMLButtonElement>('[data-private-room-voice-fallback-create="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomVoiceFallbackCreate?.())
+  root.querySelector<HTMLButtonElement>('[data-private-room-voice-fallback-cancel="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomVoiceFallbackCancel?.())
 
   // Отделен бутон от "+"-ите по-долу (различно DOM поддърво в roomRowHtml) —
   // клик върху зает seat/avatar никога не тригва join.

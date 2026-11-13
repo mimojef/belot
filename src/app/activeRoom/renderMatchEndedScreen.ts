@@ -12,6 +12,7 @@ import {
   getActiveRoomTableBackground,
 } from './activeRoomShared'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { renderVoiceSpeakingSlot } from '../voice/ui/voiceSpeakingIndicator'
 
 // Module-level run counter — гарантира, че при бърз повторен render() (напр.
 // countdown tick, докато numeric prize animation-ът още тече) само
@@ -511,6 +512,7 @@ function renderMobilePlayerTile(
           }
         </div>
         ${renderLevelBadge(seat.level)}
+        ${seat.isOccupied && !seat.isBot ? renderVoiceSpeakingSlot(seat.profileId, { sizePx: 19, insetPx: -6, corner: 'top-right', zIndex: 3 }) : ''}
       </div>
       <div style="min-width:0;display:flex;flex-direction:column;gap:3px;">
         <div

@@ -60,7 +60,8 @@ for (const file of jsFiles.filter((name) => precached.has(`assets/${name}`))) {
 ok(true, 'нито един precache-нат chunk не импортира статично voice chunk')
 for (const file of voiceFiles) {
   const imported = staticImports(readFileSync(join(assetsDir, file), 'utf8'))
-  const foreign = imported.filter((name) => !name.startsWith('voice-'))
+  // Допустимо: други voice-* chunks и главният bundle (винаги зареден и в precache-а).
+  const foreign = imported.filter((name) => !name.startsWith('voice-') && name !== main)
   ok(foreign.length === 0, `${file}: статични зависимости ${imported.length === 0 ? '(няма)' : imported.join(', ')}`)
 }
 

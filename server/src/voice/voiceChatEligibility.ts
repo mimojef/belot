@@ -84,6 +84,29 @@ export function evaluateVoiceTableCreation(input: {
   return { ok: true }
 }
 
+/**
+ * Опцията „Гласов чат“ във формата за създаване (Етап 4, само четене — НЕ
+ * резервира слот). visible=false: редът не се показва (режим „Изключен“,
+ * „Само админ“ за не-админ, гост, бан). canCreate=false + vip_required:
+ * редът се показва заключен и отваря VIP прозореца. Лимитът и наличността на
+ * LiveKit се проверяват само при реалното създаване (атомарно).
+ */
+export type VoiceTableCreationOption = {
+  visible: boolean
+  canCreate: boolean
+  reason: 'vip_required' | null
+}
+
+export function describeVoiceTableCreationOption(input: {
+  mode: VoiceModeFacts
+  requester: VoiceRequesterFacts
+}): VoiceTableCreationOption {
+  const decision = evaluateVoiceTableCreation(input)
+  if (decision.ok) return { visible: true, canCreate: true, reason: null }
+  if (decision.code === 'vip_required') return { visible: true, canCreate: false, reason: 'vip_required' }
+  return { visible: false, canCreate: false, reason: null }
+}
+
 // ─── Слушане и говорене ───────────────────────────────────────────────────
 
 export type VoiceTableFacts = {

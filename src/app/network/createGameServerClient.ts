@@ -1004,6 +1004,8 @@ export type ClientMessage =
       manualStart?: boolean
       humanTurnTimeoutMs?: HumanTurnTimeoutMs
       invitePartner?: boolean
+      /** Гласов чат (Етап 4) — само VIP; липсващо = false. */
+      voiceEnabled?: boolean
       displayName?: string
     }
   | {
@@ -3757,7 +3759,7 @@ export type GameServerClient = {
   subscribeTournamentMatches: (tournamentId: string, token: string) => void
   unsubscribeTournamentMatches: (tournamentId: string) => void
   requestPrivateGamesList: () => void
-  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean) => void
+  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean, voiceEnabled?: boolean) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   leavePrivateRoom: () => void
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -4233,8 +4235,8 @@ export function createGameServerClient(
     send({ type: 'request_private_games_list' })
   }
 
-  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean): void {
-    send({ type: 'create_private_room', stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner })
+  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean, voiceEnabled = false): void {
+    send({ type: 'create_private_room', stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, ...(voiceEnabled ? { voiceEnabled: true } : {}) })
   }
 
   function joinPrivateRoomSlot(privateRoomId: string, team: Team, slotIndex: 0 | 1): void {

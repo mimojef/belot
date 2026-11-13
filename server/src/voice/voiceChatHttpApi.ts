@@ -2,6 +2,9 @@
 //
 //   POST /api/voice/token         { voiceTableId, clientInstanceId }
 //   POST /api/voice/speak-access  { voiceTableId, clientInstanceId }
+//   GET  /api/voice/create-option  (Етап 4) -> { visible, canCreate, reason }
+//        само четене за формата „Нова маса“: не резервира слот и не издава
+//        токени; лимитът се проверява атомарно едва при create_private_room.
 //
 // Токенът се издава САМО тук (никога през игровия WebSocket — клиентът логва
 // всяко входящо WS съобщение). Всички отговори са Cache-Control: no-store.
@@ -17,9 +20,11 @@ import type { VoiceChatService, VoiceHttpResult } from './voiceChatService.js'
 export const VOICE_CHAT_API_BASE_PATH = '/api/voice'
 
 export type VoiceChatHttpApiDeps = {
-  service: Pick<VoiceChatService, 'handleTokenRequest' | 'handleSpeakAccessRequest'>
+  service: Pick<VoiceChatService, 'handleTokenRequest' | 'handleSpeakAccessRequest' | 'describeCreationOption'>
   /** profileId от СВЕЖА сесия (cookie), иначе null. */
   getSessionProfileId: (req: IncomingMessage) => string | null
+  /** Пълна роля admin (същата проверка като при create_private_room). */
+  isFullAdminProfile: (profileId: string) => boolean
   isAllowedOrigin: (req: IncomingMessage) => boolean
   readJsonBody: (req: IncomingMessage) => Promise<unknown>
 }
@@ -44,6 +49,24 @@ export function createVoiceChatHttpRequestHandler(
 ): (req: IncomingMessage, res: ServerResponse, requestUrl: URL) => Promise<boolean> {
   return async function handleVoiceChatApiRequest(req, res, requestUrl): Promise<boolean> {
     const pathname = requestUrl.pathname
+    if (pathname === `${VOICE_CHAT_API_BASE_PATH}/create-option`) {
+      if (req.method !== 'GET') {
+        send(res, { status: 405, body: { ok: false, code: 'method_not_allowed' } })
+        return true
+      }
+      const profileId = deps.getSessionProfileId(req)
+      if (profileId === null) {
+        send(res, { status: 401, body: { ok: false, code: 'not_authenticated' } })
+        return true
+      }
+      try {
+        const option = deps.service.describeCreationOption({ profileId, isFullAdmin: deps.isFullAdminProfile(profileId) })
+        send(res, { status: 200, body: { ok: true, ...option } })
+      } catch {
+        send(res, { status: 500, body: { ok: false, code: 'internal_error' } })
+      }
+      return true
+    }
     if (pathname !== `${VOICE_CHAT_API_BASE_PATH}/token` && pathname !== `${VOICE_CHAT_API_BASE_PATH}/speak-access`) return false
 
     if (req.method !== 'POST') {

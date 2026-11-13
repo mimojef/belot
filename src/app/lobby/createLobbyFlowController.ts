@@ -191,6 +191,23 @@ import {
   rememberTournamentSpectatorTeamLabels,
 } from '../activeRoom/spectatorTeamLabels'
 
+/** Гласов чат (Етап 4) — опцията във „Нова маса“ (виж server describeVoiceTableCreationOption). */
+export type PrivateRoomVoiceCreateOption = {
+  visible: boolean
+  canCreate: boolean
+  reason: 'vip_required' | null
+}
+
+type PrivateRoomCreateRequest = {
+  stake: MatchStake
+  isLocked: boolean
+  waitMinutes: 5 | 10 | 15 | 30
+  manualStart: boolean
+  humanTurnTimeoutMs: HumanTurnTimeoutMs
+  invitePartner: boolean
+  voiceEnabled: boolean
+}
+
 export type LobbyFlowScreen =
   | 'lobby'
   | 'players'
@@ -986,7 +1003,11 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomsClose?: () => void
   /** "Играещи"/"Приключили" табове — извиква се веднъж при first-open на всеки от двата (lazy load, не при "Чакащи"). */
   onPrivateGamesOpen?: () => void
-  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean) => void
+  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean, voiceEnabled?: boolean) => void
+  /** Гласов чат (Етап 4): видимост на опцията във „Нова маса“ (GET /api/voice/create-option). null = неизвестно -> скрита. */
+  loadVoiceCreateOption?: () => Promise<PrivateRoomVoiceCreateOption | null>
+  /** Гласов чат (Етап 4): след всяко рендериране на чакалнята (лентата се попълва извън lobby state-а). */
+  onPrivateRoomWaitingRendered?: (root: HTMLElement) => void
   onPrivateRoomJoinSlot?: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   onPrivateRoomLeave?: () => void
   onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -1582,6 +1603,8 @@ export type LobbyFlowController = {
   getCurrentScreen: () => LobbySocialScreen
   /** Гласов чат (Етап 3): текущата частна маса (чакалнята), в която седи играчът. */
   getMyPrivateRoom: () => PrivateRoomSnapshot | null
+  /** Гласов чат (Етап 4): „Вземи VIP“ от чакалнята — магазин, VIP раздел. */
+  openVipShop: () => void
   // Auto-return STATE A/B (§ "A → B AUTO NAVIGATION") — за да не rest-не
   // излишно STATE A в STATE A (loading flash), caller-ът (main.ts's
   // tournament_match_assigned handler) трябва да провери "показвам ли ВЕЧЕ
@@ -2350,6 +2373,14 @@ type InternalLobbyFlowState = {
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
   privateRoomsCreatePopupOpen: boolean
+  // Гласов чат (Етап 4) — „Нова маса“.
+  privateRoomVoiceCreateOption: PrivateRoomVoiceCreateOption | null
+  privateRoomVoiceVipPopupOpen: boolean
+  privateRoomVoiceVipClaimSubmitting: boolean
+  privateRoomVoiceVipClaimErrorText: string | null
+  /** Сървърът отказа гласова маса (лимит, недостъпна услуга…) — изричен избор „без гласов чат“ / „Отказ“. */
+  privateRoomVoiceCreateFallback: { message: string; request: PrivateRoomCreateRequest } | null
+  lastPrivateRoomCreateRequest: PrivateRoomCreateRequest | null
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
   // Брой реални чакащи по залог (значките на каретата) — от matchmaking_waiting_counts.
@@ -3154,6 +3185,12 @@ function createInitialState(): InternalLobbyFlowState {
     matchRoomsErrorText: null,
     adminMatchRoomEdit: null,
     privateRoomsCreatePopupOpen: false,
+    privateRoomVoiceCreateOption: null,
+    privateRoomVoiceVipPopupOpen: false,
+    privateRoomVoiceVipClaimSubmitting: false,
+    privateRoomVoiceVipClaimErrorText: null,
+    privateRoomVoiceCreateFallback: null,
+    lastPrivateRoomCreateRequest: null,
     privateRoomsTab: 'all',
     privateRoomsLifecycleTab: 'waiting',
     privateGamesPlaying: [],
@@ -6052,6 +6089,11 @@ export function createLobbyFlowController(
       matchRoomsErrorText: state.matchRoomsErrorText,
       adminMatchRoomEdit: state.adminMatchRoomEdit,
       privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
+      privateRoomVoiceCreateOption: state.privateRoomVoiceCreateOption,
+      privateRoomVoiceVipPopupOpen: state.privateRoomVoiceVipPopupOpen,
+      privateRoomVoiceVipClaimSubmitting: state.privateRoomVoiceVipClaimSubmitting,
+      privateRoomVoiceVipClaimErrorText: state.privateRoomVoiceVipClaimErrorText,
+      privateRoomVoiceCreateFallbackText: state.privateRoomVoiceCreateFallback?.message ?? null,
       privateRoomsTab: state.privateRoomsTab,
       privateRooms: state.privateRooms,
       matchmakingWaitingCounts: state.matchmakingWaitingCounts,
@@ -7763,12 +7805,49 @@ export function createLobbyFlowController(
       onPrivateRoomsCreateOpen: () => {
         state.privateRoomsCreatePopupOpen = true
         render()
+        void refreshPrivateRoomVoiceCreateOption()
+      },
+      onPrivateRoomVoiceVipOpen: () => {
+        state.privateRoomVoiceVipPopupOpen = true
+        state.privateRoomVoiceVipClaimErrorText = null
+        render()
+        void ensureTopicsVipGateLoaded().then(() => render())
+      },
+      onPrivateRoomVoiceVipClose: () => {
+        state.privateRoomVoiceVipPopupOpen = false
+        state.privateRoomVoiceVipClaimErrorText = null
+        render()
+      },
+      onPrivateRoomVoiceVipClaimLaunchGift: () => { void claimPrivateRoomVoiceLaunchGift() },
+      onPrivateRoomVoiceVipGoToShop: () => {
+        state.privateRoomVoiceVipPopupOpen = false
+        state.privateRoomsCreatePopupOpen = false
+        state.shopActiveTab = 'vip'
+        void showShopPanel()
+      },
+      onPrivateRoomVoiceFallbackCreate: () => {
+        const fallback = state.privateRoomVoiceCreateFallback
+        state.privateRoomVoiceCreateFallback = null
+        if (fallback === null || state.myPrivateRoom !== null) {
+          render()
+          return
+        }
+        // Изричен избор на потребителя — никога автоматично (2.3).
+        const request = { ...fallback.request, voiceEnabled: false }
+        state.lastPrivateRoomCreateRequest = request
+        state.privateRoomJoinInFlight = true
+        render()
+        options.onPrivateRoomCreate?.(request.stake, request.isLocked, request.waitMinutes, request.manualStart, request.humanTurnTimeoutMs, request.invitePartner, false)
+      },
+      onPrivateRoomVoiceFallbackCancel: () => {
+        state.privateRoomVoiceCreateFallback = null
+        render()
       },
       onPrivateRoomsCreateClose: () => {
         state.privateRoomsCreatePopupOpen = false
         render()
       },
-      onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner) => {
+      onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled) => {
         if (state.myPrivateRoom !== null) {
           state.privateRoomsCreatePopupOpen = false
           openPrivateRoomConflictPrompt()
@@ -7801,7 +7880,10 @@ export function createLobbyFlowController(
 
         state.privateRoomsCreatePopupOpen = false
         state.privateRoomJoinInFlight = true
-        options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner)
+        // Гласът — само ако опцията е видима и разрешена (сървърът проверява атомарно).
+        const withVoice = voiceEnabled === true && state.privateRoomVoiceCreateOption?.canCreate === true
+        state.lastPrivateRoomCreateRequest = { stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled: withVoice }
+        options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, withVoice)
       },
       onPrivateRoomJoin: handlePrivateRoomJoin,
       onPrivateRoomMemberClick: (profileId, displayName) => {
@@ -11567,6 +11649,47 @@ export function createLobbyFlowController(
   // (напр. Belot "Гледай" click, докато private-rooms екранът вече тегли
   // статуса) await-ва СЪЩАТА заявка, вместо да върне веднага с unknown gate.
   let topicsVipGateLoadInFlight: Promise<void> | null = null
+
+  async function refreshPrivateRoomVoiceCreateOption(): Promise<void> {
+    const loader = options.loadVoiceCreateOption
+    if (loader === undefined) return
+    let option: PrivateRoomVoiceCreateOption | null = null
+    try {
+      option = await loader()
+    } catch {
+      option = null
+    }
+    const before = state.privateRoomVoiceCreateOption
+    state.privateRoomVoiceCreateOption = option
+    if (state.privateRoomsCreatePopupOpen && JSON.stringify(before) !== JSON.stringify(option)) render()
+  }
+
+  /** Безплатният VIP подарък от прозореца „Гласов чат [VIP]“ — същият механизъм като останалите VIP прозорци. */
+  async function claimPrivateRoomVoiceLaunchGift(): Promise<void> {
+    if (state.privateRoomVoiceVipClaimSubmitting || !options.onClaimTopicsLaunchGift) return
+    state.privateRoomVoiceVipClaimSubmitting = true
+    state.privateRoomVoiceVipClaimErrorText = null
+    render()
+    const result = await options.onClaimTopicsLaunchGift()
+    state.privateRoomVoiceVipClaimSubmitting = false
+    if (result.ok) {
+      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: true, launchGiftDays: state.topicsVipGate?.launchGiftDays ?? 0 }
+      if (result.activeUntil !== undefined) state.ownVipActiveUntil = result.activeUntil
+      state.privateRoomVoiceVipPopupOpen = false
+      render()
+      await refreshPrivateRoomVoiceCreateOption()
+      return
+    }
+    await refreshTopicsVipGateStatus()
+    if (result.alreadyClaimed && state.topicsVipGate?.isActive) {
+      state.privateRoomVoiceVipPopupOpen = false
+      render()
+      await refreshPrivateRoomVoiceCreateOption()
+      return
+    }
+    if (result.alreadyClaimed) state.privateRoomVoiceVipClaimErrorText = 'Безплатният VIP подарък вече е използван за този профил.'
+    render()
+  }
 
   async function ensureTopicsVipGateLoaded(): Promise<void> {
     if (state.topicsVipGate !== null || !options.onGetTopicsVipGateStatus) {
@@ -20078,7 +20201,10 @@ export function createLobbyFlowController(
         light: isLightWaitingScreen,
       }),
       light: isLightWaitingScreen,
+      voiceEnabled: isLightWaitingScreen && viewerRole === 'member' && room.voiceEnabled === true,
     })
+
+    options.onPrivateRoomWaitingRendered?.(options.root)
 
     attachPrivateRoomNoticeHandlers(options.root, {
       onInviteOther: () => openPartnerPickerFromNotice(),
@@ -22701,6 +22827,17 @@ export function createLobbyFlowController(
         options.onLudoRoomsOpen?.()
         return true
       }
+      // Гласов чат (Етап 4): гласовата маса не може да бъде създадена (лимит,
+      // недостъпна услуга, сменен режим…) — масата НЕ е създадена; изричен
+      // избор „Създай без гласов чат“ / „Отказ“ (никога автоматично).
+      const voiceCreateRequest = state.lastPrivateRoomCreateRequest
+      if (typeof message.code === 'string' && message.code.startsWith('voice_chat_') && voiceCreateRequest !== null && voiceCreateRequest.voiceEnabled) {
+        state.privateRoomJoinInFlight = false
+        state.lastPrivateRoomCreateRequest = null
+        state.privateRoomVoiceCreateFallback = { message: message.message, request: voiceCreateRequest }
+        render()
+        return true
+      }
       // Defensive reset — never leaves an in-flight create/join marked as
       // "in flight" forever if the server rejects it (e.g. stake no longer
       // available, room full, race with another joiner).
@@ -24809,6 +24946,10 @@ export function createLobbyFlowController(
     },
     getCurrentScreen: () => state.currentScreen,
     getMyPrivateRoom: () => state.myPrivateRoom,
+    openVipShop: () => {
+      state.shopActiveTab = 'vip'
+      void showShopPanel()
+    },
     getCurrentTournamentDetailId: () => (state.currentScreen === 'tournament-detail' ? state.tournamentDetailId : null),
     getSpectatingBelotRoomId: () => state.spectatingBelotRoomId,
     getPendingBelotSpectatorRoomId: () => state.pendingBelotSpectatorRoomId,

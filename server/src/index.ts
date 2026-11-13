@@ -21400,6 +21400,7 @@ const handleAdminVoiceChatRequest = createVoiceChatAdminRequestHandler({
 const handleVoiceChatApiRequest = createVoiceChatHttpRequestHandler({
   service: voiceChatService,
   getSessionProfileId: (req) => authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))?.profile?.profileId ?? null,
+  isFullAdminProfile: (profileId) => authStore.getAccountRoleForProfile(profileId) === 'admin',
   isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),
   readJsonBody: (req) => readJsonRequestBody(req),
 })

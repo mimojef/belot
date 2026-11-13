@@ -171,6 +171,9 @@ import {
 import { VIOLET_3D_BUTTON_CLASS, ensureViolet3dButtonStyles } from './ui/layout/violet3dButton'
 import type { VoiceContext, VoiceController } from './app/voice/createVoiceController'
 import { createLazyVoiceController } from './app/voice/voiceFacade'
+import { createVoiceMobileUi, type VoiceMobileUi } from './app/voice/ui/createVoiceMobileUi'
+import type { VoiceUiSeat } from './app/voice/ui/voiceUiStatus'
+import { setVoiceSpeakingSlotsEnabled } from './app/voice/ui/voiceSpeakingIndicator'
 import type { RoomSnapshotMessage } from './app/network/createGameServerClient'
 
 // Общият 3D стил на основните виолетови бутони в светлия мобилен дизайн —
@@ -499,6 +502,8 @@ let currentAuthSession: AuthSession | null = null
 let voiceController: VoiceController | null = null
 /** Най-много една отложена синхронизация на контекста (microtask) наведнъж. */
 let isVoiceContextSyncQueued = false
+/** Гласов чат (Етап 4) — мобилният интерфейс върху voiceController. */
+let voiceMobileUi: VoiceMobileUi | null = null
 /** Последният room_snapshot на активната маса — само voiceTableId и местата. */
 let voiceRoomSnapshot: { roomId: string; voiceTableId: string | null; yourSeat: string | null; seats: RoomSnapshotMessage['seats'] } | null = null
 
@@ -7312,6 +7317,7 @@ async function respondTournamentPartnerInviteRequest(
 lobby = createLobbyFlowController({
   root: rootElement,
   onBeforeRender: () => syncVoiceContext(),
+  onPrivateRoomWaitingRendered: (root) => voiceMobileUi?.syncWaitingStrip(root),
   suppressRendering: _isStandaloneDedicatedPath,
   joinMatchmaking: (stake, displayName) => {
     client.joinMatchmaking(stake, displayName)
@@ -7512,7 +7518,8 @@ lobby = createLobbyFlowController({
   onPrivateRoomsOpen: () => { client.requestPrivateRoomsList() },
   onPrivateRoomsClose: () => {},
   onPrivateGamesOpen: () => { client.requestPrivateGamesList() },
-  onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner) => { client.createPrivateRoom(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner) },
+  onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled) => { client.createPrivateRoom(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled === true) },
+  loadVoiceCreateOption: () => loadVoiceCreateOption(),
   onPrivateRoomJoinSlot: (privateRoomId, team, slotIndex) => { client.joinPrivateRoomSlot(privateRoomId, team, slotIndex) },
   onPrivateRoomLeave: () => { client.leavePrivateRoom() },
   onPrivateRoomInvite: (toProfiles) => { client.inviteToPrivateRoom(toProfiles) },
@@ -8696,6 +8703,13 @@ const muteEndNoticePopup = createMuteEndNoticePopupController({
 })
 
 voiceController = createAppVoiceController()
+voiceMobileUi = createVoiceMobileUi({
+  voice: voiceController,
+  getSeats: () => resolveVoiceUiSeats(),
+  isOwnVip: () => currentAuthSession?.profile.isVip === true,
+  isPhoneLayout: () => isPhoneLayoutViewport(),
+  onGetVip: () => lobby.openVipShop(),
+})
 
 client = createGameServerClient({
   onOpen: () => {
@@ -8923,6 +8937,8 @@ client = createGameServerClient({
     // лобито/активната маса вече са приложили съобщението.
     if (message.type === 'room_snapshot') {
       voiceRoomSnapshot = { roomId: message.roomId, voiceTableId: message.voiceTableId ?? null, yourSeat: message.yourSeat, seats: message.seats }
+      // Синхронно, преди activeRoom да рендерира: слотовете „говори“ само на гласова маса.
+      setVoiceSpeakingSlotsEnabled((message.voiceTableId ?? null) !== null && message.yourSeat !== null)
     }
     if (voiceController !== null && voiceController.handleServerMessage(message)) return
     if (!isVoiceContextSyncQueued) {
@@ -10410,6 +10426,40 @@ function resolveVoiceContext(): VoiceContext {
     screen: lobby.getCurrentScreen() === 'private-room-waiting' ? 'waiting' : 'off_table',
     selfProfileId,
     seats: privateRoom.slots.map((slot) => ({ profileId: slot.occupant?.profileId ?? null, isBot: slot.occupant?.isBot ?? false })),
+  }
+}
+
+/** Местата за гласовия панел: аз, после останалите (имена/аватари от авторитетните snapshot-и). */
+function resolveVoiceUiSeats(): VoiceUiSeat[] {
+  const selfProfileId = currentAuthSession?.profile.profileId ?? null
+  let seats: VoiceUiSeat[] = []
+  if (activeRoom !== undefined && activeRoom.hasActiveRoom() && voiceRoomSnapshot !== null && voiceRoomSnapshot.roomId === activeRoom.getCurrentRoomId()) {
+    seats = voiceRoomSnapshot.seats
+      .filter((seat) => seat.isOccupied)
+      .map((seat) => ({ profileId: seat.isBot ? null : seat.profileId, displayName: seat.displayName, avatarUrl: seat.avatarUrl, isBot: seat.isBot, isSelf: !seat.isBot && seat.profileId !== null && seat.profileId === selfProfileId }))
+  } else if (lobby !== undefined) {
+    const privateRoom = lobby.getMyPrivateRoom()
+    seats = (privateRoom?.slots ?? []).flatMap((slot) => (slot.occupant === null ? [] : [{
+      profileId: slot.occupant.isBot ? null : slot.occupant.profileId,
+      displayName: slot.occupant.displayName,
+      avatarUrl: slot.occupant.avatarUrl,
+      isBot: slot.occupant.isBot,
+      isSelf: !slot.occupant.isBot && slot.occupant.profileId !== null && slot.occupant.profileId === selfProfileId,
+    }]))
+  }
+  return [...seats.filter((seat) => seat.isSelf), ...seats.filter((seat) => !seat.isSelf)]
+}
+
+/** GET /api/voice/create-option — видимост на „Гласов чат“ във „Нова маса“ (без резервация). */
+async function loadVoiceCreateOption(): Promise<{ visible: boolean; canCreate: boolean; reason: 'vip_required' | null } | null> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/voice/create-option`, { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) return null
+    const body = await response.json() as { ok?: unknown; visible?: unknown; canCreate?: unknown; reason?: unknown }
+    if (body.ok !== true || typeof body.visible !== 'boolean' || typeof body.canCreate !== 'boolean') return null
+    return { visible: body.visible, canCreate: body.canCreate, reason: body.reason === 'vip_required' ? 'vip_required' : null }
+  } catch {
+    return null
   }
 }
 

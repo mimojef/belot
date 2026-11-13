@@ -1,4 +1,5 @@
 import type { MatchStake, PrivateRoomPartnerReservationSnapshot, Team } from '../network/createGameServerClient'
+import { renderVoiceSpeakingSlot } from '../voice/ui/voiceSpeakingIndicator'
 import {
   PRIVATE_ROOM_POPUP_LIGHT_STYLES,
   PRIVATE_ROOM_POPUP_STYLES,
@@ -48,6 +49,8 @@ export type PrivateRoomWaitingChatMessageSnapshot = {
 export type PrivateRoomWaitingViewerRole = 'member' | 'previewer'
 
 export type RenderPrivateRoomWaitingScreenParams = {
+  /** Гласов чат (Етап 4, само светлият мобилен вариант): лента + индикатор „говори“. */
+  voiceEnabled?: boolean
   isLocked: boolean
   stake: MatchStake
   slots: PrivateRoomWaitingSlotSnapshot[]
@@ -270,6 +273,7 @@ function renderSlotCard(
   viewerRole: PrivateRoomWaitingViewerRole,
   isLocalHost: boolean,
   partner: PartnerSlotContext,
+  voiceEnabled = false,
 ): string {
   const occupant = slot.occupant
   const slotKey = `${slot.team}:${slot.slotIndex}`
@@ -311,6 +315,7 @@ function renderSlotCard(
   const avatarHtml = `
     <div class="prw-slot-avatar${occupant.isBot ? ' prw-slot-avatar-bot' : ''}">
       ${occupant.avatarUrl ? `<img src="${escapeHtml(occupant.avatarUrl)}" alt="" draggable="false">` : escapeHtml(occupant.isBot ? '🤖' : getInitialLetter(occupant.displayName))}
+      ${voiceEnabled && !occupant.isBot ? renderVoiceSpeakingSlot(occupant.profileId, { sizePx: 18, insetPx: -6, corner: isLocal ? 'top-left' : 'top-right', zIndex: 3, force: true }) : ''}
       ${isLocal ? `
         <button type="button" data-private-room-leave-slot="1" class="prw-leave-badge" aria-label="Напусни мястото си">
           <span aria-hidden="true">−</span>
@@ -385,6 +390,7 @@ function renderTeamColumn(
   botActionLoadingTeam: Team | null,
   isLocalHost: boolean,
   partner: PartnerSlotContext,
+  voiceEnabled = false,
 ): string {
   const [slotA, slotB] = getTeamSlots(slots, team)
   const control = computeTeamBotControlState(slots, team, localTeam, partner.reservation)
@@ -398,8 +404,8 @@ function renderTeamColumn(
     <div class="prw-team">
       <div class="prw-team-header">${teamLabel}</div>
       <div class="prw-team-slots">
-        ${renderSlotCard(slotA, localProfileId, viewerRole, isLocalHost, partner)}
-        ${renderSlotCard(slotB, localProfileId, viewerRole, isLocalHost, partner)}
+        ${renderSlotCard(slotA, localProfileId, viewerRole, isLocalHost, partner, voiceEnabled)}
+        ${renderSlotCard(slotB, localProfileId, viewerRole, isLocalHost, partner, voiceEnabled)}
       </div>
       ${showBotRow ? `
       <div class="prw-bot-row">
@@ -452,6 +458,10 @@ function renderPrivateRoomWaitingLightStyles(): string {
           z-index:-1;
           pointer-events:none;
           background:${MOBILE_LIGHT_PAGE_BACKGROUND};
+        }
+
+        [data-private-room-light="1"] .prw-voice-strip {
+          min-height:52px;
         }
 
         [data-private-room-light="1"] .prw-header {
@@ -1574,6 +1584,8 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           </div>
         </div>
 
+        ${params.voiceEnabled === true ? '<div class="prw-voice-strip" data-voice-waiting-strip="1"></div>' : ''}
+
         <div class="prw-waiting-actions">
           <button type="button" data-private-waiting-wait-in-lobby-button="1" class="prw-wait-in-lobby-button">Изчакай в лоби</button>
           ${params.isLocked && isMember && occupiedCount < 4
@@ -1594,9 +1606,9 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}
 
         <div class="prw-teams">
-          ${renderTeamColumn(params.slots, 'A', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost, partner)}
+          ${renderTeamColumn(params.slots, 'A', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost, partner, params.voiceEnabled === true)}
           <div class="prw-team-divider" aria-hidden="true"></div>
-          ${renderTeamColumn(params.slots, 'B', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost, partner)}
+          ${renderTeamColumn(params.slots, 'B', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost, partner, params.voiceEnabled === true)}
         </div>
 
         <div class="prw-chat-panel">

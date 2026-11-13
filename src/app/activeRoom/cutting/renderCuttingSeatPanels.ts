@@ -1,4 +1,5 @@
 import type { RoomCardSnapshot, RoomSeatSnapshot, Seat, TournamentBotReplacementSnapshot } from '../../network/createGameServerClient'
+import { renderVoiceSpeakingSlot } from '../../voice/ui/voiceSpeakingIndicator'
 import { getCardFaceImagePath, getActiveRoomCardBackImageValue } from '../cardImageAssets'
 import { getAnimatedEmojiUrl } from '../../animatedEmoji/animatedEmojiAssets'
 import {
@@ -450,6 +451,25 @@ function renderGiftBoxIcon(sizePx: number): string {
  * винаги се рендира празен и скрит (display:none) — така PATCH diffing-ът
  * по data-seat-avatar-url никога не трие активен overlay.
  */
+/**
+ * Гласов чат (Етап 4, само мобилно): празен slot за зеленото микрофонче
+ * „говори“ в data-profile-seat-btn (над gift overlay-а, z-index 7). Родителят
+ * е с transform scale(panelScale) × scale(cardScale) — размерите се
+ * компенсират, за да е ~19px на екрана. Горе вдясно; горе вляво, когато
+ * pill-ът „Цепи“ (highlight badge) е върху аватара (страничните места).
+ * Без гласова маса или на desktop — нищо не се рендерира.
+ */
+function renderSeatVoiceSpeakingSlot(seat: RoomSeatSnapshot, panelScale: number, cardScale: number, preferLeft: boolean, insetRealPx: number): string {
+  if (!isPhoneLayoutViewport() || seat.isBot || seat.profileId === null) return ''
+  const scale = panelScale > 0 ? panelScale * cardScale : cardScale
+  return renderVoiceSpeakingSlot(seat.profileId, {
+    sizePx: Math.round((19 / scale) * 10) / 10,
+    insetPx: Math.round((insetRealPx / scale) * 10) / 10,
+    corner: preferLeft ? 'top-left' : 'top-right',
+    zIndex: 7,
+  })
+}
+
 function renderSeatGiftOverlaySlot(seat: Seat, borderRadiusPx: number): string {
   return `
     <div
@@ -1425,6 +1445,7 @@ export function createCuttingSeatPanelHtml(
             ${renderCuttingSeatAvatar(seat, visualSeat, 18, escapeHtml)}
             ${renderLevelBadge(seat.level)}
             ${renderSeatGiftOverlaySlot(seat.seat, 18)}
+            ${renderSeatVoiceSpeakingSlot(seat, panelScale, 0.8, false, 3)}
           </div>
 
           ${isControlledSeat
@@ -1552,6 +1573,7 @@ export function createCuttingSeatPanelHtml(
           ${renderCuttingSeatAvatar(seat, visualSeat, 16, escapeHtml)}
           ${renderLevelBadge(seat.level)}
           ${renderSeatGiftOverlaySlot(seat.seat, 16)}
+          ${renderSeatVoiceSpeakingSlot(seat, panelScale, 0.9, isHighlightedSeat && Boolean(highlightBadgeLabel), 6)}
         </div>
 
         ${renderSideCuttingCountdownFooter(

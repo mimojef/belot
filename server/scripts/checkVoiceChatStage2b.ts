@@ -691,6 +691,7 @@ try {
     const handler = createVoiceChatHttpRequestHandler({
       service: h.service,
       getSessionProfileId: (req) => (req.headers['x-test-profile'] as string | undefined) ?? null,
+      isFullAdminProfile: () => false,
       isAllowedOrigin: (req) => req.headers.origin !== 'https://evil.example',
       readJsonBody: (req) => new Promise((resolvePromise, rejectPromise) => {
         let raw = ''

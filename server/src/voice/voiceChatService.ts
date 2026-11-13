@@ -58,6 +58,7 @@
 
 import { randomUUID } from 'node:crypto'
 import {
+  describeVoiceTableCreationOption,
   evaluateVoiceAccess,
   evaluateVoiceTableCreation,
   isVoiceSessionBindingCurrent,
@@ -65,6 +66,7 @@ import {
   toVoiceLiveKitPermissionProfile,
   type VoiceAccessDecision,
   type VoiceListenDenialCode,
+  type VoiceTableCreationOption,
 } from './voiceChatEligibility.js'
 import { isVoiceChatEmergencyStopActive, resolveEffectiveVoiceChatMode } from './voiceChatFeatureFlag.js'
 import type {
@@ -202,6 +204,8 @@ export type VoiceRuntimeStats = {
 export type VoiceChatService = {
   // Създаване и чакалня
   reserveVoiceTableForPrivateRoom: (input: { profileId: string; isFullAdmin: boolean }) => VoiceTableCreationResult
+  /** Само четене (формата за създаване) — без резервация, без I/O. */
+  describeCreationOption: (input: { profileId: string; isFullAdmin: boolean }) => VoiceTableCreationOption
   attachPrivateRoom: (voiceTableId: VoiceTableId, privateRoomId: string, creatorProfileId: string) => void
   abortReservation: (voiceTableId: VoiceTableId) => void
   onMemberSeated: (voiceTableId: VoiceTableId, profileId: string) => void
@@ -789,6 +793,12 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
   // ─── Публични куки ────────────────────────────────────────────────────
 
   const service: VoiceChatService = {
+    describeCreationOption({ profileId, isFullAdmin }) {
+      return describeVoiceTableCreationOption({
+        mode: { storedMode: store.getSettings().mode, emergencyStop: isVoiceChatEmergencyStopActive(env) },
+        requester: { profileId, isFullAdmin, isVipActive: deps.isVipActive(profileId), isBanned: deps.isBanned(profileId) },
+      })
+    },
     reserveVoiceTableForPrivateRoom({ profileId, isFullAdmin }) {
       const settings = store.getSettings()
       const emergencyStop = isVoiceChatEmergencyStopActive(env)
