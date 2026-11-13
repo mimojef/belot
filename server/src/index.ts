@@ -76,6 +76,8 @@ import {
   type ProfileCustomizationOrderSnapshot,
 } from './profileCustomization/profileCustomizationStore.js'
 import { isProfileCustomizationEmergencyStopActive } from './profileCustomization/profileCustomizationFeatureFlag.js'
+import { createVoiceChatStore } from './voice/voiceChatStore.js'
+import { createVoiceChatAdminRequestHandler } from './voice/voiceChatAdminApi.js'
 import {
   PROFILE_CUSTOMIZATION_COLOR_GROUPS,
   PROFILE_CUSTOMIZATION_COLOR_GROUP_LABELS,
@@ -1161,6 +1163,10 @@ const belotVisualOverrideStore = await createBelotVisualOverrideStore(databaseBo
 // "Персонализация на профила" — store-ът се създава винаги (само схема и
 // четене при заявка); всичко видимо е зад PROFILE_CUSTOMIZATION_ENABLED.
 const profileCustomizationStore = await createProfileCustomizationStore(databaseBootstrap.databaseFilePath)
+// Гласов чат (Етап 2а) — само режим/лимит/одит и структурите на слотовете.
+// Режимът по подразбиране е 'off' (без записи); нищо не е свързано с
+// игровите маси и няма LiveKit заявки (Етап 2б).
+const voiceChatStore = await createVoiceChatStore(databaseBootstrap.databaseFilePath)
 
 // Anti Bad Luck runtime config (admin_settings) — main thread cache, подаван
 // ЗАДЪЛЖИТЕЛНО при всеки game tick към worker-а (workerProtocol v4). Initial
@@ -21243,6 +21249,19 @@ async function handleAdminProfileCustomizationRequest(
   return true
 }
 
+// Гласов чат (Етап 2а) — Admin → Гласов чат: режим, лимит, одит. Само пълен
+// admin от свежа сесия; мутациите минават през origin guard-а. Без LiveKit.
+const handleAdminVoiceChatRequest = createVoiceChatAdminRequestHandler({
+  store: voiceChatStore,
+  getFullAdminProfileId: (req) => {
+    const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+    return isFullAdminSession(session) ? session.profile.profileId : null
+  },
+  isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),
+  readJsonBody: (req) => readJsonRequestBody(req),
+  resolveDisplayName: (profileId) => playerProgressStore.getPublicProfile(profileId)?.displayName ?? null,
+})
+
 async function handleAdminCampaignsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -25173,6 +25192,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminProfileCustomizationRequest(req, res, requestUrl)) {
+    return
+  }
+
+  if (await handleAdminVoiceChatRequest(req, res, requestUrl)) {
     return
   }
 
@@ -30989,6 +31012,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
   closeStore('belotVisualOverrideStore', () => belotVisualOverrideStore.close())
   closeStore('profileCustomizationStore', () => profileCustomizationStore.close())
+  closeStore('voiceChatStore', () => voiceChatStore.close())
   closeStore('authStore', () => authStore.close())
   closeStore('friendshipStore', () => friendshipStore.close())
   closeStore('chatStore', () => chatStore.close())

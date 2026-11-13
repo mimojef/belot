@@ -1,0 +1,226 @@
+// Гласов чат — чиста eligibility логика (Етап 2а).
+//
+// Три ОТДЕЛНИ права:
+//   * създаване на гласова маса  -> evaluateVoiceTableCreation
+//   * слушане                    -> evaluateVoiceAccess(...).canListen
+//   * говорене                   -> evaluateVoiceAccess(...).canSpeak
+//
+// Всички функции са чисти: без I/O, без часовник, без глобално състояние.
+// Caller-ът (Етап 2б) резолвва авторитетните факти точно преди решението —
+// и ОТНОВО непосредствено преди подписване на JWT, след всяка асинхронна
+// операция (виж "async race" в плана за Етап 2б). VIP идва единствено от
+// vipStore.getStatus(profileId).isActive; администраторите НЯМАТ bypass — те
+// минават същите проверки (прецедент: evaluateVipSpectatorGateEligibility).
+//
+// Лимитът (свободен слот) НЕ се проверява тук — той е атомарна проверка в
+// voiceChatStore.reserveVoiceTable() заедно с режима.
+
+import { resolveEffectiveVoiceChatMode } from './voiceChatFeatureFlag.js'
+import type {
+  VoiceChatMode,
+  VoiceLiveKitPermissionProfile,
+  VoiceMembershipFacts,
+  VoiceSessionBinding,
+  VoiceSessionClaim,
+  VoiceTablePhase,
+  VoiceTableStatus,
+} from './voiceChatTypes.js'
+
+export type VoiceModeFacts = {
+  /** Записаният режим (voiceChatStore.getSettings().mode). */
+  storedMode: VoiceChatMode
+  /** isVoiceChatEmergencyStopActive(). */
+  emergencyStop: boolean
+}
+
+export type VoiceRequesterFacts = {
+  /** null = гост / без валидна сесия. */
+  profileId: string | null
+  /** account.role === 'admin' от СВЕЖА сесия (isFullAdminSession). */
+  isFullAdmin: boolean
+  /** vipStore.getStatus(profileId).isActive — единственият VIP източник. */
+  isVipActive: boolean
+  /** profileBanStore.getActiveBan(profileId) !== null. */
+  isBanned: boolean
+}
+
+// ─── Създаване ────────────────────────────────────────────────────────────
+
+export type VoiceTableCreationDenialCode =
+  | 'voice_off'
+  | 'not_authenticated'
+  | 'banned'
+  | 'admin_only_mode'
+  | 'vip_required'
+
+export type VoiceTableCreationDecision =
+  | { ok: true }
+  | { ok: false; code: VoiceTableCreationDenialCode }
+
+/**
+ * 'public'     -> VIP.
+ * 'admin_only' -> пълен admin И VIP (без VIP bypass за администратора).
+ * 'off'/авариен стоп -> никой.
+ */
+export function evaluateVoiceTableCreation(input: {
+  mode: VoiceModeFacts
+  requester: VoiceRequesterFacts
+}): VoiceTableCreationDecision {
+  const effectiveMode = resolveEffectiveVoiceChatMode(input.mode.storedMode, input.mode.emergencyStop)
+  if (effectiveMode === 'off') return { ok: false, code: 'voice_off' }
+  if (input.requester.profileId === null) return { ok: false, code: 'not_authenticated' }
+  if (input.requester.isBanned) return { ok: false, code: 'banned' }
+  if (effectiveMode === 'admin_only' && !input.requester.isFullAdmin) return { ok: false, code: 'admin_only_mode' }
+  if (!input.requester.isVipActive) return { ok: false, code: 'vip_required' }
+  return { ok: true }
+}
+
+// ─── Слушане и говорене ───────────────────────────────────────────────────
+
+export type VoiceTableFacts = {
+  voiceTableId: string
+  status: VoiceTableStatus
+  phase: VoiceTablePhase
+  matchSeq: number
+}
+
+export type VoiceListenDenialCode =
+  | 'voice_off'
+  | 'not_authenticated'
+  | 'banned'
+  | 'table_not_found'
+  | 'table_released'
+  | 'spectator'
+  | 'bot'
+  | 'not_a_player'
+  | 'wrong_table'
+  | 'permanently_left'
+  | 'invalid_session'
+
+export type VoiceSpeakBasis = 'vip' | 'match_grace'
+
+export type VoiceAccessDecision =
+  | { canListen: false; canSpeak: false; denialCode: VoiceListenDenialCode }
+  | {
+      canListen: true
+      canSpeak: true
+      speakBasis: VoiceSpeakBasis
+    }
+  | {
+      canListen: true
+      canSpeak: false
+      speakDenialCode: 'vip_required'
+    }
+
+export type VoiceAccessInput = {
+  mode: VoiceModeFacts
+  requester: VoiceRequesterFacts
+  /** voiceTableId, за който се иска достъп (от заявката). */
+  requestedVoiceTableId: string
+  /** Авторитетният запис от voiceChatStore (null = несъществуващ). */
+  table: VoiceTableFacts | null
+  /** Изведено от авторитетното игрово състояние, не от клиента. */
+  membership: VoiceMembershipFacts
+  /** isVoiceSessionBindingCurrent(...) за тази заявка. */
+  sessionBindingCurrent: boolean
+  /**
+   * voiceChatStore.hasSpeakingGrant(table, table.matchSeq, profile) —
+   * true само ако профилът вече е имал право да говори в ТЕКУЩИЯ сегмент.
+   */
+  hasSpeakingGrantForCurrentMatch: boolean
+}
+
+/**
+ * Ред на проверките (първата неуспешна печели):
+ *   режим -> сесия/профил -> бан -> маса -> отношение -> същата маса ->
+ *   окончателно напускане -> авторитетна игрова сесия.
+ * Банът и окончателното напускане имат приоритет пред всякакъв grace.
+ * Слушането НЕ изисква VIP. Говоренето изисква VIP ИЛИ запис за ТЕКУЩИЯ
+ * сегмент (match-scoped grace) — никога role bypass.
+ *
+ * Режимите 'admin_only' и 'public' са еднакви за ВЕЧЕ съществуващи маси:
+ * превключването между тях не отнема правата в тях.
+ */
+export function evaluateVoiceAccess(input: VoiceAccessInput): VoiceAccessDecision {
+  const deny = (denialCode: VoiceListenDenialCode): VoiceAccessDecision => ({ canListen: false, canSpeak: false, denialCode })
+
+  const effectiveMode = resolveEffectiveVoiceChatMode(input.mode.storedMode, input.mode.emergencyStop)
+  if (effectiveMode === 'off') return deny('voice_off')
+
+  const profileId = input.requester.profileId
+  if (profileId === null) return deny('not_authenticated')
+  if (input.requester.isBanned) return deny('banned')
+
+  const table = input.table
+  if (table === null || table.voiceTableId !== input.requestedVoiceTableId) return deny('table_not_found')
+  if (table.status !== 'active') return deny('table_released')
+
+  const { relation, seatedVoiceTableId, permanentlyLeft } = input.membership
+  if (relation === 'spectator') return deny('spectator')
+  if (relation === 'bot') return deny('bot')
+  if (relation !== 'player') return deny('not_a_player')
+  if (seatedVoiceTableId !== table.voiceTableId) return deny('wrong_table')
+  if (permanentlyLeft) return deny('permanently_left')
+
+  if (!input.sessionBindingCurrent) return deny('invalid_session')
+
+  if (input.requester.isVipActive) return { canListen: true, canSpeak: true, speakBasis: 'vip' }
+  if (input.hasSpeakingGrantForCurrentMatch) return { canListen: true, canSpeak: true, speakBasis: 'match_grace' }
+  return { canListen: true, canSpeak: false, speakDenialCode: 'vip_required' }
+}
+
+/**
+ * LiveKit permission профил за решението (само данни — JWT се подписва в
+ * Етап 2б). null = никакъв токен (зрители, ботове, напуснали, чужди и т.н.).
+ * Без право за говорене -> canPublish:false на ниво LiveKit, не само в UI.
+ */
+export function toVoiceLiveKitPermissionProfile(decision: VoiceAccessDecision): VoiceLiveKitPermissionProfile | null {
+  if (!decision.canListen) return null
+  return decision.canSpeak
+    ? { canSubscribe: true, canPublish: true, canPublishSources: ['microphone'], canPublishData: false }
+    : { canSubscribe: true, canPublish: false, canPublishSources: [], canPublishData: false }
+}
+
+/**
+ * Кога да се запише/потвърди match-scoped speaking grant: само когато
+ * правото за говорене идва от активен VIP (grace не се "самоудължава").
+ */
+export function shouldRecordSpeakingGrant(decision: VoiceAccessDecision): boolean {
+  return decision.canSpeak && decision.speakBasis === 'vip'
+}
+
+/**
+ * Изисква ли загубата на право ротация на стаята. Стар токен (вкл. LiveKit
+ * refresh token) пази правата си до изтичане и е вързан за ИМЕТО на стаята,
+ * затова отнемането е сигурно само с нова генерация:
+ *   * загубено слушане при вече издаден токен -> 'listen_revoked';
+ *   * загубено говорене при вече издаден publish-способен токен -> 'speak_revoked';
+ *   * иначе (никога не е получавал съответния токен) -> без ротация.
+ */
+export function resolveRevocationRotation(input: {
+  wasIssuedToken: boolean
+  wasPublishCapable: boolean
+  decision: VoiceAccessDecision
+}): 'listen_revoked' | 'speak_revoked' | null {
+  if (!input.decision.canListen) return input.wasIssuedToken ? 'listen_revoked' : null
+  if (!input.decision.canSpeak) return input.wasPublishCapable ? 'speak_revoked' : null
+  return null
+}
+
+/**
+ * Гласът следва АВТОРИТЕТНАТА игрова сесия, не последния LiveKit join.
+ * Заявката е валидна само ако представя текущия clientInstanceId на профила
+ * за тази маса (изместен таб има друг clientInstanceId -> отказ).
+ */
+export function isVoiceSessionBindingCurrent(
+  claim: VoiceSessionClaim,
+  authoritative: VoiceSessionBinding | null,
+): boolean {
+  return (
+    authoritative !== null &&
+    claim.clientInstanceId.length > 0 &&
+    authoritative.profileId === claim.profileId &&
+    authoritative.voiceTableId === claim.voiceTableId &&
+    authoritative.clientInstanceId === claim.clientInstanceId
+  )
+}
