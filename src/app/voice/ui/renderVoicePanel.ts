@@ -222,8 +222,9 @@ export function renderVoicePanel(options: VoicePanelOptions): string {
   `
 }
 
-/** Прозорец за включване (2.5) — само в чакалнята, веднъж за посещение. */
-export function renderVoiceJoinPrompt(options: { isOwnVip: boolean; canOpenShop: boolean }): string {
+/** Прозорец за включване (2.5) — само в чакалнята, веднъж за посещение. light: мобилно; dark: desktop. */
+export function renderVoiceJoinPrompt(options: { isOwnVip: boolean; canOpenShop: boolean; theme?: VoiceUiTheme }): string {
+  const theme = options.theme ?? 'light'
   const body = options.isOwnVip
     ? `
       <p class="pvp-prompt-text">Говорете с останалите играчи на масата.</p>
@@ -240,8 +241,8 @@ export function renderVoiceJoinPrompt(options: { isOwnVip: boolean; canOpenShop:
         ${button('data-voice-action="not-now"', 'Не сега', 'quiet')}
       </div>`
   return `
-    <div class="pvp-prompt-backdrop" data-voice-prompt="1">
-      <section class="pvp pvp--light pvp-prompt" role="dialog" aria-modal="true" aria-label="Гласов чат">
+    <div class="pvp-prompt-backdrop pvp-prompt-backdrop--${theme}" data-voice-prompt="1">
+      <section class="pvp pvp--${theme} pvp-prompt" role="dialog" aria-modal="true" aria-label="Гласов чат">
         <header class="pvp-head">
           <span class="pvp-title pvp-title--lg"><span class="pvp-title-badge">${voiceIcon.mic(18)}</span>Гласов чат</span>
           <button type="button" class="pvp-close" data-voice-action="not-now" aria-label="Затвори">${voiceIcon.close(18)}</button>
@@ -323,4 +324,11 @@ export const VOICE_PANEL_STYLES = `
   .pvp-prompt { width:100%; max-width:360px; padding:16px 18px 18px; gap:12px; }
   .pvp-prompt .pvp-close { margin-left:auto; }
   .pvp-prompt-text { margin:0; font-size:15px; line-height:1.5; color:#344054; }
+  /* Desktop (Етап 5): тъмният черно-златист вариант на същите елементи. */
+  .pvp-prompt-backdrop--dark { background:rgba(0,0,0,0.6); }
+  .pvp--dark.pvp-prompt { max-width:380px; padding:18px 20px 20px; }
+  .pvp--dark .pvp-prompt-text { color:rgba(248,250,252,0.85); }
+  .pvp--dark .pvp-title-badge { background:rgba(212,165,32,0.14); border-color:rgba(212,165,32,0.55); color:#F4C432; }
+  /* На тъмен фон „Вземи VIP“ се различава от основния златен бутон. */
+  .pvp--dark .pvp-btn--vip { background:rgba(212,165,32,0.08) !important; border-color:rgba(244,201,91,0.8); color:#F4C95B !important; }
 `

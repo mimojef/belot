@@ -30,6 +30,7 @@ const { createLobbyFlowController } = await import('/src/app/lobby/createLobbyFl
 const { createActiveRoomFlowController } = await import('/src/app/activeRoom/createActiveRoomFlowController.ts')
 const { createVoiceMobileUi } = await import('/src/app/voice/ui/createVoiceMobileUi.ts')
 const { setVoiceSpeakingSlotsEnabled } = await import('/src/app/voice/ui/voiceSpeakingIndicator.ts')
+const { isPhoneLayoutViewport } = await import('/src/ui/layout/viewportStage.ts')
 
 const TABLE = '11111111-2222-4333-8444-555555555555'
 const PEOPLE = [
@@ -225,7 +226,7 @@ async function frames(count = 2): Promise<void> {
   },
   async showWaiting(): Promise<void> {
     snapshot = baseSnapshot('waiting')
-    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(true), isOwnVip: () => isVip, isPhoneLayout: () => true, onGetVip: record('getVip') })
+    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(true), isOwnVip: () => isVip, isPhoneLayout: () => isPhoneLayoutViewport(), onGetVip: record('getVip') })
     const room = waitingRoom()
     lobby.handleServerMessage({ type: 'private_rooms_list', rooms: [room] } as any)
     lobby.joinPrivateRoom(room.id)
@@ -244,7 +245,7 @@ async function frames(count = 2): Promise<void> {
     const message = { type: 'room_snapshot', roomId: 'room-play', roomStatus: 'playing', yourSeat: 'bottom', reconnectToken: 't', seats, game: playingGame(), isGuestTrial: false, isPrivateTableOrigin: true, isTournamentMatchOrigin: false, stakeAmount: 5000, voiceTableId: TABLE } as RoomSnapshotMessage
     activeRoom.handleServerMessage(message)
     snapshot = baseSnapshot('game')
-    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(false), isOwnVip: () => isVip, isPhoneLayout: () => true, onGetVip: record('getVip') })
+    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(false), isOwnVip: () => isVip, isPhoneLayout: () => isPhoneLayoutViewport(), onGetVip: record('getVip') })
     emit()
     const startedAt = performance.now()
     while (document.querySelector('[data-playing-bottom-hand-host] [data-card-id]') === null && performance.now() - startedAt < 8000) {

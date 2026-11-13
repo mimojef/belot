@@ -15019,7 +15019,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
 
   const popupsHtml = `
     ${renderPrivateRoomsCreatePopup(state, light)}
-    ${light ? renderPrivateRoomVoiceCreatePopups(state) : ''}
+    ${renderPrivateRoomVoiceCreatePopups(state, light)}
     ${renderPrivateRoomJoinConfirmPopup(state.privateRoomJoinSlotPopup, light)}
     ${renderPrivateRoomBlockedPopup(state.privateRoomBlockedPopupText)}
     ${renderPrivateRoomCreatorBlockedPopup(state.privateRoomCreatorBlockedPopupOpen, light)}
@@ -15126,9 +15126,10 @@ function renderPrivateRoomListVoiceBadge(light: boolean): string {
  * докато видимостта не е заредена. Без VIP — заключен ред, който отваря VIP
  * прозореца (не е поле на формата).
  */
-function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState): string {
+function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState, light = true): string {
   const option = state.privateRoomVoiceCreateOption
   if (option === null || !option.visible) return ''
+  if (!light) return renderPrivateRoomVoiceCreateRowDark(option.canCreate)
   const vipBadge = '<span style="display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:999px;background:#FEF0C7;color:#93370D;font-size:10px;font-weight:800;letter-spacing:0.04em;">VIP</span>'
   const title = `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:#6941C6;display:inline-flex;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>Гласов чат ${vipBadge}</span>`
   const hint = 'Разговор с микрофон между играчите на масата'
@@ -15154,7 +15155,27 @@ function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState): string {
   `
 }
 
-function renderPrivateRoomVoiceCreatePopups(state: LobbyScreenState): string {
+/** Desktop (Етап 5): същият ред в тъмния стил на desktop формата „Нова маса“. */
+function renderPrivateRoomVoiceCreateRowDark(canCreate: boolean): string {
+  const vipBadge = '<span style="display:inline-flex;align-items:center;height:17px;padding:0 6px;border-radius:999px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#101010;font-size:10px;font-weight:900;letter-spacing:0.04em;">VIP</span>'
+  const title = `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:#a78bfa;display:inline-flex;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>Гласов чат ${vipBadge}</span>`
+  if (!canCreate) {
+    return `
+      <button type="button" data-private-room-voice-vip="1" style="display:flex;align-items:center;gap:10px;width:100%;padding:0;border:0;background:transparent;cursor:pointer;text-align:left;font-family:inherit;user-select:none;">
+        <span style="width:17px;height:17px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.45);">${PRIVATE_ROOM_VOICE_LOCK_ICON}</span>
+        <span style="font-size:13px;color:rgba(255,255,255,0.7);">${title} <span style="color:rgba(255,255,255,0.4);">(създаването е VIP привилегия)</span></span>
+      </button>
+    `
+  }
+  return `
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
+      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
+      <span style="font-size:13px;color:rgba(255,255,255,0.7);">${title} <span style="color:rgba(255,255,255,0.4);">(разговор с микрофон)</span></span>
+    </label>
+  `
+}
+
+function renderPrivateRoomVoiceCreatePopups(state: LobbyScreenState, light = true): string {
   // Общият VIP прозорец е с z-index 1200, а „Нова маса“ — 9500: обвивката
   // (позиционирана, със собствен z-index) го поставя НАД формата, без да се
   // променя общият компонент.
@@ -15166,10 +15187,11 @@ function renderPrivateRoomVoiceCreatePopups(state: LobbyScreenState): string {
     launchGiftDays: state.topicsVipGate ? state.topicsVipGate.launchGiftDays : null,
     claimSubmitting: state.privateRoomVoiceVipClaimSubmitting,
     claimErrorText: state.privateRoomVoiceVipClaimErrorText,
-    light: true,
+    light,
   })
   const vipPopup = vipPopupHtml === '' ? '' : `<div style="position:relative;z-index:9600;">${vipPopupHtml}</div>`
   const fallbackText = state.privateRoomVoiceCreateFallbackText
+  if (fallbackText !== null && !light) return vipPopup + renderPrivateRoomVoiceCreateFallbackDark(fallbackText)
   const fallback = fallbackText === null ? '' : `
     <div data-private-room-voice-fallback-backdrop="1" style="${PRIVATE_ROOMS_LIGHT_POPUP_BACKDROP_STYLE}z-index:9600;">
       <div role="dialog" aria-modal="true" aria-label="Гласов чат" style="${PRIVATE_ROOMS_LIGHT_POPUP_CARD_STYLE}width:360px;">
@@ -15186,6 +15208,25 @@ function renderPrivateRoomVoiceCreatePopups(state: LobbyScreenState): string {
     </div>
   `
   return vipPopup + fallback
+}
+
+/** Desktop (Етап 5): изричният избор при отказ на сървъра — в тъмния стил на desktop формата. */
+function renderPrivateRoomVoiceCreateFallbackDark(text: string): string {
+  return `
+    <div data-private-room-voice-fallback-backdrop="1" style="position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div role="dialog" aria-modal="true" aria-label="Гласов чат" style="background:#1a1a2e;border:1px solid rgba(167,139,250,0.4);border-radius:16px;width:380px;max-width:100%;padding:26px 28px;box-shadow:0 8px 40px rgba(0,0,0,0.7);">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+          <span style="width:32px;height:32px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:rgba(167,139,250,0.14);border:1px solid rgba(167,139,250,0.4);color:#a78bfa;flex:0 0 auto;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>
+          <div style="font-size:17px;font-weight:900;color:#a78bfa;">Гласов чат</div>
+        </div>
+        <p style="margin:0 0 18px;font-size:14px;line-height:1.5;color:rgba(255,255,255,0.75);">${escapeHtml(text)}</p>
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-private-room-voice-fallback-create="1" style="flex:1 1 auto;padding:11px;background:rgba(167,139,250,0.2);border:1px solid rgba(167,139,250,0.5);border-radius:10px;color:#a78bfa;font-size:14px;font-weight:700;cursor:pointer;">Създай без гласов чат</button>
+          <button type="button" data-private-room-voice-fallback-cancel="1" style="flex:0 0 auto;padding:11px 18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:10px;color:rgba(255,255,255,0.75);font-size:14px;font-weight:700;cursor:pointer;">Отказ</button>
+        </div>
+      </div>
+    </div>
+  `
 }
 
 function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): string {
@@ -15336,6 +15377,7 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
             <input type="checkbox" name="invitePartner" data-private-room-invite-partner-checkbox="1" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
             <span style="font-size:13px;color:rgba(255,255,255,0.7);">Покани партньор <span style="color:rgba(255,255,255,0.4);">(мястото до вас се пази за поканен приятел)</span></span>
           </label>
+          ${renderPrivateRoomVoiceCreateRow(state, false)}
           <div>
             <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Време за изчакване на играчи</div>
             <select name="waitMinutes" style="

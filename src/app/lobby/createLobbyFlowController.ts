@@ -20201,7 +20201,7 @@ export function createLobbyFlowController(
         light: isLightWaitingScreen,
       }),
       light: isLightWaitingScreen,
-      voiceEnabled: isLightWaitingScreen && viewerRole === 'member' && room.voiceEnabled === true,
+      voiceEnabled: viewerRole === 'member' && room.voiceEnabled === true,
     })
 
     options.onPrivateRoomWaitingRendered?.(options.root)

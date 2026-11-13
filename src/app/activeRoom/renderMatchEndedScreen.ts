@@ -273,6 +273,13 @@ function renderVoteBadge(hasVotedReplay: boolean, hasVotedLeave: boolean, size =
   `
 }
 
+/**
+ * Desktop екранът е в сцена с transform scale(stageScale) — зеленото
+ * микрофонче (Етап 5) се компенсира, за да е ~19px на екрана. Задава се в
+ * началото на всеки renderMatchEndedScreen().
+ */
+let desktopVoiceStageScale = 1
+
 function renderPlayerTile(seat: RoomSeatSnapshot, hasVotedReplay = false, hasVotedLeave = false): string {
   const displayName = seat.isOccupied ? seat.displayName : 'Свободно място'
 
@@ -326,6 +333,7 @@ function renderPlayerTile(seat: RoomSeatSnapshot, hasVotedReplay = false, hasVot
           }
         </div>
         ${renderLevelBadge(seat.level)}
+        ${seat.isOccupied && !seat.isBot ? renderVoiceSpeakingSlot(seat.profileId, { sizePx: Math.round((19 / desktopVoiceStageScale) * 10) / 10, insetPx: Math.round((5 / desktopVoiceStageScale) * 10) / 10, corner: 'top-right', zIndex: 3 }) : ''}
       </div>
 
       <div style="min-width:0;width:100%;text-align:center;">
@@ -955,6 +963,7 @@ function renderMatchEndedPanel(
 }
 
 export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): void {
+  desktopVoiceStageScale = options.stageScale > 0 ? options.stageScale : 1
   const {
     root,
     game,

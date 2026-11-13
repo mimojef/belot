@@ -830,6 +830,10 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-weight:800;
         }
 
+        .prw-voice-strip {
+          min-height:52px;
+        }
+
         .prw-waiting-actions {
           display:flex;
           gap:10px;

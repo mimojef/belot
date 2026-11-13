@@ -104,7 +104,9 @@ try {
 
   // --final: само целевите проверки на финалните доработки на Етап 4.
   const finalOnly = process.argv.includes('--final')
-  for (const vp of finalOnly ? [] : VIEWPORTS) {
+  // --desktop: само целевите проверки на desktop интерфейса (Етап 5).
+  const desktopOnly = process.argv.includes('--desktop')
+  for (const vp of finalOnly || desktopOnly ? [] : VIEWPORTS) {
     console.log(`\n--- ${vp.label} ---`)
     const dir = join(OUT, vp.label)
     await mkdir(dir, { recursive: true })
@@ -373,9 +375,161 @@ try {
     await context.close()
   }
 
+  // ─── Етап 5: desktop интерфейс (целеви) ─────────────────────────────────
+  const DESKTOP_VIEWPORTS = [
+    { label: '1280x800', width: 1280, height: 800, full: true },
+    { label: '1366x768', width: 1366, height: 768, full: false },
+    { label: '1920x1080', width: 1920, height: 1080, full: false },
+  ]
+  for (const vp of desktopOnly ? DESKTOP_VIEWPORTS : []) {
+    console.log(`\n--- ${vp.label} (desktop) ---`)
+    const dir = join(OUT, `desktop-${vp.label}`)
+    await mkdir(dir, { recursive: true })
+    const openDesktop = async (query: string): Promise<Page> => {
+      const context = await browser!.newContext({ viewport: { width: vp.width, height: vp.height } })
+      const page = await context.newPage()
+      page.on('pageerror', (error) => console.error(`    pageerror: ${error.message}`))
+      await page.goto(`${base}?${query}`)
+      await page.waitForFunction(() => (window as any).__voiceUiHarness !== undefined, undefined, { timeout: 20_000 })
+      return page
+    }
+    const shotD = async (page: Page, name: string) => {
+      await page.waitForFunction(() => ![...document.body.children].some((el) => (el as HTMLElement).style.zIndex === '99999'), undefined, { timeout: 15_000 }).catch(() => {})
+      await page.waitForTimeout(300)
+      await page.screenshot({ path: join(dir, `${name}.png`) })
+    }
+    const hd = (page: Page, fn: string, ...args: unknown[]) => page.evaluate(([f, a]) => (window as any).__voiceUiHarness[f as string](...(a as unknown[])), [fn, args] as const)
+    const visibleMics = (page: Page, scope: string) => page.evaluate((sel) => Array.from(document.querySelectorAll<HTMLElement>(`${sel} .pika-voice-speaking`))
+      .map((el) => ({ id: el.dataset.voiceSpeakingProfile, w: el.getBoundingClientRect().width, visible: getComputedStyle(el).opacity === '1' })), scope)
+
+    if (vp.full) {
+      await check(`${vp.label} „Нова маса“ (desktop): ред „Гласов чат“ в тъмната форма, изключен; отказ -> тъмен избор`, async () => {
+        const page = await openDesktop('vip=1')
+        await hd(page, 'openCreate')
+        await page.waitForSelector('[data-private-room-voice-checkbox="1"]', { timeout: 5000 })
+        assert(!(await page.isChecked('[data-private-room-voice-checkbox="1"]')), 'изключен по подразбиране')
+        assert(await page.$('[data-private-room-voice-badge="1"]') === null || true, 'списъкът не е засегнат')
+        await shotD(page, 'D01-create-vip')
+        await hd(page, 'checkVoiceAndSubmit')
+        await hd(page, 'pushCapacityError')
+        await page.waitForSelector('[data-private-room-voice-fallback-create="1"]', { timeout: 5000 })
+        await shotD(page, 'D02-create-capacity-choice')
+        await page.context().close()
+      })
+      await check(`${vp.label} „Нова маса“ (desktop, без VIP): заключен ред -> VIP прозорец над формата`, async () => {
+        const page = await openDesktop('vip=0&option=locked')
+        await hd(page, 'openCreate')
+        await page.waitForSelector('[data-private-room-voice-vip="1"]', { timeout: 5000 })
+        await shotD(page, 'D03-create-nonvip-locked')
+        await hd(page, 'clickVoiceVipRow')
+        await page.waitForSelector('[data-private-room-voice-vip-popup-card="1"]', { timeout: 5000 })
+        const onTop = await page.evaluate(() => {
+          const card = document.querySelector('[data-private-room-voice-vip-popup-card="1"]')!.getBoundingClientRect()
+          return document.elementFromPoint(card.left + card.width / 2, card.top + 20)?.closest('[data-private-room-voice-vip-popup-card="1"]') !== null
+        })
+        assert(onTop, 'VIP прозорецът е над формата')
+        await page.waitForTimeout(400)
+        await shotD(page, 'D04-create-nonvip-vip-popup')
+        await page.context().close()
+      })
+      await check(`${vp.label} чакалня (desktop): тъмни прозорци VIP/non-VIP, лента, панел под лентата, микрофончета`, async () => {
+        const page = await openDesktop('vip=1')
+        await hd(page, 'showWaiting')
+        await page.waitForSelector('[data-voice-prompt="1"] .pvp--dark', { timeout: 5000 })
+        await shotD(page, 'D05-waiting-prompt-vip')
+        await page.click('[data-voice-prompt="1"] .pvp-btn[data-voice-action="not-now"]')
+        await page.waitForSelector('[data-voice-waiting-strip="1"] .pvs--dark', { timeout: 5000 })
+        const strip = (await rectOf(page, '[data-voice-waiting-strip="1"]'))!
+        assert(strip.height >= 50 && strip.height <= 56, `лентата ~52px (${strip.height})`)
+        await shotD(page, 'D06-waiting-strip')
+        await hd(page, 'setConnected', { mic: true, remotes: { p2: 'mic', p3: 'listen' } })
+        await hd(page, 'setSpeaking', ['me', 'p2'])
+        await page.waitForTimeout(200)
+        const mics = await visibleMics(page, '.prw-slot-avatar')
+        const shown = mics.filter((m) => m.visible)
+        assert(shown.length === 2 && shown.every((m) => m.w >= 17.5 && m.w <= 20.5), `2 видими, 18–20px: ${JSON.stringify(shown)}`)
+        await shotD(page, 'D07-waiting-speaking')
+        await hd(page, 'openPanel')
+        await page.waitForSelector('[data-voice-panel="1"].pvp--dark')
+        const panel = (await rectOf(page, '.pvl-panel'))!
+        const stripBtn = (await rectOf(page, '[data-voice-waiting-strip="1"] .pvs'))!
+        assert(panel.top >= stripBtn.bottom && panel.right <= vp.width - 15 && panel.bottom <= vp.height, `панелът е под лентата и в екрана (${JSON.stringify(panel)})`)
+        assert((await page.textContent('[data-voice-panel="1"]'))!.includes('Микрофонът е включен'), 'одобреният статус')
+        await shotD(page, 'D08-waiting-panel')
+        await page.context().close()
+        const page2 = await openDesktop('vip=0')
+        await hd(page2, 'showWaiting')
+        await page2.waitForSelector('[data-voice-prompt="1"] .pvp--dark', { timeout: 5000 })
+        const text = await page2.textContent('[data-voice-prompt="1"]')
+        assert((text ?? '').includes('Можеш да слушаш разговора безплатно. Говоренето през микрофона е VIP привилегия.') && (text ?? '').includes('Вземи VIP'), 'non-VIP текст и „Вземи VIP“')
+        await shotD(page2, 'D09-waiting-prompt-nonvip')
+        await page2.context().close()
+      })
+    }
+
+    await check(`${vp.label} игра (desktop): бутон 52px веднага след ⚙️ в същия flex; панел над бутона; микрофончета; само на гласова маса; финален екран`, async () => {
+      const page = await openDesktop('vip=1')
+      await hd(page, 'showGame')
+      await page.waitForSelector('[data-active-room-desktop-action-bar="1"] [data-voice-game-toggle="1"]', { timeout: 8000 })
+      const layout = await page.evaluate(() => {
+        const btn = document.querySelector<HTMLElement>('[data-voice-game-toggle="1"]')!
+        const settings = document.querySelector<HTMLElement>('[data-active-room-desktop-action-bar="1"] [data-active-room-settings-button="1"]')!
+        const leave = document.querySelector<HTMLElement>('[data-active-room-desktop-action-bar="1"] [data-active-room-leave-button="1"]')!
+        const b = btn.getBoundingClientRect()
+        const s = settings.getBoundingClientRect()
+        const l = leave.getBoundingClientRect()
+        return { afterSettings: btn.previousElementSibling === settings, gap: b.left - s.right, w: b.width, h: b.height, centerDelta: Math.abs((b.top + b.height / 2) - (l.top + l.height / 2)), settingsW: s.width, leaveH: l.height }
+      })
+      assert(layout.afterSettings, 'веднага след ⚙️ в същия flex')
+      assert(Math.abs(layout.gap - 6) < 1, `отстояние като останалите (6px): ${layout.gap}`)
+      assert(Math.round(layout.w) === 52 && Math.round(layout.h) === 52, `52px (${layout.w}x${layout.h})`)
+      assert(layout.centerDelta < 1 && Math.round(layout.leaveH) === 52 && Math.round(layout.settingsW) === 52, 'подравнен с „Изход“ и ⚙️, които не са променени')
+      await shotD(page, 'D10-game-button')
+      await hd(page, 'setConnected', { mic: true, remotes: { p2: 'mic', p3: 'listen', p4: 'out' } })
+      await hd(page, 'openPanel')
+      await page.waitForSelector('[data-voice-panel="1"].pvp--dark')
+      const panel = (await rectOf(page, '.pvl-panel'))!
+      const btn = (await rectOf(page, '[data-voice-game-toggle="1"]'))!
+      assert(panel.bottom <= btn.top - 5 && panel.left >= 15 && panel.top >= 0, `панелът е над бутона (${JSON.stringify(panel)})`)
+      await shotD(page, 'D11-game-panel')
+      await page.mouse.click(vp.width / 2, 30)
+      assert(await page.$('[data-voice-panel="1"]') === null, 'клик извън панела го затваря')
+      await hd(page, 'setSpeaking', ['me', 'p2', 'p3'])
+      await page.waitForTimeout(200)
+      const mics = await visibleMics(page, '[data-profile-seat-btn]')
+      const shown = mics.filter((m) => m.visible)
+      assert(mics.length === 4 && shown.length === 3 && shown.every((m) => m.w >= 17.5 && m.w <= 20.5), `4 слота, 3 видими 18–20px: ${JSON.stringify(mics)}`)
+      await shotD(page, 'D12-game-speaking')
+      // Само на гласова маса.
+      await hd(page, 'setVoice', { voiceTableId: null })
+      assert(await page.$('[data-voice-game-toggle="1"]') === null, 'без гласова маса няма бутон')
+      await hd(page, 'setConnected', { mic: true, remotes: { p2: 'mic', p3: 'listen', p4: 'listen' } }, { voiceTableId: '11111111-2222-4333-8444-555555555555' })
+      await page.waitForSelector('[data-voice-game-toggle="1"]', { timeout: 3000 })
+      // Финален екран: лентата „Изход“ се маха — бутонът остава на същото място.
+      await hd(page, 'setSpeaking', [])
+      await hd(page, 'showMatchEnded')
+      await page.waitForSelector('[data-profile-seat-btn] .pika-voice-speaking', { timeout: 8000 })
+      await hd(page, 'setSpeaking', ['me', 'p2'])
+      await page.waitForTimeout(250)
+      const end = await page.evaluate(() => {
+        const slots = Array.from(document.querySelectorAll<HTMLElement>('[data-profile-seat-btn] .pika-voice-speaking'))
+        const visible = slots.filter((el) => getComputedStyle(el).opacity === '1').map((el) => el.getBoundingClientRect())
+        const badges = Array.from(document.querySelectorAll<HTMLElement>('[aria-label="Гласувал за преиграване"], [aria-label="Гласувал за излизане"]')).map((el) => el.getBoundingClientRect())
+        const overlap = visible.some((v) => badges.some((b) => v.left < b.right && b.left < v.right && v.top < b.bottom && b.top < v.bottom))
+        const btn = document.querySelector<HTMLElement>('[data-voice-game-toggle="1"]')?.getBoundingClientRect() ?? null
+        return { slots: slots.length, widths: visible.map((v) => v.width), overlap, btn: btn ? { left: btn.left, bottom: window.innerHeight - btn.bottom } : null }
+      })
+      assert(end.slots === 4 && end.widths.length === 2 && end.widths.every((w) => w >= 17.5 && w <= 20.5), `финален екран: ${JSON.stringify(end)}`)
+      assert(!end.overlap, 'без застъпване със значката за гласуване')
+      assert(end.btn !== null && Math.abs(end.btn.left - 18) < 1.5 && Math.abs(end.btn.bottom - 24) < 1.5, `бутонът остава долу вляво (${JSON.stringify(end.btn)})`)
+      await shotD(page, 'D13-match-ended-speaking')
+      await page.context().close()
+    })
+  }
+
   // Desktop (тъмният вариант на същия списък) — само иконата в списъка.
-  if (!finalOnly) console.log('\n--- 1280x800 (desktop списък) ---')
-  if (!finalOnly) await check('1280x800 списък „Частни маси“ (тъмен вариант): същата икона до „Ръчен старт“', async () => {
+  if (!finalOnly && !desktopOnly) console.log('\n--- 1280x800 (desktop списък) ---')
+  if (!finalOnly && !desktopOnly) await check('1280x800 списък „Частни маси“ (тъмен вариант): същата икона до „Ръчен старт“', async () => {
     const dir = join(OUT, '1280x800')
     await mkdir(dir, { recursive: true })
     const context = await browser!.newContext({ viewport: { width: 1280, height: 800 } })

@@ -1,8 +1,15 @@
-// Гласов чат — мобилен интерфейс (Етап 4).
+// Гласов чат — интерфейс: мобилно (Етап 4) и desktop (Етап 5).
 //
 // Само визуализация върху съществуващия VoiceController (без дублирана
-// логика): чете snapshot-а и вика действията му. Елементите живеят в
-// document.body (fixed), извън innerHTML прерисуванията на екраните:
+// логика): чете snapshot-а и вика действията му. Desktop използва СЪЩИТЕ
+// компоненти (лента, панел, прозорец, индикатор) — различни са само темата
+// (черно-златиста) и позиционирането:
+//   * игра: бутон 52px веднага след ⚙️ в долния ляв flex
+//     ([data-active-room-desktop-action-bar]); без лентата (край на мача) —
+//     на същото място, самостоятелно; панелът се отваря над бутона;
+//   * чакалня: тъмна лента, панел под лентата, тъмен прозорец за включване.
+// Мобилно — елементите живеят в document.body (fixed), извън innerHTML
+// прерисуванията на екраните:
 //   * чакалня: лента „Гласов чат“ (host в чакалнята) + прозорец за включване
 //     веднъж за посещение (2.5) + светъл панел;
 //   * игра: кръгъл 40px бутон вляво от „Фрази“ (отваря панела, НЕ превключва
@@ -46,6 +53,7 @@ const GAME_BUTTON_SELECTOR = '[data-voice-game-toggle="1"]'
 const LAYER_SELECTOR = '[data-voice-panel-layer="1"]'
 const PROMPT_SELECTOR = '[data-voice-prompt-layer="1"]'
 const STRIP_SELECTOR = '[data-voice-waiting-strip="1"]'
+const DESKTOP_SETTINGS_SELECTOR = '[data-active-room-desktop-action-bar="1"] [data-active-room-settings-button="1"]'
 
 const EXTRA_STYLES = `
   .pvs { width:100%; min-height:52px; box-sizing:border-box; display:flex; align-items:center; gap:10px; padding:8px 10px 8px 8px; border:1px solid #D9CCFF; border-radius:12px; background:#FFFFFF; box-shadow:0 1px 2px rgba(16,24,40,0.05); font-family:inherit; text-align:left; cursor:pointer; color:#111827; -webkit-tap-highlight-color:transparent; }
@@ -65,6 +73,21 @@ const EXTRA_STYLES = `
   .pvl-panel { position:fixed; z-index:10001; max-height:calc(100dvh - 74px); overflow-y:auto; overscroll-behavior:contain; }
   .pvl-panel--dark { right:16px; bottom:58px; width:min(280px, calc(100vw - 32px)); }
   .pvl-panel--light { left:50%; bottom:12px; transform:translateX(-50%); width:min(400px, calc(100vw - 24px)); max-height:calc(100dvh - 24px); }
+  /* Desktop (Етап 5) */
+  .pvs--dark { border-color:rgba(212,165,32,0.45); background:rgba(18,18,22,0.92); color:#F8FAFC; box-shadow:none; transition:border-color 140ms ease; }
+  .pvs--dark:hover { border-color:rgba(212,165,32,0.85); }
+  .pvs--dark .pvs-ico { background:rgba(212,165,32,0.14); border-color:rgba(212,165,32,0.55); color:#F4C432; }
+  .pvs--dark .pvs-title { color:#F8FAFC; }
+  .pvs--dark .pvs-sub { color:rgba(248,250,252,0.6); }
+  .pvs--dark .pvs-sub--ok { color:#4ADE80; } .pvs--dark .pvs-sub--busy { color:#FBBF24; } .pvs--dark .pvs-sub--error { color:#F87171; }
+  .pvs--dark .pvs-cta { background:linear-gradient(180deg,#F4C95B 0%,#C98F13 100%); color:#080808; }
+  .pvs--dark .pvs-cta--open { background:rgba(212,165,32,0.14); border:1px solid rgba(212,165,32,0.55); color:#F4C432; }
+  .pvg--desktop, .pvg--desktop-free { width:52px; height:52px; right:auto; bottom:auto; flex:0 0 auto; transition:background 140ms ease, color 140ms ease; }
+  .pvg--desktop { position:relative; z-index:auto; }
+  .pvg--desktop-free { position:fixed; left:18px; bottom:24px; z-index:9400; }
+  .pvg--desktop:hover, .pvg--desktop-free:hover { background:rgba(212,165,32,0.16); color:#FFE08A; }
+  .pvg--desktop::before, .pvg--desktop-free::before { content:none; }
+  .pvl-panel--desk { width:352px; max-height:calc(100dvh - 32px); }
 `
 
 export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
@@ -106,8 +129,36 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
     return viewPromise
   }
 
+  const isDesktop = (): boolean => !deps.isPhoneLayout()
+  /** Мобилно: игра — тъмна, чакалня — светла. Desktop: навсякъде черно-златиста. */
   const themeFor = (snapshot: VoiceSnapshot): VoiceUiTheme | null =>
-    snapshot.voiceTableId === null ? null : snapshot.screen === 'game' ? 'dark' : snapshot.screen === 'waiting' ? 'light' : null
+    snapshot.voiceTableId === null ? null
+      : snapshot.screen === 'game' ? 'dark'
+        : snapshot.screen === 'waiting' ? (isDesktop() ? 'dark' : 'light') : null
+
+  /** Desktop: панелът е закотвен към бутона (игра) или към лентата (чакалня). */
+  function positionDesktopPanel(panel: HTMLElement, snapshot: VoiceSnapshot): void {
+    const width = 352
+    const viewportWidth = doc.documentElement.clientWidth
+    const viewportHeight = doc.documentElement.clientHeight
+    const clampLeft = (left: number) => Math.max(16, Math.min(left, viewportWidth - width - 16))
+    const anchor = snapshot.screen === 'game'
+      ? doc.querySelector<HTMLElement>(GAME_BUTTON_SELECTOR)
+      : doc.querySelector<HTMLElement>(`${STRIP_SELECTOR} .pvs`)
+    const rect = anchor?.getBoundingClientRect() ?? null
+    let style: string
+    if (rect === null || rect.width === 0) {
+      style = `left:50%;top:50%;transform:translate(-50%,-50%);`
+    } else if (snapshot.screen === 'game') {
+      style = `left:${clampLeft(rect.left)}px;bottom:${Math.max(16, viewportHeight - rect.top + 10)}px;`
+    } else {
+      style = `left:${clampLeft(rect.right - width)}px;top:${Math.min(rect.bottom + 8, viewportHeight - 120)}px;`
+    }
+    if (panel.dataset.position !== style) {
+      panel.dataset.position = style
+      panel.setAttribute('style', style)
+    }
+  }
 
   // ─── Действия (делегирано) ──────────────────────────────────────────
 
@@ -156,16 +207,21 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       seats: deps.getSeats(),
       theme,
       isOwnVip: deps.isOwnVip(),
-      canOpenShop: theme === 'light',
+      // Магазинът е достъпен от чакалнята (мобилно и desktop), не в активна игра.
+      canOpenShop: snapshot.screen === 'waiting',
     })
     const panel = layer.querySelector<HTMLElement>('.pvl-panel')
     if (panel === null) return
-    if (panel.dataset.theme !== theme) {
-      panel.dataset.theme = theme
-      panel.className = `pvl-panel pvl-panel--${theme}`
-      layer.querySelector<HTMLElement>('.pvl-backdrop')!.className = `pvl-backdrop pvl-backdrop--${theme}`
+    const placement = isDesktop() ? 'desk' : theme
+    if (panel.dataset.placement !== placement) {
+      panel.dataset.placement = placement
+      panel.className = `pvl-panel pvl-panel--${placement}`
+      panel.removeAttribute('style')
+      delete panel.dataset.position
+      layer.querySelector<HTMLElement>('.pvl-backdrop')!.className = `pvl-backdrop pvl-backdrop--${placement}`
     }
     if (panel.innerHTML !== html) panel.innerHTML = html
+    if (placement === 'desk') positionDesktopPanel(panel, snapshot)
   }
 
   function openPanel(): void {
@@ -190,7 +246,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
     if (layer === null) {
       layer = doc.createElement('div')
       layer.setAttribute('data-voice-panel-layer', '1')
-      layer.innerHTML = `<div class="pvl-backdrop pvl-backdrop--${theme}" data-voice-action="close"></div><div class="pvl-panel pvl-panel--${theme}" data-theme="${theme}"></div>`
+      layer.innerHTML = '<div class="pvl-backdrop" data-voice-action="close"></div><div class="pvl-panel"></div>'
       layer.addEventListener('click', onDelegatedClick)
       doc.body.appendChild(layer)
     }
@@ -216,7 +272,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
 
   function syncPrompt(snapshot: VoiceSnapshot): void {
     const shouldShow = snapshot.voiceTableId !== null && snapshot.screen === 'waiting' && snapshot.status === 'idle'
-      && !promptHandledThisVisit && !panelOpen && deps.isPhoneLayout()
+      && !promptHandledThisVisit && !panelOpen
     if (shouldShow && !promptOpen) {
       if (view === null) {
         // Lazy chunk-ът още се зарежда — прозорецът се показва веднага след него (ако още е уместен).
@@ -225,7 +281,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       }
       const layer = doc.createElement('div')
       layer.setAttribute('data-voice-prompt-layer', '1')
-      layer.innerHTML = view.renderVoiceJoinPrompt({ isOwnVip: deps.isOwnVip(), canOpenShop: true })
+      layer.innerHTML = view.renderVoiceJoinPrompt({ isOwnVip: deps.isOwnVip(), canOpenShop: true, theme: isDesktop() ? 'dark' : 'light' })
       layer.addEventListener('click', (event) => {
         if (event.target === layer.firstElementChild) {
           closePrompt(true)
@@ -243,16 +299,41 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
 
   // ─── Бутон в игра ───────────────────────────────────────────────────
 
-  function gameButtonIcon(snapshot: VoiceSnapshot): { html: string; idle: boolean } {
-    if (!isInVoice(snapshot)) return { html: voiceIcon.mic(20), idle: true }
-    if (snapshot.speak?.blockedReason === 'muted') return { html: voiceIcon.micOff(20), idle: false }
-    if (snapshot.microphone === 'live') return { html: voiceIcon.mic(20), idle: false }
-    return { html: voiceIcon.headphones(20), idle: false }
+  function gameButtonIcon(snapshot: VoiceSnapshot, size: number): { html: string; idle: boolean } {
+    if (!isInVoice(snapshot)) return { html: voiceIcon.mic(size), idle: true }
+    if (snapshot.speak?.blockedReason === 'muted') return { html: voiceIcon.micOff(size), idle: false }
+    if (snapshot.microphone === 'live') return { html: voiceIcon.mic(size), idle: false }
+    return { html: voiceIcon.headphones(size), idle: false }
+  }
+
+  /**
+   * Desktop: лентата „Изход“ + ⚙️ се mount-ва/маха от activeRoom (напр. край на
+   * мача) — наблюдава се само body childList (без subtree), за да остане
+   * бутонът веднага след ⚙️, без промени в activeRoom контролера.
+   */
+  let actionBarObserver: MutationObserver | null = null
+  function watchDesktopActionBar(active: boolean): void {
+    if (!active) {
+      actionBarObserver?.disconnect()
+      actionBarObserver = null
+      return
+    }
+    if (actionBarObserver !== null || typeof MutationObserver === 'undefined') return
+    actionBarObserver = new MutationObserver(() => {
+      const button = doc.querySelector(GAME_BUTTON_SELECTOR)
+      const settings = doc.querySelector(DESKTOP_SETTINGS_SELECTOR)
+      if (button === null || (settings !== null && button.previousElementSibling !== settings) || (settings === null && button.parentElement !== doc.body)) {
+        syncGameButton(voice.getSnapshot())
+      }
+    })
+    actionBarObserver.observe(doc.body, { childList: true })
   }
 
   function syncGameButton(snapshot: VoiceSnapshot): void {
-    const shouldShow = snapshot.voiceTableId !== null && snapshot.screen === 'game' && deps.isPhoneLayout()
+    const shouldShow = snapshot.voiceTableId !== null && snapshot.screen === 'game'
+    const desktop = isDesktop()
     let buttonElement = doc.querySelector<HTMLButtonElement>(GAME_BUTTON_SELECTOR)
+    watchDesktopActionBar(shouldShow && desktop)
     if (!shouldShow) {
       buttonElement?.remove()
       return
@@ -265,10 +346,23 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
         if (panelOpen) closePanel()
         else openPanel()
       })
+    }
+    let placementClass = ''
+    if (desktop) {
+      // Веднага след ⚙️ в същия flex; без лентата — на същото място, самостоятелно.
+      const settings = doc.querySelector(DESKTOP_SETTINGS_SELECTOR)
+      if (settings !== null) {
+        if (buttonElement.previousElementSibling !== settings) settings.after(buttonElement)
+        placementClass = ' pvg--desktop'
+      } else {
+        if (buttonElement.parentElement !== doc.body) doc.body.appendChild(buttonElement)
+        placementClass = ' pvg--desktop-free'
+      }
+    } else if (buttonElement.parentElement !== doc.body) {
       doc.body.appendChild(buttonElement)
     }
-    const icon = gameButtonIcon(snapshot)
-    const className = `pvg${icon.idle ? ' pvg--idle' : ''}`
+    const icon = gameButtonIcon(snapshot, desktop ? 24 : 20)
+    const className = `pvg${placementClass}${icon.idle ? ' pvg--idle' : ''}`
     if (buttonElement.className !== className) buttonElement.className = className
     if (buttonElement.dataset.iconKey !== icon.html) {
       buttonElement.dataset.iconKey = icon.html
@@ -286,7 +380,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
     const inVoice = isInVoice(snapshot)
     const cta = inVoice ? 'Отвори' : snapshot.canRestore ? 'Възстанови' : 'Включи се'
     return `
-      <button type="button" class="pvs" data-voice-action="open-panel" aria-label="Гласов чат: ${status.label}">
+      <button type="button" class="pvs${isDesktop() ? ' pvs--dark' : ''}" data-voice-action="open-panel" aria-label="Гласов чат: ${status.label}">
         <span class="pvs-ico">${inVoice && snapshot.microphone !== 'live' ? voiceIcon.headphones(18) : voiceIcon.mic(18)}</span>
         <span class="pvs-copy">
           <span class="pvs-title">Гласов чат</span>
@@ -345,6 +439,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       disposed = true
       unsubscribe()
       unsubscribeSpeaking()
+      watchDesktopActionBar(false)
       doc.querySelector(LAYER_SELECTOR)?.remove()
       doc.querySelector(PROMPT_SELECTOR)?.remove()
       doc.querySelector(GAME_BUTTON_SELECTOR)?.remove()

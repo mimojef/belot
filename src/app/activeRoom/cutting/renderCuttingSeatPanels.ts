@@ -452,15 +452,16 @@ function renderGiftBoxIcon(sizePx: number): string {
  * по data-seat-avatar-url никога не трие активен overlay.
  */
 /**
- * Гласов чат (Етап 4, само мобилно): празен slot за зеленото микрофонче
+ * Гласов чат (Етап 4 мобилно, Етап 5 desktop): празен slot за зеленото микрофонче
  * „говори“ в data-profile-seat-btn (над gift overlay-а, z-index 7). Родителят
  * е с transform scale(panelScale) × scale(cardScale) — размерите се
  * компенсират, за да е ~19px на екрана. Горе вдясно; горе вляво, когато
  * pill-ът „Цепи“ (highlight badge) е върху аватара (страничните места).
- * Без гласова маса или на desktop — нищо не се рендерира.
+ * Без гласова маса — нищо не се рендерира. И на desktop panelScale = stageScale
+ * (без друг мащаб на слоя), така че компенсацията е същата.
  */
 function renderSeatVoiceSpeakingSlot(seat: RoomSeatSnapshot, panelScale: number, cardScale: number, preferLeft: boolean, insetRealPx: number): string {
-  if (!isPhoneLayoutViewport() || seat.isBot || seat.profileId === null) return ''
+  if (seat.isBot || seat.profileId === null) return ''
   const scale = panelScale > 0 ? panelScale * cardScale : cardScale
   return renderVoiceSpeakingSlot(seat.profileId, {
     sizePx: Math.round((19 / scale) * 10) / 10,
