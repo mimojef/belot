@@ -20,6 +20,7 @@ import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 import type { TopicSnapshot } from '../db/topicStore.js'
 import type { NameHighlightRole } from '../core/nameHighlightRole.js'
 import type { ProfileCustomizationDisplay } from '../profileCustomization/profileCustomizationStore.js'
+import type { VoicePresenceClientMessage, VoiceServerMessage } from '../voice/voiceChatProtocol.js'
 import type { LudoEngineEvent } from '../game/ludoEngine/ludoEngineEvents.js'
 import type { LudoColor, LudoGameState, LudoPieceSlot } from '../game/ludoEngine/ludoEngineTypes.js'
 
@@ -119,6 +120,8 @@ export type ClientBidAction =
 
 export type ClientMessage =
   | SvaraLobbyClientMessage
+  // Гласов чат (Етап 2б) — presence/lease на частната маса; без токени.
+  | VoicePresenceClientMessage
   | {
       type: 'ping'
     }
@@ -249,6 +252,10 @@ export type ClientMessage =
       humanTurnTimeoutMs?: HumanTurnTimeoutMs
       // "Покани партньор" — резервира мястото под домакина (A1). Липсващо = false.
       invitePartner?: boolean
+      // "Гласов чат" (Етап 2б) — само VIP; липсващо = false. Ако гласова маса не
+      // може да бъде създадена, масата НЕ се създава (клиентът пита изрично
+      // дали да създаде без глас).
+      voiceEnabled?: boolean
       displayName?: string
     }
   | {
@@ -767,6 +774,13 @@ export type RoomSnapshotMessage = {
   isGuestTrial: boolean
   isPrivateTableOrigin: boolean
   isTournamentMatchOrigin: boolean
+  /**
+   * Гласов чат (Етап 2б): voiceTableId на масата, ако е създадена с глас
+   * (иначе null). Само в room_snapshot към играчите — никога в
+   * belot_spectator_snapshot. Не дава достъп сам по себе си: токен се издава
+   * само по HTTPS след авторитетна проверка на участието.
+   */
+  voiceTableId: string | null
   tournamentId?: string | null
   tournamentMatchId?: string | null
   tournamentRoundType?: TournamentRoundType | null
@@ -896,6 +910,15 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_partner_level_required'
   // Резервацията/масата вече не съществува (остаряло действие от известието).
   | 'private_room_partner_reservation_missing'
+  // Гласов чат (Етап 2б) — масата НЕ е създадена; клиентът пита изрично дали
+  // да я създаде без гласов чат (никога автоматично).
+  | 'voice_chat_off'
+  | 'voice_chat_admin_only'
+  | 'voice_chat_vip_required'
+  | 'voice_chat_banned'
+  | 'voice_chat_unavailable'
+  | 'voice_chat_capacity_reached'
+  | 'voice_chat_busy'
 
 export type ErrorMessage = {
   type: 'error'
@@ -907,6 +930,9 @@ export type ErrorMessage = {
     | 'spectator_action_forbidden'
     | 'svara_commitment_active'
     | PrivateRoomActionErrorCode
+  // Гласов чат (Етап 2б) — само при code 'voice_chat_capacity_reached'.
+  voiceActiveTables?: number
+  voiceMaxTables?: number
 }
 
 export type GuestTrialErrorMessage = {
@@ -1325,6 +1351,10 @@ export type PrivateRoomSnapshot = {
   // САМО в snapshot-а към собственика на резервацията (домакина); всички
   // останали (вкл. lobby списъка) виждат само invitePending.
   partnerReservation: PrivateRoomPartnerReservationSnapshot | null
+  // Гласов чат (Етап 2б): масата е създадена с глас (иконата в лобито).
+  voiceEnabled: boolean
+  // Само в snapshot-а към играч, който седи на масата; null за всички останали.
+  voiceTableId: string | null
 }
 
 export type PrivateRoomPartnerReservationSnapshot = {
@@ -1859,6 +1889,7 @@ export type ChatConversationClearedMessage = {
 
 export type ServerMessage =
   | SvaraLobbyServerMessage
+  | VoiceServerMessage
   | ConnectedMessage
   | PongMessage
   | ErrorMessage

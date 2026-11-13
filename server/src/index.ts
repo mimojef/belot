@@ -78,6 +78,12 @@ import {
 import { isProfileCustomizationEmergencyStopActive } from './profileCustomization/profileCustomizationFeatureFlag.js'
 import { createVoiceChatStore } from './voice/voiceChatStore.js'
 import { createVoiceChatAdminRequestHandler } from './voice/voiceChatAdminApi.js'
+import { createVoiceChatHttpRequestHandler } from './voice/voiceChatHttpApi.js'
+import { createVoiceChatService, type VoiceSeatLookup } from './voice/voiceChatService.js'
+import { createVoiceLiveKitApi, readVoiceLiveKitConfig } from './voice/voiceLiveKitApi.js'
+import { createVoiceLiveKitDispatcher } from './voice/voiceLiveKitDispatcher.js'
+import { createVoiceTokenSigner } from './voice/voiceTokenIssuer.js'
+import type { VoiceTableRecord } from './voice/voiceChatTypes.js'
 import {
   PROFILE_CUSTOMIZATION_COLOR_GROUPS,
   PROFILE_CUSTOMIZATION_COLOR_GROUP_LABELS,
@@ -1072,6 +1078,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'ad_campaign_click':
     case 'ack_mute_end_notice':
     case 'request_campaign_match_credit':
+    // Гласов чат — само in-memory presence/lease; при shutdown няма какво да пази.
+    case 'voice_presence':
       return false
   }
 
@@ -1163,10 +1171,32 @@ const belotVisualOverrideStore = await createBelotVisualOverrideStore(databaseBo
 // "Персонализация на профила" — store-ът се създава винаги (само схема и
 // четене при заявка); всичко видимо е зад PROFILE_CUSTOMIZATION_ENABLED.
 const profileCustomizationStore = await createProfileCustomizationStore(databaseBootstrap.databaseFilePath)
-// Гласов чат (Етап 2а) — само режим/лимит/одит и структурите на слотовете.
-// Режимът по подразбиране е 'off' (без записи); нищо не е свързано с
-// игровите маси и няма LiveKit заявки (Етап 2б).
+// Гласов чат (Етапи 2а/2б). Режимът по подразбиране е 'off' (без записи).
+// Цялата логика е в server/src/voice/ (voiceChatService.ts); index.ts само
+// вика куките от съществуващите lifecycle точки. LiveKit API операциите са
+// асинхронни, ограничени (dispatcher: timeout, опашки, circuit breaker) и
+// НИКОГА не се await-ват в игрови WS handler-и. Без LIVEKIT_* env гласът е
+// "недостъпен", а играта работи нормално. Deps са closure-и — извикват се
+// само след инициализацията на модула (vipStore/serverState и т.н.).
 const voiceChatStore = await createVoiceChatStore(databaseBootstrap.databaseFilePath)
+const voiceLiveKitConfig = readVoiceLiveKitConfig()
+const voiceChatService = createVoiceChatService({
+  store: voiceChatStore,
+  liveKit:
+    voiceLiveKitConfig === null
+      ? null
+      : {
+          api: createVoiceLiveKitApi(voiceLiveKitConfig),
+          wsUrl: voiceLiveKitConfig.wsUrl,
+          signToken: createVoiceTokenSigner(voiceLiveKitConfig),
+        },
+  dispatcher: createVoiceLiveKitDispatcher({ log: (line) => console.log(line) }),
+  resolveSeat: (profileId, table) => resolveVoiceSeat(profileId, table),
+  isConnectionOpen: (connectionId) => getSocketByConnectionId(connectionId)?.readyState === WebSocket.OPEN,
+  sendToConnection: (connectionId, message) => safeSendToConnection(connectionId, message),
+  isVipActive: (profileId) => vipStore.getStatus(profileId).isActive,
+  isBanned: (profileId) => profileBanStore.getActiveBan(profileId) !== null,
+})
 
 // Anti Bad Luck runtime config (admin_settings) — main thread cache, подаван
 // ЗАДЪЛЖИТЕЛНО при всеки game tick към worker-а (workerProtocol v4). Initial
@@ -5096,9 +5126,13 @@ function removeCommittedServerRoom(
   roomId: string,
   currentServerState: ServerState = serverState,
 ): ServerState {
+  const removedVoiceTableId = currentServerState.rooms[roomId]?.config.voiceTableId ?? null
   const nextRooms = { ...currentServerState.rooms }
   delete nextRooms[roomId]
   roomRevisionRegistry.remove(roomId)
+  // Гласов чат — единствената точка за край на игралната маса: освобождава
+  // слота, прекратява участията и оттегля LiveKit стаята (асинхронно).
+  if (removedVoiceTableId !== null) voiceChatService.onServerRoomRemoved(removedVoiceTableId)
   // Belot Spectator Mode — единствената choke point за room removal (всички
   // cleanup/abort/force-remove пътища минават оттук): известява и чисти
   // spectators на премахнатата стая.
@@ -5261,7 +5295,13 @@ const activeRoomRuntime =
 function buildPrivateRoomSnapshot(room: PrivateRoom, viewerProfileId: string | null = null): PrivateRoomSnapshot {
   const reservation = room.partnerReservation
   const partnerInvite = reservation?.invite ?? null
+  // Гласов чат: voiceTableId само към играч, който седи на масата.
+  const viewerIsSeated =
+    viewerProfileId !== null &&
+    room.slots.some((slot) => slot.occupant?.kind === 'human' && slot.occupant.profileId === viewerProfileId)
   return {
+    voiceEnabled: room.voiceTableId !== null,
+    voiceTableId: viewerIsSeated ? room.voiceTableId : null,
     id: room.id,
     kind: room.kind,
     stake: room.stake,
@@ -5819,6 +5859,8 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
       isPrivateTableOrigin: true,
       stakeAmount: privateRoom.stake,
       humanTurnTimeoutMs: privateRoom.humanTurnTimeoutMs,
+      // Гласов чат: същият voiceTableId преминава от чакалнята в играта.
+      voiceTableId: privateRoom.voiceTableId,
     },
   })
   let nextServerState = upsertServerRoom(serverState, currentRoom)
@@ -5902,6 +5944,7 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
     )
     notifyMembersExpired()
     privateRoomChatStore.clearRoom(privateRoom.id)
+    if (privateRoom.voiceTableId !== null) voiceChatService.onGameStartFailed(privateRoom.voiceTableId)
     return
   }
 
@@ -5912,6 +5955,7 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
       activeRoomRuntime.removeRoom(initializedRoom.id)
       notifyMembersExpired()
       privateRoomChatStore.clearRoom(privateRoom.id)
+      if (privateRoom.voiceTableId !== null) voiceChatService.onGameStartFailed(privateRoom.voiceTableId)
       return
     }
 
@@ -5925,6 +5969,8 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
 
   nextServerState = commitServerRoomWithSnapshot(initializedRoom, nextServerState)
   serverState = nextServerState
+  // Гласов чат: waiting -> in_game на СЪЩИЯ слот (без второ резервиране).
+  if (privateRoom.voiceTableId !== null) voiceChatService.onGameStarted(privateRoom.voiceTableId, initializedRoom.id)
 
   recordPrivateRoomMatchStarted(privateRoom, initializedRoom.id)
   broadcastPrivateGamesListToLobbyConnections()
@@ -6106,10 +6152,40 @@ const privateRoomsStore = createPrivateRoomsStore({
   onRoomsChanged: () => broadcastPrivateRoomsListToLobbyConnections(),
   onPartnerInviteEnded: (room, invite, reason) => handlePrivateRoomPartnerInviteEnded(room, invite, reason),
   onRoomReady: (room) => handlePrivateRoomReady(room),
-  onRoomExpired: (room) => handlePrivateRoomExpired(room),
-  onRoomClosed: (room) => handlePrivateRoomClosed(room),
-  onMemberLeft: (room, occupant) => handlePrivateRoomMemberLeft(room, occupant),
-  onMemberKicked: (room, occupant) => handlePrivateRoomMemberKicked(room, occupant),
+  onRoomExpired: (room) => {
+    handlePrivateRoomExpired(room)
+    if (room.voiceTableId !== null) voiceChatService.onWaitingRoomEnded(room.voiceTableId, 'waiting_room_expired')
+  },
+  onRoomClosed: (room) => {
+    handlePrivateRoomClosed(room)
+    if (room.voiceTableId !== null) voiceChatService.onWaitingRoomEnded(room.voiceTableId, 'waiting_room_closed')
+  },
+  onMemberLeft: (room, occupant) => {
+    handlePrivateRoomMemberLeft(room, occupant)
+    if (room.voiceTableId !== null && occupant.profileId !== null) {
+      voiceChatService.onMemberRemoved(room.voiceTableId, occupant.profileId, 'left_waiting_room')
+    }
+  },
+  onMemberKicked: (room, occupant) => {
+    handlePrivateRoomMemberKicked(room, occupant)
+    if (room.voiceTableId !== null && occupant.profileId !== null) {
+      voiceChatService.onMemberRemoved(room.voiceTableId, occupant.profileId, 'kicked')
+    }
+  },
+  // Гласов чат (Етап 2б) — участието започва при сядането (VIP в този момент
+  // -> право за говорене за цялото участие).
+  onMemberSeated: (room, occupant) => {
+    if (room.voiceTableId !== null && occupant.profileId !== null) voiceChatService.onMemberSeated(room.voiceTableId, occupant.profileId)
+  },
+  // Последният човек напусна -> масата изчезва без onRoomClosed/onRoomExpired;
+  // гласовият слот трябва да се освободи изрично.
+  onRoomEmptied: (room, leavingOccupant) => {
+    if (room.voiceTableId === null) return
+    if (leavingOccupant.profileId !== null) {
+      voiceChatService.onMemberRemoved(room.voiceTableId, leavingOccupant.profileId, 'left_waiting_room')
+    }
+    voiceChatService.onWaitingRoomEnded(room.voiceTableId, 'waiting_room_empty')
+  },
   onTimerTiming: (label, durationMs) => mainThreadTimings.record('timer', label, durationMs),
 })
 
@@ -7887,6 +7963,39 @@ function findProfileInGameSession(
   return null
 }
 
+// Гласов чат — авторитетното място на профила спрямо гласовата маса:
+// чакалнята (PrivateRoom slot) или играта (ServerRoom seat). Никога от
+// клиента. seatConnectionId е връзката, която В МОМЕНТА държи мястото.
+function resolveVoiceSeat(profileId: string, table: VoiceTableRecord): VoiceSeatLookup {
+  if (table.phase === 'waiting') {
+    const privateRoom = privateRoomsStore.getRoomByProfileId(profileId)
+    if (privateRoom === null || privateRoom.voiceTableId !== table.voiceTableId) return { relation: 'none' }
+    const occupant = privateRoom.slots.find(
+      (slot) => slot.occupant?.kind === 'human' && slot.occupant.profileId === profileId,
+    )?.occupant
+    if (occupant?.kind !== 'human') return { relation: 'none' }
+    return { relation: 'player', permanentlyLeft: false, seatConnectionId: occupant.connectionId }
+  }
+  const room = table.serverRoomId === null ? null : (serverState.rooms[table.serverRoomId] ?? null)
+  if (room === null || room.config.voiceTableId !== table.voiceTableId) return { relation: 'none' }
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind !== 'human') continue
+    const participantProfileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+    if (participantProfileId !== profileId) continue
+    if (participant.permanentlyLeftAt != null) return { relation: 'player', permanentlyLeft: true, seatConnectionId: null }
+    return {
+      relation: 'player',
+      permanentlyLeft: false,
+      seatConnectionId: participant.isConnected ? participant.connectionId : null,
+    }
+  }
+  const spectatesThisRoom = findProfileSpectatorConnectionIds(belotSpectatorRegistry, profileId, resolveConnectionProfileId).some(
+    (connectionId) => belotSpectatorRegistry.getWatchedRoomId(connectionId) === room.id,
+  )
+  return { relation: spectatesThisRoom ? 'spectator' : 'none' }
+}
+
 function sendSessionInGameIfNeeded(
   connectionId: ConnectionId,
   profileId: string,
@@ -7972,6 +8081,9 @@ function displaceProfileConnections(
     // веднага (не чака асинхронния 'close' event), за да не остане профилът
     // spectator през вече мъртъв таб.
     endBelotSpectatingForConnection(conn.id, 'replaced', true)
+    // Гласов чат — изместената връзка губи гласовия binding (ротация, ако
+    // същата страница не си върне сесията в кратък срок).
+    voiceChatService.onGameConnectionDisplaced(conn.id)
 
     const socket = socketRegistry.get(conn.id)
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -8007,6 +8119,8 @@ function banProfileConnections(
   profileId: string,
   ban: { bannedUntil: string; reason: string; remainingDays: number },
 ): void {
+  // Банът винаги прекратява гласа (и правото за говорене в участието).
+  voiceChatService.onProfileRevoked(profileId, 'banned')
   closeAllProfileConnections(profileId, {
     type: 'session_banned',
     bannedUntil: ban.bannedUntil,
@@ -8024,6 +8138,7 @@ function banProfileConnections(
  * enforcement) — единствената user-facing причина, без admin identity.
  */
 function deleteProfileConnections(profileId: string, reason: string): void {
+  voiceChatService.onProfileRevoked(profileId, 'profile_revoked')
   closeAllProfileConnections(profileId, { type: 'session_deleted', reason })
 }
 
@@ -21260,7 +21375,31 @@ const handleAdminVoiceChatRequest = createVoiceChatAdminRequestHandler({
   isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),
   readJsonBody: (req) => readJsonRequestBody(req),
   resolveDisplayName: (profileId) => playerProgressStore.getPublicProfile(profileId)?.displayName ?? null,
+  onModeChanged: (result) => voiceChatService.onModeChanged(result),
+  getRuntimeStats: () => voiceChatService.stats() as unknown as Record<string, unknown>,
 })
+// Гласов чат (Етап 2б) — HTTPS: токени и повишаване на правата (никога WS).
+const handleVoiceChatApiRequest = createVoiceChatHttpRequestHandler({
+  service: voiceChatService,
+  getSessionProfileId: (req) => authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))?.profile?.profileId ?? null,
+  isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),
+  readJsonBody: (req) => readJsonRequestBody(req),
+})
+// Гласов чат — reconciliation при старт: освобождава изгубените чакални и
+// невъзстановените игри, пази възстановените (с участията на активните
+// играчи) и ротира живите им стаи; LiveKit почистването е асинхронно.
+voiceChatService.boot(
+  Object.values(serverState.rooms).map((room) => ({
+    serverRoomId: room.id,
+    voiceTableId: room.config.voiceTableId ?? null,
+    activeProfileIds: SERVER_SEAT_ORDER.flatMap((seat) => {
+      const participant = room.seats[seat].participant
+      if (participant?.kind !== 'human' || participant.permanentlyLeftAt != null) return []
+      const profileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+      return profileId === null ? [] : [profileId]
+    }),
+  })),
+)
 
 async function handleAdminCampaignsRequest(
   req: IncomingMessage,
@@ -25199,6 +25338,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleVoiceChatApiRequest(req, res, requestUrl)) {
+    return
+  }
+
   if (await handleProfileCustomizationRequest(req, res, requestUrl)) {
     return
   }
@@ -25869,6 +26012,13 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           type: 'pong',
           timestamp: Date.now(),
         })
+        return
+      }
+
+      // Гласов чат (Етап 2б) — presence/lease на екрана на масата. Само
+      // in-memory; без токени; отговорът е voice_presence_result.
+      if (message.type === 'voice_presence') {
+        voiceChatService.handlePresence(connection.id, getConnectionById(serverState, connection.id)?.profileId ?? null, message)
         return
       }
 
@@ -27556,6 +27706,14 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           detachedConnection,
         )
 
+        // Гласов чат — окончателното напускане прекратява участието и правото
+        // за говорене веднага (без 120 s), с ротация при издаден токен.
+        const leftVoiceTableId = room.config.voiceTableId ?? null
+        const leftProfileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+        if (leftVoiceTableId !== null && leftProfileId !== null) {
+          voiceChatService.onMemberRemoved(leftVoiceTableId, leftProfileId, 'permanently_left')
+        }
+
         const roomWasRemoved = cleanupInactiveRoomIfNeeded(message.roomId)
 
         safeSendToConnection(connection.id, {
@@ -28352,6 +28510,29 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           return
         }
 
+        // Гласов чат (Етап 2б): слотът се резервира АТОМАРНО преди масата.
+        // Ако гласова маса не е възможна, масата НЕ се създава — клиентът
+        // пита изрично дали да я създаде без глас. LiveKit не участва тук.
+        let voiceTableId: string | null = null
+        if (message.voiceEnabled === true) {
+          const voiceReservation = voiceChatService.reserveVoiceTableForPrivateRoom({
+            profileId: latestConnection.profileId,
+            isFullAdmin: authStore.getAccountRoleForProfile(latestConnection.profileId) === 'admin',
+          })
+          if (!voiceReservation.ok) {
+            safeSendToConnection(connection.id, {
+              type: 'error',
+              message: voiceReservation.message,
+              code: voiceReservation.code,
+              ...(voiceReservation.activeCount === undefined
+                ? {}
+                : { voiceActiveTables: voiceReservation.activeCount, voiceMaxTables: voiceReservation.maxTables }),
+            })
+            return
+          }
+          voiceTableId = voiceReservation.voiceTableId
+        }
+
         const createResult = privateRoomsStore.createRoom({
           connectionId: connection.id,
           profileId: latestConnection.profileId,
@@ -28365,11 +28546,17 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           manualStart: message.manualStart ?? false,
           humanTurnTimeoutMs: message.humanTurnTimeoutMs,
           invitePartner: message.invitePartner === true,
+          voiceTableId,
         })
 
         if (!createResult.ok) {
+          // Неуспешно създаване -> резервираният гласов слот не остава зает.
+          if (voiceTableId !== null) voiceChatService.abortReservation(voiceTableId)
           safeSendToConnection(connection.id, { type: 'error', message: createResult.message })
           return
+        }
+        if (voiceTableId !== null) {
+          voiceChatService.attachPrivateRoom(voiceTableId, createResult.room.id, latestConnection.profileId)
         }
 
         activityCounters.incrementRooms('privateRoomCreate')
@@ -30039,6 +30226,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     // Belot Spectator Mode ("Гледай", Phase 2A) — disconnect cleanup (socket-ът
     // вече е затворен, затова без belot_spectate_ended известяване).
     endBelotSpectatingForConnection(connection.id, 'unwatched', false)
+    // Гласов чат — загубена игрова връзка: 120 s таймер само за активни
+    // гласови участници (in-memory, без запис в базата).
+    voiceChatService.onGameConnectionClosed(connection.id)
 
     try {
       if (isServerShuttingDown) {
@@ -31012,6 +31202,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
   closeStore('belotVisualOverrideStore', () => belotVisualOverrideStore.close())
   closeStore('profileCustomizationStore', () => profileCustomizationStore.close())
+  closeStore('voiceChatService', () => voiceChatService.dispose())
   closeStore('voiceChatStore', () => voiceChatStore.close())
   closeStore('authStore', () => authStore.close())
   closeStore('friendshipStore', () => friendshipStore.close())

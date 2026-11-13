@@ -1,9 +1,10 @@
 /**
  * checkVoiceChatStage2a.ts
  *
- * Гласов чат, Етап 2а — миграция 20261112_001, voiceChatFeatureFlag,
- * voiceChatEligibility (пълна матрица), voiceRoomNaming, voiceChatStore
- * (режим/лимит/одит, атомарни слотове, генерации, grace, reconcile),
+ * Гласов чат, Етап 2а (адаптиран в Етап 2б) — миграции 20261112_001 и
+ * 20261113_001, voiceChatFeatureFlag, voiceChatEligibility (пълна матрица),
+ * voiceRoomNaming, voiceChatStore (режим/лимит/одит, атомарни слотове,
+ * генерации, участия с право за говорене, reconcile),
  * voiceTableReleaseQueue и административното API. Само изолирани temp
  * SQLite бази с реалните миграции — никога production/dev базата.
  *
@@ -24,7 +25,7 @@ import {
   evaluateVoiceTableCreation,
   isVoiceSessionBindingCurrent,
   resolveRevocationRotation,
-  shouldRecordSpeakingGrant,
+  shouldPersistSpeakingEntitlement,
   toVoiceLiveKitPermissionProfile,
   type VoiceAccessDecision,
   type VoiceAccessInput,
@@ -79,6 +80,7 @@ const sourceServerRoot = resolve(
 )
 const sourceMigrationsDirectoryPath = join(sourceServerRoot, 'database', 'migrations')
 const VOICE_MIGRATION = '20261112_001_create_voice_chat.sql'
+const VOICE_MEMBERSHIP_MIGRATION = '20261113_001_voice_chat_memberships.sql'
 
 console.log('\ncheckVoiceChatStage2a')
 console.log(`Server root: ${sourceServerRoot}`)
@@ -145,8 +147,8 @@ function forceMode(store: VoiceChatStore, mode: VoiceChatMode): void {
 
 try {
   // ═══ [M] Миграция ═══════════════════════════════════════════════════════
-  await check('[M1] Миграцията създава 4-те таблици и индексите', () => {
-    for (const table of ['voice_chat_admin_changes', 'voice_tables', 'voice_room_generations', 'voice_speaking_grants']) {
+  await check('[M1] Миграциите създават 5-те таблици и индексите', () => {
+    for (const table of ['voice_chat_admin_changes', 'voice_tables', 'voice_room_generations', 'voice_speaking_grants', 'voice_table_memberships']) {
       assert(db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?;`).get(table) !== undefined, table)
     }
     for (const index of [
@@ -156,14 +158,17 @@ try {
       'idx_voice_room_generations_one_live',
       'idx_voice_room_generations_pending',
       'idx_voice_chat_admin_changes_setting_changed_at',
+      'idx_voice_table_memberships_one_active',
+      'idx_voice_table_memberships_active_table',
     ]) {
       assert(db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;`).get(index) !== undefined, index)
     }
     assert(db.prepare(`SELECT 1 FROM server_migrations WHERE filename = ?;`).get(VOICE_MIGRATION) !== undefined, 'ledger ред')
+    assert(db.prepare(`SELECT 1 FROM server_migrations WHERE filename = ?;`).get(VOICE_MEMBERSHIP_MIGRATION) !== undefined, 'ledger ред 2б')
   })
 
-  await check('[M2] Добавяща миграция: върху база с всички предишни миграции + данни; повторен старт я пропуска', async () => {
-    const root = await createTempServerRoot((name) => name !== VOICE_MIGRATION)
+  await check('[M2] Добавящи миграции (2а, после 2б): върху база с всички предишни миграции + данни; повторен старт ги пропуска', async () => {
+    const root = await createTempServerRoot((name) => name !== VOICE_MIGRATION && name !== VOICE_MEMBERSHIP_MIGRATION)
     const { databaseFilePath: path } = await ensureServerDatabaseReady({ serverRootOverride: root })
     const before = new sqliteModule.DatabaseSync(path, { open: true })
     const tablesBefore = Number((before.prepare(`SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table';`).get() as { c: number }).c)
@@ -182,6 +187,18 @@ try {
       assertEqual(Number((after.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length), 0, 'foreign_key_check')
     } finally {
       after.close()
+    }
+    // 2б: само добавяща миграция върху вече приложената 2а.
+    await cp(join(sourceMigrationsDirectoryPath, VOICE_MEMBERSHIP_MIGRATION), join(root, 'database', 'migrations', VOICE_MEMBERSHIP_MIGRATION))
+    const applied2b = await ensureServerDatabaseReady({ serverRootOverride: root })
+    assertEqual(applied2b.appliedCount, 1, 'само миграцията на 2б')
+    const after2b = new sqliteModule.DatabaseSync(path, { open: true })
+    try {
+      const tables2b = Number((after2b.prepare(`SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table';`).get() as { c: number }).c)
+      assertEqual(tables2b, tablesBefore + 5, 'точно 1 нова таблица в 2б')
+      assertEqual(Number((after2b.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length), 0, 'foreign_key_check 2б')
+    } finally {
+      after2b.close()
     }
   })
 
@@ -204,15 +221,20 @@ try {
     db.prepare(`DELETE FROM voice_tables WHERE voice_table_id IN (?, ?);`).run(a, b)
   })
 
-  await check('[M5] Изтрит профил: grace редовете CASCADE, одитът SET NULL (без следи от профила)', () => {
+  await check('[M5] Изтрит профил: участия и (наследени) grace редове CASCADE, одитът SET NULL; CHECK на участията', () => {
     const profileId = seedProfile('Erased')
     const tableId = randomUUID()
     db.prepare(`INSERT INTO voice_tables (voice_table_id, status, phase, created_at) VALUES (?, 'active', 'waiting', 'x');`).run(tableId)
     db.prepare(`INSERT INTO voice_speaking_grants (voice_table_id, match_seq, profile_id, granted_at) VALUES (?, 1, ?, 'x');`).run(tableId, profileId)
+    db.prepare(`INSERT INTO voice_table_memberships (membership_id, voice_table_id, profile_id, started_at, speaking_entitled_at) VALUES (?, ?, ?, 'x', 'x');`).run(randomUUID(), tableId, profileId)
+    assertThrows(() => db.prepare(`INSERT INTO voice_table_memberships (membership_id, voice_table_id, profile_id, started_at) VALUES (?, ?, ?, 'x');`).run(randomUUID(), tableId, profileId), 'UNIQUE', 'две активни участия')
+    assertThrows(() => db.prepare(`INSERT INTO voice_table_memberships (membership_id, voice_table_id, profile_id, started_at, ended_at) VALUES (?, ?, ?, 'x', 'y');`).run(randomUUID(), tableId, profileId), 'CHECK', 'край без причина')
+    assertThrows(() => db.prepare(`INSERT INTO voice_table_memberships (membership_id, voice_table_id, profile_id, started_at, ended_at, end_reason) VALUES (?, ?, ?, 'x', 'y', 'vip_expired');`).run(randomUUID(), tableId, profileId), 'CHECK', 'изтичане на VIP не е причина за край')
     const changeId = randomUUID()
     db.prepare(`INSERT INTO voice_chat_admin_changes (change_id, setting, new_value, previous_value, changed_by_profile_id, changed_at) VALUES (?, 'max_tables', '11', '10', ?, '1999-01-01T00:00:00.000Z');`).run(changeId, profileId)
     db.prepare(`DELETE FROM profiles WHERE profile_id = ?;`).run(profileId)
     assertEqual(Number((db.prepare(`SELECT COUNT(*) AS c FROM voice_speaking_grants WHERE profile_id = ?;`).get(profileId) as { c: number }).c), 0, 'grant')
+    assertEqual(Number((db.prepare(`SELECT COUNT(*) AS c FROM voice_table_memberships WHERE profile_id = ?;`).get(profileId) as { c: number }).c), 0, 'участие')
     assertEqual((db.prepare(`SELECT changed_by_profile_id AS p FROM voice_chat_admin_changes WHERE change_id = ?;`).get(changeId) as { p: string | null }).p, null, 'одит')
     db.prepare(`DELETE FROM voice_chat_admin_changes WHERE change_id = ?;`).run(changeId)
     db.prepare(`DELETE FROM voice_tables WHERE voice_table_id = ?;`).run(tableId)
@@ -279,7 +301,7 @@ try {
   const OTHER_TABLE_ID = '99999999-2222-4333-8444-555555555555'
   function accessInput(overrides: Partial<VoiceAccessInput> & { relation?: VoiceRelation; sameTable?: boolean; permanentlyLeft?: boolean; vip?: boolean; admin?: boolean; banned?: boolean } = {}): VoiceAccessInput {
     const table: VoiceTableFacts | null = overrides.table === undefined
-      ? { voiceTableId: TABLE_ID, status: 'active', phase: 'in_game', matchSeq: 1 }
+      ? { voiceTableId: TABLE_ID, status: 'active', phase: 'in_game' }
       : overrides.table
     return {
       mode: overrides.mode ?? { storedMode: 'public', emergencyStop: false },
@@ -292,7 +314,7 @@ try {
         permanentlyLeft: overrides.permanentlyLeft ?? false,
       },
       sessionBindingCurrent: overrides.sessionBindingCurrent ?? true,
-      hasSpeakingGrantForCurrentMatch: overrides.hasSpeakingGrantForCurrentMatch ?? false,
+      hasSpeakingEntitlement: overrides.hasSpeakingEntitlement ?? false,
     }
   }
   const denial = (decision: VoiceAccessDecision): string => (decision.canListen ? 'listen' : decision.denialCode)
@@ -308,24 +330,24 @@ try {
     assertEqual(denial(evaluateVoiceAccess(accessInput({ relation: 'none' }))), 'not_a_player', 'извън масата')
     assertEqual(denial(evaluateVoiceAccess(accessInput({ sameTable: false }))), 'wrong_table', 'друга маса (cross-room)')
     assertEqual(denial(evaluateVoiceAccess(accessInput({ requestedVoiceTableId: OTHER_TABLE_ID }))), 'table_not_found', 'заявка за чужд voiceTableId')
-    assertEqual(denial(evaluateVoiceAccess(accessInput({ permanentlyLeft: true, hasSpeakingGrantForCurrentMatch: true }))), 'permanently_left', 'напуснал (и с grace)')
-    assertEqual(denial(evaluateVoiceAccess(accessInput({ banned: true, hasSpeakingGrantForCurrentMatch: true }))), 'banned', 'баннат (и с grace)')
+    assertEqual(denial(evaluateVoiceAccess(accessInput({ permanentlyLeft: true, hasSpeakingEntitlement: true }))), 'permanently_left', 'напуснал (и с придобито право)')
+    assertEqual(denial(evaluateVoiceAccess(accessInput({ banned: true, hasSpeakingEntitlement: true }))), 'banned', 'баннат (и с придобито право)')
     assertEqual(denial(evaluateVoiceAccess(accessInput({ sessionBindingCurrent: false }))), 'invalid_session', 'невалидна игрова сесия')
     assertEqual(denial(evaluateVoiceAccess(accessInput({ mode: { storedMode: 'off', emergencyStop: false } }))), 'voice_off', 'режим OFF')
     assertEqual(denial(evaluateVoiceAccess(accessInput({ mode: { storedMode: 'public', emergencyStop: true } }))), 'voice_off', 'авариен стоп')
-    assertEqual(denial(evaluateVoiceAccess(accessInput({ table: { voiceTableId: TABLE_ID, status: 'released', phase: 'in_game', matchSeq: 1 } }))), 'table_released', 'освободена маса')
+    assertEqual(denial(evaluateVoiceAccess(accessInput({ table: { voiceTableId: TABLE_ID, status: 'released', phase: 'in_game' } }))), 'table_released', 'освободена маса')
     assertEqual(denial(evaluateVoiceAccess(accessInput({ table: null }))), 'table_not_found', 'липсваща маса')
-    const graced = evaluateVoiceAccess(accessInput({ vip: false, hasSpeakingGrantForCurrentMatch: true }))
-    assert(graced.canListen && graced.canSpeak && graced.speakBasis === 'match_grace', 'grace в текущия мач')
+    const entitled = evaluateVoiceAccess(accessInput({ vip: false, hasSpeakingEntitlement: true }))
+    assert(entitled.canListen && entitled.canSpeak && entitled.speakBasis === 'membership', 'изтекъл VIP, придобито право в участието')
     const adminNoVip = evaluateVoiceAccess(accessInput({ admin: true, vip: false }))
     assert(adminNoVip.canListen && !adminNoVip.canSpeak, 'admin играч без VIP — слуша, без bypass за говорене')
   })
 
-  await check('[E4] Пълна матрица на достъпа (3×2 режима × 4 отношения × маса × напуснал × бан × сесия × VIP × grace × admin × 3 статуса = 9216)', () => {
+  await check('[E4] Пълна матрица на достъпа (3×2 режима × 4 отношения × маса × напуснал × бан × сесия × VIP × право × admin × 3 статуса = 9216)', () => {
     let combos = 0
     const tableStates: Array<VoiceTableFacts | null> = [
-      { voiceTableId: TABLE_ID, status: 'active', phase: 'in_game', matchSeq: 3 },
-      { voiceTableId: TABLE_ID, status: 'released', phase: 'in_game', matchSeq: 3 },
+      { voiceTableId: TABLE_ID, status: 'active', phase: 'in_game' },
+      { voiceTableId: TABLE_ID, status: 'released', phase: 'in_game' },
       null,
     ]
     for (const storedMode of MODES) for (const emergencyStop of BOOLS)
@@ -335,7 +357,7 @@ try {
             combos += 1
             const input = accessInput({
               mode: { storedMode, emergencyStop }, relation, sameTable, permanentlyLeft, banned, vip, admin,
-              sessionBindingCurrent: session, hasSpeakingGrantForCurrentMatch: grant, table,
+              sessionBindingCurrent: session, hasSpeakingEntitlement: grant, table,
             })
             const decision = evaluateVoiceAccess(input)
             const effective = emergencyStop ? 'off' : storedMode
@@ -379,28 +401,32 @@ try {
     )
   })
 
-  await check('[E6] Grace се записва само при право от VIP; ротация само при издаден съответен токен', () => {
-    assert(shouldRecordSpeakingGrant(evaluateVoiceAccess(accessInput({ vip: true }))), 'VIP -> запис')
-    assert(!shouldRecordSpeakingGrant(evaluateVoiceAccess(accessInput({ vip: false, hasSpeakingGrantForCurrentMatch: true }))), 'grace не се самоудължава')
-    assert(!shouldRecordSpeakingGrant(evaluateVoiceAccess(accessInput({ vip: false }))), 'non-VIP')
+  await check('[E6] Право в участието: записва се само от VIP и само веднъж; ротация само при загубено слушане с токен за живата генерация', () => {
+    assert(shouldPersistSpeakingEntitlement(evaluateVoiceAccess(accessInput({ vip: true })), false), 'VIP без записано право -> запис')
+    assert(!shouldPersistSpeakingEntitlement(evaluateVoiceAccess(accessInput({ vip: true, hasSpeakingEntitlement: true })), true), 'вече записано')
+    assert(!shouldPersistSpeakingEntitlement(evaluateVoiceAccess(accessInput({ vip: false, hasSpeakingEntitlement: true })), true), 'правото не се "самоудължава"')
+    assert(!shouldPersistSpeakingEntitlement(evaluateVoiceAccess(accessInput({ vip: false })), false), 'non-VIP')
     const listenOnly = evaluateVoiceAccess(accessInput({ vip: false }))
     const none = evaluateVoiceAccess(accessInput({ relation: 'none' }))
     const full = evaluateVoiceAccess(accessInput({ vip: true }))
-    assertEqual(resolveRevocationRotation({ wasIssuedToken: true, wasPublishCapable: true, decision: listenOnly }), 'speak_revoked', 'загубено говорене')
-    assertEqual(resolveRevocationRotation({ wasIssuedToken: true, wasPublishCapable: false, decision: listenOnly }), null, 'никога не е говорил')
-    assertEqual(resolveRevocationRotation({ wasIssuedToken: true, wasPublishCapable: false, decision: none }), 'listen_revoked', 'загубено слушане')
-    assertEqual(resolveRevocationRotation({ wasIssuedToken: false, wasPublishCapable: false, decision: none }), null, 'без токен')
-    assertEqual(resolveRevocationRotation({ wasIssuedToken: true, wasPublishCapable: true, decision: full }), null, 'без загуба')
+    assertEqual(resolveRevocationRotation({ wasIssuedTokenForLiveGeneration: true, decision: listenOnly }), null, 'изтекъл VIP -> без ротация')
+    assertEqual(resolveRevocationRotation({ wasIssuedTokenForLiveGeneration: true, decision: none }), 'listen_revoked', 'загубено слушане')
+    assertEqual(resolveRevocationRotation({ wasIssuedTokenForLiveGeneration: false, decision: none }), null, 'без токен за живата генерация')
+    assertEqual(resolveRevocationRotation({ wasIssuedTokenForLiveGeneration: true, decision: full }), null, 'без загуба')
   })
 
-  await check('[E7] Session binding: само текущият clientInstanceId на профила за масата', () => {
-    const binding: VoiceSessionBinding = { profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new', gameConnectionId: 'c2', bindingEpoch: 2, boundAt: 1 }
-    assert(isVoiceSessionBindingCurrent({ profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new' }, binding), 'текущ')
-    assert(!isVoiceSessionBindingCurrent({ profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-old' }, binding), 'изместен таб')
-    assert(!isVoiceSessionBindingCurrent({ profileId: 'p2', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new' }, binding), 'друг профил')
-    assert(!isVoiceSessionBindingCurrent({ profileId: 'p1', voiceTableId: OTHER_TABLE_ID, clientInstanceId: 'tab-new' }, binding), 'друга маса')
-    assert(!isVoiceSessionBindingCurrent({ profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: '' }, { ...binding, clientInstanceId: '' }), 'празен')
-    assert(!isVoiceSessionBindingCurrent({ profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new' }, null), 'без binding')
+  await check('[E7] Session binding: текущият clientInstanceId И връзката, която държи мястото', () => {
+    const binding: VoiceSessionBinding = { profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new', gameConnectionId: 'c2', bindingEpoch: 2 }
+    const claim = { profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new' }
+    assert(isVoiceSessionBindingCurrent(claim, binding, 'c2'), 'текущ')
+    assert(!isVoiceSessionBindingCurrent({ ...claim, clientInstanceId: 'tab-old' }, binding, 'c2'), 'изместен таб')
+    assert(!isVoiceSessionBindingCurrent({ ...claim, profileId: 'p2' }, binding, 'c2'), 'друг профил')
+    assert(!isVoiceSessionBindingCurrent({ ...claim, voiceTableId: OTHER_TABLE_ID }, binding, 'c2'), 'друга маса')
+    assert(!isVoiceSessionBindingCurrent({ ...claim, clientInstanceId: '' }, { ...binding, clientInstanceId: '' }, 'c2'), 'празен')
+    assert(!isVoiceSessionBindingCurrent(claim, null, 'c2'), 'без binding')
+    assert(!isVoiceSessionBindingCurrent(claim, binding, 'c3'), 'мястото е поето от друга връзка')
+    assert(!isVoiceSessionBindingCurrent(claim, binding, null), 'няма жива seat връзка')
+    assert(!isVoiceSessionBindingCurrent(claim, { ...binding, gameConnectionId: null }, null), 'затворена връзка')
   })
 
   // ═══ [N] Имена на стаите ════════════════════════════════════════════════
@@ -549,12 +575,13 @@ try {
     const liveB = store.allocateGeneration(b.table.voiceTableId, 'boot_rotation')
     if (!liveA.ok || !liveB.ok) throw new Error('генерации')
     const profile = seedProfileIn(store, 'Speaker')
-    store.recordSpeakingGrant(b.table.voiceTableId, 1, profile)
+    const membershipId = randomUUID()
+    assert(store.startMembership({ membershipId, voiceTableId: b.table.voiceTableId, profileId: profile, entitled: true }).ok, 'участие')
 
     const toAdminOnly = store.setMode('admin_only', { profileId: admin }, at(2))
     assert(toAdminOnly.ok && toAdminOnly.changed && toAdminOnly.releasedVoiceTableIds.length === 0, 'admin_only')
     assert(store.getVoiceTable(a.table.voiceTableId)?.status === 'active' && store.isLiveRoomName(liveA.roomName), 'масите продължават')
-    assert(store.hasSpeakingGrant(b.table.voiceTableId, 1, profile), 'правата се запазват')
+    assert(store.getActiveMembership(b.table.voiceTableId, profile)?.speakingEntitledAt !== null, 'правата се запазват')
 
     const off = store.setMode('off', { profileId: admin }, at(3))
     assert(off.ok && off.changed && off.releasedVoiceTableIds.length === 2 && off.retiredRoomNames.length === 2, JSON.stringify(off))
@@ -563,7 +590,8 @@ try {
     assertEqual(store.getGeneration(liveA.roomName)?.status, 'delete_pending', 'стая A чака DeleteRoom')
     assertEqual(store.getGeneration(liveB.roomName)?.retireReason, 'mode_off', 'причина')
     assertEqual(store.countPendingRoomDeletions(), 2, 'durable опашка')
-    assert(!store.hasSpeakingGrant(b.table.voiceTableId, 1, profile), 'grace изчистен')
+    assertEqual(store.getActiveMembership(b.table.voiceTableId, profile), null, 'участието е приключено')
+    assertEqual(store.getMembership(membershipId)?.endReason, 'table_released', 'причина')
     const unchanged = store.setMode('off', { profileId: admin }, at(4))
     assert(unchanged.ok && !unchanged.changed, 'същият режим не се одитира')
 
@@ -595,16 +623,17 @@ try {
     assertEqual(store.listAdminChanges().filter((change) => change.setting === 'max_tables').length, 2, 'два записа')
   })
 
-  await check('[S9] Създателят губи VIP: масата остава гласова; той слуша, говори само с grace за текущия мач', async () => {
+  await check('[S9] Създателят губи VIP: масата остава гласова и той продължава да говори (право от сядането)', async () => {
     const { store } = await freshDatabase()
     forceMode(store, 'public')
     const creator = seedProfileIn(store, 'Creator')
     const reserved = store.reserveVoiceTable({ emergencyStop: false, requesterIsFullAdmin: false })
     if (!reserved.ok) throw new Error('резервация')
     const id = reserved.table.voiceTableId
+    assert(store.startMembership({ membershipId: randomUUID(), voiceTableId: id, profileId: creator, entitled: true }).ok, 'участие на създателя')
     store.markInGame(id, 'server-c')
     const table = store.getVoiceTable(id)!
-    const facts: VoiceTableFacts = { voiceTableId: id, status: table.status, phase: table.phase, matchSeq: table.matchSeq }
+    const facts: VoiceTableFacts = { voiceTableId: id, status: table.status, phase: table.phase }
     const asCreator = (vip: boolean): VoiceAccessDecision => evaluateVoiceAccess({
       mode: { storedMode: 'public', emergencyStop: false },
       requester: { profileId: creator, isFullAdmin: false, isVipActive: vip, isBanned: false },
@@ -612,46 +641,52 @@ try {
       table: facts,
       membership: { relation: 'player', seatedVoiceTableId: id, permanentlyLeft: false },
       sessionBindingCurrent: true,
-      hasSpeakingGrantForCurrentMatch: store.hasSpeakingGrant(id, facts.matchSeq, creator),
+      hasSpeakingEntitlement: store.getActiveMembership(id, creator)?.speakingEntitledAt != null,
     })
     const lostVip = asCreator(false)
     assert(store.getVoiceTable(id)?.status === 'active', 'масата остава гласова')
-    assert(lostVip.canListen && !lostVip.canSpeak, 'слуша без grace')
-    store.recordSpeakingGrant(id, 1, creator)
-    const withGrace = asCreator(false)
-    assert(withGrace.canSpeak && withGrace.speakBasis === 'match_grace', 'grace')
+    assert(lostVip.canListen && lostVip.canSpeak && lostVip.speakBasis === 'membership', 'говори с правото от сядането')
   })
 
-  await check('[S10] Match-scoped grace: преживява рестарт; "Преиграй" (+1) го прекратява; идемпотентно; не важи за освободена маса', async () => {
+  await check('[S10] Право в участието: преживява старт, рестарт и повторни игри; ново сядане = ново участие без правото; освобождаване го прекратява', async () => {
     const { path, store } = await freshDatabase()
     forceMode(store, 'public')
-    const player = seedProfileIn(store, 'Grace')
+    const player = seedProfileIn(store, 'Member')
     const reserved = store.reserveVoiceTable({ emergencyStop: false, requesterIsFullAdmin: false })
     if (!reserved.ok) throw new Error('резервация')
     const id = reserved.table.voiceTableId
-    const earlyAdvance = store.advanceMatchSeq(id, 1)
-    assert(!earlyAdvance.ok && earlyAdvance.code === 'not_in_game', 'чакалнята не е граница')
-    const first = store.recordSpeakingGrant(id, 1, player, at(1))
-    assert(first.ok && first.created, 'запис в сегмент 1 (чакалня + мач 1)')
-    const duplicate = store.recordSpeakingGrant(id, 1, player, at(2))
-    assert(duplicate.ok && !duplicate.created, 'идемпотентно')
+    const first = randomUUID()
+    const started = store.startMembership({ membershipId: first, voiceTableId: id, profileId: player, entitled: false, now: at(1) })
+    assert(started.ok && started.membership.speakingEntitledAt === null && started.supersededMembershipId === null, 'non-VIP при сядането')
+    const entitled = store.entitleMembership(first, at(2))
+    assert(entitled.ok && entitled.entitled, 'придобит VIP по време на участието')
+    const again = store.entitleMembership(first, at(3))
+    assert(again.ok && !again.entitled, 'идемпотентно (не се удължава)')
+    assertEqual(store.getMembership(first)?.speakingEntitledAt, at(2).toISOString(), 'времето на придобиване се пази')
     store.markInGame(id, 'server-g')
-    assert(store.hasSpeakingGrant(id, 1, player), 'старт на играта не прекъсва grace')
+    assert(store.getActiveMembership(id, player)?.membershipId === first, 'старт на играта не прекъсва участието')
     const restarted = await openStore(path)
-    assert(restarted.hasSpeakingGrant(id, 1, player), 'след рестарт (нова връзка)')
-    const advanced = restarted.advanceMatchSeq(id, 1)
-    assert(advanced.ok && advanced.advanced && advanced.matchSeq === 2, JSON.stringify(advanced))
-    const duplicateAdvance = store.advanceMatchSeq(id, 1)
-    assert(duplicateAdvance.ok && !duplicateAdvance.advanced && duplicateAdvance.matchSeq === 2, 'дублиран replay')
-    assert(!store.hasSpeakingGrant(id, 1, player) && !store.hasSpeakingGrant(id, 2, player), 'нов мач -> без grace')
-    assertEqual(store.listSpeakingGrants(id).length, 0, 'старите редове са изчистени')
-    const stale = store.recordSpeakingGrant(id, 1, player)
-    assert(!stale.ok && stale.code === 'stale_match', 'стар сегмент')
-    assert(store.recordSpeakingGrant(id, 2, player).ok && store.hasSpeakingGrant(id, 2, player), 'нов запис за мач 2')
+    assert(restarted.getActiveMembership(id, player)?.speakingEntitledAt !== null, 'след рестарт (нова връзка)')
+    assertEqual(restarted.listActiveMemberships().filter((m) => m.voiceTableId === id).length, 1, 'зареждане при старт')
+    const duplicateId = store.startMembership({ membershipId: first, voiceTableId: id, profileId: player, entitled: false })
+    assert(!duplicateId.ok && duplicateId.code === 'duplicate_id', 'повторно ползване на id')
+    const ended = store.endMembership(first, 'left_waiting_room', at(4))
+    assert(ended.ok && ended.ended, 'напускане')
+    assert(store.endMembership(first, 'kicked', at(5)).ok && store.getMembership(first)?.endReason === 'left_waiting_room', 'идемпотентно, първата причина остава')
+    const notActive = store.entitleMembership(first)
+    assert(!notActive.ok && notActive.code === 'ended', 'приключено участие не получава право')
+    const second = randomUUID()
+    const rejoin = store.startMembership({ membershipId: second, voiceTableId: id, profileId: player, entitled: false, now: at(6) })
+    assert(rejoin.ok && rejoin.membership.speakingEntitledAt === null, 'ново сядане без VIP -> без старото право')
+    const third = randomUUID()
+    const superseding = store.startMembership({ membershipId: third, voiceTableId: id, profileId: player, entitled: true, now: at(7) })
+    assert(superseding.ok && superseding.supersededMembershipId === second, 'ново сядане приключва предишното')
+    assertEqual(store.getMembership(second)?.endReason, 'superseded', 'причина superseded')
     store.releaseVoiceTable(id, 'server_room_removed')
-    assert(!store.hasSpeakingGrant(id, 2, player), 'освободена маса')
-    const afterRelease = store.recordSpeakingGrant(id, 2, player)
-    assert(!afterRelease.ok && afterRelease.code === 'not_active', 'без запис след release')
+    assertEqual(store.getActiveMembership(id, player), null, 'освободена маса')
+    assertEqual(store.getMembership(third)?.endReason, 'table_released', 'причина при освобождаване')
+    const afterRelease = store.startMembership({ membershipId: randomUUID(), voiceTableId: id, profileId: player, entitled: true })
+    assert(!afterRelease.ok && afterRelease.code === 'not_active', 'без участие след release')
   })
 
   await check('[S11] Генерации: една жива; оттеглената влиза в durable DeleteRoom опашка; неуспех/успех; име никога не се връща', async () => {
@@ -689,7 +724,7 @@ try {
     assertEqual(store.countActiveVoiceTables(), 0, 'слотът е освободен независимо от стаите')
   })
 
-  await check('[S12] Рестарт: чакалните и изчезналите стаи се освобождават; възстановените пазят слота и grace, живата стая се ротира', async () => {
+  await check('[S12] Рестарт: чакалните и изчезналите стаи се освобождават; възстановените пазят слота и участията на активните играчи; живата стая се ротира', async () => {
     const { store } = await freshDatabase()
     forceMode(store, 'public')
     const player = seedProfileIn(store, 'Boot')
@@ -705,8 +740,16 @@ try {
     const liveRestored = store.allocateGeneration(restored, 'listen_revoked')
     const liveMissing = store.allocateGeneration(missing, 'listen_revoked')
     if (!liveRestored.ok || !liveMissing.ok) throw new Error('генерации')
-    store.recordSpeakingGrant(restored, 1, player)
-    const reconciled = store.reconcileOnBoot({ restoredServerRoomIds: new Set(['server-restored', 'unrelated']), now: at(100) })
+    const leaver = seedProfileIn(store, 'Leaver')
+    const playerMembership = randomUUID()
+    const leaverMembership = randomUUID()
+    store.startMembership({ membershipId: playerMembership, voiceTableId: restored, profileId: player, entitled: true })
+    store.startMembership({ membershipId: leaverMembership, voiceTableId: restored, profileId: leaver, entitled: true })
+    const reconciled = store.reconcileOnBoot({
+      restoredServerRoomIds: new Set(['server-restored', 'unrelated']),
+      restoredActiveProfileIds: new Map([['server-restored', new Set([player])]]),
+      now: at(100),
+    })
     assert(reconciled.ok, 'reconcile')
     if (!reconciled.ok) return
     assertEqual(reconciled.releasedVoiceTableIds.sort().join(','), [waiting, missing].sort().join(','), 'освободени')
@@ -716,7 +759,17 @@ try {
     assertEqual(store.countActiveVoiceTables(), 1, 'слотът на възстановената маса се пази')
     assert(!store.isLiveRoomName(liveRestored.roomName) && store.getGeneration(liveRestored.roomName)?.retireReason === 'boot_rotation', 'ротация')
     assertEqual(store.getLiveGeneration(restored), null, 'нова стая се създава lazy')
-    assert(store.hasSpeakingGrant(restored, 1, player), 'grace преживява рестарт')
+    assert(store.getActiveMembership(restored, player)?.speakingEntitledAt !== null, 'правото преживява рестарт')
+    assertEqual(store.getMembership(leaverMembership)?.endReason, 'boot_not_restored', 'окончателно напусналият губи участието')
+    assertEqual(reconciled.endedMembershipIds.join(','), leaverMembership, 'отчет')
+    const emergency = await freshDatabase()
+    forceMode(emergency.store, 'public')
+    const e1 = emergency.store.reserveVoiceTable({ emergencyStop: false, requesterIsFullAdmin: false })
+    if (!e1.ok) throw new Error('резервация')
+    emergency.store.markInGame(e1.table.voiceTableId, 'server-e')
+    const releasedAll = emergency.store.reconcileOnBoot({ restoredServerRoomIds: new Set(['server-e']), releaseAll: true })
+    assert(releasedAll.ok && releasedAll.releasedVoiceTableIds.length === 1, 'авариен стоп при старт')
+    assertEqual(emergency.store.getVoiceTable(e1.table.voiceTableId)?.releaseReason, 'mode_off', 'причина при авариен стоп')
     const next = store.allocateGeneration(restored, 'boot_rotation')
     assert(next.ok && next.generation === 2, 'следващата генерация е монотонна')
   })
@@ -969,20 +1022,20 @@ try {
   }
 
   // ═══ [W] Свързване в index.ts (статично) ════════════════════════════════
-  await check('[W1] index.ts: store + admin handler + router + close; без игрови куки и без LiveKit в Етап 2а', async () => {
+  await check('[W1] LiveKit SDK само в voiceLiveKitApi.ts/voiceTokenIssuer.ts; index.ts без SDK и без директни мрежови заявки към LiveKit', async () => {
     const source = await readFile(join(sourceServerRoot, 'src', 'index.ts'), 'utf8')
     assert(source.includes('await createVoiceChatStore(databaseBootstrap.databaseFilePath)'), 'store')
-    assert(/if \(await handleAdminVoiceChatRequest\(req, res, requestUrl\)\) \{/.test(source), 'router')
+    assert(/if \(await handleAdminVoiceChatRequest\(req, res, requestUrl\)\) \{/.test(source), 'admin router')
     assert(source.includes(`closeStore('voiceChatStore', () => voiceChatStore.close())`), 'close')
-    const voiceUsages = (source.match(/voiceChatStore\.[a-zA-Z]+/g) ?? []).filter((usage) => usage !== 'voiceChatStore.js')
-    assertEqual([...new Set(voiceUsages)].join(','), 'voiceChatStore.close', 'index.ts не вика игрови voice операции')
-    for (const forbidden of ['livekit-server-sdk', 'livekit-client', 'reserveVoiceTable', 'AccessToken']) {
+    for (const forbidden of ["from 'livekit-server-sdk'", 'livekit-client', 'AccessToken', 'RoomServiceClient']) {
       assert(!source.includes(forbidden), forbidden)
     }
     const voiceDir = join(sourceServerRoot, 'src', 'voice')
     for (const file of await readdir(voiceDir)) {
       const text = await readFile(join(voiceDir, file), 'utf8')
-      assert(!/from 'livekit|fetch\(|https?:\/\/voice/.test(text), `${file}: без LiveKit/мрежа`)
+      const importsSdk = /from 'livekit-server-sdk'/.test(text)
+      assertEqual(importsSdk, file === 'voiceLiveKitApi.ts' || file === 'voiceTokenIssuer.ts', `${file}: SDK`)
+      assert(!/\bfetch\(|livekit-client/.test(text), `${file}: без директни мрежови заявки/клиентски SDK`)
     }
   })
 } finally {

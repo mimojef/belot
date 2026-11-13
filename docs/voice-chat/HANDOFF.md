@@ -12,8 +12,9 @@
 
 **Текущо състояние:**
 - Етап 1 (анализ) е завършен.
-- Етап 2а (backend основа) е завършен, одобрен и commit-нат в този branch.
-- **Етап 2б НЕ е започнат.** Започва се само след изрично одобрение от собственика.
+- Етап 2а (backend основа) е завършен, одобрен и commit-нат (`f19e3d3`).
+- **Етап 2б (LiveKit backend) е имплементиран и чака преглед.** Промените са в working tree, **без commit**. Детайли: раздели 8А–8Б.
+- **Етап 3 НЕ е започнат.** Започва се само след изрично одобрение от собственика.
 - Нищо не е внедрено в production. Режимът на гласовия чат е **„Изключен“** по подразбиране.
 
 **Приоритет на източниците при противоречие:**
@@ -40,7 +41,8 @@
 
 - Базов HEAD преди гласовия чат: `6b3b9cb` („fix(lobby): animate mobile carousel arrow navigation“).
 - Новият мобилен дизайн е изцяло влят в `v2-clean-architecture` (merge `f61954a`, 2026-11-04) и е в production.
-- Commit на Етап 2а: `feat(voice): add voice chat backend foundation`. Съдържа само backend основата и този документ. Няма LiveKit SDK, мрежови заявки към LiveKit, JWT или frontend.
+- Commit на Етап 2а: `f19e3d3` „feat(voice): add voice chat backend foundation“. Съдържа само backend основата и този документ.
+- Етап 2б (некомитнат): официален `livekit-server-sdk@2.19.2` (pin), LiveKit API клиент, токени, участия с право за говорене, session binding, ротация, reconciliation, игрови куки и тестове. **Няма frontend и UI.**
 
 ---
 
@@ -127,26 +129,20 @@
   - **изключения** (показва се пак): връщане в чакалнята след „Изчакай в лоби“, връщане от магазина, изрична заявка за повторно включване.
 - **Нито един гласов popup не се появява модално по време на собствения ход.** Не блокирай картите, обявяването или таймера. Предложението изчаква или остава достъпно през гласовия бутон.
 
-### 2.6 Придобиване и изтичане на VIP
-- **Придобит VIP:**
-  - играчът получава право да говори и не напуска масата;
-  - микрофонът не се включва автоматично.
-- При натискане на заключения микрофон:
-  - правото се проверява от **backend**, със съществуващия VIP източник;
-  - при активен VIP следва безопасно повишаване на LiveKit правата;
-  - при липсващ VIP се показва VIP информация.
-- **Изтекъл VIP по време на мач:**
-  - който вече е имал право да говори в текущия мач, говори **до края му**, без прекъсване в средата;
-  - при **„Преиграй“** VIP се проверява отново;
-  - без VIP играчът продължава да слуша, губи говоренето и микрофонът му се спира;
-  - стари токени с publish право **не трябва** да възстановяват правото.
-- Без неопределено удължаване на правото.
-- Правото да завърши мача с глас трябва да преживее:
-  - временен reconnect;
-  - ротация на стаята;
-  - рестарт на backend, ако мачът е възстановен.
-- Затова правото е **persistent**, обвързано с конкретния мач и профил. Не е втори VIP статус.
-- **Банът и окончателното напускане печелят** над всеки grace период.
+### 2.6 Право за говорене — обвързано с участието (окончателно, 2026-11-13)
+**Заменя** match-scoped grace от Етап 2а. Правото за говорене важи за **целия непрекъснат период на участие** на конкретния играч в конкретната частна маса.
+- **Влиза с активен VIP** → говори в чакалнята, в започналия мач и във всички повторни игри. Правото се запазва при:
+  - изтичане на VIP;
+  - временен disconnect, refresh, ротация на стаята;
+  - рестарт на backend, ако игровата маса е възстановена;
+  - „Изчакай в лоби“ и връщане в чакалнята;
+  - напускане само на гласовия чат.
+- **Придобит VIP по време на участието** → същото право след авторитетна backend проверка (`POST /api/voice/speak-access`). Микрофонът **не** се включва автоматично.
+- **Правото се прекратява при:** окончателно напускане на игровата маса, освобождаване на мястото, изгонване, бан, разпадане на масата, прекратяване на гласовата функционалност.
+- Напуснал и влязъл отново без VIP → **само слуша** (ново участие без старото право).
+- **„Преиграй“ не проверява VIP** с цел отнемане. **Без ротация** заради изтичане на VIP.
+- Обвързано е с конкретното участие (`membership_id`), не само с `profileId`, `voiceTableId` или `match_seq`. Пази се в базата (`voice_table_memberships`) и преживява рестарт. Не е втори VIP статус.
+- **Банът и окончателното напускане печелят** над придобитото право.
 
 ### 2.7 Reconnect и lifecycle
 - **Одобрено:** постоянен `voiceTableId`, който преминава от `PrivateRoom` към `ServerRoom`.
@@ -163,9 +159,9 @@
   - гласът може да продължи **до 120 s**;
   - ако връзката не се възстанови дотогава, гласовият достъп се прекратява;
   - **това е продуктово правило със server-side прилагане**, не frontend таймер.
-- Прилагането на 120-секундния срок трябва да е изяснено за: недостъпен Pika backend, недостъпен LiveKit API, частично мрежово прекъсване, замръзнал мобилен браузър, backend restart.
-  - Ако за гаранция е нужен voice-side watchdog или lease, се представя конкретно решение.
-  - Webhook `participant_joined` **не е** еквивалент на watchdog.
+- **Voice-side watchdog ОТПАДА** (решение на собственика, 2026-11-13). Без допълнителни процеси, Redis, webhooks или нова инфраструктура.
+- Остават: сървърният 120 s таймер, клиентски защитен таймер (Етап 3), прекратяване при напускане, ротация при отнемане на права, durable DeleteRoom опашка, reconciliation и почистване при старт.
+- **Приет остатъчен риск (НЕ е решен):** при пълна недостъпност на игровия backend или на управляващата връзка Pika → LiveKit API не може да се гарантира прекратяване на вече активен разговор точно след 120 s. Затваряне на браузъра или пълно затваряне на PWA прекратява аудиовръзката независимо от backend-а.
 - **Два таба или две устройства:**
   - ползва се съществуващата логика за валидна игрова сесия;
   - правилата за `session_in_game` и `session_displaced` **не се променят**;
@@ -197,9 +193,9 @@
   - старата генерация се маркира за прекратяване и токени се издават само за текущата;
   - за старата стая се праща `DeleteRoom`;
   - оттеглено име **никога** не се създава отново.
-- **Кога има ротация:** при загубено право за слушане или говорене, ако са издадени съответните токени. При обикновено присъединяване ротация няма.
+- **Кога има ротация:** при край на участието (напускане, изгонване, окончателно напускане, бан) или при изместена/сменена страница (refresh, друго устройство), **само ако** на тази сесия е издаден токен за текущата жива генерация. Без ротация при: обикновено присъединяване, изтичане на VIP, „Преиграй“, напускане на екрана, изтекъл lease, 120 s таймер (там — отнемане на правата + RemoveParticipant).
 
-### 2.10 Критични технически корекции (трябва да се решат в Етап 2б)
+### 2.10 Критични технически корекции (решени в Етап 2б — виж 8А)
 - **A. Async race при издаване на токен.** След всяка асинхронна операция и непосредствено преди подписа на JWT се прави повторна авторитетна проверка (напускане, изгонване, бан, displacement, ротация, изключване, загуба на VIP). При сменена генерация или загубено право токен не се връща.
 - **B. Забавен CreateRoom.** Timeout не доказва, че стаята не е създадена. Оттеглено име не трябва да остане достъпно заради забавена операция. Нужен е reconciliation.
 - **C. Ротация при network partition.** Не приемай, че всички честни клиенти са получили WS сигнала. Не твърди, че старата стая съдържа само отпадналия. Fail-closed решение с честно описание на гаранциите.
@@ -382,6 +378,28 @@ room:
   - Node Exporter на `127.0.0.1:9100/metrics`;
   - sysstat с едноминутно събиране.
   - Prometheus endpoints **не са публични**. Централен Prometheus или Grafana няма.
+- **Потвърдени слушащи портове** (read-only проверка на собственика, 2026-11-13):
+
+| Адрес | Услуга | Публично |
+|---|---|---|
+| `185.203.119.211:443` | Caddy (WSS/HTTPS + TURN/TLS) | да |
+| `185.203.119.211:3478/udp` | TURN/UDP | да |
+| `185.203.119.211:5349/tcp` | TURN без TLS (зад Caddy) | **не** |
+| `*:7881/tcp` | ICE/TCP | да |
+| `50000–60000/udp` | ICE/UDP | да |
+| `127.0.0.1:7880` | LiveKit API (зад Caddy) | **не** |
+| `127.0.0.1:6789` | LiveKit metrics | **не** |
+| `127.0.0.1:9100` | Node Exporter | **не** |
+
+  - UFW е активен. SSH е през `185.141.61.49`; Nginx на Kandido.bg остава на стария IP.
+  - Контейнери: `lk-server` (LiveKit v1.13.11) и `lk-caddy` (Caddy L4 v2.11.3), и двата работят.
+
+### 4.1 Потвърдени метрики (за бъдещия админ dashboard — Етап 6)
+Реално налични на гласовия VPS (не се измислят други имена):
+- **LiveKit:** `livekit_room_total`, `livekit_participant_total`, `livekit_track_published_total`, `livekit_track_subscribed_total`, `livekit_rtt_ms`, `livekit_jitter_us`, `livekit_packet_loss_percent`, `livekit_packet_out_of_order_percent`, `livekit_quality_rating`, `livekit_quality_score`, `livekit_session_join_latency_ms`, `livekit_packet_bytes`, `livekit_packet_total`, `livekit_forward_latency_ns`, `livekit_node_twirp_request_latency_ms`, `livekit_node_twirp_request_status`, `livekit_participant_join_total`, `livekit_room_duration_seconds`.
+- **Node Exporter:** `node_cpu_seconds_total{cpu="0..3",mode="steal"}` — **натрупани секунди, не проценти**. Процентът се изчислява като разлика между две четения / (интервал × брой ядра).
+- Пътят на метриките до игровия backend остава нерешен (раздел 9). Без публичен Prometheus.
+- В Етап 2б `GET /api/admin/voice-chat` вече връща и `runtime` (breaker, опашки, активни сесии, блокирани маси, броячи) — технически данни от Pika процеса, без тайни. Dashboard UI не е направен.
 - **Ресурси на контейнерите:**
   - LiveKit: 3 GiB RAM лимит, `GOMEMLIMIT` 2500 MiB, четирите vCPU без CPU quota;
   - Caddy: 256 MiB RAM лимит.
@@ -473,7 +491,7 @@ room:
   - displacement и бан;
   - boot.
 - **LiveKit не участва в създаването на маса.** `CreateRoom` се вика lazy, при първото искане на токен.
-- **Identity:** предложено е `p_<profileId>`, без име и metadata. В 2б се допълва със session-bound компонент (виж 10.D).
+- **Identity (окончателно в 2б):** `p_<profileId>_<bindingEpoch>`, без име, metadata и attributes. Епохата расте при всяка нова страница на профила за масата.
 - **Устойчивост на LiveKit API клиента (предложени стойности):**
   - timeout 3 s и най-много 4 паралелни заявки;
   - ограничена опашка за обикновените операции;
@@ -481,7 +499,7 @@ room:
   - circuit breaker: 5 поредни грешки → отворен за 30 s → half-open.
   - Отнемането на права и DeleteRoom имат **приоритет** и живеят в durable опашка в базата, която **никога не губи** задача.
 - Нищо от това не се изпълнява в game worker-ите и никога не се `await`-ва в игрови WS handler.
-- **Проверка в 2б:** дали `RoomServiceClient` от `livekit-server-sdk` поддържа timeout и abort за всяка заявка. Ако не, тънък fetch клиент към Twirp endpoint-ите.
+- **Проверено в 2б:** `RoomServiceClient` от `livekit-server-sdk@2.19.2` поддържа `requestTimeout` (секунди → `AbortSignal.timeout` за всяка заявка, вкл. четенето на тялото). Регионалният failover е само за `*.livekit.cloud` и е изрично изключен (`failover:false`). Ползва се официалният клиент, без собствен fetch.
 
 ### 6.3 Frontend архитектура (за Етап 3)
 Модул `src/app/voice/`:
@@ -585,6 +603,8 @@ connected ─"Напусни гласовия чат"─► idle            (м�
 ## 7. Изпълнено в Етап 2а (backend основа)
 
 **Не включва:** LiveKit заявки, SDK, JWT, frontend, игрови куки.
+
+> **Променено в Етап 2б:** match-scoped grace (`voice_speaking_grants`, `match_seq`, `advanceMatchSeq`, `recordSpeakingGrant`/`hasSpeakingGrant`, basis `match_grace`) е **премахнат от кода** и заменен с участия (`voice_table_memberships`, раздел 8А). Таблицата `voice_speaking_grants` и колоната `match_seq` остават в приложената миграция, но не се четат и не се пишат. Описанието по-долу е историческо там, където говори за grace.
 
 ### 7.1 Нови файлове
 | Файл | Роля |
@@ -725,35 +745,147 @@ node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit
 
 ---
 
-## 9. Оставащи технически въпроси
+## 8А. Изпълнено в Етап 2б (LiveKit backend) — чака преглед, без commit
 
-1. **Подписване на JWT.** `toJwt()` в `livekit-server-sdk` е асинхронен: дава `await` между последната проверка и подписа.
-   - Предложение: собствен синхронен HS256 signer + тест за еквивалентност със SDK-то.
-   - Инсталирането на SDK-тата изисква одобрение. Версии към 2026-11-12: `livekit-client` **2.24.0**, `livekit-server-sdk` **2.19.3** (node ≥19; Node е v24).
-2. **Voice-side watchdog** на гласовия VPS. Без него 120-секундното правило не е гарантирано при пълно мрежово прекъсване (виж 10.H). Нова инфраструктура, изисква одобрение.
-3. **LiveKit webhooks** (промяна в LiveKit конфигурацията). Препоръка: не за MVP.
-4. **Сегмент 1 = чакалнята + мач 1** (7.3). Чака потвърждение.
-5. **Refresh на страницата** създава нова сесия (`clientInstanceId`). Ако старата страница е имала токен, следва ротация и кратко прекъсване (~1–2 s) за всички на масата. Приемливо ли е?
-6. **Изтичане на слот при празна чакалня:** `privateRoomsStore.leaveRoom` трие чакалнята при излизане на последния човек **без** да вика `onRoomClosed` или `onRoomExpired`. В 2б трябва изрична кука.
-7. **`busy_timeout` 5000 ms** при останалите store-ове е съществуващ риск за блокиране на event loop-а (извън гласовия чат).
-8. **Production PM2 топологията** е непотвърдена. Лимитът е атомарен и при няколко процеса, но гласовото in-memory състояние в 2б предполага един процес с игровото състояние.
-9. **`stopMicTrackOnMute`:** поведение на Android и iPhone (решава се в Етап 3 и 7). Препоръка: `true` на мобилни.
-10. **Механизъм, по който сървърът знае, че играчът е напуснал екрана** (лоби, магазин, „Към лобито“). Предложение в 10.I.
-11. **Безопасен път на метриките от гласовия VPS до игровия backend** (Етап 6, изисква промяна в инфраструктурата):
-    - (а) Caddy route с mTLS или Bearer + IP allowlist към филтриран `/metrics` (препоръка след MVP);
-    - (б) SSH тунел;
-    - (в) без VPS метрики.
-12. **Общи условия и Политика за поверителност:** нужна ли е промяна. Юридическа задача преди публичното активиране.
-13. **„Инкогнито режим“** за наблюдение: в кода не е намерен механизъм с това име (зрителите в „Гледай“ са видими). Да се уточни кой механизъм трябва да се опази.
-14. Реалната **семантика на LiveKit токените и правата** трябва да се провери срещу v1.13.11:
-    - publish с listen-only токен;
-    - стар и refresh токен след ротация;
-    - `UpdateParticipant(canPublish:true)` без реконект;
-    - `ParticipantPermissionsChanged`.
+### 8А.1 Файлове
+**Нови** (`server/src/voice/`):
+
+| Файл | Роля |
+|---|---|
+| `voiceLiveKitApi.ts` | Официален `RoomServiceClient` (timeout 3 s, `failover:false`), класификация на грешките (`not_found` / `rejected` / `transient`), четене на `LIVEKIT_*` (https/wss; http/ws само за loopback) |
+| `voiceLiveKitDispatcher.ts` | ≤4 едновременни заявки; опашки `high` (200) и `normal` (50) с незабавен `queue_full`; circuit breaker (5 грешки → open 30 s → half-open с една проба); retry само за идемпотентни при временна грешка, backoff + jitter, без да държи слот; твърд таймаут 4 s |
+| `voiceTokenIssuer.ts` | Официален `AccessToken` (HS256), точни grants, TTL 600 s, identity `p_<profileId>_<epoch>` |
+| `voiceRoomReconciler.ts` | Durable DeleteRoom опашка с потвърждение чрез ListRooms, backoff в базата, сериализация CreateRoom↔DeleteRoom по име, наблюдение на неясен CreateRoom, boot sweep на `pv_` сираци |
+| `voiceStoreWriteQueue.ts` | FIFO повторение на lifecycle записи при заета база (кратък `busy_timeout` остава) |
+| `voiceChatProtocol.ts` | WS съобщения и строго парсване (`voice_presence`, `voice_presence_result`, `voice_table_updated`, `voice_access_ended`) |
+| `voiceChatService.ts` | Runtime: участия, session binding, lease, 120 s, токени (4 проверки), ротация, куки, boot |
+| `voiceChatHttpApi.ts` | `POST /api/voice/token`, `POST /api/voice/speak-access` (сесия, origin, тяло, `Cache-Control: no-store`) |
+
+**Нова миграция:** `server/database/migrations/20261113_001_voice_chat_memberships.sql` (само добавяща).
+**Нов тест:** `server/scripts/checkVoiceChatStage2b.ts` (36 проверки).
+**Променени:** `voiceChatTypes.ts`, `voiceChatEligibility.ts`, `voiceChatStore.ts`, `voiceChatAdminApi.ts` (поле `runtime`), `privateRoomsStore.ts` (`voiceTableId`, `onMemberSeated`, `onRoomEmptied`), `serverTypes.ts` (`ServerRoomConfig.voiceTableId`), `messageTypes.ts`, `parseClientMessage.ts`, `createRoomSnapshotMessage.ts`, `index.ts`, `checkVoiceChatStage2a.ts`, `server/package.json` + lock (`livekit-server-sdk` **2.19.2**, точен pin).
+
+### 8А.2 База (миграция `20261113_001`)
+- `voice_table_memberships`: `membership_id` PK, `voice_table_id`, `profile_id`, `started_at`, `speaking_entitled_at`, `ended_at`, `end_reason`.
+- CHECK: край ⇔ причина; причините са само `left_waiting_room`, `kicked`, `permanently_left`, `banned`, `profile_revoked`, `superseded`, `table_released`, `boot_not_restored` (изтичане на VIP **не е** причина).
+- Уникален частичен индекс: **едно активно участие** на профил в маса. FK към `voice_tables` и `profiles` с CASCADE.
+- Освобождаването на маса приключва всички участия в същата транзакция. `reconcileOnBoot` приключва участията на профили, които не са активни участници във възстановената стая (`boot_not_restored`).
+
+### 8А.3 Право за говорене (membership-scoped)
+- Сядане (създаване, `joinTeam`, приета партньорска покана) → **ново участие**; `speaking_entitled_at` = сега, ако е VIP в момента.
+- Токен/speak-access при активен VIP → правото се записва еднократно (идемпотентно).
+- `canSpeak = активен VIP || правото е записано в текущото участие`. Бан и окончателно напускане печелят (проверяват се преди правото).
+- Напускане/изгонване/окончателно напускане/бан/освобождаване → край на участието (DB + памет). Ново сядане → ново `membership_id` без право.
+- Паметта е авторитетна в процеса; записите минават през FIFO опашка с повторение при `busy`; при старт участията се зареждат от базата.
+
+### 8А.4 Токени, session binding, проверки
+- **Binding:** `voice_presence{onTableScreen:true}` по игровия WS, **само** от връзката, която държи мястото (PrivateRoom occupant / ServerRoom participant). Същата връзка не може да смени `clientInstanceId`. Нова страница от актуалната seat връзка → старият binding приключва (ротация, ако е имал токен за живата генерация), епохата расте.
+- **Токен** (`POST /api/voice/token`): режим, LiveKit конфигурация, маса, бан, място, binding (същия `clientInstanceId`, връзката е отворена и държи мястото), lease, участие, fencing (няма чакащо изтриване на по-стара генерация).
+- **Четири проверки** с fingerprint (жива стая, епоха, връзка, участие, право, режим):
+  1. преди асинхронните операции;
+  2. след `CreateRoom`;
+  3. след `toJwt()` (официален, асинхронен);
+  4. окончателна синхронна проверка, след която `respond` се вика в същия тик.
+  - При разлика токенът се изхвърля (409 `voice_state_changed` или код на отказа).
+  - Токенът се маркира като издаден **преди** подписа (консервативно за ротацията).
+- **Grants:** VIP → `canSubscribe:true, canPublish:true, canPublishSources:['microphone'], canPublishData:false`; без право → `canPublish:false, canPublishSources:[], canPublishData:false`. Винаги без `roomCreate/roomAdmin/roomList/roomRecord/hidden/recorder/agent`.
+- **Повишаване** (`POST /api/voice/speak-access`): backend проверка → запис на правото → `UpdateParticipant` (само микрофон) → `updated`; при неуспех `request_new_token`; без VIP → `canSpeak:false, code:'vip_required'`. Микрофонът не се включва.
+- Токен **никога** през WS, не се логва, не се пише в базата. Отговорите са `no-store`.
+
+### 8А.5 Ротация и reconciliation
+- **Ротация** само при: край на участието или изместена/сменена страница, **ако** на binding-а е издаден токен за **текущата** жива генерация.
+- **Последователност:**
+  1. приоритетно `UpdateParticipant` (без subscribe/publish) + `RemoveParticipant` за отнетия identity в старата стая;
+  2. нова генерация (ново неповторимо име), старата → `delete_pending`;
+  3. `voice_table_updated{ready:false}` към останалите;
+  4. DeleteRoom (висок приоритет) + потвърждение с ListRooms;
+  5. `voice_table_updated{ready:true}`.
+- **Fencing:** докато масата има непотвърдено изтриване, **нови токени не се издават** (503 `voice_rotation_pending`). При недостъпно API това трае, докато не стане безопасно.
+- **Забавен CreateRoom:** CreateRoom се праща само за живо име и е дедупликиран. DeleteRoom за същото име изчаква CreateRoom в полет. При timeout (или повече от един опит) името влиза в наблюдение за 20 min; на 30 s `ListRooms()` трие всяка `pv_` стая, която не е жива. Оттеглено име никога не получава токен.
+- **Boot:**
+  - чакалните и невъзстановените игри се освобождават;
+  - възстановените пазят слота и участията на активните играчи, живата им стая се ротира;
+  - авариен стоп при старт освобождава всичко;
+  - ограничено чистене на освободени маси, по-стари от 30 дни;
+  - еднократен sweep трие `pv_` сираци.
+- **Режим OFF:** освобождава всички маси (с участията), известява `voice_access_ended{voice_off}`, изтрива стаите.
+
+### 8А.6 120 s, lease, напускане на екрана
+- **Lease:** клиентът подновява `voice_presence` на 20 s; TTL 60 s. Живият игрови WS **не** удължава lease-а. Изтекъл lease при активен глас → отнемане на правата + RemoveParticipant + `voice_access_ended{lease_expired}`.
+- **Напускане на екрана** (`onTableScreen:false`): същото незабавно; мястото и правото се пазят; връщане → ново изрично включване.
+- **120 s:** при затворена игрова връзка на **активен** гласов участник → таймер. Възстановяване на същата страница (същия `clientInstanceId`) от нова връзка го отменя. След 120 s → отнемане + RemoveParticipant (без ротация — легитимен участник).
+- **Изместена връзка** (`session_displaced`): веднага губи правото за токени. Ако същата страница не си върне сесията за 15 s (честият network reconnect с полуотворен сокет), следва ротация, ако е имало токен.
+- **Окончателно напускане/бан:** веднага, без 120 s.
+- Таймери има **само** за binding-и с издаден токен; без записи в базата за lease/таймери.
+- **Остатъчен риск (приет, не е решен):** при недостъпен Pika backend или недостъпно LiveKit API отнемането чака (durable за DeleteRoom; best-effort за RemoveParticipant). Активен разговор може да продължи след 120 s.
+
+### 8А.7 Игрови куки (index.ts)
+| Събитие | Кука |
+|---|---|
+| `create_private_room{voiceEnabled}` | атомарна резервация преди масата; отказ → масата не се създава (`voice_chat_*` код, при лимит `voiceActiveTables/voiceMaxTables`); неуспешно създаване → `abortReservation` |
+| сядане (`joinTeam`, партньорска покана) | `onMemberSeated` (преди auto-start) |
+| напускане / изгонване в чакалнята | `onMemberRemoved` (`left_waiting_room` / `kicked`) |
+| празна чакалня | **нова** `onRoomEmptied` → край на участието + освобождаване (`waiting_room_empty`) |
+| изтичане / затваряне | `onWaitingRoomEnded` |
+| старт | `ServerRoomConfig.voiceTableId` (същото id) + `onGameStarted` (същият ред); два неуспешни пътя → `onGameStartFailed` |
+| временен disconnect | `onGameConnectionClosed` (120 s само за активни) |
+| временно заместване от бот, „Преиграй“ | **без кука** (участието и правото продължават) |
+| окончателно напускане (`leave_active_room`) | `onMemberRemoved('permanently_left')` |
+| бан / изтриване на профил | `onProfileRevoked` |
+| изместване на сесия | `onGameConnectionDisplaced` |
+| премахване на ServerRoom | `onServerRoomRemoved` в `removeCommittedServerRoom` |
+| рестарт | `boot(...)` с активните участници на възстановените стаи |
+| режим (админ) | `onModeChanged` |
+
+Snapshot-и: `PrivateRoomSnapshot.voiceEnabled` (за всички), `voiceTableId` само към седнал играч. `room_snapshot.voiceTableId` само при `yourSeat !== null`; spectator snapshot не го съдържа.
+
+### 8А.8 Performance
+- Всички LiveKit заявки са асинхронни, през dispatcher-а; нито една не се `await`-ва в игрови WS handler (статична проверка).
+- Куките са синхронни: in-memory + кратки SQLite записи само при lifecycle промени на гласови маси.
+- `voice_presence` на 20 s за активен участник: само индексирани SELECT-и, без запис.
+- Недостъпен LiveKit: след 5 грешки breaker-ът отказва веднага без мрежа. Създаването, сядането, стартът, ходовете, резултатите и „Преиграй“ не зависят от LiveKit.
+
+## 8Б. Тестове на Етап 2б
+- **`checkVoiceChatStage2b`: 36/36** при три поредни пускания. Fake Twirp сървър на 127.0.0.1, официалният SDK срещу него, изолирани temp бази, ръчен часовник за таймерите. Групи:
+  - **L1–L6** — SDK съвместимост (заявки, admin JWT, `MICROPHONE`), реален timeout, 5xx, connection refused, класификация, circuit breaker, ограничени опашки и приоритет, retry;
+  - **T1–T8** — точни grants, подпис, TTL, identity, lazy CreateRoom с 4 участника, non-VIP, зрител/чужд/без сесия, binding, HTTP (`no-store`, 405/403/401/400), race по време на CreateRoom и подписа, ротация по време на CreateRoom, дедупликация, breaker → бърз 503;
+  - **V1–V7** — VIP правила: изтичане в чакалнята и в играта, повторни игри, reconnect, refresh, рестарт, повторно влизане без VIP, придобит VIP, бан;
+  - **R1–R6** — ред на отнемането преди DeleteRoom, fencing, празна/затворена/изтекла чакалня, неуспешен DeleteRoom и потвърждение, забавен CreateRoom „възкресяване“, изместена сесия, OFF;
+  - **P1–P4** — 120 s, lease при жив WS, напускане на екрана, таймери само за активни, окончателно напускане веднага;
+  - **C1–C4** — създаване (VIP, режими, авариен стоп, без LiveKit, лимит), неуспешно създаване/старт, преход чакалня → игра, куките на `privateRoomsStore`, протокол;
+  - **W1** — статична проверка на всички куки в `index.ts`.
+- **`checkVoiceChatStage2a`: 39/39** (адаптиран: M1/M2 и двете миграции, M5 участия, E3–E7, S7, S9, S10, S12, W1).
+- **Регресии (0 грешки):** 15 `checkPrivateRoom*` (без spawn), `checkProfileCustomizationStore` 96, `checkProfileDeletionWorker` 57, `checkProfileDeletionAdminUnified` 30, `checkProfileDeletionInfrastructure` 54.
+- **Typecheck:** server `tsc -p tsconfig.json` 0, `tsconfig.scripts.json` 0, двата voice теста 0, frontend `tsc --noEmit` 0.
+- **Smoke** с реалния `index.ts` (build в изолирано копие в `D:\tmp`, временна база, fake LiveKit на 127.0.0.1):
+  - старт и миграции OK; boot reconcile; sweep изтри `pv_` сирак и не пипна чужда стая;
+  - `GET /api/voice/token` → 405, `POST` без сесия → 401 + `no-store`, admin → 403; SIGTERM е чист.
+
+Пускане (от `server/`):
+```
+node node_modules/tsx/dist/cli.mjs scripts/checkVoiceChatStage2a.ts
+node node_modules/tsx/dist/cli.mjs scripts/checkVoiceChatStage2b.ts
+```
+
+## 9. Оставащи технически въпроси (след Етап 2б)
+
+1. **Реалната семантика на LiveKit v1.13.11** — да се провери по плана в раздел 13 (refresh токени след ротация, `UpdateParticipant` без реконект, `not_found` при DeleteRoom, отказ на publish, макс. 4).
+2. **Един LiveKit сървър = един Pika backend с `LIVEKIT_*` env.** Boot sweep и reconciler трият всяка `pv_` стая, която **техният** процес не познава. Ако два backend-а (напр. локален dev и production) сочат към същия LiveKit с гласа, ще си трият стаите взаимно. Ръчните тестове ползват имена **без** `pv_`. Ако е нужен споделен LiveKit — отделна задача: префикс по среда.
+3. **Валидност на LiveKit refresh токените** (за хоризонта на наблюдение след неясен CreateRoom: сега 20 min) — проверка в раздел 13.
+4. **`RemoveParticipant.revokeTokenTs`** (ново поле в протокола на SDK 2.19.x): ако v1.13.11 го поддържа, в бъдеще може да намали нуждата от ротация. Сега не се ползва.
+5. **Безопасен път на метриките до игровия backend** (Етап 6, промяна в инфраструктурата): (а) Caddy route с mTLS/Bearer + IP allowlist; (б) SSH тунел; (в) без VPS метрики.
+6. **Общи условия и Политика за поверителност** — юридическа задача преди публичното активиране.
+7. **„Инкогнито режим“** — да се уточни кой механизъм се има предвид (не е намерен в кода).
+8. **`stopMicTrackOnMute`** на Android/iPhone — Етап 3 и 7.
+9. **`busy_timeout` 5000 ms** при останалите store-ове — съществуващ риск извън гласа.
+10. **Клиентски протокол за Етап 3:** клиентът подновява `voice_presence` на `renewAfterMs`, иска токен само след `voice_presence_result{ok}`, при `voice_table_updated` иска нов токен (при `ready:false` — изчаква `ready:true`), при `voice_access_ended` не се включва автоматично.
+11. Решено/отпаднало: собствен JWT signer (не — официален SDK), watchdog (отпада), сегмент „чакалня + мач 1“ (заменен с участие), refresh → ротация (одобрено), празна чакалня (кука `onRoomEmptied`), PM2 топология (един fork процес, потвърдено), механизъм за напускане на екрана (`voice_presence` + lease).
 
 ---
 
-## 10. Пълен предложен план за Етап 2б (чака одобрение)
+## 10. Първоначален план за Етап 2б (исторически — изпълнен, актуалното е в 8А)
+
+> Разлики спрямо плана: собствен синхронен signer **не** е направен (официален `AccessToken` + 4 проверки); voice-side watchdog в 10.H **отпада** (приет остатъчен риск); ротация при загубено говорене **няма** (правото е за участието); 10.I е реализиран с `voice_presence` + lease.
 
 **Обхват:**
 - LiveKit API клиент, издаване на токени, ротация, reconciliation;
@@ -850,9 +982,17 @@ node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit
 
 ---
 
-## 11. Production read-only проверки (изпълнява собственикът)
+## 11. Production read-only проверки — ИЗПЪЛНЕНИ (2026-11-13)
 
-Само четене. Не се променя нищо. Не се показват тайни.
+**Резултати (от собственика):**
+- **Игрови VPS** `185.203.117.14`:
+  - PM2 `belot-v2-server`: **един процес**, `fork_mode`, online;
+  - Node.js **v24.15.0** (SDK изисква ≥19 — ОК);
+  - Nginx и публичните headers на `https://pika.bg/`: **няма** Permissions-Policy, Feature-Policy или CSP ограничения;
+  - `https://voice.pika.bg/` от игровия VPS → HTTP 200 (connect 0.040 s, TLS 0.111 s, общо 0.113 s). Това **не е** authenticated API тест.
+- **Гласов VPS:** виж раздел 4 (портове, контейнери, конфигурация, UFW) и 4.1 (метрики).
+
+Командите по-долу остават за справка.
 
 **Игрови VPS:**
 ```
@@ -885,7 +1025,7 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
 
 | Етап | Съдържание | Критерии за приемане |
 |---|---|---|
-| **2б** | LiveKit backend (раздел 10) | fake Twirp тестове; race тестове; декодирани JWT; ръчен тест срещу реалния LiveKit |
+| **2б** | LiveKit backend (раздел 8А) — **имплементиран, чака преглед** | fake Twirp тестове ✓; race тестове ✓; декодирани JWT ✓; ръчен тест срещу реалния LiveKit (раздел 13) — предстои |
 | **3** | Frontend voice controller: lazy SDK, state machine, audio sink, permissions, reconnect, cleanup, диагностика; временен debug бутон зад admin флаг | два таба с различни профили: connect, listen, mute, rotation, leave; 0 дублирани audio елементи и listeners; chunk извън precache; главният bundle ±1 KB |
 | **4** | Мобилен UI: лоби, създаване, popup-и, чакалня, бутон и панел, speaking микрофончета, всички състояния | Playwright screenshots (2.14); одобрение на всеки екран; touch regression (`b4f2271`) с активен глас |
 | **5** | Desktop UI | screenshots 1280×800, 1366×768, 1920×1080 |
@@ -904,3 +1044,39 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
   3. `deployFrontendAtomic.sh --rollback`;
   4. backend към предишен commit (таблиците остават неизползвани).
 - LiveKit инфраструктурата не се пипа.
+
+---
+
+## 13. План за реалните LiveKit тестове (със съдействие на собственика)
+
+**Правила за безопасност:**
+- Без production потребители, без реални игрови маси, без production Pika backend с `LIVEKIT_*` env.
+- Ръчните LiveKit стаи са с имена **без** префикс `pv_` (напр. `manual-test-1`). Иначе reconciler-ът на всеки Pika процес с LiveKit env би ги изтрил (раздел 9, т. 2).
+- По всяко време **най-много един** Pika backend сочи към гласовия LiveKit.
+- API key/secret се пренасят само по защитен канал (scp/SSH) в локален `server/.env`. Никога в чат, Git, screenshots или логове. JWT не се поставят в отчети. Токен за ръчен тест се генерира на гласовия VPS и се ползва веднага (TTL 10 min).
+- Инструменти:
+  - `https://meet.livekit.io` → Custom (URL `wss://voice.pika.bg` + токен), без камера;
+  - `chrome://webrtc-internals`;
+  - помощният скрипт на гласовия VPS от плана за инсталация (`/opt/livekit/tools/lk-tool`), ако е наличен. За тестове 3–5 трябва да може да издава токен само за слушане и да задава източниците — малка добавка, ще я подготвя при одобрение.
+
+| # | Тест | Как | Очаквано |
+|---|---|---|---|
+| 1 | Authenticated API | `lk-tool api ListRooms` (вярни ключове); заявка без/с грешен Bearer към `https://voice.pika.bg/twirp/livekit.RoomService/ListRooms` | 200 само с валиден подпис; 401 иначе |
+| 2 | `auto_create:false` | токен за несъществуваща стая → meet | отказ „room not found“; стаята не се създава |
+| 3 | Non-VIP не публикува | токен `canPublish:false` → meet → микрофон | publish отказан от сървъра; слушането работи |
+| 4 | VIP само микрофон | токен `canPublishSources:['microphone']` → микрофон, после камера/екран, после чат (data) | микрофонът работи; видео, екран и data — отказани |
+| 5 | Макс. 4 | стая с `maxParticipants:4`, 5 токена | петият е отказан |
+| 6 | Стар токен след DeleteRoom/ротация | T1 за стая G1 → `DeleteRoom G1` → join с T1 | отказ (стаята не съществува, `auto_create:false`) |
+| 7 | Refresh токен след ротация | клиент в G1 ≥ 10 min (получава refresh токени) → `DeleteRoom G1` → наблюдение на опита за reconnect в `webrtc-internals`/конзолата | клиентът е изключен и не може да влезе отново; да се запише колко време важи refresh токенът (за хоризонта от 20 min) |
+| 8 | `UpdateParticipant` | влизане с listen-only → `UpdateParticipant canPublish:true, sources:[MICROPHONE]` → микрофон без реконект | publish е разрешен без нова връзка (`ParticipantPermissionsChanged`); при неуспех backend-ът връща `request_new_token` |
+| 9 | Displacement / identity | два клиента със **същия** identity → после с `p_x_1` и `p_x_2` | същият identity изхвърля стария (DUPLICATE_IDENTITY); различни епохи не се изхвърлят взаимно |
+| 10 | RemoveParticipant не анулира JWT | `RemoveParticipant` → повторно влизане със **същия** токен | влизането **успява** — доказва нуждата от ротация |
+| 11 | DeleteRoom на несъществуваща стая | `DeleteRoom manual-missing` | 404 `not_found` или 200 (и двете са обработени) |
+| 12 | (по желание) `revokeTokenTs` | `RemoveParticipant` с `revokeTokenTs` → повторно влизане със стар токен | само наблюдение за бъдещо решение |
+
+**Свързан тест с Pika** (локален dev backend, локална dev база, 2 тестови профила — admin+VIP и non-VIP, режим „Само админ“): изисква клиент за `voice_presence` и token заявка (Етап 3 или малък probe скрипт — при одобрение). Проверява се:
+- boot sweep: в лога `ListRooms`;
+- токен само след presence;
+- non-VIP → `canPublish:false`;
+- ротация при напускане: старият клиент е изключен, новият влиза след `ready:true`;
+- 120 s и lease.

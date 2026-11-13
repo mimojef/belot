@@ -1,4 +1,5 @@
-// Гласов чат — чиста eligibility логика (Етап 2а).
+// Гласов чат — чиста eligibility логика (Етап 2а; правото за говорене е
+// адаптирано в Етап 2б към участието — voice_table_memberships).
 //
 // Три ОТДЕЛНИ права:
 //   * създаване на гласова маса  -> evaluateVoiceTableCreation
@@ -6,9 +7,9 @@
 //   * говорене                   -> evaluateVoiceAccess(...).canSpeak
 //
 // Всички функции са чисти: без I/O, без часовник, без глобално състояние.
-// Caller-ът (Етап 2б) резолвва авторитетните факти точно преди решението —
-// и ОТНОВО непосредствено преди подписване на JWT, след всяка асинхронна
-// операция (виж "async race" в плана за Етап 2б). VIP идва единствено от
+// Caller-ът (voiceChatService.ts) резолвва авторитетните факти точно преди
+// решението — и ОТНОВО след всяка асинхронна операция (CreateRoom, подпис на
+// JWT) и непосредствено преди да предаде токена. VIP идва единствено от
 // vipStore.getStatus(profileId).isActive; администраторите НЯМАТ bypass — те
 // минават същите проверки (прецедент: evaluateVipSpectatorGateEligibility).
 //
@@ -81,7 +82,6 @@ export type VoiceTableFacts = {
   voiceTableId: string
   status: VoiceTableStatus
   phase: VoiceTablePhase
-  matchSeq: number
 }
 
 export type VoiceListenDenialCode =
@@ -97,7 +97,13 @@ export type VoiceListenDenialCode =
   | 'permanently_left'
   | 'invalid_session'
 
-export type VoiceSpeakBasis = 'vip' | 'match_grace'
+/**
+ * 'vip'        — активен VIP в момента на проверката;
+ * 'membership' — правото е придобито по-рано в ТЕКУЩОТО непрекъснато
+ *                участие (VIP при сядането или придобит по време на
+ *                участието) и се пази до края му, дори VIP да е изтекъл.
+ */
+export type VoiceSpeakBasis = 'vip' | 'membership'
 
 export type VoiceAccessDecision =
   | { canListen: false; canSpeak: false; denialCode: VoiceListenDenialCode }
@@ -124,19 +130,20 @@ export type VoiceAccessInput = {
   /** isVoiceSessionBindingCurrent(...) за тази заявка. */
   sessionBindingCurrent: boolean
   /**
-   * voiceChatStore.hasSpeakingGrant(table, table.matchSeq, profile) —
-   * true само ако профилът вече е имал право да говори в ТЕКУЩИЯ сегмент.
+   * Текущото активно участие на профила в ТАЗИ маса има придобито право за
+   * говорене (voice_table_memberships.speaking_entitled_at != NULL). Ново
+   * участие след напускане започва без него.
    */
-  hasSpeakingGrantForCurrentMatch: boolean
+  hasSpeakingEntitlement: boolean
 }
 
 /**
  * Ред на проверките (първата неуспешна печели):
  *   режим -> сесия/профил -> бан -> маса -> отношение -> същата маса ->
  *   окончателно напускане -> авторитетна игрова сесия.
- * Банът и окончателното напускане имат приоритет пред всякакъв grace.
- * Слушането НЕ изисква VIP. Говоренето изисква VIP ИЛИ запис за ТЕКУЩИЯ
- * сегмент (match-scoped grace) — никога role bypass.
+ * Банът и окончателното напускане имат приоритет пред придобитото право.
+ * Слушането НЕ изисква VIP. Говоренето изисква VIP ИЛИ право, придобито в
+ * текущото участие — никога role bypass.
  *
  * Режимите 'admin_only' и 'public' са еднакви за ВЕЧЕ съществуващи маси:
  * превключването между тях не отнема правата в тях.
@@ -165,7 +172,7 @@ export function evaluateVoiceAccess(input: VoiceAccessInput): VoiceAccessDecisio
   if (!input.sessionBindingCurrent) return deny('invalid_session')
 
   if (input.requester.isVipActive) return { canListen: true, canSpeak: true, speakBasis: 'vip' }
-  if (input.hasSpeakingGrantForCurrentMatch) return { canListen: true, canSpeak: true, speakBasis: 'match_grace' }
+  if (input.hasSpeakingEntitlement) return { canListen: true, canSpeak: true, speakBasis: 'membership' }
   return { canListen: true, canSpeak: false, speakDenialCode: 'vip_required' }
 }
 
@@ -182,45 +189,55 @@ export function toVoiceLiveKitPermissionProfile(decision: VoiceAccessDecision): 
 }
 
 /**
- * Кога да се запише/потвърди match-scoped speaking grant: само когато
- * правото за говорене идва от активен VIP (grace не се "самоудължава").
+ * Кога правото за говорене трябва да се запише в участието: играчът е VIP
+ * сега, а участието още няма придобито право. Записаното право не се
+ * "самоудължава" — то вече важи до края на участието.
  */
-export function shouldRecordSpeakingGrant(decision: VoiceAccessDecision): boolean {
-  return decision.canSpeak && decision.speakBasis === 'vip'
+export function shouldPersistSpeakingEntitlement(decision: VoiceAccessDecision, alreadyEntitled: boolean): boolean {
+  return !alreadyEntitled && decision.canSpeak && decision.speakBasis === 'vip'
 }
 
 /**
  * Изисква ли загубата на право ротация на стаята. Стар токен (вкл. LiveKit
  * refresh token) пази правата си до изтичане и е вързан за ИМЕТО на стаята,
  * затова отнемането е сигурно само с нова генерация:
- *   * загубено слушане при вече издаден токен -> 'listen_revoked';
- *   * загубено говорене при вече издаден publish-способен токен -> 'speak_revoked';
- *   * иначе (никога не е получавал съответния токен) -> без ротация.
+ *   * загубено слушане при токен, издаден за ТЕКУЩАТА жива генерация -> 'listen_revoked';
+ *   * иначе (никога не е получавал токен или токенът е за вече оттеглена
+ *     генерация) -> без ротация.
+ * От Етап 2б правото за говорене не се отнема самостоятелно (изтичането на
+ * VIP не го прекратява в текущото участие), затова 'speak_revoked' не се
+ * връща — говоренето се губи само заедно със слушането (край на участието).
  */
 export function resolveRevocationRotation(input: {
-  wasIssuedToken: boolean
-  wasPublishCapable: boolean
+  wasIssuedTokenForLiveGeneration: boolean
   decision: VoiceAccessDecision
-}): 'listen_revoked' | 'speak_revoked' | null {
-  if (!input.decision.canListen) return input.wasIssuedToken ? 'listen_revoked' : null
-  if (!input.decision.canSpeak) return input.wasPublishCapable ? 'speak_revoked' : null
+}): 'listen_revoked' | null {
+  if (!input.decision.canListen) return input.wasIssuedTokenForLiveGeneration ? 'listen_revoked' : null
   return null
 }
 
 /**
  * Гласът следва АВТОРИТЕТНАТА игрова сесия, не последния LiveKit join.
- * Заявката е валидна само ако представя текущия clientInstanceId на профила
- * за тази маса (изместен таб има друг clientInstanceId -> отказ).
+ * Заявката е валидна само ако:
+ *   * представя текущия clientInstanceId на профила за тази маса (изместен
+ *     таб/стара страница има друг clientInstanceId -> отказ);
+ *   * binding-ът е регистриран от връзката, която В МОМЕНТА държи мястото
+ *     на масата (seatConnectionId от PrivateRoom occupant / ServerRoom
+ *     participant). Затворена или изместена връзка -> отказ.
  */
 export function isVoiceSessionBindingCurrent(
   claim: VoiceSessionClaim,
   authoritative: VoiceSessionBinding | null,
+  seatConnectionId: string | null,
 ): boolean {
   return (
     authoritative !== null &&
     claim.clientInstanceId.length > 0 &&
     authoritative.profileId === claim.profileId &&
     authoritative.voiceTableId === claim.voiceTableId &&
-    authoritative.clientInstanceId === claim.clientInstanceId
+    authoritative.clientInstanceId === claim.clientInstanceId &&
+    authoritative.gameConnectionId !== null &&
+    seatConnectionId !== null &&
+    authoritative.gameConnectionId === seatConnectionId
   )
 }

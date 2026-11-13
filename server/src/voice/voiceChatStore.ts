@@ -1,8 +1,13 @@
-// Гласов чат — SQLite store (Етап 2а).
+// Гласов чат — SQLite store (Етапи 2а и 2б).
 //
 // Отговаря за: режим и лимит (с одит), атомарните слотове на гласовите маси,
 // генерациите на LiveKit стаите (само имена и статуси — без LiveKit заявки),
-// durable опашката за DeleteRoom и match-scoped speaking grace.
+// durable опашката за DeleteRoom и участията с правото за говорене
+// (voice_table_memberships, Етап 2б — замества match-scoped grace от 2а).
+//
+// Писане има САМО при lifecycle промени (създаване/старт/край на маса,
+// сядане/напускане, ротация, придобито право, опит за DeleteRoom) — никога
+// при издаване на токен, говорене, audio level или lease.
 //
 // Event loop защита: node:sqlite е синхронен, а busy_timeout чака
 // СИНХРОННО. Затова тази връзка е с КРАТЪК busy_timeout (200 ms, срещу
@@ -26,9 +31,10 @@ import {
   type VoiceChatSettingsSnapshot,
   type VoiceRoomGenerationRecord,
   type VoiceRoomGenerationStatus,
+  type VoiceMembershipEndReason,
   type VoiceRoomRetireReason,
-  type VoiceSpeakingGrant,
   type VoiceTableId,
+  type VoiceTableMembership,
   type VoiceTablePhase,
   type VoiceTableRecord,
   type VoiceTableReleaseReason,
@@ -83,14 +89,18 @@ export type BindVoiceTableResult =
   | { ok: false; code: 'not_found' | 'not_active' | 'conflict' }
   | VoiceStoreBusy
 
-export type AdvanceMatchSeqResult =
-  | { ok: true; advanced: boolean; matchSeq: number }
-  | { ok: false; code: 'not_found' | 'not_active' | 'not_in_game' }
+export type StartMembershipResult =
+  | { ok: true; membership: VoiceTableMembership; supersededMembershipId: string | null }
+  | { ok: false; code: 'not_found' | 'not_active' | 'duplicate_id' }
   | VoiceStoreBusy
 
-export type RecordSpeakingGrantResult =
-  | { ok: true; created: boolean }
-  | { ok: false; code: 'not_found' | 'not_active' | 'stale_match' }
+export type EndMembershipResult =
+  | { ok: true; ended: boolean }
+  | VoiceStoreBusy
+
+export type EntitleMembershipResult =
+  | { ok: true; entitled: boolean }
+  | { ok: false; code: 'not_found' | 'ended' }
   | VoiceStoreBusy
 
 export type AllocateGenerationResult =
@@ -110,8 +120,24 @@ export type ReconcileOnBootResult =
       retainedVoiceTableIds: VoiceTableId[]
       /** Живите стаи на ВСИЧКИ активни маси преди рестарта — оттеглени (boot_rotation/освобождаване). */
       retiredRoomNames: string[]
+      /** Участия, приключени защото профилът не е активен участник във възстановената стая. */
+      endedMembershipIds: string[]
     }
   | VoiceStoreBusy
+
+export type ReconcileOnBootInput = {
+  /** ServerRoom.id на възстановените от snapshot игрови стаи с гласова маса. */
+  restoredServerRoomIds: ReadonlySet<string>
+  /**
+   * serverRoomId -> profileId-тата на АКТИВНИТЕ човешки участници (без
+   * окончателно напуснали). Участията на останалите се приключват. Липсващ
+   * ключ = всички участия на масата се пазят (консервативно само при тест).
+   */
+  restoredActiveProfileIds?: ReadonlyMap<string, ReadonlySet<string>>
+  /** Авариен стоп при старт: освобождава ВСИЧКИ активни маси ('mode_off'). */
+  releaseAll?: boolean
+  now?: Date
+}
 
 export type VoiceChatStore = {
   getSettings: () => VoiceChatSettingsSnapshot
@@ -124,9 +150,7 @@ export type VoiceChatStore = {
   bindPrivateRoom: (voiceTableId: VoiceTableId, privateRoomId: string) => BindVoiceTableResult
   /** waiting -> in_game на СЪЩИЯ ред (никога второ резервиране); идемпотентно за същия serverRoomId. */
   markInGame: (voiceTableId: VoiceTableId, serverRoomId: string, now?: Date) => BindVoiceTableResult
-  /** "Преиграй": +1 само ако текущият сегмент е expectedMatchSeq (идемпотентно при дублиране). */
-  advanceMatchSeq: (voiceTableId: VoiceTableId, expectedMatchSeq: number) => AdvanceMatchSeqResult
-  /** Идемпотентно; освобождава слота и оттегля живата стая. */
+  /** Идемпотентно; освобождава слота, приключва участията и оттегля живата стая. */
   releaseVoiceTable: (voiceTableId: VoiceTableId, reason: VoiceTableReleaseReason, now?: Date) => ReleaseVoiceTableResult
 
   getVoiceTable: (voiceTableId: VoiceTableId) => VoiceTableRecord | null
@@ -135,18 +159,43 @@ export type VoiceChatStore = {
   listActiveVoiceTables: () => VoiceTableRecord[]
   countActiveVoiceTables: () => number
 
-  recordSpeakingGrant: (voiceTableId: VoiceTableId, matchSeq: number, profileId: string, now?: Date) => RecordSpeakingGrantResult
-  /** true само за ТЕКУЩИЯ сегмент на АКТИВНА маса. */
-  hasSpeakingGrant: (voiceTableId: VoiceTableId, matchSeq: number, profileId: string) => boolean
-  listSpeakingGrants: (voiceTableId: VoiceTableId) => VoiceSpeakingGrant[]
+  /**
+   * Ново непрекъснато участие. В една транзакция: приключва предишното
+   * активно участие на профила в масата ('superseded') и вмъква новото.
+   * entitled=true -> правото за говорене е придобито от самото начало
+   * (VIP при сядането).
+   */
+  startMembership: (input: {
+    membershipId: string
+    voiceTableId: VoiceTableId
+    profileId: string
+    entitled: boolean
+    now?: Date
+  }) => StartMembershipResult
+  /** Приключва САМО посоченото участие (идемпотентно). */
+  endMembership: (membershipId: string, reason: VoiceMembershipEndReason, now?: Date) => EndMembershipResult
+  /** Записва придобито право за говорене в активно участие (идемпотентно). */
+  entitleMembership: (membershipId: string, now?: Date) => EntitleMembershipResult
+  getMembership: (membershipId: string) => VoiceTableMembership | null
+  getActiveMembership: (voiceTableId: VoiceTableId, profileId: string) => VoiceTableMembership | null
+  /** Активните участия на активните маси (зареждане в паметта при старт). */
+  listActiveMemberships: () => VoiceTableMembership[]
 
-  /** Нова 'live' генерация; текущата 'live' (ако има) става 'delete_pending' с retireReason. */
-  allocateGeneration: (voiceTableId: VoiceTableId, retireReason: VoiceRoomRetireReason, now?: Date) => AllocateGenerationResult
+  /**
+   * Нова 'live' генерация; текущата 'live' (ако има) става 'delete_pending'
+   * с retireReason. retireReason=null -> само ако масата още няма жива
+   * генерация (първи токен / след boot_rotation); иначе връща текущата.
+   */
+  allocateGeneration: (voiceTableId: VoiceTableId, retireReason: VoiceRoomRetireReason | null, now?: Date) => AllocateGenerationResult
   getLiveGeneration: (voiceTableId: VoiceTableId) => VoiceRoomGenerationRecord | null
   getGeneration: (roomName: string) => VoiceRoomGenerationRecord | null
-  /** Единствената проверка "може ли да се издаде токен за това име" (Етап 2б). */
+  /** Единствената проверка "може ли да се издаде токен за това име". */
   isLiveRoomName: (roomName: string) => boolean
+  /** Има ли масата оттеглена генерация, чийто DeleteRoom още не е потвърден (fencing). */
+  hasPendingRoomDeletion: (voiceTableId: VoiceTableId) => boolean
   listDueRoomDeletions: (input: { now?: Date; limit?: number }) => VoiceRoomGenerationRecord[]
+  /** Най-ранното next_delete_attempt_at сред чакащите (null = няма чакащи). */
+  nextRoomDeletionDueAt: () => string | null
   countPendingRoomDeletions: () => number
   recordRoomDeletionAttempt: (
     roomName: string,
@@ -154,7 +203,7 @@ export type VoiceChatStore = {
     now?: Date,
   ) => RecordRoomDeletionAttemptResult
 
-  reconcileOnBoot: (input: { restoredServerRoomIds: ReadonlySet<string>; now?: Date }) => ReconcileOnBootResult
+  reconcileOnBoot: (input: ReconcileOnBootInput) => ReconcileOnBootResult
   /** Ограничено чистене на стари освободени маси без чакащи DeleteRoom. */
   purgeReleasedVoiceTables: (input: { releasedBefore: Date; limit?: number }) => { ok: true; purged: number } | VoiceStoreBusy
 
@@ -225,6 +274,28 @@ function toGenerationRecord(row: GenerationRow): VoiceRoomGenerationRecord {
     nextDeleteAttemptAt: row.next_delete_attempt_at,
     lastDeleteError: row.last_delete_error,
     deletedConfirmedAt: row.deleted_confirmed_at,
+  }
+}
+
+type MembershipRow = {
+  membership_id: string
+  voice_table_id: string
+  profile_id: string
+  started_at: string
+  speaking_entitled_at: string | null
+  ended_at: string | null
+  end_reason: VoiceMembershipEndReason | null
+}
+
+function toMembership(row: MembershipRow): VoiceTableMembership {
+  return {
+    membershipId: row.membership_id,
+    voiceTableId: row.voice_table_id,
+    profileId: row.profile_id,
+    startedAt: row.started_at,
+    speakingEntitledAt: row.speaking_entitled_at,
+    endedAt: row.ended_at,
+    endReason: row.end_reason,
   }
 }
 
@@ -311,10 +382,6 @@ export async function createVoiceChatStore(
     UPDATE voice_tables SET phase = 'in_game', server_room_id = ?, in_game_at = ?
     WHERE voice_table_id = ? AND status = 'active' AND phase = 'waiting';
   `)
-  const advanceMatchSeqStatement = database.prepare(`
-    UPDATE voice_tables SET match_seq = match_seq + 1
-    WHERE voice_table_id = ? AND status = 'active' AND match_seq = ?;
-  `)
   const releaseTableStatement = database.prepare(`
     UPDATE voice_tables SET status = 'released', released_at = ?, release_reason = ?
     WHERE voice_table_id = ? AND status = 'active';
@@ -336,6 +403,12 @@ export async function createVoiceChatStore(
     UPDATE voice_room_generations
     SET status = 'delete_pending', retire_requested_at = ?, retire_reason = ?, next_delete_attempt_at = ?
     WHERE livekit_room_name = ? AND status = 'live';
+  `)
+  const selectPendingForTableStatement = database.prepare(`
+    SELECT 1 AS p FROM voice_room_generations WHERE voice_table_id = ? AND status = 'delete_pending' LIMIT 1;
+  `)
+  const selectNextDeletionDueStatement = database.prepare(`
+    SELECT MIN(next_delete_attempt_at) AS due FROM voice_room_generations WHERE status = 'delete_pending';
   `)
   const selectIsLiveRoomStatement = database.prepare(`
     SELECT 1 AS live FROM voice_room_generations g
@@ -364,22 +437,36 @@ export async function createVoiceChatStore(
     WHERE livekit_room_name = ? AND status = 'delete_pending';
   `)
 
-  const insertGrantStatement = database.prepare(`
-    INSERT OR IGNORE INTO voice_speaking_grants (voice_table_id, match_seq, profile_id, granted_at) VALUES (?, ?, ?, ?);
+  const membershipColumns = `membership_id, voice_table_id, profile_id, started_at, speaking_entitled_at, ended_at, end_reason`
+  const insertMembershipStatement = database.prepare(`
+    INSERT INTO voice_table_memberships (membership_id, voice_table_id, profile_id, started_at, speaking_entitled_at)
+    VALUES (?, ?, ?, ?, ?);
   `)
-  const selectGrantStatement = database.prepare(`
-    SELECT 1 AS g FROM voice_speaking_grants s
-    JOIN voice_tables t ON t.voice_table_id = s.voice_table_id
-    WHERE s.voice_table_id = ? AND s.match_seq = ? AND s.profile_id = ?
-      AND t.status = 'active' AND t.match_seq = s.match_seq
-    LIMIT 1;
+  const selectMembershipStatement = database.prepare(`SELECT ${membershipColumns} FROM voice_table_memberships WHERE membership_id = ?;`)
+  const selectActiveMembershipStatement = database.prepare(`
+    SELECT ${membershipColumns} FROM voice_table_memberships
+    WHERE voice_table_id = ? AND profile_id = ? AND ended_at IS NULL LIMIT 1;
   `)
-  const listGrantsStatement = database.prepare(`
-    SELECT voice_table_id, match_seq, profile_id, granted_at FROM voice_speaking_grants
-    WHERE voice_table_id = ? ORDER BY match_seq ASC, profile_id ASC;
+  const listActiveMembershipsStatement = database.prepare(`
+    SELECT m.membership_id, m.voice_table_id, m.profile_id, m.started_at, m.speaking_entitled_at, m.ended_at, m.end_reason
+    FROM voice_table_memberships m
+    JOIN voice_tables t ON t.voice_table_id = m.voice_table_id
+    WHERE m.ended_at IS NULL AND t.status = 'active'
+    ORDER BY m.started_at ASC, m.membership_id ASC;
   `)
-  const deleteOlderGrantsStatement = database.prepare(`DELETE FROM voice_speaking_grants WHERE voice_table_id = ? AND match_seq < ?;`)
-  const deleteAllGrantsStatement = database.prepare(`DELETE FROM voice_speaking_grants WHERE voice_table_id = ?;`)
+  const listActiveMembershipsForTableStatement = database.prepare(`
+    SELECT ${membershipColumns} FROM voice_table_memberships WHERE voice_table_id = ? AND ended_at IS NULL;
+  `)
+  const endMembershipStatement = database.prepare(`
+    UPDATE voice_table_memberships SET ended_at = ?, end_reason = ? WHERE membership_id = ? AND ended_at IS NULL;
+  `)
+  const endTableMembershipsStatement = database.prepare(`
+    UPDATE voice_table_memberships SET ended_at = ?, end_reason = ? WHERE voice_table_id = ? AND ended_at IS NULL;
+  `)
+  const entitleMembershipStatement = database.prepare(`
+    UPDATE voice_table_memberships SET speaking_entitled_at = ?
+    WHERE membership_id = ? AND ended_at IS NULL AND speaking_entitled_at IS NULL;
+  `)
 
   const purgeReleasedStatement = database.prepare(`
     DELETE FROM voice_tables WHERE voice_table_id IN (
@@ -466,7 +553,8 @@ export async function createVoiceChatStore(
   ): string | null | false {
     const changes = Number(releaseTableStatement.run(nowIso, reason, voiceTableId).changes)
     if (changes === 0) return false
-    deleteAllGrantsStatement.run(voiceTableId)
+    // Освободената маса прекратява всички участия и правата за говорене в тях.
+    endTableMembershipsStatement.run(nowIso, 'table_released', voiceTableId)
     return retireLiveGenerationInTransaction(voiceTableId, retireReason, nowIso)
   }
 
@@ -586,22 +674,6 @@ export async function createVoiceChatStore(
     return result.ok ? result.value : result
   }
 
-  function advanceMatchSeq(voiceTableId: VoiceTableId, expectedMatchSeq: number): AdvanceMatchSeqResult {
-    const result = runWriteTransaction((): AdvanceMatchSeqResult => {
-      const current = readTable(voiceTableId)
-      if (current === null) return { ok: false, code: 'not_found' }
-      if (current.status !== 'active') return { ok: false, code: 'not_active' }
-      if (current.phase !== 'in_game') return { ok: false, code: 'not_in_game' }
-      if (current.matchSeq !== expectedMatchSeq) return { ok: true, advanced: false, matchSeq: current.matchSeq }
-      advanceMatchSeqStatement.run(voiceTableId, expectedMatchSeq)
-      const nextMatchSeq = expectedMatchSeq + 1
-      // Grace важи само за сегмента, в който е получен — старите редове се махат.
-      deleteOlderGrantsStatement.run(voiceTableId, nextMatchSeq)
-      return { ok: true, advanced: true, matchSeq: nextMatchSeq }
-    })
-    return result.ok ? result.value : result
-  }
-
   function releaseVoiceTable(voiceTableId: VoiceTableId, reason: VoiceTableReleaseReason, now: Date = new Date()): ReleaseVoiceTableResult {
     const nowIso = now.toISOString()
     const result = runWriteTransaction((): ReleaseVoiceTableResult => {
@@ -634,43 +706,81 @@ export async function createVoiceChatStore(
     return (listActiveTablesStatement.all() as VoiceTableRow[]).map(toVoiceTableRecord)
   }
 
-  // ─── Match-scoped speaking grace ────────────────────────────────────────
+  // ─── Участия и право за говорене (Етап 2б) ──────────────────────────────
 
-  function recordSpeakingGrant(voiceTableId: VoiceTableId, matchSeq: number, profileId: string, now: Date = new Date()): RecordSpeakingGrantResult {
-    const nowIso = now.toISOString()
-    const result = runWriteTransaction((): RecordSpeakingGrantResult => {
-      const current = readTable(voiceTableId)
+  function startMembership(input: {
+    membershipId: string
+    voiceTableId: VoiceTableId
+    profileId: string
+    entitled: boolean
+    now?: Date
+  }): StartMembershipResult {
+    const nowIso = (input.now ?? new Date()).toISOString()
+    const result = runWriteTransaction((): StartMembershipResult => {
+      const current = readTable(input.voiceTableId)
       if (current === null) return { ok: false, code: 'not_found' }
       if (current.status !== 'active') return { ok: false, code: 'not_active' }
-      if (current.matchSeq !== matchSeq) return { ok: false, code: 'stale_match' }
-      const changes = Number(insertGrantStatement.run(voiceTableId, matchSeq, profileId, nowIso).changes)
-      return { ok: true, created: changes > 0 }
+      if (selectMembershipStatement.get(input.membershipId) !== undefined) return { ok: false, code: 'duplicate_id' }
+      const previous = selectActiveMembershipStatement.get(input.voiceTableId, input.profileId) as MembershipRow | undefined
+      if (previous !== undefined) endMembershipStatement.run(nowIso, 'superseded', previous.membership_id)
+      insertMembershipStatement.run(input.membershipId, input.voiceTableId, input.profileId, nowIso, input.entitled ? nowIso : null)
+      return {
+        ok: true,
+        membership: toMembership(selectMembershipStatement.get(input.membershipId) as MembershipRow),
+        supersededMembershipId: previous?.membership_id ?? null,
+      }
     })
     return result.ok ? result.value : result
   }
 
-  function hasSpeakingGrant(voiceTableId: VoiceTableId, matchSeq: number, profileId: string): boolean {
-    return selectGrantStatement.get(voiceTableId, matchSeq, profileId) !== undefined
+  function endMembership(membershipId: string, reason: VoiceMembershipEndReason, now: Date = new Date()): EndMembershipResult {
+    const nowIso = now.toISOString()
+    const result = runWriteTransaction(() => Number(endMembershipStatement.run(nowIso, reason, membershipId).changes) > 0)
+    return result.ok ? { ok: true, ended: result.value } : result
   }
 
-  function listSpeakingGrants(voiceTableId: VoiceTableId): VoiceSpeakingGrant[] {
-    return (listGrantsStatement.all(voiceTableId) as Array<{ voice_table_id: string; match_seq: number; profile_id: string; granted_at: string }>).map((row) => ({
-      voiceTableId: row.voice_table_id,
-      matchSeq: Number(row.match_seq),
-      profileId: row.profile_id,
-      grantedAt: row.granted_at,
-    }))
+  function entitleMembership(membershipId: string, now: Date = new Date()): EntitleMembershipResult {
+    const nowIso = now.toISOString()
+    const result = runWriteTransaction((): EntitleMembershipResult => {
+      const row = selectMembershipStatement.get(membershipId) as MembershipRow | undefined
+      if (row === undefined) return { ok: false, code: 'not_found' }
+      if (row.ended_at !== null) return { ok: false, code: 'ended' }
+      if (row.speaking_entitled_at !== null) return { ok: true, entitled: false }
+      entitleMembershipStatement.run(nowIso, membershipId)
+      return { ok: true, entitled: true }
+    })
+    return result.ok ? result.value : result
+  }
+
+  function getMembership(membershipId: string): VoiceTableMembership | null {
+    const row = selectMembershipStatement.get(membershipId) as MembershipRow | undefined
+    return row === undefined ? null : toMembership(row)
+  }
+
+  function getActiveMembership(voiceTableId: VoiceTableId, profileId: string): VoiceTableMembership | null {
+    const row = selectActiveMembershipStatement.get(voiceTableId, profileId) as MembershipRow | undefined
+    return row === undefined ? null : toMembership(row)
+  }
+
+  function listActiveMemberships(): VoiceTableMembership[] {
+    return (listActiveMembershipsStatement.all() as MembershipRow[]).map(toMembership)
   }
 
   // ─── Генерации ──────────────────────────────────────────────────────────
 
-  function allocateGeneration(voiceTableId: VoiceTableId, retireReason: VoiceRoomRetireReason, now: Date = new Date()): AllocateGenerationResult {
+  function allocateGeneration(voiceTableId: VoiceTableId, retireReason: VoiceRoomRetireReason | null, now: Date = new Date()): AllocateGenerationResult {
     const nowIso = now.toISOString()
     const result = runWriteTransaction((): AllocateGenerationResult => {
       const current = readTable(voiceTableId)
       if (current === null) return { ok: false, code: 'not_found' }
       if (current.status !== 'active') return { ok: false, code: 'not_active' }
-      const retiredRoomName = retireLiveGenerationInTransaction(voiceTableId, retireReason, nowIso)
+      // Без причина -> не се оттегля нищо; ако все пак има жива, тя се пази
+      // (идемпотентно: втори "първи токен" не създава нова генерация).
+      if (retireReason === null) {
+        const live = selectLiveGenerationStatement.get(voiceTableId) as GenerationRow | undefined
+        if (live !== undefined) return { ok: true, roomName: live.livekit_room_name, generation: Number(live.generation), retiredRoomName: null }
+      }
+      const retiredRoomName = retireReason === null ? null : retireLiveGenerationInTransaction(voiceTableId, retireReason, nowIso)
       const generation = Number((selectMaxGenerationStatement.get(voiceTableId) as { g: number }).g) + 1
       const roomName = buildVoiceRoomName(voiceTableId, generation)
       insertGenerationStatement.run(roomName, voiceTableId, generation, nowIso)
@@ -691,6 +801,15 @@ export async function createVoiceChatStore(
 
   function isLiveRoomName(roomName: string): boolean {
     return selectIsLiveRoomStatement.get(roomName) !== undefined
+  }
+
+  function hasPendingRoomDeletion(voiceTableId: VoiceTableId): boolean {
+    return selectPendingForTableStatement.get(voiceTableId) !== undefined
+  }
+
+  function nextRoomDeletionDueAt(): string | null {
+    const row = selectNextDeletionDueStatement.get() as { due: string | null } | undefined
+    return row?.due ?? null
   }
 
   function listDueRoomDeletions(input: { now?: Date; limit?: number }): VoiceRoomGenerationRecord[] {
@@ -727,15 +846,22 @@ export async function createVoiceChatStore(
 
   // ─── Рестарт ────────────────────────────────────────────────────────────
 
-  function reconcileOnBoot(input: { restoredServerRoomIds: ReadonlySet<string>; now?: Date }): ReconcileOnBootResult {
+  function reconcileOnBoot(input: ReconcileOnBootInput): ReconcileOnBootResult {
     const nowIso = (input.now ?? new Date()).toISOString()
     const result = runWriteTransaction(() => {
       const releasedVoiceTableIds: VoiceTableId[] = []
       const retainedVoiceTableIds: VoiceTableId[] = []
       const retiredRoomNames: string[] = []
+      const endedMembershipIds: string[] = []
       for (const row of listActiveTablesStatement.all() as VoiceTableRow[]) {
-        if (row.phase === 'waiting' || row.server_room_id === null || !input.restoredServerRoomIds.has(row.server_room_id)) {
-          const reason: VoiceTableReleaseReason = row.phase === 'waiting' ? 'boot_waiting_room_lost' : 'boot_server_room_missing'
+        if (
+          input.releaseAll === true ||
+          row.phase === 'waiting' ||
+          row.server_room_id === null ||
+          !input.restoredServerRoomIds.has(row.server_room_id)
+        ) {
+          const reason: VoiceTableReleaseReason =
+            input.releaseAll === true ? 'mode_off' : row.phase === 'waiting' ? 'boot_waiting_room_lost' : 'boot_server_room_missing'
           const retired = releaseTableInTransaction(row.voice_table_id, reason, 'table_released', nowIso)
           if (retired === false) continue
           releasedVoiceTableIds.push(row.voice_table_id)
@@ -748,8 +874,19 @@ export async function createVoiceChatStore(
         retainedVoiceTableIds.push(row.voice_table_id)
         const retired = retireLiveGenerationInTransaction(row.voice_table_id, 'boot_rotation', nowIso)
         if (retired !== null) retiredRoomNames.push(retired)
+        // Участията оцеляват само за профилите, които все още са активни
+        // участници във възстановената игрова стая (окончателно напусналите
+        // и изчезналите — край на участието и на правото за говорене).
+        const activeProfiles = input.restoredActiveProfileIds?.get(row.server_room_id)
+        if (activeProfiles !== undefined) {
+          for (const membership of listActiveMembershipsForTableStatement.all(row.voice_table_id) as MembershipRow[]) {
+            if (activeProfiles.has(membership.profile_id)) continue
+            endMembershipStatement.run(nowIso, 'boot_not_restored', membership.membership_id)
+            endedMembershipIds.push(membership.membership_id)
+          }
+        }
       }
-      return { releasedVoiceTableIds, retainedVoiceTableIds, retiredRoomNames }
+      return { releasedVoiceTableIds, retainedVoiceTableIds, retiredRoomNames, endedMembershipIds }
     })
     return result.ok ? { ok: true, ...result.value } : result
   }
@@ -772,21 +909,25 @@ export async function createVoiceChatStore(
     reserveVoiceTable,
     bindPrivateRoom,
     markInGame,
-    advanceMatchSeq,
     releaseVoiceTable,
     getVoiceTable,
     findActiveVoiceTableByPrivateRoomId,
     findActiveVoiceTableByServerRoomId,
     listActiveVoiceTables,
     countActiveVoiceTables: readCountActive,
-    recordSpeakingGrant,
-    hasSpeakingGrant,
-    listSpeakingGrants,
+    startMembership,
+    endMembership,
+    entitleMembership,
+    getMembership,
+    getActiveMembership,
+    listActiveMemberships,
     allocateGeneration,
     getLiveGeneration,
     getGeneration,
     isLiveRoomName,
+    hasPendingRoomDeletion,
     listDueRoomDeletions,
+    nextRoomDeletionDueAt,
     countPendingRoomDeletions,
     recordRoomDeletionAttempt,
     reconcileOnBoot,

@@ -472,6 +472,8 @@ export function createRoomSnapshotMessage(
     isGuestTrial: room.config.isGuestTrial === true,
     isPrivateTableOrigin: room.config.isPrivateTableOrigin === true,
     isTournamentMatchOrigin: room.config.isTournamentMatchOrigin === true,
+    // Гласов чат (Етап 2б) — само за играч на мястото си (yourSeat !== null).
+    voiceTableId: yourSeat !== null ? (room.config.voiceTableId ?? null) : null,
     tournamentId: room.config.tournamentId ?? null,
     tournamentMatchId: room.config.tournamentMatchId ?? null,
     tournamentRoundType: room.config.tournamentRoundType ?? null,

@@ -267,6 +267,12 @@ export type ServerRoomConfig = {
    * ("Нова игра" бутонът се крие) — виж createRoomSnapshotMessage.ts.
    */
   isPrivateTableOrigin?: boolean
+  /**
+   * Гласов чат (Етап 2б): постоянният voiceTableId, пренесен от PrivateRoom
+   * при старта; запазва се в JSON snapshot-а и през "Преиграй" (същата
+   * ServerRoom). Липсващ/null = масата е без гласов чат.
+   */
+  voiceTableId?: string | null
   isTournamentMatchOrigin?: boolean
   tournamentId?: TournamentId
   tournamentMatchId?: TournamentMatchId

@@ -143,6 +143,13 @@ export type PrivateRoom = {
   readonly humanTurnTimeoutMs: HumanTurnTimeoutMs
   /** null = масата е създадена без "Покани партньор" (старото поведение). */
   partnerReservation: PrivateRoomPartnerReservation | null
+  /**
+   * Гласов чат (Етап 2б): постоянният voiceTableId (слот, резервиран преди
+   * createRoom). Задава се веднъж и НЕ се променя; при старт преминава в
+   * ServerRoomConfig. null = масата е без гласов чат. Store-ът не знае нищо
+   * за гласа — само носи идентификатора.
+   */
+  readonly voiceTableId: string | null
 }
 
 // Партньорът напусна/беше изритан — "прие" известието вече не е вярно.
@@ -341,6 +348,8 @@ export type CreateRoomInput = {
   humanTurnTimeoutMs?: HumanTurnTimeoutMs
   /** "Покани партньор" — резервира A1 за поканен приятел. Липсващо = false. */
   invitePartner?: boolean
+  /** Гласов чат (Етап 2б) — вече резервиран voiceTableId; липсващо = без глас. */
+  voiceTableId?: string | null
 }
 
 export type CreateRoomResult =
@@ -495,6 +504,16 @@ type StoreCallbacks = {
   // изтичане на цялата маса НЕ минава оттук: onRoomClosed/onRoomExpired
   // получават стаята с все още закачената покана.
   onPartnerInviteEnded?: (room: PrivateRoom, invite: PrivateRoomPartnerInvite, reason: PartnerInviteEndReason) => void
+  // Гласов чат (Етап 2б) — човек е седнал на място (joinTeam /
+  // acceptPartnerInvite). Вика се ПРЕДИ евентуалния auto-start (onRoomReady),
+  // за да започне участието му още в чакалнята. Създателят не минава оттук
+  // (index.ts го обработва при createRoom).
+  onMemberSeated?: (room: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
+  // Гласов чат (Етап 2б) — последният човек е напуснал и масата е изтрита
+  // БЕЗ onRoomClosed/onRoomExpired (leaveRoom). room е състоянието ПРЕДИ
+  // напускането (съдържа напусналия). Без тази кука гласовият слот би
+  // останал зает.
+  onRoomEmptied?: (room: PrivateRoom, leavingOccupant: PrivateRoomHumanOccupant) => void
 }
 
 type StoreOptions = {
@@ -689,6 +708,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
         : DEFAULT_HUMAN_TURN_TIMEOUT_MS,
       // Гост (profileId null) не може да кани приятели — резервация без
       // собственик би блокирала мястото завинаги.
+      voiceTableId: input.voiceTableId ?? null,
       partnerReservation:
         input.invitePartner === true && input.profileId !== null
           ? {
@@ -795,6 +815,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     const nextRoom: PrivateRoom = { ...room, slots: nextSlots }
     rooms.set(nextRoom.id, nextRoom)
     connectionToRoom.set(input.connectionId, nextRoom.id)
+    callbacks.onMemberSeated?.(nextRoom, occupant)
 
     const outcome = tryAutoStartIfFull(nextRoom, input.isBlockedWith)
     return { ok: true, room: outcome.room, readyToStart: outcome.readyToStart, readiness: outcome.readiness }
@@ -1089,6 +1110,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       cancelExpiry(roomId)
       cancelPartnerInviteTimer(roomId)
       rooms.delete(roomId)
+      callbacks.onRoomEmptied?.(room, leavingOccupant)
       if (revokedPartnerInvite !== null) {
         callbacks.onPartnerInviteEnded?.(
           { ...room, slots: finalSlots, partnerReservation: null },
@@ -1529,6 +1551,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     }
     rooms.set(nextRoom.id, nextRoom)
     connectionToRoom.set(input.connectionId, nextRoom.id)
+    callbacks.onMemberSeated?.(nextRoom, occupant)
 
     const outcome = tryAutoStartIfFull(nextRoom, input.isBlockedWith)
     return { ok: true, room: outcome.room, invite, readyToStart: outcome.readyToStart, readiness: outcome.readiness }

@@ -31,8 +31,13 @@ export type VoiceChatAdminApiDeps = {
   readJsonBody: (req: IncomingMessage) => Promise<unknown>
   /** Имена за одита (live от профилите; липсващ/изтрит -> null). */
   resolveDisplayName?: (profileId: string) => string | null
-  /** Етап 2б: прекратяване на LiveKit стаите след 'off'. В 2а — само лог. */
+  /** Етап 2б: прекратяване на гласовите сесии и LiveKit стаите след 'off'. */
   onModeChanged?: (result: Extract<SetModeResult, { ok: true }>) => void
+  /**
+   * Етап 2б: технически показатели на runtime-а (breaker, опашки, броячи) —
+   * без тайни, токени или лични данни. Липсващ -> полето не се връща.
+   */
+  getRuntimeStats?: () => Record<string, unknown>
   env?: EnvSource
   now?: () => Date
   log?: (line: string) => void
@@ -68,6 +73,7 @@ export function buildVoiceChatAdminSnapshot(deps: VoiceChatAdminApiDeps): Record
     activeVoiceTables: deps.store.countActiveVoiceTables(),
     pendingRoomDeletions: deps.store.countPendingRoomDeletions(),
     liveKit: getVoiceChatLiveKitConfigStatus(env),
+    ...(deps.getRuntimeStats === undefined ? {} : { runtime: deps.getRuntimeStats() }),
     history: deps.store.listAdminChanges(50).map((change) => ({
       changeId: change.changeId,
       setting: change.setting,

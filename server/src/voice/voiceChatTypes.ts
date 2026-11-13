@@ -1,10 +1,12 @@
-// Гласов чат в частните маси на Белот — общи типове (Етап 2а).
+// Гласов чат в частните маси на Белот — общи типове (Етапи 2а и 2б).
 //
-// Модулът server/src/voice/ НЕ зависи от index.ts, WebSocket слоя или
-// LiveKit SDK. Етап 2а съдържа само: режим/лимит (voiceChatStore.ts), чиста
-// eligibility логика (voiceChatEligibility.ts), структурите за слотове,
-// генерации на стаята, session binding и match-scoped speaking grace.
-// LiveKit заявки и JWT издаване идват в Етап 2б.
+// Модулът server/src/voice/ НЕ зависи от index.ts или WebSocket слоя.
+// Етап 2а: режим/лимит (voiceChatStore.ts), чиста eligibility логика
+// (voiceChatEligibility.ts), слотове и генерации на стаята. Етап 2б: право
+// за говорене, обвързано с участието (voice_table_memberships), session
+// binding, LiveKit API клиент, издаване на токени, ротация и reconciliation
+// (voiceChatService.ts и съседните модули). LiveKit SDK се ползва само от
+// voiceLiveKitApi.ts и voiceTokenIssuer.ts.
 
 // ─── Административен режим ────────────────────────────────────────────────
 
@@ -110,7 +112,7 @@ export type VoiceTableRecord = {
   phase: VoiceTablePhase
   privateRoomId: string | null
   serverRoomId: string | null
-  /** Сегмент на speaking grace: 1 = чакалнята + първият мач; "Преиграй" -> +1. */
+  /** Наследено от Етап 2а (match-scoped grace); от Етап 2б винаги 1 и не се използва. */
   matchSeq: number
   createdAt: string
   inGameAt: string | null
@@ -133,7 +135,10 @@ export type VoiceRoomGenerationStatus = 'live' | 'delete_pending' | 'deleted'
 export type VoiceRoomRetireReason =
   /** Член с издаден токен е загубил правото да слуша (напускане/изгонване/бан). */
   | 'listen_revoked'
-  /** Член с publish-способен токен е загубил правото да говори (VIP при "Преиграй"). */
+  /**
+   * Наследено от Етап 2а. От Етап 2б правото за говорене НЕ се отнема при
+   * изтичане на VIP (виж voice_table_memberships), затова не се използва.
+   */
   | 'speak_revoked'
   /** Изместена игрова сесия, на която е бил издаден токен. */
   | 'session_displaced'
@@ -177,18 +182,22 @@ export type VoiceMembershipFacts = {
  * clientInstanceId е случаен идентификатор на конкретната страница/таб
  * (генерира се в паметта на клиента, не се пази в storage). Обикновен
  * WebSocket reconnect от същата страница пази същия clientInstanceId (сменя
- * се само gameConnectionId); друг таб/устройство = друг clientInstanceId.
- * bindingEpoch расте при всяка смяна на clientInstanceId за профила на
- * масата — стар токен на изместена сесия се обезсилва чрез ротация
- * (VoiceRoomRetireReason 'session_displaced'), не чрез DUPLICATE_IDENTITY.
+ * се само gameConnectionId); refresh/друг таб/устройство = друг
+ * clientInstanceId. Регистрира се САМО през игровия WebSocket от връзката,
+ * която в момента държи мястото на масата (seat connection) — HTTP заявка
+ * не може да създаде/премести binding. bindingEpoch расте при всяка смяна
+ * на clientInstanceId за профила на масата и е част от LiveKit identity —
+ * стар токен на изместена сесия има ДРУГО identity (не може да изхвърли
+ * новия участник чрез DUPLICATE_IDENTITY) и се обезсилва чрез ротация
+ * (VoiceRoomRetireReason 'session_displaced').
  */
 export type VoiceSessionBinding = {
   profileId: string
   voiceTableId: VoiceTableId
   clientInstanceId: string
-  gameConnectionId: string
+  /** Игровата WS връзка, през която е регистриран binding-ът; null = връзката е затворена. */
+  gameConnectionId: string | null
   bindingEpoch: number
-  boundAt: number
 }
 
 /** Това, което заявката за токен представя (Етап 2б). */
@@ -198,12 +207,50 @@ export type VoiceSessionClaim = {
   clientInstanceId: string
 }
 
-/** Ограничено право за завършване на текущия сегмент с глас (DB: voice_speaking_grants). */
-export type VoiceSpeakingGrant = {
+// ─── Участие и право за говорене (Етап 2б) ───────────────────────────────
+
+export type VoiceMembershipEndReason =
+  /** Напуснал е чакалнята (освободил е мястото си). */
+  | 'left_waiting_room'
+  /** Изгонен от домакина в чакалнята. */
+  | 'kicked'
+  /** Окончателно напускане на започналата игра (permanentlyLeftAt). */
+  | 'permanently_left'
+  | 'banned'
+  /** Профилът е изтрит/спрян от администратор. */
+  | 'profile_revoked'
+  /** Ново сядане на същия профил — предишното участие безусловно приключва. */
+  | 'superseded'
+  /** Гласовата маса е освободена (разпадане, край, изключване на гласа). */
+  | 'table_released'
+  /** Рестарт: профилът не е активен участник във възстановената игрова стая. */
+  | 'boot_not_restored'
+
+export const VOICE_MEMBERSHIP_END_REASONS: readonly VoiceMembershipEndReason[] = [
+  'left_waiting_room',
+  'kicked',
+  'permanently_left',
+  'banned',
+  'profile_revoked',
+  'superseded',
+  'table_released',
+  'boot_not_restored',
+]
+
+/**
+ * Едно НЕПРЕКЪСНАТО участие на профил в гласова маса (DB:
+ * voice_table_memberships). speakingEntitledAt != null -> правото за
+ * говорене е придобито и не се губи при изтичане на VIP до края на ТОВА
+ * участие. Ново сядане = ново membershipId без старото право.
+ */
+export type VoiceTableMembership = {
+  membershipId: string
   voiceTableId: VoiceTableId
-  matchSeq: number
   profileId: string
-  grantedAt: string
+  startedAt: string
+  speakingEntitledAt: string | null
+  endedAt: string | null
+  endReason: VoiceMembershipEndReason | null
 }
 
 // ─── LiveKit permission профил (само данни — без SDK, без JWT) ───────────

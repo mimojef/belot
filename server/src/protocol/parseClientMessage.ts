@@ -1,3 +1,4 @@
+import { parseVoicePresenceMessage } from '../voice/voiceChatProtocol.js'
 import {
   SUPPORTED_MATCH_STAKES,
   type MatchStake,
@@ -182,6 +183,11 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
 
     if (parsed.type === 'ping') {
       return { type: 'ping' }
+    }
+
+    // Гласов чат (Етап 2б) — presence/lease; невалиден формат -> null.
+    if (parsed.type === 'voice_presence') {
+      return parseVoicePresenceMessage(parsed)
     }
 
     if (parsed.type === 'create_room') {
@@ -662,6 +668,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         manualStart: parsed.manualStart === true,
         humanTurnTimeoutMs,
         invitePartner: parsed.invitePartner === true,
+        voiceEnabled: parsed.voiceEnabled === true,
         displayName: normalizeOptionalDisplayName(parsed.displayName),
       }
     }
