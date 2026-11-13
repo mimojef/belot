@@ -373,7 +373,7 @@ async function createHarness(options: {
     now: clock.now,
     scheduler: clock.scheduler,
     log: (line) => { logs.push(line) },
-    reconcilerOptions: { scheduler: reconcilerClock, now: clock.now, retryBaseDelayMs: 1_000, uncertainHorizonMs: 20 * 60_000 },
+    reconcilerOptions: { scheduler: reconcilerClock, now: clock.now, retryBaseDelayMs: 1_000 },
   })
   service.boot(options.boot ?? [])
   const call = (fn: VoiceChatService['handleTokenRequest'], profileId: string, voiceTableId: string, clientInstanceId: string): Promise<VoiceHttpResult> =>
@@ -430,6 +430,15 @@ const harnesses: Harness[] = []
 
 function decodeJwt(token: string): Record<string, unknown> {
   return JSON.parse(base64UrlDecode(token.split('.')[1]!)) as Record<string, unknown>
+}
+
+async function waitForRoom(fakeLiveKit: FakeLiveKit, name: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (fakeLiveKit.rooms.has(name)) return
+    await sleep(50)
+  }
+  throw new Error(`timeout: стая ${name.slice(0, 12)}…`)
 }
 
 function messagesOf(h: Harness, connectionId: string, type: VoiceServerMessage['type']): VoiceServerMessage[] {
@@ -1171,6 +1180,66 @@ try {
     assertEqual((await h.token(creator, table, inst)).status, 410, 'старата маса остава освободена')
     const reserve = h.service.reserveVoiceTableForPrivateRoom({ profileId: creator, isFullAdmin: false })
     assert(reserve.ok, 'нова маса')
+  })
+
+  await check('[R7] Постоянно наблюдение през рестарт: CreateRoom timeout -> оттегляне -> потвърдено изтриване -> рестарт -> старото име се появява -> изтрито; текущата генерация незасегната', async () => {
+    fake.reset()
+    const h1 = await createHarness({ fake })
+    const host = h1.seedProfile('Host')
+    const table = h1.createTable(host, 'c1')
+    h1.service.onGameStarted(table, 'server-r7')
+    const inst = 'inst_r7_00000000000001'
+    h1.presence('c1', host, table, inst)
+    const oldName = (() => {
+      const g = h1.store.allocateGeneration(table, null)
+      if (!g.ok) throw new Error('gen')
+      return g.roomName
+    })()
+    // (1) И двата опита изтичат (0.4 s); LiveKit ги изпълнява след 2.5 s.
+    fake.next.set('CreateRoom', [{ kind: 'delay_apply', delayMs: 2_500 }, { kind: 'delay_apply', delayMs: 2_500 }])
+    const failed = await h1.token(host, table, inst)
+    assert(failed.status === 503 && failed.body.token === undefined, 'CreateRoom timeout -> без токен')
+    assert(h1.store.getGeneration(oldName)?.uncertainCreateAt !== null, 'маркер за неясен CreateRoom (в базата)')
+    // (2) Оттегляне на генерацията.
+    const rotated = h1.store.allocateGeneration(table, 'listen_revoked')
+    assert(rotated.ok && rotated.retiredRoomName === oldName, 'оттеглено')
+    // (3) Потвърден DeleteRoom (стаята още не съществува в LiveKit).
+    await h1.reconcile()
+    assertEqual(h1.store.getGeneration(oldName)?.status, 'deleted', 'потвърдено изтриване')
+    const watchBefore = h1.store.getGeneration(oldName)?.watchUntil ?? ''
+    assert(watchBefore > new Date(h1.clock.now()).toISOString(), 'активно наблюдение преди рестарта')
+    // (4) Рестарт на backend-а.
+    h1.service.dispose()
+    const h2 = await createHarness({
+      fake,
+      existing: { path: h1.path, store: h1.store, seedProfile: h1.seedProfile },
+      boot: [{ serverRoomId: 'server-r7', voiceTableId: table, activeProfileIds: [host] }],
+    })
+    await h2.reconcile() // boot sweep (старото име още не е в LiveKit)
+    assert(h2.store.hasActiveRoomWatch(new Date(h2.clock.now())), 'наблюдението е възстановено от базата')
+    h2.vip.add(host)
+    h2.seats.set(`${table}|${host}`, { relation: 'player', permanentlyLeft: false, seatConnectionId: 'n1' })
+    h2.open.add('n1')
+    h2.presence('n1', host, table, inst)
+    await h2.reconcile()
+    const current = await h2.token(host, table, inst)
+    assert(current.status === 200, `текущ токен ${current.status} ${JSON.stringify(current.body.code)}`)
+    const currentRoom = String((decodeJwt(String(current.body.token)).video as Record<string, unknown>).room)
+    // (5) Старото име се появява отново (забавените CreateRoom пристигат).
+    await waitForRoom(fake, oldName, 6_000)
+    await sleep(700) // и вторият опит
+    assert(fake.rooms.has(oldName) && !h2.store.isLiveRoomName(oldName), 'възкресено старо име (не е живо)')
+    // (6) Reconciliation го открива и изтрива.
+    h2.clock.advance(31_000)
+    await h2.reconcile()
+    assert(!fake.rooms.has(oldName), 'възкресената стая е изтрита след рестарта')
+    const watchAfter = h2.store.getGeneration(oldName)?.watchUntil ?? ''
+    assert(watchAfter > watchBefore, 'наблюдението е удължено при повторната поява')
+    assertEqual(h2.store.getGeneration(oldName)?.status, 'deleted', 'името остава оттеглено (никога не се ползва отново)')
+    // (7) Текущата генерация е незасегната.
+    assert(fake.rooms.has(currentRoom) && h2.store.isLiveRoomName(currentRoom), 'текущата стая е непокътната')
+    const again = await h2.token(host, table, inst)
+    assert(again.status === 200 && String((decodeJwt(String(again.body.token)).video as Record<string, unknown>).room) === currentRoom, 'токени за текущата генерация продължават')
   })
 
   // ═══ [P] Presence, lease и 120 s ═════════════════════════════════════════

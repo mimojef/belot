@@ -359,10 +359,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     scheduler,
     now: () => new Date(now()),
     log,
-    onReleased: (voiceTableId, retiredRoomNames) => {
-      reconciler.noteRetired(retiredRoomNames)
-      handleTableReleased(voiceTableId, 'table_released')
-    },
+    onReleased: (voiceTableId) => handleTableReleased(voiceTableId, 'table_released'),
   })
 
   // ─── Помощни ──────────────────────────────────────────────────────────
@@ -535,7 +532,6 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       return 'done'
     }
     blockedTables.delete(voiceTableId)
-    if (result.retiredRoomName !== null) reconciler.noteRetired([result.retiredRoomName])
     counters.rotations! += 1
     log(`[voice-chat] rotation voiceTable=${voiceTableId} generation=${result.generation} reason=${reason}`)
     notifyTable(voiceTableId, { type: 'voice_table_updated', voiceTableId, generation: result.generation, ready: false })
@@ -1147,7 +1143,6 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
 
     onModeChanged(result) {
       if (result.settings.mode !== 'off') return
-      reconciler.noteRetired(result.retiredRoomNames)
       for (const voiceTableId of result.releasedVoiceTableIds) handleTableReleased(voiceTableId, 'voice_off')
       reconciler.kick()
     },

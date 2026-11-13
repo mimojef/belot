@@ -159,6 +159,10 @@ export type VoiceRoomGenerationRecord = {
   nextDeleteAttemptAt: string | null
   lastDeleteError: string | null
   deletedConfirmedAt: string | null
+  /** Първият неясен изход на CreateRoom за името (null = няма). */
+  uncertainCreateAt: string | null
+  /** Край на наблюдението срещу възкресяване (null = без наблюдение). */
+  watchUntil: string | null
 }
 
 // ─── Membership, сесия и права ────────────────────────────────────────────

@@ -14,10 +14,14 @@
 //      "възкреси" вече изтрито име. Затова:
 //        * DeleteRoom за име с CreateRoom в полет изчаква (сериализация по
 //          име);
-//        * име с неясен CreateRoom влиза в "наблюдение" за uncertainHorizonMs
-//          (по-дълго от валидността на токените); докато има наблюдавани
-//          имена, на sweepIntervalMs се прави ListRooms() и ВСЯКА pv_ стая,
-//          която не е текущата жива генерация на активна маса, се трие.
+//        * име с неясен CreateRoom влиза в ПОСТОЯННО наблюдение (в базата:
+//          voice_room_generations.uncertain_create_at / watch_until — виж
+//          миграция 20261113_002). Наблюдението започва при оттеглянето,
+//          удължава се при потвърденото изтриване и при всяко повторно
+//          появяване и ПРЕЖИВЯВА рестарт на backend-а. Докато има активно
+//          наблюдение, на sweepIntervalMs се прави ListRooms() и ВСЯКА
+//          pv_<namespace>_ стая, която не е текущата жива генерация на
+//          активна маса, се трие (текущата никога не се пипа).
 //   4. При старт: еднократен sweep — трие всички pv_ стаи, които не са живи
 //      (сираци от предишния процес, вкл. имена, непознати за базата).
 //
@@ -46,11 +50,6 @@ const defaultScheduler: VoiceReconcilerScheduler = {
 export type VoiceRoomReconciler = {
   /** Нова работа (оттеглена генерация) — изпълни възможно най-скоро. */
   kick: () => void
-  /**
-   * Имената са оттеглени. Ако за някое има неясен CreateRoom, наблюдението
-   * започва (или се удължава) ОТ МОМЕНТА НА ОТТЕГЛЯНЕТО.
-   */
-  noteRetired: (roomNames: readonly string[]) => void
   /** CreateRoom за името е в полет — DeleteRoom за него изчаква. */
   trackCreate: (roomName: string, promise: Promise<unknown>) => void
   /** CreateRoom е завършил с timeout/неясен изход — наблюдение за възкресяване. */
@@ -58,14 +57,23 @@ export type VoiceRoomReconciler = {
   requestBootSweep: () => void
   /** Едно пълно преминаване (за тестове и за kick). Не се припокрива със себе си. */
   runNow: () => Promise<void>
-  stats: () => { uncertainWatches: number; uncertainLiveNames: number; bootSweepPending: boolean; createsInFlight: number }
+  stats: () => { uncertainWatches: number; pendingUncertainMarks: number; bootSweepPending: boolean; createsInFlight: number }
   dispose: () => void
 }
 
 export type VoiceRoomReconcilerOptions = {
   store: Pick<
     VoiceChatStore,
-    'listDueRoomDeletions' | 'recordRoomDeletionAttempt' | 'nextRoomDeletionDueAt' | 'isLiveRoomName' | 'getGeneration' | 'hasPendingRoomDeletion'
+    | 'listDueRoomDeletions'
+    | 'recordRoomDeletionAttempt'
+    | 'nextRoomDeletionDueAt'
+    | 'isLiveRoomName'
+    | 'getGeneration'
+    | 'hasPendingRoomDeletion'
+    | 'markUncertainCreate'
+    | 'extendRoomWatch'
+    | 'hasActiveRoomWatch'
+    | 'countActiveRoomWatches'
   >
   /** null -> LiveKit не е конфигуриран: нищо не се изпълнява (задачите остават в базата). */
   api: VoiceLiveKitApi | null
@@ -80,7 +88,6 @@ export type VoiceRoomReconcilerOptions = {
   batchSize?: number
   retryBaseDelayMs?: number
   retryMaxDelayMs?: number
-  uncertainHorizonMs?: number
   sweepIntervalMs?: number
   /** Изчакване, когато име има CreateRoom в полет. */
   createInFlightRetryMs?: number
@@ -95,7 +102,6 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
   const batchSize = options.batchSize ?? 10
   const retryBaseDelayMs = options.retryBaseDelayMs ?? 2_000
   const retryMaxDelayMs = options.retryMaxDelayMs ?? 5 * 60_000
-  const uncertainHorizonMs = options.uncertainHorizonMs ?? 20 * 60_000
   const sweepIntervalMs = options.sweepIntervalMs ?? 30_000
   const createInFlightRetryMs = options.createInFlightRetryMs ?? 500
   const now = options.now ?? (() => Date.now())
@@ -106,12 +112,11 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
   const roomNamespace = options.roomNamespace ?? VOICE_ROOM_DEFAULT_NAMESPACE
   const createsInFlight = new Map<string, Promise<unknown>>()
   /**
-   * roomName -> до кога да се наблюдава (epoch ms) или null, докато името
-   * още е живо (наблюдението започва при оттеглянето). Ограничено — неясните
-   * CreateRoom са редки; при препълване се изхвърлят най-старите живи.
+   * Маркери за неясен CreateRoom, чийто запис в базата е отложен (busy).
+   * Повтарят се при следващото преминаване; ограничено.
    */
-  const uncertainWatches = new Map<string, number | null>()
-  const MAX_UNCERTAIN_ENTRIES = 10_000
+  const pendingUncertainMarks = new Set<string>()
+  const MAX_PENDING_MARKS = 1_000
   let bootSweepPending = false
   let lastSweepAt = 0
   let timer: unknown = null
@@ -146,8 +151,18 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
   }
 
   function hasActiveWatch(): boolean {
-    for (const until of uncertainWatches.values()) if (until !== null) return true
-    return false
+    return pendingUncertainMarks.size > 0 || store.hasActiveRoomWatch(new Date(now()))
+  }
+
+  function persistUncertainMark(roomName: string): boolean {
+    const result = store.markUncertainCreate(roomName, new Date(now()))
+    return result.ok
+  }
+
+  function flushPendingMarks(): void {
+    for (const roomName of [...pendingUncertainMarks]) {
+      if (persistUncertainMark(roomName)) pendingUncertainMarks.delete(roomName)
+    }
   }
 
   function backoffMs(attempts: number): number {
@@ -185,11 +200,10 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
       if (record !== null && record.status === 'delete_pending') continue
       if (createsInFlight.has(room.name)) continue
       const deleted = await deleteRoomDirect(room.name)
+      // Повторно появило се оттеглено име -> възможни са още забавени
+      // CreateRoom (повторни опити) -> наблюдението се удължава.
+      if (record !== null) store.extendRoomWatch(room.name, new Date(now()))
       log(`[voice-reconcile] sweep ${record === null ? 'orphan' : 'resurrected'} room ${deleted ? 'deleted' : 'delete failed'}`)
-    }
-    const nowMs = now()
-    for (const [name, until] of uncertainWatches) {
-      if (until !== null && until <= nowMs) uncertainWatches.delete(name)
     }
   }
 
@@ -243,6 +257,7 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
   async function runOnce(): Promise<void> {
     if (api === null || disposed) return
     try {
+      flushPendingMarks()
       if ((bootSweepPending || hasActiveWatch()) && now() - lastSweepAt >= sweepIntervalMs) {
         await sweep()
       }
@@ -281,33 +296,10 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
       promise.then(clear, clear)
     },
     noteUncertainCreate: (roomName) => {
-      // Още живо име -> наблюдението започва при оттеглянето (noteRetired);
-      // вече оттеглено -> веднага.
-      if (store.isLiveRoomName(roomName)) {
-        if (!uncertainWatches.has(roomName)) {
-          if (uncertainWatches.size >= MAX_UNCERTAIN_ENTRIES) {
-            for (const [name, until] of uncertainWatches) {
-              if (until === null) {
-                uncertainWatches.delete(name)
-                break
-              }
-            }
-          }
-          uncertainWatches.set(roomName, null)
-        }
-        return
-      }
-      uncertainWatches.set(roomName, now() + uncertainHorizonMs)
-      schedule(Math.max(0, lastSweepAt + sweepIntervalMs - now()))
-    },
-    noteRetired: (roomNames) => {
-      let started = false
-      for (const name of roomNames) {
-        if (!uncertainWatches.has(name)) continue
-        uncertainWatches.set(name, now() + uncertainHorizonMs)
-        started = true
-      }
-      if (started) schedule(Math.max(0, lastSweepAt + sweepIntervalMs - now()))
+      // В базата: за живо име — маркер (наблюдението започва при
+      // оттеглянето в същата транзакция); за оттеглено — веднага.
+      if (!persistUncertainMark(roomName) && pendingUncertainMarks.size < MAX_PENDING_MARKS) pendingUncertainMarks.add(roomName)
+      if (hasActiveWatch()) schedule(Math.max(0, lastSweepAt + sweepIntervalMs - now()))
     },
     requestBootSweep: () => {
       bootSweepPending = true
@@ -315,11 +307,12 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
       schedule(0)
     },
     runNow,
-    stats: () => {
-      let active = 0
-      for (const until of uncertainWatches.values()) if (until !== null) active += 1
-      return { uncertainWatches: active, uncertainLiveNames: uncertainWatches.size - active, bootSweepPending, createsInFlight: createsInFlight.size }
-    },
+    stats: () => ({
+      uncertainWatches: store.countActiveRoomWatches(new Date(now())),
+      pendingUncertainMarks: pendingUncertainMarks.size,
+      bootSweepPending,
+      createsInFlight: createsInFlight.size,
+    }),
     dispose: () => {
       disposed = true
       if (timer !== null) scheduler.clearTimeout(timer)

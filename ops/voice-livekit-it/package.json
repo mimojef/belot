@@ -1,0 +1,17 @@
+{
+  "name": "pika-voice-livekit-it",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Самостоятелни интеграционни тестове срещу реален LiveKit (Етап 2б/2в). Не е част от приложението.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "@livekit/rtc-node": "1.2.1",
+    "livekit-server-sdk": "2.19.2"
+  }
+}

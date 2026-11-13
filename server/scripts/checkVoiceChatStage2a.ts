@@ -81,6 +81,7 @@ const sourceServerRoot = resolve(
 const sourceMigrationsDirectoryPath = join(sourceServerRoot, 'database', 'migrations')
 const VOICE_MIGRATION = '20261112_001_create_voice_chat.sql'
 const VOICE_MEMBERSHIP_MIGRATION = '20261113_001_voice_chat_memberships.sql'
+const VOICE_WATCH_MIGRATION = '20261113_002_voice_room_generation_watch.sql'
 
 console.log('\ncheckVoiceChatStage2a')
 console.log(`Server root: ${sourceServerRoot}`)
@@ -160,15 +161,19 @@ try {
       'idx_voice_chat_admin_changes_setting_changed_at',
       'idx_voice_table_memberships_one_active',
       'idx_voice_table_memberships_active_table',
+      'idx_voice_room_generations_watch',
     ]) {
       assert(db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?;`).get(index) !== undefined, index)
     }
     assert(db.prepare(`SELECT 1 FROM server_migrations WHERE filename = ?;`).get(VOICE_MIGRATION) !== undefined, 'ledger ред')
     assert(db.prepare(`SELECT 1 FROM server_migrations WHERE filename = ?;`).get(VOICE_MEMBERSHIP_MIGRATION) !== undefined, 'ledger ред 2б')
+    assert(db.prepare(`SELECT 1 FROM server_migrations WHERE filename = ?;`).get(VOICE_WATCH_MIGRATION) !== undefined, 'ledger ред 2в')
+    const generationColumns = (db.prepare(`PRAGMA table_info(voice_room_generations);`).all() as Array<{ name: string }>).map((c) => c.name)
+    assert(generationColumns.includes('uncertain_create_at') && generationColumns.includes('watch_until'), 'колони за наблюдение')
   })
 
   await check('[M2] Добавящи миграции (2а, после 2б): върху база с всички предишни миграции + данни; повторен старт ги пропуска', async () => {
-    const root = await createTempServerRoot((name) => name !== VOICE_MIGRATION && name !== VOICE_MEMBERSHIP_MIGRATION)
+    const root = await createTempServerRoot((name) => name !== VOICE_MIGRATION && name !== VOICE_MEMBERSHIP_MIGRATION && name !== VOICE_WATCH_MIGRATION)
     const { databaseFilePath: path } = await ensureServerDatabaseReady({ serverRootOverride: root })
     const before = new sqliteModule.DatabaseSync(path, { open: true })
     const tablesBefore = Number((before.prepare(`SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table';`).get() as { c: number }).c)
@@ -197,9 +202,25 @@ try {
       const tables2b = Number((after2b.prepare(`SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table';`).get() as { c: number }).c)
       assertEqual(tables2b, tablesBefore + 5, 'точно 1 нова таблица в 2б')
       assertEqual(Number((after2b.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length), 0, 'foreign_key_check 2б')
+      // данни отпреди 2в: генерация, която трябва да преживее ALTER TABLE
+      after2b.prepare(`INSERT INTO voice_tables (voice_table_id, status, phase, created_at) VALUES ('t-pre-2c', 'active', 'waiting', 'x');`).run()
+      after2b.prepare(`INSERT INTO voice_room_generations (livekit_room_name, voice_table_id, generation, status, created_at) VALUES ('pv_local_pre', 't-pre-2c', 1, 'live', 'x');`).run()
     } finally {
       after2b.close()
     }
+    // 2в: само добавяща миграция (две колони + частичен индекс).
+    await cp(join(sourceMigrationsDirectoryPath, VOICE_WATCH_MIGRATION), join(root, 'database', 'migrations', VOICE_WATCH_MIGRATION))
+    const applied2c = await ensureServerDatabaseReady({ serverRootOverride: root })
+    assertEqual(applied2c.appliedCount, 1, 'само миграцията на 2в')
+    const after2c = new sqliteModule.DatabaseSync(path, { open: true })
+    try {
+      const row = after2c.prepare(`SELECT status, uncertain_create_at AS u, watch_until AS w FROM voice_room_generations WHERE livekit_room_name = 'pv_local_pre';`).get() as { status: string; u: string | null; w: string | null }
+      assert(row.status === 'live' && row.u === null && row.w === null, 'съществуващите редове са непокътнати')
+      assertEqual(Number((after2c.prepare(`SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table';`).get() as { c: number }).c), tablesBefore + 5, 'без нови таблици в 2в')
+    } finally {
+      after2c.close()
+    }
+    assertEqual((await ensureServerDatabaseReady({ serverRootOverride: root })).appliedCount, 0, 'повторен старт пропуска 2в')
   })
 
   await check('[M3] CHECK ограниченията: невалиден режим/лимит, in_game без стая, released без причина', () => {
@@ -797,6 +818,44 @@ try {
     assertEqual(emergency.store.getVoiceTable(e1.table.voiceTableId)?.releaseReason, 'mode_off', 'причина при авариен стоп')
     const next = store.allocateGeneration(restored, 'boot_rotation')
     assert(next.ok && next.generation === 2, 'следващата генерация е монотонна')
+  })
+
+  await check('[S17] Постоянно наблюдение: неясен CreateRoom (живо име -> маркер), оттегляне/изтриване/повторна поява -> срок; преживява рестарт; чистенето го пази', async () => {
+    const { path, store } = await freshDatabase()
+    forceMode(store, 'public')
+    const reserved = store.reserveVoiceTable({ emergencyStop: false, requesterIsFullAdmin: false })
+    if (!reserved.ok) throw new Error('резервация')
+    const id = reserved.table.voiceTableId
+    const g1 = store.allocateGeneration(id, null, at(0))
+    if (!g1.ok) throw new Error('g1')
+    const plain = store.allocateGeneration(id, 'listen_revoked', at(1))
+    if (!plain.ok) throw new Error('g2')
+    assertEqual(store.getGeneration(g1.roomName)?.watchUntil, null, 'без неясен CreateRoom -> без наблюдение при оттегляне')
+    assert(store.markUncertainCreate(plain.roomName, at(2)).ok, 'маркер за живо име')
+    const marked = store.getGeneration(plain.roomName)!
+    assert(marked.uncertainCreateAt === at(2).toISOString() && marked.watchUntil === null, 'живо име: само маркер, без наблюдение')
+    assert(!store.hasActiveRoomWatch(at(2)), 'без активно наблюдение докато е живо')
+    const g3 = store.allocateGeneration(id, 'speak_revoked', at(100))
+    if (!g3.ok) throw new Error('g3')
+    const horizon = 20 * 60 * 1000
+    assertEqual(store.getGeneration(plain.roomName)?.watchUntil, new Date(at(100).getTime() + horizon).toISOString(), 'оттегляне -> срок от момента на оттеглянето')
+    assertEqual(store.getLiveGeneration(id)?.watchUntil ?? null, null, 'текущата генерация не се засяга')
+    assert(store.hasActiveRoomWatch(at(101)) && store.countActiveRoomWatches(at(101)) === 1, 'активно')
+    assert(store.recordRoomDeletionAttempt(plain.roomName, { outcome: 'deleted' }, at(700)).ok, 'потвърдено изтриване')
+    assertEqual(store.getGeneration(plain.roomName)?.watchUntil, new Date(at(700).getTime() + horizon).toISOString(), 'удължено от потвърденото изтриване')
+    const restarted = await openStore(path)
+    assert(restarted.hasActiveRoomWatch(at(701)), 'преживява рестарт (нова връзка)')
+    assert(restarted.extendRoomWatch(plain.roomName, at(900)).ok, 'повторна поява')
+    assertEqual(restarted.getGeneration(plain.roomName)?.watchUntil, new Date(at(900).getTime() + horizon).toISOString(), 'удължено при повторна поява')
+    const liveExtend = restarted.extendRoomWatch(g3.roomName, at(901))
+    assert(liveExtend.ok && !liveExtend.found, 'живо име никога не се "удължава"')
+    const lateMark = restarted.markUncertainCreate(g1.roomName, at(950))
+    assert(lateMark.ok && restarted.getGeneration(g1.roomName)?.watchUntil === new Date(at(950).getTime() + horizon).toISOString(), 'неясен изход след оттеглянето -> наблюдение веднага')
+    assert(!restarted.hasActiveRoomWatch(new Date(at(950).getTime() + horizon + 1_000)), 'изтича след последния срок')
+    restarted.releaseVoiceTable(id, 'server_room_removed', at(960))
+    for (const name of [g1.roomName, g3.roomName]) restarted.recordRoomDeletionAttempt(name, { outcome: 'deleted' }, at(970))
+    const purged = restarted.purgeReleasedVoiceTables({ releasedBefore: at(100_000) })
+    assert(purged.ok && purged.purged === 0, 'чистенето пази масата с активно наблюдение')
   })
 
   await check('[S13] Чистене: само стари освободени маси без чакащи DeleteRoom', async () => {

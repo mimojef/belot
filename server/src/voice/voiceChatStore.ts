@@ -55,7 +55,17 @@ export type CreateVoiceChatStoreOptions = {
   busyTimeoutMs?: number
   /** VOICE_ROOM_NAMESPACE на средата (част от имената на новите стаи). */
   roomNamespace?: string
+  /** Хоризонт на наблюдението на имена с неясен CreateRoom (по подразбиране 20 min). */
+  roomWatchHorizonMs?: number
 }
+
+/**
+ * 20 min = 2 × измерената валидност на токените (Pika JWT 600 s; LiveKit
+ * refresh token 600 s — реален тест 12 срещу v1.13.11). Започва при
+ * оттеглянето и се удължава от потвърденото изтриване и от всяко повторно
+ * появяване на стаята.
+ */
+export const VOICE_ROOM_WATCH_HORIZON_MS = 20 * 60 * 1000
 
 export type ReserveVoiceTableResult =
   | { ok: true; table: VoiceTableRecord; activeCount: number; maxTables: number }
@@ -198,6 +208,16 @@ export type VoiceChatStore = {
   listDueRoomDeletions: (input: { now?: Date; limit?: number }) => VoiceRoomGenerationRecord[]
   /** Най-ранното next_delete_attempt_at сред чакащите (null = няма чакащи). */
   nextRoomDeletionDueAt: () => string | null
+  /**
+   * Неясен изход на CreateRoom за името: за живо име се помни само маркерът
+   * (наблюдението започва при оттеглянето); за вече оттеглено — веднага.
+   */
+  markUncertainCreate: (roomName: string, now?: Date) => { ok: true; found: boolean } | VoiceStoreBusy
+  /** Оттеглено име се е появило отново в LiveKit — удължава наблюдението. */
+  extendRoomWatch: (roomName: string, now?: Date) => { ok: true; found: boolean } | VoiceStoreBusy
+  /** Има ли поне едно активно наблюдение (кратка индексирана заявка). */
+  hasActiveRoomWatch: (now?: Date) => boolean
+  countActiveRoomWatches: (now?: Date) => number
   countPendingRoomDeletions: () => number
   recordRoomDeletionAttempt: (
     roomName: string,
@@ -246,6 +266,8 @@ type GenerationRow = {
   next_delete_attempt_at: string | null
   last_delete_error: string | null
   deleted_confirmed_at: string | null
+  uncertain_create_at: string | null
+  watch_until: string | null
 }
 
 function toVoiceTableRecord(row: VoiceTableRow): VoiceTableRecord {
@@ -276,6 +298,8 @@ function toGenerationRecord(row: GenerationRow): VoiceRoomGenerationRecord {
     nextDeleteAttemptAt: row.next_delete_attempt_at,
     lastDeleteError: row.last_delete_error,
     deletedConfirmedAt: row.deleted_confirmed_at,
+    uncertainCreateAt: row.uncertain_create_at,
+    watchUntil: row.watch_until,
   }
 }
 
@@ -339,6 +363,8 @@ export async function createVoiceChatStore(
 
   const busyTimeoutMs = options.busyTimeoutMs ?? VOICE_CHAT_STORE_BUSY_TIMEOUT_MS
   const roomNamespace = options.roomNamespace ?? VOICE_ROOM_DEFAULT_NAMESPACE
+  const roomWatchHorizonMs = options.roomWatchHorizonMs ?? VOICE_ROOM_WATCH_HORIZON_MS
+  const watchDeadlineFrom = (iso: string): string => new Date(Date.parse(iso) + roomWatchHorizonMs).toISOString()
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
   database.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(busyTimeoutMs))};`)
@@ -390,7 +416,7 @@ export async function createVoiceChatStore(
     WHERE voice_table_id = ? AND status = 'active';
   `)
 
-  const generationColumns = `livekit_room_name, voice_table_id, generation, status, created_at, retire_requested_at, retire_reason, delete_attempts, next_delete_attempt_at, last_delete_error, deleted_confirmed_at`
+  const generationColumns = `livekit_room_name, voice_table_id, generation, status, created_at, retire_requested_at, retire_reason, delete_attempts, next_delete_attempt_at, last_delete_error, deleted_confirmed_at, uncertain_create_at, watch_until`
   const selectLiveGenerationStatement = database.prepare(`
     SELECT ${generationColumns} FROM voice_room_generations WHERE voice_table_id = ? AND status = 'live' LIMIT 1;
   `)
@@ -402,10 +428,40 @@ export async function createVoiceChatStore(
     INSERT INTO voice_room_generations (livekit_room_name, voice_table_id, generation, status, created_at)
     VALUES (?, ?, ?, 'live', ?);
   `)
+  // Оттегляне: ако името има неясен CreateRoom, наблюдението започва СЕГА.
   const retireGenerationStatement = database.prepare(`
     UPDATE voice_room_generations
-    SET status = 'delete_pending', retire_requested_at = ?, retire_reason = ?, next_delete_attempt_at = ?
+    SET status = 'delete_pending', retire_requested_at = ?, retire_reason = ?, next_delete_attempt_at = ?,
+        watch_until = CASE
+          WHEN uncertain_create_at IS NULL THEN watch_until
+          WHEN watch_until IS NULL OR watch_until < ? THEN ?
+          ELSE watch_until
+        END
     WHERE livekit_room_name = ? AND status = 'live';
+  `)
+  // Неясен CreateRoom: за живо име — само маркер; за оттеглено — и наблюдение.
+  const markUncertainCreateStatement = database.prepare(`
+    UPDATE voice_room_generations
+    SET uncertain_create_at = COALESCE(uncertain_create_at, ?),
+        watch_until = CASE
+          WHEN status = 'live' THEN watch_until
+          WHEN watch_until IS NULL OR watch_until < ? THEN ?
+          ELSE watch_until
+        END
+    WHERE livekit_room_name = ?;
+  `)
+  // Повторно появила се стая: удължаване (само за оттеглени имена).
+  const extendWatchStatement = database.prepare(`
+    UPDATE voice_room_generations
+    SET uncertain_create_at = COALESCE(uncertain_create_at, ?),
+        watch_until = CASE WHEN watch_until IS NULL OR watch_until < ? THEN ? ELSE watch_until END
+    WHERE livekit_room_name = ? AND status <> 'live';
+  `)
+  const selectActiveWatchStatement = database.prepare(`
+    SELECT 1 AS w FROM voice_room_generations WHERE watch_until IS NOT NULL AND watch_until > ? LIMIT 1;
+  `)
+  const countActiveWatchesStatement = database.prepare(`
+    SELECT COUNT(*) AS c FROM voice_room_generations WHERE watch_until IS NOT NULL AND watch_until > ?;
   `)
   const selectPendingForTableStatement = database.prepare(`
     SELECT 1 AS p FROM voice_room_generations WHERE voice_table_id = ? AND status = 'delete_pending' LIMIT 1;
@@ -428,10 +484,19 @@ export async function createVoiceChatStore(
   const countPendingDeletionsStatement = database.prepare(`
     SELECT COUNT(*) AS c FROM voice_room_generations WHERE status = 'delete_pending';
   `)
+  // Потвърдено изтриване: наблюдението на име с неясен CreateRoom се
+  // удължава ОТ ТОЗИ момент (участниците в старата стая са получавали refresh
+  // токени до изтриването — при недостъпно API то може да е много след
+  // оттеглянето).
   const markGenerationDeletedStatement = database.prepare(`
     UPDATE voice_room_generations
     SET status = 'deleted', deleted_confirmed_at = ?, delete_attempts = delete_attempts + 1,
-        next_delete_attempt_at = NULL, last_delete_error = NULL
+        next_delete_attempt_at = NULL, last_delete_error = NULL,
+        watch_until = CASE
+          WHEN uncertain_create_at IS NULL THEN watch_until
+          WHEN watch_until IS NULL OR watch_until < ? THEN ?
+          ELSE watch_until
+        END
     WHERE livekit_room_name = ? AND status = 'delete_pending';
   `)
   const markGenerationDeleteFailedStatement = database.prepare(`
@@ -477,7 +542,8 @@ export async function createVoiceChatStore(
       WHERE t.status = 'released' AND t.released_at < ?
         AND NOT EXISTS (
           SELECT 1 FROM voice_room_generations g
-          WHERE g.voice_table_id = t.voice_table_id AND g.status <> 'deleted'
+          WHERE g.voice_table_id = t.voice_table_id
+            AND (g.status <> 'deleted' OR (g.watch_until IS NOT NULL AND g.watch_until > ?))
         )
       LIMIT ?
     );
@@ -543,7 +609,8 @@ export async function createVoiceChatStore(
   function retireLiveGenerationInTransaction(voiceTableId: VoiceTableId, reason: VoiceRoomRetireReason, nowIso: string): string | null {
     const live = selectLiveGenerationStatement.get(voiceTableId) as GenerationRow | undefined
     if (live === undefined) return null
-    retireGenerationStatement.run(nowIso, reason, nowIso, live.livekit_room_name)
+    const watchUntil = watchDeadlineFrom(nowIso)
+    retireGenerationStatement.run(nowIso, reason, nowIso, watchUntil, watchUntil, live.livekit_room_name)
     return live.livekit_room_name
   }
 
@@ -815,6 +882,28 @@ export async function createVoiceChatStore(
     return row?.due ?? null
   }
 
+  function markUncertainCreate(roomName: string, now: Date = new Date()): { ok: true; found: boolean } | VoiceStoreBusy {
+    const nowIso = now.toISOString()
+    const watchUntil = watchDeadlineFrom(nowIso)
+    const result = runWriteTransaction(() => Number(markUncertainCreateStatement.run(nowIso, watchUntil, watchUntil, roomName).changes) > 0)
+    return result.ok ? { ok: true, found: result.value } : result
+  }
+
+  function extendRoomWatch(roomName: string, now: Date = new Date()): { ok: true; found: boolean } | VoiceStoreBusy {
+    const nowIso = now.toISOString()
+    const watchUntil = watchDeadlineFrom(nowIso)
+    const result = runWriteTransaction(() => Number(extendWatchStatement.run(nowIso, watchUntil, watchUntil, roomName).changes) > 0)
+    return result.ok ? { ok: true, found: result.value } : result
+  }
+
+  function hasActiveRoomWatch(now: Date = new Date()): boolean {
+    return selectActiveWatchStatement.get(now.toISOString()) !== undefined
+  }
+
+  function countActiveRoomWatches(now: Date = new Date()): number {
+    return Number((countActiveWatchesStatement.get(now.toISOString()) as { c: number }).c)
+  }
+
   function listDueRoomDeletions(input: { now?: Date; limit?: number }): VoiceRoomGenerationRecord[] {
     const nowIso = (input.now ?? new Date()).toISOString()
     const limit = Math.max(1, Math.min(100, Math.trunc(input.limit ?? 20)))
@@ -836,7 +925,8 @@ export async function createVoiceChatStore(
       if (current === undefined) return { ok: false, code: 'not_found' }
       if (current.status !== 'delete_pending') return { ok: false, code: 'not_pending' }
       if (attempt.outcome === 'deleted') {
-        markGenerationDeletedStatement.run(nowIso, roomName)
+        const watchUntil = watchDeadlineFrom(nowIso)
+        markGenerationDeletedStatement.run(nowIso, watchUntil, watchUntil, roomName)
         return { ok: true, status: 'deleted' }
       }
       // Грешката е техническо описание от LiveKit клиента; съкратена, без токени.
@@ -896,7 +986,9 @@ export async function createVoiceChatStore(
 
   function purgeReleasedVoiceTables(input: { releasedBefore: Date; limit?: number }): { ok: true; purged: number } | VoiceStoreBusy {
     const limit = Math.max(1, Math.min(500, Math.trunc(input.limit ?? 200)))
-    const result = runWriteTransaction(() => Number(purgeReleasedStatement.run(input.releasedBefore.toISOString(), limit).changes))
+    const result = runWriteTransaction(() =>
+      Number(purgeReleasedStatement.run(input.releasedBefore.toISOString(), new Date().toISOString(), limit).changes),
+    )
     return result.ok ? { ok: true, purged: result.value } : result
   }
 
@@ -931,6 +1023,10 @@ export async function createVoiceChatStore(
     hasPendingRoomDeletion,
     listDueRoomDeletions,
     nextRoomDeletionDueAt,
+    markUncertainCreate,
+    extendRoomWatch,
+    hasActiveRoomWatch,
+    countActiveRoomWatches,
     countPendingRoomDeletions,
     recordRoomDeletionAttempt,
     reconcileOnBoot,
