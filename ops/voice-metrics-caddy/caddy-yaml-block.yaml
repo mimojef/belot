@@ -1,0 +1,26 @@
+# Pika.bg — защитен маршрут за метриките на гласовия VPS (Етап 6 на гласовия чат).
+#
+# ВНЕДРЕН на гласовия VPS на 2026-11-13 (виж README.md). Това НЕ е самостоятелен
+# конфигурационен файл: последният ред по-долу се ДОБАВЯ като последен ред на
+# /opt/livekit/caddy.yaml, под `apps:` (отстъп 2 интервала, до `tls:` и `layer4:`).
+# Редът е JSON в YAML flow стил — без многоредови отстъпи. Съществуващите
+# `admin`, `tls` и `layer4` (вкл. 185.203.119.211:443) не се променят.
+#
+# Предпоставки (проверени преди добавянето):
+#   * последният top-level ключ във файла е `apps:` и под него няма `http:`;
+#   * файлът завършва с нов ред.
+#
+# <BCRYPT_HASH> се замества с изхода на `caddy hash-password` (виж README.md,
+# стъпка 4). Реалният хеш НЕ се пази в Git.
+#
+# Какво прави:
+#   * HTTPS само на 185.203.119.211:8443, HTTP/1.1 и HTTP/2 (без HTTP/3/UDP);
+#   * automatic_https изключен (без listener на :80, без ново издаване) —
+#     ползва се сертификатът за voice.pika.bg, който tls app вече управлява;
+#   * само remote_ip 185.203.117.14/32 (игровият VPS), иначе 403;
+#   * HTTP Basic (pika-metrics, bcrypt) с hash_cache — bcrypt не се изчислява
+#     при всяка заявка;
+#   * GET /pika-ops/livekit-metrics -> 127.0.0.1:6789/metrics;
+#   * GET /pika-ops/node-metrics    -> 127.0.0.1:9100/metrics;
+#   * всичко друго -> 404; Authorization не се подава към upstream-а.
+  http: {"servers": {"pika_metrics": {"listen": ["185.203.119.211:8443"], "protocols": ["h1", "h2"], "automatic_https": {"disable": true}, "tls_connection_policies": [{"match": {"sni": ["voice.pika.bg"]}}], "routes": [{"match": [{"host": ["voice.pika.bg"], "remote_ip": {"ranges": ["185.203.117.14/32"]}}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "authentication", "providers": {"http_basic": {"hash": {"algorithm": "bcrypt"}, "hash_cache": {}, "accounts": [{"username": "pika-metrics", "password": "<BCRYPT_HASH>"}]}}}]}, {"match": [{"path": ["/pika-ops/livekit-metrics"], "method": ["GET"]}], "handle": [{"handler": "rewrite", "uri": "/metrics"}, {"handler": "reverse_proxy", "headers": {"request": {"delete": ["Authorization"]}}, "upstreams": [{"dial": "127.0.0.1:6789"}]}], "terminal": true}, {"match": [{"path": ["/pika-ops/node-metrics"], "method": ["GET"]}], "handle": [{"handler": "rewrite", "uri": "/metrics"}, {"handler": "reverse_proxy", "headers": {"request": {"delete": ["Authorization"]}}, "upstreams": [{"dial": "127.0.0.1:9100"}]}], "terminal": true}, {"handle": [{"handler": "static_response", "status_code": 404}]}]}], "terminal": true}, {"handle": [{"handler": "static_response", "status_code": 403}]}]}}}

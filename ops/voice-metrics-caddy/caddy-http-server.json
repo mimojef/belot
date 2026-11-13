@@ -1,8 +1,9 @@
 {
-  "_comment": "Pika.bg — същият маршрут като Caddyfile.snippet, за JSON конфигурация. Добавя се като НОВ сървър в apps.http.servers (не заменя нищо). Заместете <BCRYPT_HASH>. Проверете с 'caddy validate' преди reload.",
+  "_comment": "Pika.bg — същият сървър като внедрения caddy-yaml-block.yaml, за JSON конфигурация (за справка; на гласовия VPS конфигурацията е YAML). Добавя се като НОВ сървър в apps.http.servers. Заместете <BCRYPT_HASH>. Проверете с 'caddy validate' преди прилагане.",
   "pika_metrics": {
-    "listen": [":8443"],
-    "automatic_https": { "disable_redirects": true },
+    "listen": ["185.203.119.211:8443"],
+    "protocols": ["h1", "h2"],
+    "automatic_https": { "disable": true },
     "tls_connection_policies": [{ "match": { "sni": ["voice.pika.bg"] } }],
     "routes": [
       {
@@ -18,6 +19,7 @@
                     "providers": {
                       "http_basic": {
                         "hash": { "algorithm": "bcrypt" },
+                        "hash_cache": {},
                         "accounts": [{ "username": "pika-metrics", "password": "<BCRYPT_HASH>" }]
                       }
                     }

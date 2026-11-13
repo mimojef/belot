@@ -2890,7 +2890,8 @@ function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false
 
   return blocks.map((block, index) => {
     const isDocumentTitle = index === 0
-    const isSectionTitle = /^\d+\.\s/.test(block)
+    // „6А.“ / „19А.“ — допълнителни раздели без преномериране на съществуващите.
+    const isSectionTitle = /^\d+[А-ЯA-Z]?\.\s/.test(block)
     const style = isDocumentTitle
       ? `margin:0 0 18px;color:${light ? '#17233C' : '#f8fafc'};font-size:${isMobile ? '18px' : '22px'};line-height:1.22;font-weight:${light ? '800' : '900'};`
       : isSectionTitle

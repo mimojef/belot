@@ -88,6 +88,7 @@ import type {
 import type { VoiceLiveKitApi } from './voiceLiveKitApi.js'
 import type { VoiceDispatchResult, VoiceLiveKitDispatcher } from './voiceLiveKitDispatcher.js'
 import { createVoiceRoomReconciler, type VoiceRoomReconciler, type VoiceRoomReconcilerOptions } from './voiceRoomReconciler.js'
+import { VOICE_PERSONAL_DATA_RETENTION_MS, createVoiceRetentionSweeper, type VoiceRetentionSweeper } from './voiceRetentionSweeper.js'
 import { createVoiceStoreWriteQueue, type VoiceStoreWriteQueue } from './voiceStoreWriteQueue.js'
 import { createVoiceTableReleaseQueue, type VoiceTableReleaseQueue } from './voiceTableReleaseQueue.js'
 import { VOICE_TOKEN_TTL_SECONDS, buildVoiceIdentity, type VoiceTokenSigner } from './voiceTokenIssuer.js'
@@ -112,7 +113,8 @@ export const VOICE_ROOM_MAX_PARTICIPANTS = 4
 export const VOICE_ROOM_EMPTY_TIMEOUT_SECONDS = 120
 export const VOICE_ROOM_DEPARTURE_TIMEOUT_SECONDS = 120
 /** Освободени маси по-стари от това се чистят при старт (ограничено). */
-export const VOICE_RELEASED_TABLE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+/** 30 дни след окончателното освобождаване на масата (T1 — voiceRetentionSweeper.ts). */
+export const VOICE_RELEASED_TABLE_RETENTION_MS = VOICE_PERSONAL_DATA_RETENTION_MS
 
 // ─── Вход от index.ts ─────────────────────────────────────────────────────
 
@@ -153,6 +155,8 @@ export type VoiceChatServiceDeps = {
   }
   log?: (line: string) => void
   reconcilerOptions?: Partial<Omit<VoiceRoomReconcilerOptions, 'store' | 'api' | 'dispatcher' | 'onTableDeletionsSettled'>>
+  /** T1: само за тестове (интервал, партиди, паузи при busy). */
+  retentionOptions?: { intervalMs?: number; batchSize?: number; busyRetryDelaysMs?: readonly number[]; yieldToEventLoop?: () => Promise<void> }
   timing?: {
     disconnectGraceMs?: number
     displacementReclaimMs?: number
@@ -382,6 +386,16 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     onTableDeletionsSettled: (voiceTableId) => notifyTableReady(voiceTableId),
     ...(liveKit?.roomNamespace === undefined ? {} : { roomNamespace: liveKit.roomNamespace }),
     log: deps.reconcilerOptions?.log ?? log,
+  })
+
+  // T1: периодично изтриване на личните данни (при старт и на всеки 6 часа).
+  const retention: VoiceRetentionSweeper = createVoiceRetentionSweeper({
+    store,
+    scheduler,
+    now,
+    log,
+    retentionMs: VOICE_RELEASED_TABLE_RETENTION_MS,
+    ...(deps.retentionOptions ?? {}),
   })
 
   const releaseQueue: VoiceTableReleaseQueue = createVoiceTableReleaseQueue({
@@ -1207,7 +1221,9 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
             entitled: membership.speakingEntitledAt !== null,
           })
         }
-        store.purgeReleasedVoiceTables({ releasedBefore: new Date(now() - VOICE_RELEASED_TABLE_RETENTION_MS), limit: 200 })
+        // T1: лични данни + технически записи — малки партиди, повторен опит
+        // при busy, после на всеки 6 часа (не блокира старта).
+        retention.start()
         bootComplete = true
         log(
           `[voice-chat] boot reconcile released=${result.releasedVoiceTableIds.length} retained=${result.retainedVoiceTableIds.length}` +
@@ -1263,6 +1279,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       disposed = true
       for (const binding of bindings.values()) clearBindingTimers(binding)
       reconciler.dispose()
+      retention.dispose()
       releaseQueue.dispose()
       writeQueue.dispose()
       dispatcher.dispose()

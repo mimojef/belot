@@ -228,6 +228,15 @@ export type VoiceChatStore = {
   reconcileOnBoot: (input: ReconcileOnBootInput) => ReconcileOnBootResult
   /** Ограничено чистене на стари освободени маси без чакащи DeleteRoom. */
   purgeReleasedVoiceTables: (input: { releasedBefore: Date; limit?: number }) => { ok: true; purged: number } | VoiceStoreBusy
+  /**
+   * Етап T1 (лични данни): изтрива ПРИКЛЮЧИЛИТЕ участия (и наследените
+   * voice_speaking_grants) на маси, окончателно освободени преди `endedBefore`
+   * — НЕЗАВИСИМО от статуса на LiveKit стаите. Една малка партида в една
+   * кратка транзакция; активни маси и активни участия не се пипат.
+   * Техническите редове (voice_tables, voice_room_generations) остават —
+   * те са нужни за потвърденото изтриване на стаите и за сигурността.
+   */
+  purgeEndedVoiceMemberships: (input: { endedBefore: Date; limit?: number }) => { ok: true; memberships: number; grants: number } | VoiceStoreBusy
 
   close: () => void
 }
@@ -545,6 +554,26 @@ export async function createVoiceChatStore(
           WHERE g.voice_table_id = t.voice_table_id
             AND (g.status <> 'deleted' OR (g.watch_until IS NOT NULL AND g.watch_until > ?))
         )
+      LIMIT ?
+    );
+  `)
+
+  // T1: лични данни на окончателно освободени маси — без условие за стаите.
+  // m.ended_at IS NOT NULL — защита: активно участие никога не се изтрива.
+  const purgeEndedMembershipsStatement = database.prepare(`
+    DELETE FROM voice_table_memberships WHERE membership_id IN (
+      SELECT m.membership_id FROM voice_table_memberships m
+      JOIN voice_tables t ON t.voice_table_id = m.voice_table_id
+      WHERE t.status = 'released' AND t.released_at IS NOT NULL AND t.released_at < ?
+        AND m.ended_at IS NOT NULL
+      LIMIT ?
+    );
+  `)
+  const purgeEndedGrantsStatement = database.prepare(`
+    DELETE FROM voice_speaking_grants WHERE voice_table_id IN (
+      SELECT DISTINCT g.voice_table_id FROM voice_speaking_grants g
+      JOIN voice_tables t ON t.voice_table_id = g.voice_table_id
+      WHERE t.status = 'released' AND t.released_at IS NOT NULL AND t.released_at < ?
       LIMIT ?
     );
   `)
@@ -992,6 +1021,17 @@ export async function createVoiceChatStore(
     return result.ok ? { ok: true, purged: result.value } : result
   }
 
+  function purgeEndedVoiceMemberships(input: { endedBefore: Date; limit?: number }): { ok: true; memberships: number; grants: number } | VoiceStoreBusy {
+    const limit = Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100)))
+    const cutoff = input.endedBefore.toISOString()
+    const result = runWriteTransaction(() => ({
+      memberships: Number(purgeEndedMembershipsStatement.run(cutoff, limit).changes),
+      // Наследената таблица (Етап 2а) не се записва вече; партидата е по маси.
+      grants: Number(purgeEndedGrantsStatement.run(cutoff, limit).changes),
+    }))
+    return result.ok ? { ok: true, ...result.value } : result
+  }
+
   function close(): void {
     database.close()
   }
@@ -1031,6 +1071,7 @@ export async function createVoiceChatStore(
     recordRoomDeletionAttempt,
     reconcileOnBoot,
     purgeReleasedVoiceTables,
+    purgeEndedVoiceMemberships,
     close,
   }
 }

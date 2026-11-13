@@ -47,6 +47,21 @@ export type VoicePanelOptions = {
 
 export const VOICE_PRIVACY_NOTE = 'Разговорите се предават през гласовия сървър на Pika.bg и не се записват от сайта. Другите участници могат да ги запишат със собствените си устройства.'
 
+/**
+ * Раздел 6А на Политиката (= VOICE_CHAT_PRIVACY_PATH в lobby/publicLegalPages.ts;
+ * равенството се проверява от scripts/checkVoiceLegalTexts.ts). Локална
+ * константа — lazy chunk-ът на панела не импортира правните текстове.
+ */
+export const VOICE_PRIVACY_POLICY_PATH = '/privacy#voice-chat'
+
+/**
+ * Бележката при първо включване (и в панела) с връзка към Политиката. Нов таб —
+ * навигацията в същото приложение би извела играча от масата и би спряла гласа.
+ */
+export function renderVoicePrivacyNote(): string {
+  return `<p class="pvp-note">${escapeHtml(VOICE_PRIVACY_NOTE)} <a class="pvp-note-link" data-voice-privacy-link="1" href="${VOICE_PRIVACY_POLICY_PATH}" target="_blank" rel="noopener noreferrer">Политика за поверителност</a></p>`
+}
+
 const MIC_ERROR_TEXT: Record<string, string> = {
   mic_not_found: 'Не е открит микрофон. Свържете слушалки с микрофон или продължете само да слушате.',
   mic_permission_denied: 'Pika.bg няма достъп до микрофона. Разрешете го от настройките на браузъра (🔒 до адреса → Микрофон) и опитайте пак. Можете да продължите само да слушате.',
@@ -205,7 +220,7 @@ function renderActions(options: VoicePanelOptions): string {
 export function renderVoicePanel(options: VoicePanelOptions): string {
   const status = describeVoiceStatus(options.snapshot)
   const idleNote = !isInVoice(options.snapshot) && options.snapshot.status !== 'unavailable' && options.snapshot.status !== 'error'
-    ? `<p class="pvp-note">${escapeHtml(VOICE_PRIVACY_NOTE)}</p>`
+    ? renderVoicePrivacyNote()
     : ''
   return `
     <section class="pvp pvp--${options.theme}" role="dialog" aria-label="Гласов чат" data-voice-panel="1">
@@ -248,7 +263,7 @@ export function renderVoiceJoinPrompt(options: { isOwnVip: boolean; canOpenShop:
           <button type="button" class="pvp-close" data-voice-action="not-now" aria-label="Затвори">${voiceIcon.close(18)}</button>
         </header>
         ${body}
-        <p class="pvp-note">${escapeHtml(VOICE_PRIVACY_NOTE)}</p>
+        ${renderVoicePrivacyNote()}
       </section>
     </div>
   `
@@ -320,6 +335,7 @@ export const VOICE_PANEL_STYLES = `
   .pvp--light .pvp-notice--info { background:#F4F0FF; color:#5B3CC4; }
   .pvp-note { margin:0; font-size:11px; line-height:1.4; }
   .pvp--dark .pvp-note { color:rgba(248,250,252,0.5); } .pvp--light .pvp-note { color:#667085; }
+  .pvp-note-link { color:inherit; font-weight:700; text-decoration:underline; text-underline-offset:2px; }
   .pvp-prompt-backdrop { position:fixed; inset:0; z-index:1250; background:rgba(16,24,40,0.55); display:flex; align-items:center; justify-content:center; padding:16px; }
   .pvp-prompt { width:100%; max-width:360px; padding:16px 18px 18px; gap:12px; }
   .pvp-prompt .pvp-close { margin-left:auto; }

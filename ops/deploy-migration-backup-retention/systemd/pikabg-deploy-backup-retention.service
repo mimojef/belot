@@ -1,0 +1,10 @@
+[Unit]
+Description=Pika.bg — 90-day retention for pre-migration deploy DB snapshots (T2)
+Documentation=file:///var/www/belot-v2/ops/deploy-migration-backup-retention/README.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/www/belot-v2
+ExecStart=/usr/bin/env node /var/www/belot-v2/ops/deploy-migration-backup-retention/prune-deploy-migration-backups.mjs --apply
+Nice=10
+IOSchedulingClass=idle
