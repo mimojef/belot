@@ -40,7 +40,7 @@ import {
   type VoiceTableReleaseReason,
   type VoiceTableStatus,
 } from './voiceChatTypes.js'
-import { buildVoiceRoomName } from './voiceRoomNaming.js'
+import { VOICE_ROOM_DEFAULT_NAMESPACE, buildVoiceRoomName } from './voiceRoomNaming.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -53,6 +53,8 @@ export type VoiceStoreBusy = { ok: false; code: 'busy' }
 export type CreateVoiceChatStoreOptions = {
   /** Само за тестове — production ползва VOICE_CHAT_STORE_BUSY_TIMEOUT_MS. */
   busyTimeoutMs?: number
+  /** VOICE_ROOM_NAMESPACE на средата (част от имената на новите стаи). */
+  roomNamespace?: string
 }
 
 export type ReserveVoiceTableResult =
@@ -336,6 +338,7 @@ export async function createVoiceChatStore(
   })
 
   const busyTimeoutMs = options.busyTimeoutMs ?? VOICE_CHAT_STORE_BUSY_TIMEOUT_MS
+  const roomNamespace = options.roomNamespace ?? VOICE_ROOM_DEFAULT_NAMESPACE
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
   database.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(busyTimeoutMs))};`)
@@ -782,7 +785,7 @@ export async function createVoiceChatStore(
       }
       const retiredRoomName = retireReason === null ? null : retireLiveGenerationInTransaction(voiceTableId, retireReason, nowIso)
       const generation = Number((selectMaxGenerationStatement.get(voiceTableId) as { g: number }).g) + 1
-      const roomName = buildVoiceRoomName(voiceTableId, generation)
+      const roomName = buildVoiceRoomName(voiceTableId, generation, roomNamespace)
       insertGenerationStatement.run(roomName, voiceTableId, generation, nowIso)
       return { ok: true, roomName, generation, retiredRoomName }
     })

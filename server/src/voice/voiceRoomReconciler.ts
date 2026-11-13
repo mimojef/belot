@@ -27,7 +27,7 @@
 import type { VoiceChatStore } from './voiceChatStore.js'
 import { describeLiveKitError, type VoiceLiveKitApi } from './voiceLiveKitApi.js'
 import type { VoiceLiveKitDispatcher } from './voiceLiveKitDispatcher.js'
-import { VOICE_ROOM_NAME_PREFIX, parseVoiceRoomName } from './voiceRoomNaming.js'
+import { VOICE_ROOM_DEFAULT_NAMESPACE, parseVoiceRoomName } from './voiceRoomNaming.js'
 
 export type VoiceReconcilerScheduler = {
   setTimeout: (callback: () => void, delayMs: number) => unknown
@@ -46,6 +46,11 @@ const defaultScheduler: VoiceReconcilerScheduler = {
 export type VoiceRoomReconciler = {
   /** Нова работа (оттеглена генерация) — изпълни възможно най-скоро. */
   kick: () => void
+  /**
+   * Имената са оттеглени. Ако за някое има неясен CreateRoom, наблюдението
+   * започва (или се удължава) ОТ МОМЕНТА НА ОТТЕГЛЯНЕТО.
+   */
+  noteRetired: (roomNames: readonly string[]) => void
   /** CreateRoom за името е в полет — DeleteRoom за него изчаква. */
   trackCreate: (roomName: string, promise: Promise<unknown>) => void
   /** CreateRoom е завършил с timeout/неясен изход — наблюдение за възкресяване. */
@@ -53,7 +58,7 @@ export type VoiceRoomReconciler = {
   requestBootSweep: () => void
   /** Едно пълно преминаване (за тестове и за kick). Не се припокрива със себе си. */
   runNow: () => Promise<void>
-  stats: () => { uncertainWatches: number; bootSweepPending: boolean; createsInFlight: number }
+  stats: () => { uncertainWatches: number; uncertainLiveNames: number; bootSweepPending: boolean; createsInFlight: number }
   dispose: () => void
 }
 
@@ -67,6 +72,11 @@ export type VoiceRoomReconcilerOptions = {
   dispatcher: VoiceLiveKitDispatcher
   /** Всички DeleteRoom на масата са потвърдени — новата генерация е безопасна. */
   onTableDeletionsSettled?: (voiceTableId: string) => void
+  /**
+   * Namespace на тази среда: sweep-ът трие САМО стаи pv_<namespace>_...;
+   * стаи на друг namespace (друга среда на същия LiveKit) никога не се пипат.
+   */
+  roomNamespace?: string
   batchSize?: number
   retryBaseDelayMs?: number
   retryMaxDelayMs?: number
@@ -93,9 +103,15 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
   const scheduler = options.scheduler ?? defaultScheduler
   const log = options.log ?? (() => {})
 
+  const roomNamespace = options.roomNamespace ?? VOICE_ROOM_DEFAULT_NAMESPACE
   const createsInFlight = new Map<string, Promise<unknown>>()
-  /** roomName -> до кога да се наблюдава (epoch ms). */
-  const uncertainWatches = new Map<string, number>()
+  /**
+   * roomName -> до кога да се наблюдава (epoch ms) или null, докато името
+   * още е живо (наблюдението започва при оттеглянето). Ограничено — неясните
+   * CreateRoom са редки; при препълване се изхвърлят най-старите живи.
+   */
+  const uncertainWatches = new Map<string, number | null>()
+  const MAX_UNCERTAIN_ENTRIES = 10_000
   let bootSweepPending = false
   let lastSweepAt = 0
   let timer: unknown = null
@@ -124,9 +140,14 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
     }
     const due = store.nextRoomDeletionDueAt()
     if (due !== null) consider(Math.max(0, Date.parse(due) - now()))
-    if (bootSweepPending || uncertainWatches.size > 0) consider(Math.max(0, lastSweepAt + sweepIntervalMs - now()))
+    if (bootSweepPending || hasActiveWatch()) consider(Math.max(0, lastSweepAt + sweepIntervalMs - now()))
     if (createsInFlight.size > 0 && due !== null) consider(createInFlightRetryMs)
     return next
+  }
+
+  function hasActiveWatch(): boolean {
+    for (const until of uncertainWatches.values()) if (until !== null) return true
+    return false
   }
 
   function backoffMs(attempts: number): number {
@@ -153,7 +174,9 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
     if (!listed.ok) return
     bootSweepPending = false
     for (const room of listed.value) {
-      if (!room.name.startsWith(VOICE_ROOM_NAME_PREFIX) || parseVoiceRoomName(room.name) === null) continue
+      // Само собствените стаи: точен формат И собственият namespace.
+      const parsed = parseVoiceRoomName(room.name)
+      if (parsed === null || parsed.namespace !== roomNamespace) continue
       if (store.isLiveRoomName(room.name)) continue
       // Чакащите в базата ще бъдат обработени от опашката по-долу (с
       // потвърждение); тук се трият само непознати или вече "deleted" имена,
@@ -166,7 +189,7 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
     }
     const nowMs = now()
     for (const [name, until] of uncertainWatches) {
-      if (until <= nowMs) uncertainWatches.delete(name)
+      if (until !== null && until <= nowMs) uncertainWatches.delete(name)
     }
   }
 
@@ -220,7 +243,7 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
   async function runOnce(): Promise<void> {
     if (api === null || disposed) return
     try {
-      if ((bootSweepPending || uncertainWatches.size > 0) && now() - lastSweepAt >= sweepIntervalMs) {
+      if ((bootSweepPending || hasActiveWatch()) && now() - lastSweepAt >= sweepIntervalMs) {
         await sweep()
       }
       await processDueDeletions()
@@ -258,8 +281,33 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
       promise.then(clear, clear)
     },
     noteUncertainCreate: (roomName) => {
+      // Още живо име -> наблюдението започва при оттеглянето (noteRetired);
+      // вече оттеглено -> веднага.
+      if (store.isLiveRoomName(roomName)) {
+        if (!uncertainWatches.has(roomName)) {
+          if (uncertainWatches.size >= MAX_UNCERTAIN_ENTRIES) {
+            for (const [name, until] of uncertainWatches) {
+              if (until === null) {
+                uncertainWatches.delete(name)
+                break
+              }
+            }
+          }
+          uncertainWatches.set(roomName, null)
+        }
+        return
+      }
       uncertainWatches.set(roomName, now() + uncertainHorizonMs)
       schedule(Math.max(0, lastSweepAt + sweepIntervalMs - now()))
+    },
+    noteRetired: (roomNames) => {
+      let started = false
+      for (const name of roomNames) {
+        if (!uncertainWatches.has(name)) continue
+        uncertainWatches.set(name, now() + uncertainHorizonMs)
+        started = true
+      }
+      if (started) schedule(Math.max(0, lastSweepAt + sweepIntervalMs - now()))
     },
     requestBootSweep: () => {
       bootSweepPending = true
@@ -267,7 +315,11 @@ export function createVoiceRoomReconciler(options: VoiceRoomReconcilerOptions): 
       schedule(0)
     },
     runNow,
-    stats: () => ({ uncertainWatches: uncertainWatches.size, bootSweepPending, createsInFlight: createsInFlight.size }),
+    stats: () => {
+      let active = 0
+      for (const until of uncertainWatches.values()) if (until !== null) active += 1
+      return { uncertainWatches: active, uncertainLiveNames: uncertainWatches.size - active, bootSweepPending, createsInFlight: createsInFlight.size }
+    },
     dispose: () => {
       disposed = true
       if (timer !== null) scheduler.clearTimeout(timer)

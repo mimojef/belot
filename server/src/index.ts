@@ -1178,8 +1178,11 @@ const profileCustomizationStore = await createProfileCustomizationStore(database
 // НИКОГА не се await-ват в игрови WS handler-и. Без LIVEKIT_* env гласът е
 // "недостъпен", а играта работи нормално. Deps са closure-и — извикват се
 // само след инициализацията на модула (vipStore/serverState и т.н.).
-const voiceChatStore = await createVoiceChatStore(databaseBootstrap.databaseFilePath)
 const voiceLiveKitConfig = readVoiceLiveKitConfig()
+const voiceChatStore = await createVoiceChatStore(
+  databaseBootstrap.databaseFilePath,
+  voiceLiveKitConfig === null ? {} : { roomNamespace: voiceLiveKitConfig.roomNamespace },
+)
 const voiceChatService = createVoiceChatService({
   store: voiceChatStore,
   liveKit:
@@ -1189,6 +1192,7 @@ const voiceChatService = createVoiceChatService({
           api: createVoiceLiveKitApi(voiceLiveKitConfig),
           wsUrl: voiceLiveKitConfig.wsUrl,
           signToken: createVoiceTokenSigner(voiceLiveKitConfig),
+          roomNamespace: voiceLiveKitConfig.roomNamespace,
         },
   dispatcher: createVoiceLiveKitDispatcher({ log: (line) => console.log(line) }),
   resolveSeat: (profileId, table) => resolveVoiceSeat(profileId, table),
@@ -1196,6 +1200,12 @@ const voiceChatService = createVoiceChatService({
   sendToConnection: (connectionId, message) => safeSendToConnection(connectionId, message),
   isVipActive: (profileId) => vipStore.getStatus(profileId).isActive,
   isBanned: (profileId) => profileBanStore.getActiveBan(profileId) !== null,
+  // Единният административен mute (Лафче/Общи/чатът в чакалнята) забранява и
+  // говоренето — същият източник на истина, без втори mute статус.
+  getChatMuteStatus: (profileId) => {
+    const mute = topicModerationStore.getSectionMuteSnapshot(profileId)
+    return { isMuted: mute.isMuted, mutedUntil: mute.mutedUntil }
+  },
 })
 
 // Anti Bad Luck runtime config (admin_settings) — main thread cache, подаван
@@ -3337,6 +3347,12 @@ function notifyProfileOfTopicMuteStateChange(
     mutedUntil: muteSnapshot.mutedUntil,
     reason: muteSnapshot.reason,
   })
+  // Гласов чат — единствената точка, през която минават ВСИЧКИ промени на
+  // единния mute (налагане, ръчно премахване, изтичане от sweep-а): при
+  // налагане се отнема publish правото (+ ротация при publish токен), при
+  // край — само известие (без автоматичен микрофон). Състоянието се чете
+  // наново от източника на истина, не от подадения snapshot.
+  voiceChatService.onChatMuteChanged(profileId)
 }
 
 // Public, boolean-only broadcast (mute indicator icon брифа §7/§8) — до
@@ -5587,7 +5603,9 @@ function broadcastPrivateRoomCreatedNotice(input: {
 }
 
 function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
-  const snapshot = buildPrivateRoomSnapshot(room)
+  // Гласов чат: получателите тук са само седналите играчи -> voiceTableId е
+  // позволен (общият snapshot без зрител го нулира за лобито).
+  const snapshot = { ...buildPrivateRoomSnapshot(room), voiceTableId: room.voiceTableId }
   const ownerProfileId = room.partnerReservation?.ownerProfileId ?? null
   const ownerSnapshot = ownerProfileId !== null ? buildPrivateRoomSnapshot(room, ownerProfileId) : snapshot
   for (const slot of room.slots) {

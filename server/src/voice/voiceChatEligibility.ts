@@ -43,6 +43,14 @@ export type VoiceRequesterFacts = {
   isVipActive: boolean
   /** profileBanStore.getActiveBan(profileId) !== null. */
   isBanned: boolean
+  /**
+   * Активно административно mute наказание (единният mute за Лафче, Общи и
+   * чата в чакалнята — topicModerationStore.getSectionMuteSnapshot). Не
+   * влияе на създаването на гласова маса и на слушането; забранява само
+   * говоренето и има приоритет пред придобитото право (без да го изтрива).
+   * Липсващо = false (създаването не го ползва).
+   */
+  isChatMuted?: boolean
 }
 
 // ─── Създаване ────────────────────────────────────────────────────────────
@@ -117,6 +125,16 @@ export type VoiceAccessDecision =
       canSpeak: false
       speakDenialCode: 'vip_required'
     }
+  | {
+      canListen: true
+      canSpeak: false
+      speakDenialCode: 'muted'
+      /**
+       * Основанието, на което би говорил без наказанието (null = няма право).
+       * Придобитото право се пази: mute само временно забранява ползването му.
+       */
+      speakBasis: VoiceSpeakBasis | null
+    }
 
 export type VoiceAccessInput = {
   mode: VoiceModeFacts
@@ -171,8 +189,15 @@ export function evaluateVoiceAccess(input: VoiceAccessInput): VoiceAccessDecisio
 
   if (!input.sessionBindingCurrent) return deny('invalid_session')
 
-  if (input.requester.isVipActive) return { canListen: true, canSpeak: true, speakBasis: 'vip' }
-  if (input.hasSpeakingEntitlement) return { canListen: true, canSpeak: true, speakBasis: 'membership' }
+  const speakBasis: VoiceSpeakBasis | null = input.requester.isVipActive
+    ? 'vip'
+    : input.hasSpeakingEntitlement
+      ? 'membership'
+      : null
+  // Mute наказанието има приоритет пред VIP и придобитото право (бан и
+  // окончателно напускане вече са отказали и слушането по-горе).
+  if (input.requester.isChatMuted === true) return { canListen: true, canSpeak: false, speakDenialCode: 'muted', speakBasis }
+  if (speakBasis !== null) return { canListen: true, canSpeak: true, speakBasis }
   return { canListen: true, canSpeak: false, speakDenialCode: 'vip_required' }
 }
 
@@ -194,7 +219,10 @@ export function toVoiceLiveKitPermissionProfile(decision: VoiceAccessDecision): 
  * "самоудължава" — то вече важи до края на участието.
  */
 export function shouldPersistSpeakingEntitlement(decision: VoiceAccessDecision, alreadyEntitled: boolean): boolean {
-  return !alreadyEntitled && decision.canSpeak && decision.speakBasis === 'vip'
+  if (alreadyEntitled || !decision.canListen) return false
+  // И при mute: VIP по време на участието придобива правото (ще го ползва
+  // след края на наказанието, дори VIP дотогава да е изтекъл).
+  return 'speakBasis' in decision && decision.speakBasis === 'vip'
 }
 
 /**

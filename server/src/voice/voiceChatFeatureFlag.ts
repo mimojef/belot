@@ -26,6 +26,8 @@ export const VOICE_CHAT_LIVEKIT_ENV_NAMES = [
   'LIVEKIT_WS_URL',
   'LIVEKIT_API_KEY',
   'LIVEKIT_API_SECRET',
+  // Изолация на средите на един LiveKit (Етап 2б): 'prod' / 'dev' и т.н.
+  'VOICE_ROOM_NAMESPACE',
 ] as const
 
 type EnvSource = Readonly<Record<string, string | undefined>>

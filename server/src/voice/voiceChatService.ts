@@ -43,6 +43,18 @@
 // Край на достъпа без загуба на право (напуснат екран, изтекъл lease, 120 s)
 // -> само отнемане на правата + RemoveParticipant, без ротация: играчът е
 // легитимен участник и ново изрично включване е разрешено.
+//
+// ── Mute наказание ───────────────────────────────────────────────────────
+// Единният административен mute (Лафче, Общи, чатът в чакалнята — един
+// източник на истина: getChatMuteStatus) забранява и ГОВОРЕНЕТО: играчът
+// играе, създава гласова маса (с VIP) и слуша, но не получава publish
+// права. Mute има приоритет пред VIP и пред придобитото право, без да го
+// изтрива. Налагане по време на разговор (onChatMuteChanged): приоритетно
+// UpdateParticipant само без publish (слушането остава) и — ако на тази
+// сесия е издаден publish-способен токен за живата генерация — ротация
+// ('speak_revoked'), за да не може стар токен с canPublish:true да върне
+// говоренето. Изтичане/премахване: само известие; микрофонът никога не се
+// включва автоматично (повишаване по изричен speak-access).
 
 import { randomUUID } from 'node:crypto'
 import {
@@ -55,7 +67,13 @@ import {
   type VoiceListenDenialCode,
 } from './voiceChatEligibility.js'
 import { isVoiceChatEmergencyStopActive, resolveEffectiveVoiceChatMode } from './voiceChatFeatureFlag.js'
-import type { VoiceAccessEndReason, VoicePresenceClientMessage, VoicePresenceErrorCode, VoiceServerMessage } from './voiceChatProtocol.js'
+import type {
+  VoiceAccessEndReason,
+  VoicePresenceClientMessage,
+  VoicePresenceErrorCode,
+  VoiceServerMessage,
+  VoiceSpeakState,
+} from './voiceChatProtocol.js'
 import type { SetModeResult, VoiceChatStore } from './voiceChatStore.js'
 import type {
   VoiceChatMode,
@@ -112,13 +130,19 @@ export type VoiceSeatLookup =
 export type VoiceChatServiceDeps = {
   store: VoiceChatStore
   /** null -> LiveKit не е конфигуриран: гласът е недостъпен, играта продължава. */
-  liveKit: { api: VoiceLiveKitApi; wsUrl: string; signToken: VoiceTokenSigner } | null
+  liveKit: { api: VoiceLiveKitApi; wsUrl: string; signToken: VoiceTokenSigner; roomNamespace?: string } | null
   dispatcher: VoiceLiveKitDispatcher
   resolveSeat: (profileId: string, table: VoiceTableRecord) => VoiceSeatLookup
   isConnectionOpen: (connectionId: string) => boolean
   sendToConnection: (connectionId: string, message: VoiceServerMessage) => void
   isVipActive: (profileId: string) => boolean
   isBanned: (profileId: string) => boolean
+  /**
+   * Съществуващият единен mute (topicModerationStore.getSectionMuteSnapshot).
+   * Хвърлена грешка -> fail-closed за ГОВОРЕНЕТО (третира се като mute),
+   * слушането не се засяга.
+   */
+  getChatMuteStatus: (profileId: string) => { isMuted: boolean; mutedUntil: string | null }
   env?: EnvSource
   now?: () => number
   scheduler?: {
@@ -189,6 +213,8 @@ export type VoiceChatService = {
   onServerRoomRemoved: (voiceTableId: VoiceTableId) => void
   // Сесии
   onProfileRevoked: (profileId: string, reason: 'banned' | 'profile_revoked') => void
+  /** Наложено, изтекло или премахнато mute наказание (вика се от единната точка за известяване). */
+  onChatMuteChanged: (profileId: string) => void
   onGameConnectionDisplaced: (connectionId: string) => void
   onGameConnectionClosed: (connectionId: string) => void
   handlePresence: (connectionId: string, profileId: string | null, message: VoicePresenceClientMessage) => void
@@ -245,11 +271,13 @@ type EvaluationSuccess = {
   decision: Extract<VoiceAccessDecision, { canListen: true }>
   liveRoomName: string | null
   liveGeneration: number | null
+  speak: VoiceSpeakState
   fingerprint: string
 }
 
 const SPEAK_PERMISSION = { canSubscribe: true, canPublish: true, canPublishSources: ['microphone'], canPublishData: false } as const
 const REVOKED_PERMISSION = { canSubscribe: false, canPublish: false, canPublishSources: [], canPublishData: false } as const
+const LISTEN_PERMISSION = { canSubscribe: true, canPublish: false, canPublishSources: [], canPublishData: false } as const
 
 const DENIAL_STATUS: Record<VoiceListenDenialCode, number> = {
   voice_off: 403,
@@ -305,6 +333,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     leaseExpired: 0,
     disconnectTimeouts: 0,
     createRoomFailures: 0,
+    muteRevocations: 0,
   }
   let bootComplete = false
   let disposed = false
@@ -321,6 +350,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     api: liveKit?.api ?? null,
     dispatcher,
     onTableDeletionsSettled: (voiceTableId) => notifyTableReady(voiceTableId),
+    ...(liveKit?.roomNamespace === undefined ? {} : { roomNamespace: liveKit.roomNamespace }),
     log: deps.reconcilerOptions?.log ?? log,
   })
 
@@ -329,7 +359,10 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     scheduler,
     now: () => new Date(now()),
     log,
-    onReleased: (voiceTableId) => handleTableReleased(voiceTableId, 'table_released'),
+    onReleased: (voiceTableId, retiredRoomNames) => {
+      reconciler.noteRetired(retiredRoomNames)
+      handleTableReleased(voiceTableId, 'table_released')
+    },
   })
 
   // ─── Помощни ──────────────────────────────────────────────────────────
@@ -376,6 +409,52 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         run: () => api.removeParticipant(roomName, identity),
       })
     })().catch(() => {})
+  }
+
+  // ─── Mute ─────────────────────────────────────────────────────────────
+
+  function readMute(profileId: string): { isMuted: boolean; mutedUntil: string | null } {
+    try {
+      const status = deps.getChatMuteStatus(profileId)
+      return { isMuted: status.isMuted, mutedUntil: status.isMuted ? status.mutedUntil : null }
+    } catch {
+      // Fail-closed само за говоренето (същата политика като текстовия чат).
+      return { isMuted: true, mutedUntil: null }
+    }
+  }
+
+  function speakStateOf(decision: Extract<VoiceAccessDecision, { canListen: true }>, entitled: boolean, mutedUntil: string | null): VoiceSpeakState {
+    if (decision.canSpeak) return { canSpeak: true, blockedReason: null, hasSpeakingEntitlement: entitled, mutedUntil: null }
+    return {
+      canSpeak: false,
+      blockedReason: decision.speakDenialCode,
+      hasSpeakingEntitlement: entitled,
+      mutedUntil: decision.speakDenialCode === 'muted' ? mutedUntil : null,
+    }
+  }
+
+  /** Състоянието на говорене за играч на масата (за presence/известия), без да създава участие. */
+  function currentSpeakState(voiceTableId: VoiceTableId, profileId: string): VoiceSpeakState {
+    const mute = readMute(profileId)
+    const entitled = memberships.get(key(voiceTableId, profileId))?.entitled === true
+    const vip = deps.isVipActive(profileId)
+    if (mute.isMuted) return { canSpeak: false, blockedReason: 'muted', hasSpeakingEntitlement: entitled, mutedUntil: mute.mutedUntil }
+    if (vip || entitled) return { canSpeak: true, blockedReason: null, hasSpeakingEntitlement: entitled, mutedUntil: null }
+    return { canSpeak: false, blockedReason: 'vip_required', hasSpeakingEntitlement: false, mutedUntil: null }
+  }
+
+  /** Отнема само publish правото на identity-то (слушането остава); не анулира JWT. */
+  function revokePublish(roomName: string, identity: string): void {
+    if (liveKit === null) return
+    const api = liveKit.api
+    void dispatcher
+      .run({
+        name: 'UpdateParticipant(revoke publish)',
+        priority: 'high',
+        idempotent: true,
+        run: () => api.updateParticipantPermission(roomName, identity, LISTEN_PERMISSION),
+      })
+      .catch(() => {})
   }
 
   // ─── Участия ──────────────────────────────────────────────────────────
@@ -456,6 +535,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       return 'done'
     }
     blockedTables.delete(voiceTableId)
+    if (result.retiredRoomName !== null) reconciler.noteRetired([result.retiredRoomName])
     counters.rotations! += 1
     log(`[voice-chat] rotation voiceTable=${voiceTableId} generation=${result.generation} reason=${reason}`)
     notifyTable(voiceTableId, { type: 'voice_table_updated', voiceTableId, generation: result.generation, ready: false })
@@ -607,9 +687,16 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       deps.isConnectionOpen(binding.connectionId!)
 
     let membership = memberships.get(bindingKey) ?? null
+    const mute = readMute(claim.profileId)
     const decision = evaluateVoiceAccess({
       mode: { storedMode: mode, emergencyStop: false },
-      requester: { profileId: claim.profileId, isFullAdmin: false, isVipActive: deps.isVipActive(claim.profileId), isBanned },
+      requester: {
+        profileId: claim.profileId,
+        isFullAdmin: false,
+        isVipActive: deps.isVipActive(claim.profileId),
+        isBanned,
+        isChatMuted: mute.isMuted,
+      },
       requestedVoiceTableId: claim.voiceTableId,
       table: { voiceTableId: table.voiceTableId, status: table.status, phase: table.phase },
       membership: {
@@ -649,6 +736,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       decision,
       liveRoomName: live?.livekitRoomName ?? null,
       liveGeneration: live?.generation ?? null,
+      speak: speakStateOf(decision, membership.entitled, mute.mutedUntil),
       fingerprint,
     }
   }
@@ -808,6 +896,30 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       }
     },
 
+    onChatMuteChanged(profileId) {
+      const mute = readMute(profileId)
+      for (const binding of [...bindings.values()]) {
+        if (binding.profileId !== profileId) continue
+        if (mute.isMuted) {
+          const live = liveRoomName(binding.voiceTableId)
+          if (live !== null && binding.issuedRoomName === live && binding.issuedCanPublish) {
+            // (1) веднага: без publish (микрофонът спира), слушането остава;
+            // (2) ротация: стар токен с canPublish:true е вързан за старото
+            //     име и не може да върне говоренето; новият токен е само за
+            //     слушане. Мястото, участието и придобитото право се пазят.
+            revokePublish(live, binding.identity)
+            counters.muteRevocations! += 1
+            rotateTable(binding.voiceTableId, 'speak_revoked', [])
+          }
+        }
+        send(binding.connectionId, {
+          type: 'voice_speak_access_updated',
+          voiceTableId: binding.voiceTableId,
+          speak: currentSpeakState(binding.voiceTableId, profileId),
+        })
+      }
+    },
+
     onGameConnectionDisplaced(connectionId) {
       for (const binding of [...bindings.values()]) {
         if (binding.connectionId !== connectionId) continue
@@ -877,6 +989,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
           leaseTtlMs,
           renewAfterMs: leaseRenewMs,
           ready: tableReady(table.voiceTableId),
+          speak: currentSpeakState(table.voiceTableId, profileId),
         })
         return
       }
@@ -911,6 +1024,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         leaseTtlMs,
         renewAfterMs: leaseRenewMs,
         ready: tableReady(table.voiceTableId),
+        speak: currentSpeakState(table.voiceTableId, profileId),
       })
     },
 
@@ -978,6 +1092,8 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
           voiceTableId: final.table.voiceTableId,
           generation: final.liveGeneration,
           canSpeak: permission.canPublish,
+          // Само към самия играч: защо не може да говори (липсващ VIP / mute) и срокът на mute.
+          speak: final.speak,
           expiresInSeconds: VOICE_TOKEN_TTL_SECONDS,
         },
       })
@@ -986,10 +1102,19 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     async handleSpeakAccessRequest(claim, respond) {
       const first = evaluateClaim(claim, { createMembership: true })
       if (!first.ok) return respond(failure(first))
-      if (!first.decision.canSpeak) {
-        return respond({ status: 200, body: { ok: true, canSpeak: false, code: 'vip_required' } })
-      }
+      // И при mute: VIP по време на участието придобива правото (за след наказанието).
       if (shouldPersistSpeakingEntitlement(first.decision, first.membership.entitled)) entitleMembership(first.membership)
+      if (!first.decision.canSpeak) {
+        return respond({
+          status: 200,
+          body: {
+            ok: true,
+            canSpeak: false,
+            code: first.decision.speakDenialCode,
+            speak: speakStateOf(first.decision, first.membership.entitled, first.speak.mutedUntil),
+          },
+        })
+      }
       const binding = first.binding
       const live = first.liveRoomName
       if (!binding.voiceActive || binding.issuedRoomName === null || binding.issuedRoomName !== live) {
@@ -1022,6 +1147,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
 
     onModeChanged(result) {
       if (result.settings.mode !== 'off') return
+      reconciler.noteRetired(result.retiredRoomNames)
       for (const voiceTableId of result.releasedVoiceTableIds) handleTableReleased(voiceTableId, 'voice_off')
       reconciler.kick()
     },

@@ -256,7 +256,7 @@ try {
     const none = getVoiceChatLiveKitConfigStatus({})
     assert(!none.configured && none.missing.length === VOICE_CHAT_LIVEKIT_ENV_NAMES.length, JSON.stringify(none))
     const secret = 'super-secret-value-123'
-    const full = getVoiceChatLiveKitConfigStatus({ LIVEKIT_API_URL: 'https://x', LIVEKIT_WS_URL: 'wss://x', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: secret })
+    const full = getVoiceChatLiveKitConfigStatus({ LIVEKIT_API_URL: 'https://x', LIVEKIT_WS_URL: 'wss://x', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: secret, VOICE_ROOM_NAMESPACE: 'prod' })
     assert(full.configured && full.missing.length === 0, 'пълна')
     assert(!JSON.stringify(full).includes(secret), 'без стойности')
     assert(!getVoiceChatLiveKitConfigStatus({ LIVEKIT_API_URL: 'x', LIVEKIT_WS_URL: 'x', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: '   ' }).configured, 'празен secret')
@@ -415,6 +415,27 @@ try {
     assertEqual(resolveRevocationRotation({ wasIssuedTokenForLiveGeneration: true, decision: full }), null, 'без загуба')
   })
 
+  await check('[E8] Mute наказание: слуша, не говори; приоритет пред VIP и придобитото право; бан и напускане печелят; правото се записва и при mute', () => {
+    const muted = (overrides: Parameters<typeof accessInput>[0] = {}): VoiceAccessDecision => {
+      const input = accessInput(overrides)
+      return evaluateVoiceAccess({ ...input, requester: { ...input.requester, isChatMuted: true } })
+    }
+    const vipMuted = muted({ vip: true })
+    assert(vipMuted.canListen && !vipMuted.canSpeak && vipMuted.speakDenialCode === 'muted' && vipMuted.speakBasis === 'vip', 'VIP с mute слуша')
+    const entitledMuted = muted({ vip: false, hasSpeakingEntitlement: true })
+    assert(entitledMuted.canListen && !entitledMuted.canSpeak && entitledMuted.speakDenialCode === 'muted' && entitledMuted.speakBasis === 'membership', 'придобитото право е пазено, но блокирано')
+    const plainMuted = muted({ vip: false })
+    assert(plainMuted.canListen && !plainMuted.canSpeak && plainMuted.speakDenialCode === 'muted' && plainMuted.speakBasis === null, 'non-VIP с mute слуша')
+    assertEqual(denial(muted({ banned: true })), 'banned', 'банът е с най-висок приоритет')
+    assertEqual(denial(muted({ permanentlyLeft: true })), 'permanently_left', 'окончателно напускане')
+    assertEqual(JSON.stringify(toVoiceLiveKitPermissionProfile(vipMuted)), JSON.stringify({ canSubscribe: true, canPublish: false, canPublishSources: [], canPublishData: false }), 'без publish права')
+    assert(shouldPersistSpeakingEntitlement(vipMuted, false), 'VIP при mute придобива правото за след наказанието')
+    assert(!shouldPersistSpeakingEntitlement(plainMuted, false), 'non-VIP при mute — без право')
+    assert(evaluateVoiceTableCreation({ mode: { storedMode: 'public', emergencyStop: false }, requester: { profileId: 'p1', isFullAdmin: false, isVipActive: true, isBanned: false, isChatMuted: true } }).ok, 'VIP с mute създава гласова маса')
+    const unmuted = evaluateVoiceAccess({ ...accessInput({ vip: false, hasSpeakingEntitlement: true }), requester: { profileId: 'p1', isFullAdmin: false, isVipActive: false, isBanned: false, isChatMuted: false } })
+    assert(unmuted.canSpeak && unmuted.speakBasis === 'membership', 'след mute: правото важи отново (VIP изтекъл)')
+  })
+
   await check('[E7] Session binding: текущият clientInstanceId И връзката, която държи мястото', () => {
     const binding: VoiceSessionBinding = { profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new', gameConnectionId: 'c2', bindingEpoch: 2 }
     const claim = { profileId: 'p1', voiceTableId: TABLE_ID, clientInstanceId: 'tab-new' }
@@ -430,11 +451,15 @@ try {
   })
 
   // ═══ [N] Имена на стаите ════════════════════════════════════════════════
-  await check('[N1] Имена: формат, парсване, 20 000 без повторение, невалидни входове', () => {
-    const name = buildVoiceRoomName(TABLE_ID, 7)
-    assert(name.startsWith(VOICE_ROOM_NAME_PREFIX) && name.length <= 128, name)
+  await check('[N1] Имена: формат с namespace, парсване, 20 000 без повторение, невалидни входове', () => {
+    const name = buildVoiceRoomName(TABLE_ID, 7, 'prod')
+    assert(name.startsWith(`${VOICE_ROOM_NAME_PREFIX}prod_`) && name.length <= 128, name)
     const parsed = parseVoiceRoomName(name)
-    assert(parsed !== null && parsed.generation === 7 && parsed.compactVoiceTableId === TABLE_ID.replaceAll('-', ''), JSON.stringify(parsed))
+    assert(parsed !== null && parsed.namespace === 'prod' && parsed.generation === 7 && parsed.compactVoiceTableId === TABLE_ID.replaceAll('-', ''), JSON.stringify(parsed))
+    assertEqual(parseVoiceRoomName(buildVoiceRoomName(TABLE_ID, 1))?.namespace, 'local', 'namespace по подразбиране')
+    assertThrows(() => buildVoiceRoomName(TABLE_ID, 1, 'Prod!'), 'invalid_namespace', 'невалиден namespace')
+    assertThrows(() => buildVoiceRoomName(TABLE_ID, 1, 'x'), 'invalid_namespace', 'твърде къс namespace')
+    assertEqual(parseVoiceRoomName(`pv_${TABLE_ID.replaceAll('-', '')}_g1_aaaaaaaaaaaaaaaaaaaaaaaaaa`), null, 'стар формат без namespace')
     const names = new Set<string>()
     for (let index = 0; index < 20_000; index += 1) names.add(buildVoiceRoomName(TABLE_ID, 1))
     assertEqual(names.size, 20_000, 'уникални')
@@ -918,7 +943,7 @@ try {
       return JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null')
     },
     resolveDisplayName: (profileId: string) => (profileId === apiAdmin ? 'Админ Тест' : null),
-    env: { LIVEKIT_API_URL: 'https://voice.example', LIVEKIT_WS_URL: 'wss://voice.example', LIVEKIT_API_KEY: 'key-1', LIVEKIT_API_SECRET: SECRET },
+    env: { LIVEKIT_API_URL: 'https://voice.example', LIVEKIT_WS_URL: 'wss://voice.example', LIVEKIT_API_KEY: 'key-1', LIVEKIT_API_SECRET: SECRET, VOICE_ROOM_NAMESPACE: 'prod' },
     log: () => {},
   }
   const handler = createVoiceChatAdminRequestHandler(apiDeps)
@@ -1024,7 +1049,7 @@ try {
   // ═══ [W] Свързване в index.ts (статично) ════════════════════════════════
   await check('[W1] LiveKit SDK само в voiceLiveKitApi.ts/voiceTokenIssuer.ts; index.ts без SDK и без директни мрежови заявки към LiveKit', async () => {
     const source = await readFile(join(sourceServerRoot, 'src', 'index.ts'), 'utf8')
-    assert(source.includes('await createVoiceChatStore(databaseBootstrap.databaseFilePath)'), 'store')
+    assert(source.includes('await createVoiceChatStore(') && source.includes('databaseBootstrap.databaseFilePath,'), 'store')
     assert(/if \(await handleAdminVoiceChatRequest\(req, res, requestUrl\)\) \{/.test(source), 'admin router')
     assert(source.includes(`closeStore('voiceChatStore', () => voiceChatStore.close())`), 'close')
     for (const forbidden of ["from 'livekit-server-sdk'", 'livekit-client', 'AccessToken', 'RoomServiceClient']) {

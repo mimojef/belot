@@ -15,6 +15,7 @@
 // на грешките (без съдържанието на отговорите в логовете).
 
 import { RoomServiceClient, TrackSource } from 'livekit-server-sdk'
+import { isVoiceRoomNamespace } from './voiceRoomNaming.js'
 import type { VoiceLiveKitPermissionProfile } from './voiceChatTypes.js'
 
 type EnvSource = Readonly<Record<string, string | undefined>>
@@ -27,6 +28,13 @@ export type VoiceLiveKitConfig = {
   wsUrl: string
   apiKey: string
   apiSecret: string
+  /**
+   * VOICE_ROOM_NAMESPACE — задължителен: изолира тази среда от други среди
+   * на същия LiveKit (напр. 'prod' в production, 'dev' локално). Без него
+   * гласът е "недостъпен" (fail-safe), за да не може локален backend да
+   * изтрие чужди стаи.
+   */
+  roomNamespace: string
 }
 
 /**
@@ -39,9 +47,11 @@ export function readVoiceLiveKitConfig(env: EnvSource = process.env): VoiceLiveK
   const wsUrl = env.LIVEKIT_WS_URL?.trim() ?? ''
   const apiKey = env.LIVEKIT_API_KEY?.trim() ?? ''
   const apiSecret = env.LIVEKIT_API_SECRET?.trim() ?? ''
+  const roomNamespace = env.VOICE_ROOM_NAMESPACE?.trim() ?? ''
   if (apiUrl === '' || wsUrl === '' || apiKey === '' || apiSecret === '') return null
+  if (!isVoiceRoomNamespace(roomNamespace)) return null
   if (!isAllowedUrl(apiUrl, ['https:'], ['http:']) || !isAllowedUrl(wsUrl, ['wss:'], ['ws:'])) return null
-  return { apiUrl: apiUrl.replace(/\/+$/, ''), wsUrl: wsUrl.replace(/\/+$/, ''), apiKey, apiSecret }
+  return { apiUrl: apiUrl.replace(/\/+$/, ''), wsUrl: wsUrl.replace(/\/+$/, ''), apiKey, apiSecret, roomNamespace }
 }
 
 function isAllowedUrl(value: string, secureProtocols: string[], loopbackOnlyProtocols: string[]): boolean {

@@ -6,7 +6,8 @@
  * breaker, retry само за идемпотентни), издаване на токени (точни grants,
  * race проверки), участие с право за говорене (VIP правила), session
  * binding, ротация, durable DeleteRoom + reconciliation (вкл. забавен
- * CreateRoom), 120 s таймер, lease, напускане на екрана, режими, рестарт и
+ * CreateRoom), 120 s таймер, lease, напускане на екрана, режими, рестарт,
+ * единният mute (забранява говоренето), изолация по namespace и
  * свързването в index.ts (статично).
  *
  * Само изолирани temp SQLite бази и локален fake сървър на 127.0.0.1 —
@@ -304,6 +305,9 @@ type Harness = {
   open: Set<string>
   vip: Set<string>
   banned: Set<string>
+  /** profileId -> mutedUntil (ISO) за активно mute наказание. */
+  muted: Map<string, string | null>
+  failMuteLookup: { value: boolean }
   sent: Array<{ connectionId: string; message: VoiceServerMessage }>
   logs: string[]
   token: (profileId: string, voiceTableId: string, clientInstanceId: string) => Promise<VoiceHttpResult>
@@ -338,6 +342,8 @@ async function createHarness(options: {
   const open = new Set<string>()
   const vip = new Set<string>()
   const banned = new Set<string>()
+  const muted = new Map<string, string | null>()
+  const failMuteLookup = { value: false }
   const sent: Harness['sent'] = []
   const logs: string[] = []
   const dispatcher = options.dispatcher ?? createVoiceLiveKitDispatcher({
@@ -359,6 +365,10 @@ async function createHarness(options: {
     sendToConnection: (connectionId, message) => { sent.push({ connectionId, message }) },
     isVipActive: (profileId) => vip.has(profileId),
     isBanned: (profileId) => banned.has(profileId),
+    getChatMuteStatus: (profileId) => {
+      if (failMuteLookup.value) throw new Error('mute lookup unavailable')
+      return muted.has(profileId) ? { isMuted: true, mutedUntil: muted.get(profileId) ?? null } : { isMuted: false, mutedUntil: null }
+    },
     env: options.env ?? {},
     now: clock.now,
     scheduler: clock.scheduler,
@@ -385,6 +395,8 @@ async function createHarness(options: {
     open,
     vip,
     banned,
+    muted,
+    failMuteLookup,
     sent,
     logs,
     token: (p, t, i) => call(service.handleTokenRequest, p, t, i),
@@ -475,10 +487,12 @@ try {
 
   await check('[L2] Конфигурация: само https/wss (http/ws само за loopback); липсващи -> null; без тайни в резултата от грешки', () => {
     assertEqual(readVoiceLiveKitConfig({}), null, 'празно')
-    const prod = readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'https://voice.example.test', LIVEKIT_WS_URL: 'wss://voice.example.test', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's' })
+    const prod = readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'https://voice.example.test', LIVEKIT_WS_URL: 'wss://voice.example.test', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's', VOICE_ROOM_NAMESPACE: 'prod' })
     assert(prod !== null && prod.apiUrl === 'https://voice.example.test', 'https')
-    assertEqual(readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'http://voice.example.test', LIVEKIT_WS_URL: 'wss://voice.example.test', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's' }), null, 'http към външен хост')
-    assert(readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'http://127.0.0.1:7880', LIVEKIT_WS_URL: 'ws://127.0.0.1:7880', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's' }) !== null, 'loopback')
+    assertEqual(readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'http://voice.example.test', LIVEKIT_WS_URL: 'wss://voice.example.test', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's', VOICE_ROOM_NAMESPACE: 'prod' }), null, 'http към външен хост')
+    assert(readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'http://127.0.0.1:7880', LIVEKIT_WS_URL: 'ws://127.0.0.1:7880', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's', VOICE_ROOM_NAMESPACE: 'prod' }) !== null, 'loopback')
+    assertEqual(readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'https://voice.example.test', LIVEKIT_WS_URL: 'wss://voice.example.test', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's' }), null, 'без VOICE_ROOM_NAMESPACE -> гласът е недостъпен (fail-safe)')
+    assertEqual(readVoiceLiveKitConfig({ LIVEKIT_API_URL: 'https://voice.example.test', LIVEKIT_WS_URL: 'wss://voice.example.test', LIVEKIT_API_KEY: 'k', LIVEKIT_API_SECRET: 's', VOICE_ROOM_NAMESPACE: 'Prod_1' }), null, 'невалиден namespace')
   })
 
   await check('[L3] Реален timeout (hang), 5xx, connection refused -> transient; 4xx -> rejected; not_found', async () => {
@@ -896,7 +910,8 @@ try {
     h1.service.onGameStarted(table, 'server-boot')
     const before = await joinWithToken(h1, table, creator, 'c1', instanceId('a'), fake)
     h1.service.dispose()
-    fake.rooms.set('pv_00000000000000000000000000000000_g1_aaaaaaaaaaaaaaaaaaaaaaaaaa', { maxParticipants: 4, participants: new Map() })
+    fake.rooms.set('pv_local_00000000000000000000000000000000_g1_aaaaaaaaaaaaaaaaaaaaaaaaaa', { maxParticipants: 4, participants: new Map() })
+    fake.rooms.set('pv_prod_00000000000000000000000000000000_g1_aaaaaaaaaaaaaaaaaaaaaaaaaa', { maxParticipants: 4, participants: new Map() })
     const h2 = await createHarness({
       fake,
       existing: { path: h1.path, store: h1.store, seedProfile: h1.seedProfile },
@@ -912,7 +927,8 @@ try {
     assertEqual(blocked.body.code, 'voice_rotation_pending', 'стари токени: първо изтриване')
     await h2.reconcile()
     assert(!fake.rooms.has(before.roomName), 'старата стая е изтрита')
-    assert(!fake.rooms.has('pv_00000000000000000000000000000000_g1_aaaaaaaaaaaaaaaaaaaaaaaaaa'), 'сирак pv_ стая от boot sweep')
+    assert(!fake.rooms.has('pv_local_00000000000000000000000000000000_g1_aaaaaaaaaaaaaaaaaaaaaaaaaa'), 'сирак pv_ стая от boot sweep')
+    assert(fake.rooms.has('pv_prod_00000000000000000000000000000000_g1_aaaaaaaaaaaaaaaaaaaaaaaaaa'), 'стая на чужд namespace (production) не се пипа')
     const after = await h2.token(creator, table, inst)
     assert(after.status === 200 && after.body.canSpeak === true, 'правото преживява рестарта без VIP')
   })
@@ -1360,6 +1376,273 @@ try {
     assert(legacy !== null && legacy.type === 'create_private_room' && legacy.voiceEnabled === false, 'legacy -> false')
   })
 
+  // ═══ [M] Единният mute забранява говоренето ════════════════════════════
+  const MUTED_UNTIL = '2027-05-01T12:00:00.000Z'
+  const speakOf = (body: Record<string, unknown>): Record<string, unknown> => (body.speak ?? {}) as Record<string, unknown>
+  const lastSpeakUpdate = (h: Harness, conn: string): Record<string, unknown> | null => {
+    const message = messagesOf(h, conn, 'voice_speak_access_updated').at(-1)
+    return message !== undefined && message.type === 'voice_speak_access_updated' ? (message.speak as unknown as Record<string, unknown>) : null
+  }
+
+  await check('[M1] VIP без наказание говори; VIP с mute и non-VIP с mute само слушат (canPublish:false, причина muted, срок само към него); VIP с mute създава гласова маса', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const vipFree = h.seedProfile('VipFree')
+    const vipMuted = h.seedProfile('VipMuted')
+    const plainMuted = h.seedProfile('PlainMuted')
+    h.muted.set(vipMuted, MUTED_UNTIL)
+    const table = h.createTable(vipMuted, 'c1')
+    assert(h.store.getVoiceTable(table)?.status === 'active', 'VIP с mute създава гласова маса')
+    h.vip.add(vipFree)
+    h.seat(table, vipFree, 'c2')
+    h.muted.set(plainMuted, null)
+    h.seat(table, plainMuted, 'c3')
+    const free = await h.token(vipFree, table, (h.presence('c2', vipFree, table, 'inst_free_000000000001'), 'inst_free_000000000001'))
+    assert(free.body.canSpeak === true && speakOf(free.body).blockedReason === null, 'VIP без наказание')
+    const ackMuted = h.presence('c1', vipMuted, table, 'inst_vmut_000000000001')
+    assert(ackMuted?.type === 'voice_presence_result' && ackMuted.ok && ackMuted.speak.blockedReason === 'muted' && ackMuted.speak.mutedUntil === MUTED_UNTIL, 'presence: причина и срок')
+    const vm = await h.token(vipMuted, table, 'inst_vmut_000000000001')
+    assertEqual(vm.status, 200, 'слуша')
+    const video = decodeJwt(String(vm.body.token)).video as Record<string, unknown>
+    assert(video.canPublish === false && JSON.stringify(video.canPublishSources ?? []) === '[]' && video.canSubscribe === true, 'LiveKit: без publish')
+    assert(speakOf(vm.body).blockedReason === 'muted' && speakOf(vm.body).mutedUntil === MUTED_UNTIL && speakOf(vm.body).hasSpeakingEntitlement === true, 'причина, срок, пазено право')
+    h.presence('c3', plainMuted, table, 'inst_pmut_000000000001')
+    const pm = await h.token(plainMuted, table, 'inst_pmut_000000000001')
+    assert(pm.status === 200 && pm.body.canSpeak === false && speakOf(pm.body).blockedReason === 'muted', 'non-VIP с mute слуша')
+    const speakMuted = await h.speak(vipMuted, table, 'inst_vmut_000000000001')
+    assert(speakMuted.body.canSpeak === false && speakMuted.body.code === 'muted', 'speak-access отказва при mute')
+    assert(!h.sent.some((entry) => entry.connectionId !== 'c1' && JSON.stringify(entry.message).includes(MUTED_UNTIL)), 'срокът не стига до други участници')
+  })
+
+  await check('[M2] Mute преди влизане и в чакалнята: правото от сядането (VIP) се пази; изтекъл VIP по време на mute; след края -> говори; без автоматичен микрофон', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const host = h.seedProfile('Host')
+    const player = h.seedProfile('Player')
+    const table = h.createTable(host, 'c1')
+    h.vip.add(player)
+    h.muted.set(player, MUTED_UNTIL)
+    h.seat(table, player, 'c2')
+    assertEqual(h.store.getActiveMembership(table, player)?.speakingEntitledAt !== null, true, 'правото е придобито при сядането въпреки mute')
+    const inst = 'inst_pre_0000000000001'
+    h.presence('c2', player, table, inst)
+    assertEqual((await h.token(player, table, inst)).body.canSpeak, false, 'mute преди влизане -> слуша')
+    h.vip.delete(player)
+    h.muted.delete(player)
+    h.service.onChatMuteChanged(player)
+    const update = lastSpeakUpdate(h, 'c2')
+    assert(update !== null && update.canSpeak === true && update.blockedReason === null, 'известие за край на наказанието')
+    assert(!fake.calls.some((c) => c.method === 'UpdateParticipant'), 'без автоматично повишаване (микрофонът не се включва)')
+    assertEqual((await h.token(player, table, inst)).body.canSpeak, true, 'изтекъл VIP по време на mute -> говори с придобитото право')
+    // mute по време на чакалнята, без издаден publish токен: само известие, без ротация
+    const listener = h.seedProfile('Listener')
+    h.seat(table, listener, 'c3')
+    h.presence('c3', listener, table, 'inst_lst_0000000000001')
+    await h.token(listener, table, 'inst_lst_0000000000001')
+    const generationBefore = h.store.getLiveGeneration(table)?.generation
+    h.muted.set(listener, MUTED_UNTIL)
+    h.service.onChatMuteChanged(listener)
+    assertEqual(h.store.getLiveGeneration(table)?.generation, generationBefore, 'listen-only токен -> без ротация')
+    assertEqual(lastSpeakUpdate(h, 'c3')?.blockedReason, 'muted', 'известие')
+  })
+
+  await check('[M3] Mute по време на активен разговор: отнема само publish (слушането и мястото остават), ротация, стар publish токен безполезен, новият токен е само за слушане', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const host = h.seedProfile('Host')
+    const speaker = h.seedProfile('Speaker')
+    const table = h.createTable(host, 'c1')
+    h.vip.add(speaker)
+    h.seat(table, speaker, 'c2')
+    await joinWithToken(h, table, host, 'c1', 'inst_host_00000000001', fake)
+    const joined = await joinWithToken(h, table, speaker, 'c2', 'inst_spk_000000000001', fake)
+    fake.calls.length = 0
+    h.muted.set(speaker, MUTED_UNTIL)
+    h.service.onChatMuteChanged(speaker)
+    await sleep(100)
+    const revoke = fake.calls.find((c) => c.method === 'UpdateParticipant' && c.body.identity === joined.identity)
+    assert(revoke !== undefined, 'UpdateParticipant за наказания')
+    const permission = revoke!.body.permission as Record<string, unknown>
+    assert(permission.canSubscribe === true && permission.canPublish !== true, 'без publish, слушането остава')
+    assert(!fake.calls.some((c) => c.method === 'RemoveParticipant' && c.body.identity === joined.identity), 'не е изхвърлен веднага')
+    assertEqual(h.store.getLiveGeneration(table)?.generation, 2, 'ротация (стар publish токен)')
+    assertEqual(h.store.getGeneration(joined.roomName)?.retireReason, 'speak_revoked', 'причина')
+    assertEqual(lastSpeakUpdate(h, 'c2')?.blockedReason, 'muted', 'известие към наказания')
+    assert(h.service.debug.getMembership(table, speaker) !== null && h.service.debug.getBinding(table, speaker) !== null, 'мястото и сесията се пазят')
+    await h.reconcile()
+    assert(!fake.rooms.has(joined.roomName) && !h.store.isLiveRoomName(joined.roomName), 'старата стая е изтрита; старият publish токен не може да влезе')
+    const relisten = await h.token(speaker, table, 'inst_spk_000000000001')
+    const video = decodeJwt(String(relisten.body.token)).video as Record<string, unknown>
+    assert(relisten.status === 200 && video.canPublish === false && video.canSubscribe === true, 'нов токен само за слушане')
+    assertEqual(h.store.getActiveMembership(table, speaker)?.speakingEntitledAt !== null, true, 'придобитото право е запазено')
+    assertEqual(h.service.stats().counters.muteRevocations, 1, 'брояч')
+  })
+
+  await check('[M4] Mute при временно прекъсната връзка: ротация, известие при reconnect; refresh при mute -> само слушане', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const host = h.seedProfile('Host')
+    const table = h.createTable(host, 'c1')
+    const inst = 'inst_net_0000000000001'
+    await joinWithToken(h, table, host, 'c1', inst, fake)
+    h.open.delete('c1')
+    h.service.onGameConnectionClosed('c1')
+    h.muted.set(host, MUTED_UNTIL)
+    h.service.onChatMuteChanged(host)
+    assertEqual(h.store.getLiveGeneration(table)?.generation, 2, 'ротация и при прекъсната връзка')
+    h.seats.set(`${table}|${host}`, { relation: 'player', permanentlyLeft: false, seatConnectionId: 'c1b' })
+    h.open.add('c1b')
+    const ack = h.presence('c1b', host, table, inst)
+    assert(ack?.type === 'voice_presence_result' && ack.ok && ack.speak.blockedReason === 'muted', 'reconnect: presence показва mute')
+    await h.reconcile()
+    assertEqual((await h.token(host, table, inst)).body.canSpeak, false, 'reconnect: само слушане')
+    h.open.delete('c1b')
+    h.service.onGameConnectionClosed('c1b')
+    h.seats.set(`${table}|${host}`, { relation: 'player', permanentlyLeft: false, seatConnectionId: 'c1c' })
+    h.open.add('c1c')
+    h.presence('c1c', host, table, 'inst_refresh_000000001')
+    await h.reconcile()
+    const refreshed = await h.token(host, table, 'inst_refresh_000000001')
+    assert(refreshed.status === 200 && refreshed.body.canSpeak === false, 'refresh: само слушане')
+  })
+
+  await check('[M5] Mute по време на издаване на токен: токенът се изхвърля (и ротация, защото е маркиран publish); недостъпна mute проверка -> fail-closed за говоренето', async () => {
+    fake.reset()
+    let releaseSign: () => void = () => {}
+    const gate = new Promise<void>((resolvePromise) => { releaseSign = resolvePromise })
+    let gated = false
+    const real = createVoiceTokenSigner({ apiKey: API_KEY, apiSecret: API_SECRET })
+    const h = await createHarness({ fake, signToken: async (input) => { if (gated) await gate; return real(input) } })
+    const host = h.seedProfile('Host')
+    const table = h.createTable(host, 'c1')
+    const inst = 'inst_race_000000000001'
+    h.presence('c1', host, table, inst)
+    gated = true
+    const pending = h.token(host, table, inst)
+    await sleep(80)
+    h.muted.set(host, MUTED_UNTIL)
+    h.service.onChatMuteChanged(host)
+    releaseSign()
+    const result = await pending
+    assert(result.body.token === undefined && result.status >= 400, JSON.stringify(result.body))
+    assertEqual(h.store.getLiveGeneration(table)?.generation, 2, 'ротация (publish беше маркиран)')
+    gated = false
+    h.muted.delete(host)
+    h.failMuteLookup.value = true
+    await h.reconcile()
+    const failClosed = await h.token(host, table, inst)
+    assert(failClosed.status === 200 && failClosed.body.canSpeak === false, 'fail-closed: слуша, не говори')
+    h.failMuteLookup.value = false
+  })
+
+  await check('[M6] Край на mute (изтичане или ръчно премахване): известие, без автоматичен микрофон; изричен speak-access -> UpdateParticipant; без право -> остава слушател; придобит VIP междувременно -> говори', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const host = h.seedProfile('Host')
+    const plain = h.seedProfile('Plain')
+    const table = h.createTable(host, 'c1')
+    h.muted.set(host, MUTED_UNTIL)
+    const hostJoin = await joinWithToken(h, table, host, 'c1', 'inst_hst_000000000001', fake)
+    h.seat(table, plain, 'c2')
+    h.muted.set(plain, MUTED_UNTIL)
+    await joinWithToken(h, table, plain, 'c2', 'inst_pln_000000000001', fake)
+    fake.calls.length = 0
+    h.muted.delete(host)
+    h.service.onChatMuteChanged(host)
+    assertEqual(lastSpeakUpdate(h, 'c1')?.canSpeak, true, 'известие: може да говори')
+    await sleep(50)
+    assert(!fake.calls.some((c) => c.method === 'UpdateParticipant'), 'без автоматично повишаване')
+    const upgraded = await h.speak(host, table, 'inst_hst_000000000001')
+    assertEqual(upgraded.body.upgrade, 'updated', 'изрично включване -> UpdateParticipant')
+    const grant = fake.calls.find((c) => c.method === 'UpdateParticipant' && c.body.identity === hostJoin.identity)!
+    assertEqual(JSON.stringify((grant.body.permission as Record<string, unknown>).canPublishSources), '["MICROPHONE"]', 'само микрофон')
+    h.muted.delete(plain)
+    h.service.onChatMuteChanged(plain)
+    const plainUpdate = lastSpeakUpdate(h, 'c2')
+    assert(plainUpdate?.canSpeak === false && plainUpdate.blockedReason === 'vip_required', 'без право -> остава слушател')
+    h.vip.add(plain)
+    assertEqual((await h.speak(plain, table, 'inst_pln_000000000001')).body.canSpeak, true, 'придобит VIP междувременно')
+  })
+
+  await check('[M7] Рестарт при активен mute: само слушане; след края — правото от участието важи; банът е с най-висок приоритет', async () => {
+    fake.reset()
+    const h1 = await createHarness({ fake })
+    const host = h1.seedProfile('Host')
+    const table = h1.createTable(host, 'c1')
+    h1.service.onGameStarted(table, 'server-m7')
+    h1.service.dispose()
+    const h2 = await createHarness({
+      fake,
+      existing: { path: h1.path, store: h1.store, seedProfile: h1.seedProfile },
+      boot: [{ serverRoomId: 'server-m7', voiceTableId: table, activeProfileIds: [host] }],
+    })
+    h2.muted.set(host, MUTED_UNTIL)
+    h2.seats.set(`${table}|${host}`, { relation: 'player', permanentlyLeft: false, seatConnectionId: 'n1' })
+    h2.open.add('n1')
+    const inst = 'inst_boot_000000000001'
+    h2.presence('n1', host, table, inst)
+    await h2.reconcile()
+    assertEqual((await h2.token(host, table, inst)).body.canSpeak, false, 'след рестарт при mute')
+    h2.muted.delete(host)
+    assertEqual((await h2.token(host, table, inst)).body.canSpeak, true, 'правото от участието (VIP изтекъл) важи')
+    h2.muted.set(host, MUTED_UNTIL)
+    h2.banned.add(host)
+    const banned = await h2.token(host, table, inst)
+    assert(banned.status === 403 && banned.body.code === 'banned', 'банът печели над mute')
+  })
+
+  // ═══ [A] Lease срещу 120 s ═══════════════════════════════════════════════
+  await check('[A1] Временно отпадане на игровия WS: 60 s lease НЕ съкращава 120 s; при жив WS и напуснат екран lease-ът остава защитата', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const host = h.seedProfile('Host')
+    const table = h.createTable(host, 'c1')
+    const inst = 'inst_lease_00000000001'
+    await joinWithToken(h, table, host, 'c1', inst, fake)
+    h.clock.advance(50_000) // последното подновяване е преди 50 s -> lease изтича след 10 s
+    h.open.delete('c1')
+    h.service.onGameConnectionClosed('c1')
+    h.clock.advance(100_000) // 100 s без игрова връзка: > lease, < 120 s
+    assertEqual(h.service.debug.getBinding(table, host)?.voiceActive, true, 'lease не прекъсва по време на 120 s прозореца')
+    h.seats.set(`${table}|${host}`, { relation: 'player', permanentlyLeft: false, seatConnectionId: 'c2' })
+    h.open.add('c2')
+    h.presence('c2', host, table, inst)
+    assertEqual(h.service.debug.getBinding(table, host)?.voiceActive, true, 'възстановено')
+    assertEqual((await h.token(host, table, inst)).status, 200, 'нов токен след възстановяване')
+    h.clock.advance(61_000) // жив WS, клиентът не подновява (напуснат екран без съобщение)
+    assertEqual(h.service.debug.getBinding(table, host)?.voiceActive, false, 'lease-ът прекратява при жив WS')
+  })
+
+  // ═══ [B] Изолация production / локална среда ═════════════════════════════
+  await check('[B1] Namespace: имената са pv_<namespace>_...; sweep трие само собствени стаи; чужда среда (prod) никога не се пипа', async () => {
+    fake.reset()
+    const dbDev = await freshDatabase()
+    const devStore = await createVoiceChatStore(dbDev.path, { roomNamespace: 'dev' })
+    storesToClose.push(devStore)
+    assert(devStore.setMode('public', { profileId: null }).ok, 'mode')
+    const reserved = devStore.reserveVoiceTable({ emergencyStop: false, requesterIsFullAdmin: false })
+    if (!reserved.ok) throw new Error('reserve')
+    const gen = devStore.allocateGeneration(reserved.table.voiceTableId, null)
+    assert(gen.ok && gen.roomName.startsWith('pv_dev_'), 'името носи namespace-а')
+    const api = createVoiceLiveKitApi({ apiUrl: fake.url, apiKey: API_KEY, apiSecret: API_SECRET }, { requestTimeoutSeconds: 1 })
+    const dispatcher = createVoiceLiveKitDispatcher()
+    const { createVoiceRoomReconciler } = await import('../src/voice/voiceRoomReconciler.js')
+    const reconciler = createVoiceRoomReconciler({ store: devStore, api, dispatcher, roomNamespace: 'dev', scheduler: { setTimeout: () => 0, clearTimeout: () => {} } })
+    const prodRoom = 'pv_prod_11111111111111111111111111111111_g1_bbbbbbbbbbbbbbbbbbbbbbbbbb'
+    const devOrphan = 'pv_dev_22222222222222222222222222222222_g1_cccccccccccccccccccccccccc'
+    for (const name of [prodRoom, devOrphan, 'manual-test-1']) fake.rooms.set(name, { maxParticipants: 4, participants: new Map() })
+    if (gen.ok) fake.rooms.set(gen.roomName, { maxParticipants: 4, participants: new Map() })
+    reconciler.requestBootSweep()
+    await reconciler.runNow()
+    assert(fake.rooms.has(prodRoom), 'production стая — непокътната')
+    assert(fake.rooms.has('manual-test-1'), 'ръчна тестова стая — непокътната')
+    assert(!fake.rooms.has(devOrphan), 'собствен сирак — изтрит')
+    assert(gen.ok && fake.rooms.has(gen.roomName), 'собствената жива стая остава')
+    assert(!fake.calls.some((c) => c.method === 'DeleteRoom' && c.body.room === prodRoom), 'нито един DeleteRoom към чужд namespace')
+    reconciler.dispose()
+    dispatcher.dispose()
+  })
+
   // ═══ [W] Свързване в index.ts (статично) ════════════════════════════════
   await check('[W1] index.ts: всички lifecycle куки, HTTPS API, presence, boot и dispose; токенът никога през WS', async () => {
     const source = await readFile(join(sourceServerRoot, 'src', 'index.ts'), 'utf8')
@@ -1387,6 +1670,9 @@ try {
       'onModeChanged: (result) => voiceChatService.onModeChanged(result)',
       'voiceChatService.boot(',
       "closeStore('voiceChatService', () => voiceChatService.dispose())",
+      'voiceChatService.onChatMuteChanged(profileId)',
+      'getChatMuteStatus: (profileId) => {',
+      'roomNamespace: voiceLiveKitConfig.roomNamespace,',
     ]
     for (const fragment of required) assert(source.includes(fragment), `липсва: ${fragment}`)
     assertEqual((source.match(/voiceChatService\.onGameStartFailed\(/g) ?? []).length, 2, 'и двата неуспешни старта')

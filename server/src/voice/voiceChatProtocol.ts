@@ -19,7 +19,11 @@
 //                             готовност след потвърдено изтриване на старата;
 //                             клиентът иска нов токен по HTTPS;
 //     voice_access_ended    — гласовият достъп на тази страница е прекратен
-//                             от сървъра; без автоматично повторно включване.
+//                             от сървъра; без автоматично повторно включване;
+//     voice_speak_access_updated — правото за говорене на ТОЗИ играч се е
+//                             променило (наложено/изтекло/премахнато mute
+//                             наказание). Микрофонът никога не се включва
+//                             автоматично.
 //
 // HTTPS (сесия от cookie, origin guard, Cache-Control: no-store):
 //   POST /api/voice/token         { voiceTableId, clientInstanceId }
@@ -45,6 +49,34 @@ export type VoicePresenceErrorCode =
   | 'client_instance_conflict'
   | 'banned'
 
+/**
+ * Защо играчът в момента НЕ може да говори:
+ *   'vip_required' — няма VIP и няма придобито право в участието;
+ *   'muted'        — активно административно mute наказание (единният mute
+ *                    за Лафче/Общи/чата в чакалнята). Придобитото право се
+ *                    пази и важи отново след края на наказанието.
+ * Доброволно изключен микрофон е само клиентско състояние (сървърът не го
+ * знае и не го пази). Временно недостъпна услуга: HTTP 503 кодове
+ * (voice_unavailable / voice_rotation_pending / voice_starting) и ready:false.
+ */
+export type VoiceSpeakBlockedReason = 'vip_required' | 'muted'
+
+/** Само към самия играч (никога към останалите участници). */
+export type VoiceSpeakState = {
+  canSpeak: boolean
+  blockedReason: VoiceSpeakBlockedReason | null
+  /** Придобито право в текущото участие (пази се и по време на mute). */
+  hasSpeakingEntitlement: boolean
+  /** Краен срок на mute наказанието (ISO), само при blockedReason 'muted' и ако е известен. */
+  mutedUntil: string | null
+}
+
+export type VoiceSpeakAccessUpdatedMessage = {
+  type: 'voice_speak_access_updated'
+  voiceTableId: string
+  speak: VoiceSpeakState
+}
+
 export type VoicePresenceResultMessage =
   | {
       type: 'voice_presence_result'
@@ -57,6 +89,7 @@ export type VoicePresenceResultMessage =
       renewAfterMs: number
       /** false -> има чакаща ротация/изтриване; токен ще бъде отказан временно. */
       ready: boolean
+      speak: VoiceSpeakState
     }
   | { type: 'voice_presence_result'; voiceTableId: string; ok: false; code: VoicePresenceErrorCode }
 
@@ -85,7 +118,11 @@ export type VoiceAccessEndedMessage = {
   reason: VoiceAccessEndReason
 }
 
-export type VoiceServerMessage = VoicePresenceResultMessage | VoiceTableUpdatedMessage | VoiceAccessEndedMessage
+export type VoiceServerMessage =
+  | VoicePresenceResultMessage
+  | VoiceTableUpdatedMessage
+  | VoiceAccessEndedMessage
+  | VoiceSpeakAccessUpdatedMessage
 
 export function isVoiceClientInstanceId(value: unknown): value is string {
   return typeof value === 'string' && VOICE_CLIENT_INSTANCE_ID_PATTERN.test(value)
