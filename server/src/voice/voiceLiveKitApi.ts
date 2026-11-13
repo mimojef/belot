@@ -14,7 +14,7 @@
 // voiceLiveKitDispatcher.ts. Тук е само преводът към/от SDK и класификацията
 // на грешките (без съдържанието на отговорите в логовете).
 
-import { RoomServiceClient, TrackSource } from 'livekit-server-sdk'
+import { ParticipantInfo_State, RoomServiceClient, TrackSource, TrackType } from 'livekit-server-sdk'
 import { isVoiceRoomNamespace } from './voiceRoomNaming.js'
 import type { VoiceLiveKitPermissionProfile } from './voiceChatTypes.js'
 
@@ -114,6 +114,18 @@ export function classifyLiveKitError(error: unknown): VoiceLiveKitError {
 
 export type VoiceLiveKitRoomSummary = { name: string; numParticipants: number }
 
+/**
+ * Етап 6 (админ мониторинг): обобщение на участник БЕЗ идентичност, име или
+ * metadata — само дали е свързан и дали публикува микрофон.
+ */
+export type VoiceLiveKitParticipantSummary = {
+  state: 'joining' | 'joined' | 'active' | 'disconnected'
+  /** Публикуван аудио track от микрофона (адаптерът unpublish-ва при изключване). */
+  microphonePublished: boolean
+  /** Публикуван, но заглушен (напр. сървърно отнето право по време на ротация). */
+  microphoneMuted: boolean
+}
+
 export type VoiceLiveKitApi = {
   /** Идемпотентна в LiveKit (съществуваща стая се връща). auto_create:false изисква изричното ѝ създаване. */
   createRoom: (input: { name: string; maxParticipants: number; emptyTimeoutSeconds: number; departureTimeoutSeconds: number }) => Promise<void>
@@ -123,6 +135,8 @@ export type VoiceLiveKitApi = {
   listRooms: (names?: string[]) => Promise<VoiceLiveKitRoomSummary[]>
   removeParticipant: (room: string, identity: string) => Promise<void>
   updateParticipantPermission: (room: string, identity: string, permission: VoiceLiveKitParticipantPermission) => Promise<void>
+  /** Етап 6 — само за админ мониторинга (по избор: тестовите fake-ове не го изискват). */
+  listParticipants?: (room: string) => Promise<VoiceLiveKitParticipantSummary[]>
 }
 
 /** Права за UpdateParticipant — винаги само аудио, никога data/video/admin. */
@@ -164,6 +178,18 @@ export function createVoiceLiveKitApi(config: Pick<VoiceLiveKitConfig, 'apiUrl' 
     async listRooms(names) {
       const rooms = await call(() => client.listRooms(names))
       return rooms.map((room) => ({ name: room.name, numParticipants: Number(room.numParticipants ?? 0) }))
+    },
+    async listParticipants(room) {
+      const participants = await call(() => client.listParticipants(room))
+      return participants.map((participant) => {
+        const microphone = participant.tracks.find((track) => track.type === TrackType.AUDIO && track.source === TrackSource.MICROPHONE)
+        const state: VoiceLiveKitParticipantSummary['state'] =
+          participant.state === ParticipantInfo_State.JOINING ? 'joining'
+            : participant.state === ParticipantInfo_State.JOINED ? 'joined'
+              : participant.state === ParticipantInfo_State.ACTIVE ? 'active'
+                : 'disconnected'
+        return { state, microphonePublished: microphone !== undefined, microphoneMuted: microphone?.muted === true }
+      })
     },
     async removeParticipant(room, identity) {
       await call(() => client.removeParticipant(room, identity))

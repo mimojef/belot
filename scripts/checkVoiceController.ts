@@ -12,7 +12,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { createVoiceController, VOICE_UI_MESSAGES, type VoiceContext, type VoiceController, type VoiceSnapshot } from '../src/app/voice/createVoiceController'
-import { VoiceMicrophoneError, type VoiceAdapter, type VoiceAdapterEvents, type VoiceConnectedRoom, type VoiceDisconnectCause, type VoiceMicrophoneFailure, type VoiceRetainedMicrophone } from '../src/app/voice/voiceAdapter'
+import { VoiceMicrophoneError, type VoiceAdapter, type VoiceAdapterEvents, type VoiceConnectedRoom, type VoiceDiagnosticReport, type VoiceDisconnectCause, type VoiceMicrophoneFailure, type VoiceRetainedMicrophone, type VoiceTransportInfo } from '../src/app/voice/voiceAdapter'
 import { createLazyVoiceController } from '../src/app/voice/voiceFacade'
 import { createVoiceAudioSink } from '../src/app/voice/voiceAudioSink'
 import type { VoicePresenceClientMessage, VoiceSpeakState } from '../src/app/voice/voiceProtocol'
@@ -113,6 +113,9 @@ function createFakeAdapter() {
     disconnectGate: null as Promise<void> | null,
     connectFails: false,
     initialPlayback: true,
+    /** Етап 6: null -> стаята няма getTransportInfo (като стар адаптер). */
+    transportInfo: null as VoiceTransportInfo | null,
+    transportCalls: 0,
     activeRooms: () => rooms.filter((r) => r.connected && !r.disconnected).length,
     liveCaptures: () => captures.filter((c) => !c.stopped).length,
     last: () => rooms[rooms.length - 1]!,
@@ -207,6 +210,13 @@ function createFakeAdapter() {
           if (remote !== undefined) remote.volume = volume
         },
       }
+      if (state.transportInfo !== null) {
+        const info = state.transportInfo
+        room.getTransportInfo = async () => {
+          state.transportCalls += 1
+          return info
+        }
+      }
       rooms.push(room)
       return {
         async connect() {
@@ -287,7 +297,7 @@ const SEATS = [
  * facade: true — production пътят: createLazyVoiceController (основен bundle)
  * + „lazy“ factory, която създава истинския createVoiceController с fake адаптер.
  */
-function createHarness(options: { loadFails?: boolean; facade?: boolean } = {}): Harness {
+function createHarness(options: { loadFails?: boolean; facade?: boolean; reports?: VoiceDiagnosticReport[] } = {}): Harness {
   const clock = createClock()
   const fake = createFakeAdapter()
   const presence: VoicePresenceClientMessage[] = []
@@ -336,6 +346,7 @@ function createHarness(options: { loadFails?: boolean; facade?: boolean } = {}):
     createClientInstanceId: () => 'inst_test_0000000000000001',
     timers: clock.timers,
     log: (line: string) => logs.push(line),
+    ...(options.reports === undefined ? {} : { reportDiagnostic: (report: VoiceDiagnosticReport) => { options.reports!.push(report) } }),
   })
   if (options.facade) {
     voice = createLazyVoiceController({
@@ -958,15 +969,50 @@ await check('[K2] Без натрупване на таймери и слуша�
   assertEqual(h.clock.pending(), 1, 'само lease таймерът')
 })
 
-await check('[W1] Интеграция: в основния bundle само посредникът (type-only импорти); runtime само чрез import(); precache изключение', async () => {
+await check('[W1] Интеграция: основният bundle — само посредникът и разрешените леки UI модули, без статичен път до controller/runtime/адаптер/livekit-client/lazy панела; runtime само чрез import(); precache изключение', async () => {
   const main = await readFile('src/main.ts', 'utf8')
   const vite = await readFile('vite.config.ts', 'utf8')
   const facade = await readFile('src/app/voice/voiceFacade.ts', 'utf8')
   const voiceFiles = ['createVoiceController', 'voiceRuntime', 'voiceFacade', 'voiceAdapter', 'voiceAudioSink', 'voiceProtocol']
   const sources = Object.fromEntries(await Promise.all(voiceFiles.map(async (name) => [name, await readFile(`src/app/voice/${name}.ts`, 'utf8')] as const)))
-  // main.ts: само type импорти от createVoiceController + посредникът.
-  const mainVoiceImports = main.split('\n').filter((line) => /from '\.\/app\/voice\//.test(line))
-  assert(mainVoiceImports.every((line) => /^import type /.test(line) || /voiceFacade'/.test(line)), `main.ts voice импорти: ${mainVoiceImports.join(' | ')}`)
+  // main.ts (основният bundle) — актуализирано след Етап 4 (lazy UI):
+  //   * runtime импорти от src/app/voice/ САМО от посредника и от изрично
+  //     разрешените леки UI модули (лента, бутон, слотове „говори“);
+  //   * транзитивно (само не-type статични импорти) от тях НЕ се стига до
+  //     controller-а, runtime-а, адаптера, sink-а, протокола, lazy панела
+  //     или livekit-client — те са само в lazy chunk-ове;
+  //   * lazy панелът (renderVoicePanel) се зарежда само с import().
+  const MAIN_BUNDLE_VOICE_MODULES = new Set(['voiceFacade', 'ui/createVoiceMobileUi', 'ui/voiceSpeakingIndicator', 'ui/voiceUiIcons', 'ui/voiceUiStatus'])
+  const LAZY_ONLY_VOICE_MODULES = new Set(['createVoiceController', 'voiceRuntime', 'liveKitVoiceAdapter', 'voiceAdapter', 'voiceAudioSink', 'voiceProtocol', 'voiceTransportStats', 'ui/renderVoicePanel'])
+  /** Статични импорти: { spec, typeOnly }. `import { a, type B }` е runtime импорт. */
+  const staticImports = (source: string): Array<{ spec: string; typeOnly: boolean }> =>
+    [...source.matchAll(/^import\s+(type\s+)?(?:[^'";]*?\s+from\s+)?'([^']+)'/gm)].map((match) => ({ spec: match[2]!, typeOnly: match[1] !== undefined }))
+  const mainVoiceImports = staticImports(main).filter((entry) => entry.spec.startsWith('./app/voice/'))
+  assert(mainVoiceImports.length > 0, 'main.ts импортира гласовия посредник')
+  const runtimeRoots = mainVoiceImports.filter((entry) => !entry.typeOnly).map((entry) => entry.spec.slice('./app/voice/'.length))
+  for (const root of runtimeRoots) {
+    assert(MAIN_BUNDLE_VOICE_MODULES.has(root), `main.ts: неразрешен runtime импорт ./app/voice/${root} (само type или ${[...MAIN_BUNDLE_VOICE_MODULES].join(', ')})`)
+  }
+  assert(runtimeRoots.includes('voiceFacade'), 'main.ts: runtime импорт на посредника')
+  const visited = new Set<string>()
+  const queue = [...runtimeRoots]
+  while (queue.length > 0) {
+    const moduleId = queue.shift()!
+    if (visited.has(moduleId)) continue
+    visited.add(moduleId)
+    assert(!LAZY_ONLY_VOICE_MODULES.has(moduleId), `основният bundle достига статично lazy модула ${moduleId}`)
+    assert(MAIN_BUNDLE_VOICE_MODULES.has(moduleId), `основният bundle достига статично неразрешения модул ${moduleId}`)
+    const source = await readFile(`src/app/voice/${moduleId}.ts`, 'utf8')
+    for (const entry of staticImports(source)) {
+      assert(!/^(livekit-client|@livekit\/)/.test(entry.spec) || entry.typeOnly, `${moduleId}: статичен импорт на ${entry.spec}`)
+      if (entry.typeOnly || !entry.spec.startsWith('.')) continue
+      const base = moduleId.includes('/') ? moduleId.slice(0, moduleId.lastIndexOf('/') + 1) : ''
+      const resolved = new URL(entry.spec, `file:///${base}`).pathname.slice(1).replace(/\.ts$/, '')
+      queue.push(resolved)
+    }
+  }
+  const mobileUi = await readFile('src/app/voice/ui/createVoiceMobileUi.ts', 'utf8')
+  assert(/import\('\.\/renderVoicePanel'\)/.test(mobileUi), 'lazy панелът се зарежда с import()')
   // Посредникът: без runtime импорти; единственият път към runtime-а е import().
   assert(facade.split('\n').filter((line) => /^import /.test(line)).every((line) => /^import type /.test(line)), 'facade: само import type')
   assert(/import\('\.\/voiceRuntime'\)/.test(facade), 'dynamic import на runtime-а')
@@ -1491,6 +1537,57 @@ await check('[RM8] Инвариант ≤1 стая при бързи join -> le
   await flush(40)
   assertEqual(s(h).status, 'connected_listening', 'новата генерация')
   assertEqual(h.fake.state.violations, 0, 'никога две стаи')
+})
+
+// ─── Етап 6: анонимна диагностика ────────────────────────────────────────
+
+await check('[DG1] Диагностика: connected + еднократен transport отчет след 5 s; без JWT/identity в отчетите', async () => {
+  const reports: VoiceDiagnosticReport[] = []
+  const h = createHarness({ reports })
+  h.fake.state.transportInfo = { candidateType: 'relay', protocol: 'tls', rttMs: 42, jitterMs: 3.5, packetLossPercent: 0.4 }
+  await h.connect(false)
+  assertEqual(s(h).status, 'connected_listening', 'свързан')
+  assert(reports.some((r) => r.event === 'connected'), 'connected отчет')
+  assertEqual(reports.filter((r) => r.event === 'transport').length, 0, 'transport едва след закъснението')
+  await h.clock.advance(5_000)
+  const transport = reports.filter((r) => r.event === 'transport')
+  assertEqual(transport.length, 1, 'един transport отчет')
+  assertEqual(h.fake.state.transportCalls, 1, 'getTransportInfo веднъж')
+  await h.clock.advance(60_000)
+  assertEqual(reports.filter((r) => r.event === 'transport').length, 1, 'без повторни отчети')
+  const text = JSON.stringify(reports)
+  assert(!text.includes(JWT_MARK) && !text.includes('p_self') && !text.includes('self'), 'без токен/identity/профил')
+})
+
+await check('[DG2] Диагностика: неуспешно свързване, reconnect събития и грешка на микрофона', async () => {
+  const reports: VoiceDiagnosticReport[] = []
+  const h = createHarness({ reports })
+  h.fake.state.connectFails = true
+  await h.connect(false)
+  assert(reports.some((r) => r.event === 'connect_failed' && r.reason === 'livekit_connect_failed'), 'connect_failed/livekit')
+  h.fake.state.connectFails = false
+  h.voice.retryConnection()
+  await flush(30)
+  const room = h.fake.state.last()
+  room.events.onReconnecting()
+  room.events.onReconnected()
+  assert(reports.some((r) => r.event === 'reconnecting') && reports.some((r) => r.event === 'reconnected'), 'reconnect събития')
+  h.fake.state.micBehavior = 'permission_denied'
+  h.voice.enableMicrophone()
+  await flush(30)
+  assert(reports.some((r) => r.event === 'mic_failed' && r.reason === 'mic_permission_denied'), 'mic_failed/permission_denied')
+  h.voice.leaveVoice()
+  await flush(20)
+  assertEqual(h.voice.debugCounters().pendingTimers, 0, 'без висящи таймери (вкл. transport)')
+})
+
+await check('[DG3] Без reportDiagnostic: нищо не се изпраща и не се планират допълнителни таймери', async () => {
+  const h = createHarness()
+  h.fake.state.transportInfo = { candidateType: 'host', protocol: 'udp', rttMs: 10, jitterMs: 1, packetLossPercent: 0 }
+  await h.connect(false)
+  await h.clock.advance(30_000)
+  assertEqual(h.fake.state.transportCalls, 0, 'getTransportInfo не се вика')
+  assert(!h.posts.some((p) => p.path.includes('client-report')), 'без client-report')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

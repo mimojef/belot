@@ -48,6 +48,7 @@ import {
   type VoiceRetainedMicrophone,
 } from './voiceAdapter'
 import type { VoiceAudioSink } from './voiceAudioSink'
+import { summarizeTransportStats } from './voiceTransportStats'
 
 // SDK-то може да логва URL-и с токени на debug ниво — само предупреждения.
 setLogLevel(LogLevel.warn)
@@ -377,6 +378,25 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
             if (publication.kind === Track.Kind.Audio && publication.track !== undefined) {
               ;(publication.track as RemoteAudioTrack).setVolume(volume)
             }
+          }
+        },
+        async getTransportInfo() {
+          // Отдалечено аудио (subscriber връзката) или собственият микрофон (publisher).
+          let track: RemoteTrack | LocalTrack | undefined
+          for (const participant of room.remoteParticipants.values()) {
+            const publication = participant.getTrackPublication(Track.Source.Microphone)
+            if (publication?.track !== undefined) {
+              track = publication.track
+              break
+            }
+          }
+          track ??= micTrack()
+          if (track === undefined || disposed) return null
+          try {
+            const report = await track.getRTCStatsReport()
+            return report === undefined ? null : summarizeTransportStats(report)
+          } catch {
+            return null
           }
         },
       }

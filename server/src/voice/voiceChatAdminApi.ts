@@ -3,6 +3,9 @@
 //   GET  /api/admin/voice-chat          -> режим, лимит, заети слотове, одит
 //   POST /api/admin/voice-chat/mode     { mode: 'off'|'admin_only'|'public', confirm: true }
 //   POST /api/admin/voice-chat/limit    { maxTables: 0..200 }
+//   GET  /api/admin/voice-chat/monitoring  (Етап 6) -> живо състояние на
+//        стаите, клиентска статистика, показатели на гласовия VPS. Асинхронно,
+//        с кеш 15–30 s в модулите-източници; само при отворен админ панел.
 //
 // Зависимостите се инжектират (сесия, origin, четене на тялото) — модулът не
 // импортира index.ts и се тества самостоятелно. Всички отговори са
@@ -17,6 +20,10 @@ import {
 } from './voiceChatFeatureFlag.js'
 import type { SetModeResult, VoiceChatStore } from './voiceChatStore.js'
 import { VOICE_CHAT_MAX_TABLES_UPPER_BOUND, isVoiceChatMode } from './voiceChatTypes.js'
+import { getVoiceVpsMetricsConfigStatus } from './voiceVpsMetrics.js'
+
+/** Общ таван за /monitoring — източниците са с timeout 3–4 s, отговорът не чака повече. */
+export const VOICE_ADMIN_MONITORING_BUDGET_MS = 6_000
 
 export const VOICE_CHAT_ADMIN_BASE_PATH = '/api/admin/voice-chat'
 
@@ -38,6 +45,13 @@ export type VoiceChatAdminApiDeps = {
    * без тайни, токени или лични данни. Липсващ -> полето не се връща.
    */
   getRuntimeStats?: () => Record<string, unknown>
+  /**
+   * Етап 6: живо състояние (ListRooms/ListParticipants), клиентска
+   * статистика и метрики на гласовия VPS. Липсващ -> /monitoring е 404.
+   */
+  getMonitoring?: () => Promise<Record<string, unknown>>
+  /** Само за тестове (по подразбиране VOICE_ADMIN_MONITORING_BUDGET_MS). */
+  monitoringBudgetMs?: number
   env?: EnvSource
   now?: () => Date
   log?: (line: string) => void
@@ -73,6 +87,7 @@ export function buildVoiceChatAdminSnapshot(deps: VoiceChatAdminApiDeps): Record
     activeVoiceTables: deps.store.countActiveVoiceTables(),
     pendingRoomDeletions: deps.store.countPendingRoomDeletions(),
     liveKit: getVoiceChatLiveKitConfigStatus(env),
+    vpsMetrics: getVoiceVpsMetricsConfigStatus(env),
     ...(deps.getRuntimeStats === undefined ? {} : { runtime: deps.getRuntimeStats() }),
     history: deps.store.listAdminChanges(50).map((change) => ({
       changeId: change.changeId,
@@ -111,6 +126,30 @@ export function createVoiceChatAdminRequestHandler(
         return true
       }
       send(res, 200, { ok: true, ...buildVoiceChatAdminSnapshot(deps) })
+      return true
+    }
+
+    if (subPath === '/monitoring' && deps.getMonitoring !== undefined) {
+      if (req.method !== 'GET') {
+        send(res, 405, { ok: false, message: 'Method not allowed' })
+        return true
+      }
+      let timer: ReturnType<typeof setTimeout> | null = null
+      try {
+        const budget = new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), deps.monitoringBudgetMs ?? VOICE_ADMIN_MONITORING_BUDGET_MS)
+        })
+        const monitoring = await Promise.race([deps.getMonitoring(), budget])
+        if (monitoring === null) {
+          send(res, 503, { ok: false, code: 'monitoring_timeout', message: 'Показателите не отговориха навреме. Опитай отново.' })
+        } else {
+          send(res, 200, { ok: true, generatedAt: now().toISOString(), ...monitoring })
+        }
+      } catch {
+        send(res, 500, { ok: false, code: 'internal_error', message: 'Показателите не са достъпни.' })
+      } finally {
+        if (timer !== null) clearTimeout(timer)
+      }
       return true
     }
 
@@ -166,6 +205,9 @@ export function createVoiceChatAdminRequestHandler(
         ok: true,
         changed: result.changed,
         releasedVoiceTables: result.releasedVoiceTableIds.length,
+        // Оттеглени LiveKit стаи: DeleteRoom е асинхронен (durable опашка) —
+        // потвърждението се вижда в pendingRoomDeletions, не тук.
+        retiredRooms: result.retiredRoomNames.length,
         ...buildVoiceChatAdminSnapshot(deps),
       })
       return true

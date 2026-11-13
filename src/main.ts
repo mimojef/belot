@@ -1210,6 +1210,17 @@ function openAdminProfileCustomizationPanel(): void {
   showAdminProfileCustomizationPanel({ getApiBaseUrl })
 }
 
+/**
+ * „Гласови разговори“ (гласов чат, Етап 6) — само пълен admin; правата са на
+ * сървъра. Отделен chunk (dynamic import) — не увеличава главния bundle.
+ */
+function openAdminVoiceChatPanel(): void {
+  if (currentAuthSession?.account.role !== 'admin') return
+  void import('./app/adminVoiceChat/showAdminVoiceChatPanel')
+    .then((module) => module.showAdminVoiceChatPanel({ getApiBaseUrl }))
+    .catch(() => {})
+}
+
 async function submitRegisterRequest(body: Record<string, string>): Promise<{
   errorText: string | null
   pending?: { pendingRegistrationId: string; maskedEmail: string; expiresAt: string; deliveryWarning?: string } | null
@@ -7380,6 +7391,7 @@ lobby = createLobbyFlowController({
   onProfileSelfDeleteRequest: () => openSelfDeletionDialog(),
   onAdminProfileDeletionsRequest: () => openAdminProfileDeletionsPanel(),
   onAdminProfileCustomizationRequest: () => openAdminProfileCustomizationPanel(),
+  onAdminVoiceChatRequest: () => openAdminVoiceChatPanel(),
   onProfileCustomizationRequest: () => openProfileCustomizationWindow(),
   onAdminProfileCustomizationGrantRequest: (profileId) => openAdminProfileCustomizationGrantWindow(profileId),
   onRegisterSubmit: (displayName, email, password, gender) =>

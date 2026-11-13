@@ -648,6 +648,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminProfileDeletionsRequest?: () => void
   /** "Персонализация" (Етап 1) — admin меню: main.ts отваря панела. */
   onAdminProfileCustomizationRequest?: () => void
+  /** „Гласови разговори“ (гласов чат, Етап 6) — admin меню: main.ts отваря панела. */
+  onAdminVoiceChatRequest?: () => void
   onAdminHardDeleteProfile?: (
     targetProfileId: string,
     reason: string,
@@ -8567,6 +8569,10 @@ export function createLobbyFlowController(
       onAdminProfileCustomizationOpen: () => {
         if (!isFullAdminAuthSession(options.getAuthSession?.() ?? null)) return
         options.onAdminProfileCustomizationRequest?.()
+      },
+      onAdminVoiceChatOpen: () => {
+        if (!isFullAdminAuthSession(options.getAuthSession?.() ?? null)) return
+        options.onAdminVoiceChatRequest?.()
       },
       onAdminCampaignsBack: () => {
         void showAdminPanel()

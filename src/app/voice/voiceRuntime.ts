@@ -21,6 +21,17 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceController {
     sendPresence: deps.sendPresence,
     onRequestVip: deps.onRequestVip,
     loadAdapter: () => Promise.resolve(adapter),
+    // Етап 6: анонимна диагностика (броячи на сървъра) — best-effort, без
+    // retry; грешка/429 никога не влияе на гласа.
+    reportDiagnostic: (report) => {
+      void fetch(`${deps.apiBaseUrl()}/api/voice/client-report`, {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(report),
+      }).catch(() => {})
+    },
     // HTTPS със съществуващата cookie сесия; отговорът (с токена) не се логва
     // и не се кешира.
     postJson: async (path, body) => {

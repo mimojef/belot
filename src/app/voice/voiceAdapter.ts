@@ -101,7 +101,29 @@ export type VoiceConnectedRoom = {
   listRemoteParticipants: () => VoiceRemoteParticipantInfo[]
   /** Локално заглушаване/пускане на всички аудио tracks на identity (само за този клиент). */
   setRemoteIdentityVolume: (identity: string, volume: 0 | 1) => void
+  /**
+   * Етап 6 (по избор): вид на избраната ICE двойка и мрежови показатели от
+   * getStats() на аудио track — за анонимната админ статистика. null — още
+   * няма аудио track/статистика.
+   */
+  getTransportInfo?: () => Promise<VoiceTransportInfo | null>
 }
+
+/** Без адреси/IP — само вид и протокол на кандидата и закръглени показатели. */
+export type VoiceTransportInfo = {
+  candidateType: 'host' | 'srflx' | 'prflx' | 'relay' | 'unknown'
+  protocol: 'udp' | 'tcp' | 'tls' | 'unknown'
+  rttMs: number | null
+  jitterMs: number | null
+  packetLossPercent: number | null
+}
+
+/** Етап 6: анонимно диагностично събитие (виж server voiceClientDiagnostics.ts). */
+export type VoiceDiagnosticReport =
+  | { event: 'connected' | 'reconnecting' | 'reconnected' | 'connection_lost' | 'reconnect_failed' }
+  | { event: 'connect_failed'; reason: 'sdk_load_failed' | 'presence_failed' | 'token_unavailable' | 'livekit_connect_failed' }
+  | { event: 'mic_failed'; reason: 'mic_not_found' | 'mic_permission_denied' | 'mic_unavailable' | 'mic_not_permitted' }
+  | { event: 'transport'; transport: VoiceTransportInfo }
 
 export type VoiceAdapter = {
   /**

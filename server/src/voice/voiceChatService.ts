@@ -199,6 +199,25 @@ export type VoiceRuntimeStats = {
   dispatcher: ReturnType<VoiceLiveKitDispatcher['stats']>
   reconciler: ReturnType<VoiceRoomReconciler['stats']>
   counters: Record<string, number>
+  /** Етап 6: отказаните заявки за токен по код (натрупващи се от старта на процеса). */
+  tokensDeniedByCode: Record<string, number>
+}
+
+/** Етап 6 — ред за админ мониторинга: без профили, имена или токени. */
+export type VoiceAdminTableRow = {
+  voiceTableId: VoiceTableId
+  phase: VoiceTableRecord['phase']
+  createdAt: string
+  inGameAt: string | null
+  /** Име на живата LiveKit стая (null = още няма генерация). */
+  liveRoomName: string | null
+  generation: number | null
+  /** Активни участия (седнали реални играчи) в процеса. */
+  seatedMembers: number
+  /** Сесии с издаден и непрекратен гласов достъп. */
+  activeVoiceSessions: number
+  /** Временно не се издават токени (ротация/освобождаване чакат). */
+  blocked: 'releasing' | 'rotation_pending' | null
 }
 
 export type VoiceChatService = {
@@ -229,6 +248,8 @@ export type VoiceChatService = {
   onModeChanged: (result: Extract<SetModeResult, { ok: true }>) => void
   boot: (restoredRooms: readonly VoiceRestoredRoom[]) => void
   stats: () => VoiceRuntimeStats
+  /** Етап 6: активните гласови маси (само in-memory + индексирани четения). */
+  adminTables: () => VoiceAdminTableRow[]
   dispose: () => void
   /** Само за тестове. */
   debug: {
@@ -338,6 +359,11 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     disconnectTimeouts: 0,
     createRoomFailures: 0,
     muteRevocations: 0,
+  }
+  const tokensDeniedByCode: Record<string, number> = {}
+  const countDenial = (code: string): void => {
+    counters.tokensDenied! += 1
+    tokensDeniedByCode[code] = (tokensDeniedByCode[code] ?? 0) + 1
   }
   let bootComplete = false
   let disposed = false
@@ -742,14 +768,14 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
   }
 
   function failure(evaluation: EvaluationFailure): VoiceHttpResult {
-    counters.tokensDenied! += 1
+    countDenial(evaluation.code)
     const body: Record<string, unknown> = { ok: false, code: evaluation.code }
     if (evaluation.retryAfterMs !== undefined) body.retryAfterMs = evaluation.retryAfterMs
     return { status: evaluation.status, body }
   }
 
   function unavailable(code: string, retryAfterMs: number): VoiceHttpResult {
-    counters.tokensDenied! += 1
+    countDenial(code)
     return { status: 503, body: { ok: false, code, retryAfterMs } }
   }
 
@@ -1208,7 +1234,29 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         dispatcher: dispatcher.stats(),
         reconciler: reconciler.stats(),
         counters: { ...counters },
+        tokensDeniedByCode: { ...tokensDeniedByCode },
       }
+    },
+
+    adminTables() {
+      const seated = new Map<string, number>()
+      for (const membership of memberships.values()) seated.set(membership.voiceTableId, (seated.get(membership.voiceTableId) ?? 0) + 1)
+      const active = new Map<string, number>()
+      for (const binding of bindings.values()) if (binding.voiceActive) active.set(binding.voiceTableId, (active.get(binding.voiceTableId) ?? 0) + 1)
+      return store.listActiveVoiceTables().map((table) => {
+        const live = store.getLiveGeneration(table.voiceTableId)
+        return {
+          voiceTableId: table.voiceTableId,
+          phase: table.phase,
+          createdAt: table.createdAt,
+          inGameAt: table.inGameAt,
+          liveRoomName: live?.livekitRoomName ?? null,
+          generation: live?.generation ?? null,
+          seatedMembers: seated.get(table.voiceTableId) ?? 0,
+          activeVoiceSessions: active.get(table.voiceTableId) ?? 0,
+          blocked: blockedTables.get(table.voiceTableId) ?? null,
+        }
+      })
     },
 
     dispose() {

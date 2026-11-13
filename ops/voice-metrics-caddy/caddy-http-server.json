@@ -1,0 +1,60 @@
+{
+  "_comment": "Pika.bg — същият маршрут като Caddyfile.snippet, за JSON конфигурация. Добавя се като НОВ сървър в apps.http.servers (не заменя нищо). Заместете <BCRYPT_HASH>. Проверете с 'caddy validate' преди reload.",
+  "pika_metrics": {
+    "listen": [":8443"],
+    "automatic_https": { "disable_redirects": true },
+    "tls_connection_policies": [{ "match": { "sni": ["voice.pika.bg"] } }],
+    "routes": [
+      {
+        "match": [{ "host": ["voice.pika.bg"], "remote_ip": { "ranges": ["185.203.117.14/32"] } }],
+        "handle": [
+          {
+            "handler": "subroute",
+            "routes": [
+              {
+                "handle": [
+                  {
+                    "handler": "authentication",
+                    "providers": {
+                      "http_basic": {
+                        "hash": { "algorithm": "bcrypt" },
+                        "accounts": [{ "username": "pika-metrics", "password": "<BCRYPT_HASH>" }]
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "match": [{ "path": ["/pika-ops/livekit-metrics"], "method": ["GET"] }],
+                "handle": [
+                  { "handler": "rewrite", "uri": "/metrics" },
+                  {
+                    "handler": "reverse_proxy",
+                    "headers": { "request": { "delete": ["Authorization"] } },
+                    "upstreams": [{ "dial": "127.0.0.1:6789" }]
+                  }
+                ],
+                "terminal": true
+              },
+              {
+                "match": [{ "path": ["/pika-ops/node-metrics"], "method": ["GET"] }],
+                "handle": [
+                  { "handler": "rewrite", "uri": "/metrics" },
+                  {
+                    "handler": "reverse_proxy",
+                    "headers": { "request": { "delete": ["Authorization"] } },
+                    "upstreams": [{ "dial": "127.0.0.1:9100" }]
+                  }
+                ],
+                "terminal": true
+              },
+              { "handle": [{ "handler": "static_response", "status_code": 404 }] }
+            ]
+          }
+        ],
+        "terminal": true
+      },
+      { "handle": [{ "handler": "static_response", "status_code": 403 }] }
+    ]
+  }
+}

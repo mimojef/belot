@@ -1,0 +1,51 @@
+# Pika.bg — защитен маршрут за метриките на гласовия VPS (Етап 6 на гласовия чат).
+#
+# ДОБАВЯ се към съществуващия Caddyfile на lk-caddy (не го заменя).
+# Съществуващите layer4 маршрути на :443 (voice.pika.bg -> LiveKit,
+# turn.pika.bg -> TURN) НЕ се променят.
+#
+# Защо отделен порт 8443, а не път под https://voice.pika.bg:443:
+#   L4 маршрутът на :443 решава по първата заявка на TLS връзката, а игровият
+#   backend преизползва keep-alive връзките за един и същ origin. Ако метриките
+#   и LiveKit Twirp API-то са на един origin, връзка, отворена за метрики,
+#   може да получи по-късна Twirp заявка (и обратно). Отделен порт = отделен
+#   origin = отделни връзки; LiveKit пътят остава непокътнат.
+#
+# Защита на три нива:
+#   1. UFW: 8443/tcp само от IP на игровия VPS (виж README.md, стъпка 4);
+#   2. Caddy: remote_ip само от същото IP (иначе 403);
+#   3. HTTP Basic с bcrypt хеш (паролата е само в server/.env на игровия VPS).
+# Метриките остават на loopback (127.0.0.1:6789 и 127.0.0.1:9100).
+#
+# Заместете <BCRYPT_HASH> с изхода на:  docker exec -it lk-caddy caddy hash-password
+# (пита за паролата интерактивно — паролата не остава в shell history).
+
+https://voice.pika.bg:8443 {
+	@game_vps remote_ip 185.203.117.14
+
+	handle @game_vps {
+		basic_auth {
+			pika-metrics <BCRYPT_HASH>
+		}
+
+		@get method GET
+
+		handle /pika-ops/livekit-metrics {
+			rewrite * /metrics
+			reverse_proxy @get 127.0.0.1:6789 {
+				header_up -Authorization
+			}
+		}
+
+		handle /pika-ops/node-metrics {
+			rewrite * /metrics
+			reverse_proxy @get 127.0.0.1:9100 {
+				header_up -Authorization
+			}
+		}
+
+		respond 404
+	}
+
+	respond 403
+}

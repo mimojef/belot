@@ -41,6 +41,7 @@ import {
   type VoiceAdapterEvents,
   type VoiceAdapterLoader,
   type VoiceConnectedRoom,
+  type VoiceDiagnosticReport,
   type VoiceDisconnectCause,
   type VoiceRetainedMicrophone,
 } from './voiceAdapter'
@@ -186,6 +187,12 @@ export type VoiceControllerDeps = {
   /** HTTPS POST със съществуващата cookie сесия; хвърля при мрежова грешка. */
   postJson: (path: string, body: unknown) => Promise<{ status: number; body: unknown }>
   onRequestVip?: () => void
+  /**
+   * Етап 6 (по избор): анонимна диагностика за админ статистиката —
+   * best-effort, никога не влияе на гласа. Липсваща -> нищо не се изпраща и
+   * не се планират таймери.
+   */
+  reportDiagnostic?: (report: VoiceDiagnosticReport) => void
   createClientInstanceId?: () => string
   timers?: VoiceTimers
   log?: (line: string) => void
@@ -273,6 +280,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   let restoreMic: 'none' | 'reuse' | 'fresh' = 'none'
   let retained: VoiceRetainedMicrophone | null = null
   let retainTimer: unknown = null
+  /** Етап 6: еднократно отчитане на вида връзка (TURN/директна) след свързване. */
+  let transportTimer: unknown = null
   /** Изключващи се стари стаи — новата се подготвя едва след тях (≤1 активна). */
   let teardown: Promise<void> = Promise.resolve()
   let teardownCount = 0
@@ -350,6 +359,31 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   function clearTimer(handle: unknown): null {
     if (handle !== null) timers.clearTimeout(handle)
     return null
+  }
+
+  // ─── Етап 6: анонимна диагностика (best-effort) ───────────────────────
+
+  function report(event: VoiceDiagnosticReport): void {
+    if (deps.reportDiagnostic === undefined) return
+    try { deps.reportDiagnostic(event) } catch { /* никога не влияе на гласа */ }
+  }
+
+  /** Веднъж на връзка: вид на ICE двойката (relay = TURN) и мрежови показатели. */
+  function scheduleTransportReport(seq: number, connected: VoiceConnectedRoom): void {
+    transportTimer = clearTimer(transportTimer)
+    if (deps.reportDiagnostic === undefined || connected.getTransportInfo === undefined) return
+    const attempt = (delayMs: number, retriesLeft: number): void => {
+      transportTimer = timers.setTimeout(() => {
+        transportTimer = null
+        if (seq !== sessionSeq || room !== connected || disposed) return
+        void connected.getTransportInfo!().then((transport) => {
+          if (seq !== sessionSeq || room !== connected || disposed) return
+          if (transport !== null) report({ event: 'transport', transport })
+          else if (retriesLeft > 0) attempt(15_000, retriesLeft - 1)
+        }).catch(() => {})
+      }, delayMs)
+    }
+    attempt(5_000, 1)
   }
 
   function ensureAdapter(): Promise<VoiceAdapter> {
@@ -530,6 +564,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     presenceTimer = clearTimer(presenceTimer)
     disconnectTimer = clearTimer(disconnectTimer)
     retryTimer = clearTimer(retryTimer)
+    transportTimer = clearTimer(transportTimer)
     retryKick = null
     settleAck(null)
     if (options.notifyServer && inUse) sendPresence(false)
@@ -570,11 +605,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       onReconnecting: () => {
         if (!current() || room === null) return
         status = 'reconnecting'
+        report({ event: 'reconnecting' })
         invalidate()
       },
       onReconnected: () => {
         if (!current() || room === null) return
         status = connectedStatus()
+        report({ event: 'reconnected' })
         invalidate()
       },
       onActiveSpeakersChanged: (identities) => { if (current()) applyActiveSpeakers(identities) },
@@ -664,6 +701,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       loaded = await ensureAdapter()
     } catch {
       if (seq !== sessionSeq) return
+      report({ event: 'connect_failed', reason: 'sdk_load_failed' })
       failConnection('service_unavailable')
       return
     }
@@ -672,12 +710,16 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     const ack = await presenceHandshake()
     if (seq !== sessionSeq) return
     if (ack === null) {
+      report({ event: 'connect_failed', reason: 'presence_failed' })
       failConnection('service_unavailable')
       return
     }
     if (!ack.ok) {
       if (DISABLING_PRESENCE_CODES.has(ack.code)) disableEntirely()
-      else failConnection('service_unavailable')
+      else {
+        report({ event: 'connect_failed', reason: 'presence_failed' })
+        failConnection('service_unavailable')
+      }
       return
     }
     const outcome = await fetchToken(seq)
@@ -687,7 +729,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       return
     }
     if (outcome.kind !== 'token') {
-      if (outcome.kind === 'unavailable') failConnection('service_unavailable')
+      if (outcome.kind === 'unavailable') {
+        report({ event: 'connect_failed', reason: 'token_unavailable' })
+        failConnection('service_unavailable')
+      }
       return
     }
     await teardown // старата стая е напълно изключена преди новата
@@ -706,6 +751,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       if (seq !== sessionSeq) return
       prepared = null
       void connector.abort().catch(() => {})
+      report({ event: 'connect_failed', reason: 'livekit_connect_failed' })
       failConnection('service_unavailable')
       return
     }
@@ -726,6 +772,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       if (profileId !== null && locallyMuted.has(profileId)) connected.setRemoteIdentityVolume(participant.identity, 0)
     }
     scheduleRenewal()
+    report({ event: 'connected' })
+    scheduleTransportReport(seq, connected)
     invalidate()
     if (options.enableMicAfter) {
       if (speak.canSpeak) {
@@ -743,6 +791,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     room = null
     prepared = null
     presenceTimer = clearTimer(presenceTimer)
+    transportTimer = clearTimer(transportTimer)
     if (inUse) sendPresence(false)
     inUse = false
     microphone = 'off'
@@ -809,6 +858,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
     // connection_lost: официалният reconnect на LiveKit не е успял —
     // ограничени нови опити с нов токен (без втори паралелен цикъл).
+    report({ event: 'connection_lost' })
     void reconnectWithBackoff()
   }
 
@@ -866,7 +916,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       const resumed = await tryResume(seq)
       if (resumed !== 'retry') return
     }
-    if (seq === sessionSeq) failConnection('service_unavailable')
+    if (seq === sessionSeq) {
+      report({ event: 'reconnect_failed' })
+      failConnection('service_unavailable')
+    }
   }
 
   async function resumeAfterInterruption(seq: number): Promise<void> {
@@ -905,6 +958,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       }
       status = connectedStatus()
       scheduleRenewal()
+      report({ event: 'connected' })
+      scheduleTransportReport(seq, connected)
       invalidate()
       // Микрофонът в новата стая: само при валидно право и запазено желание.
       //   reuse — същият жив capture (без getUserMedia); не е жив -> слушане;
@@ -1005,6 +1060,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       microphone = 'off'
       wantsToSpeak = false
       const failure = error instanceof VoiceMicrophoneError ? error.failure : 'unavailable'
+      report({
+        event: 'mic_failed',
+        reason: failure === 'not_found' ? 'mic_not_found'
+          : failure === 'permission_denied' ? 'mic_permission_denied'
+            : failure === 'not_permitted' ? 'mic_not_permitted'
+              : 'mic_unavailable',
+      })
       setUiError(
         failure === 'not_found' ? 'mic_not_found'
           : failure === 'permission_denied' ? 'mic_permission_denied'
@@ -1371,7 +1433,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       ...counters,
       listeners: listeners.size,
       speakingListeners: speakingListeners.size,
-      pendingTimers: [presenceTimer, disconnectTimer, retryTimer, retainTimer].filter((t) => t !== null).length + speakingHoldTimers.size + (pendingAck === null ? 0 : 1),
+      pendingTimers: [presenceTimer, disconnectTimer, retryTimer, retainTimer, transportTimer].filter((t) => t !== null).length + speakingHoldTimers.size + (pendingAck === null ? 0 : 1),
       retainedMicrophone: retained === null ? 0 : 1,
     }),
   }

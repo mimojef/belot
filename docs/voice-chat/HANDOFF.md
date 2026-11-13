@@ -19,8 +19,13 @@
 - **Последна backend корекция — commit-ната `7fa9fa9`:** постоянно наблюдение на оттеглени имена с неясен CreateRoom (8А.6В, миграция `20261113_002`) и изисквания за микрофона за Етап 3 (2.11А).
 - **Етап 3 (frontend voice controller) — одобрен, commit-нат `eb397bf`** (раздел 14, одобрените решения — 14.15).
 - **Етап 4 (мобилен интерфейс) — одобрен, commit-нат `5efb87d`** (раздел 15).
-- **Етап 5 (desktop интерфейс) — одобрен (визуалният преглед е успешен), commit-нат като „feat(voice): add desktop voice chat interface“** (раздел 16). Етап 6 НЕ е започнат; нищо не е внедрено.
+- **Етап 5 (desktop интерфейс) — одобрен (визуалният преглед е успешен), commit-нат `c50149c` „feat(voice): add desktop voice chat interface“** (раздел 16).
+- **Етап 6 (админ панел „Гласови разговори“) — одобрен и commit-нат като „feat(voice): add admin monitoring and controls“** (раздел 17). Следващ етап: внедряване с изключен глас — само след изрично одобрение. Caddy маршрутът за метриките е подготвен в `ops/voice-metrics-caddy/`, но **не е внедрен**.
 - Нищо не е внедрено в production. Режимът на гласовия чат е **„Изключен“** по подразбиране.
+- **План за реалните тестове (решение на собственика, 2026-11-13):** вместо локален dev — на production, в три стъпки (раздел 12):
+  1. deploy с изключена функционалност;
+  2. режим „Само админ“ на заключена частна маса с четирима доверени играчи (затворена бета);
+  3. след успешна затворена бета — публична бета.
 
 **Приоритет на източниците при противоречие:**
 1. **Окончателните решения на собственика** (раздел 2 тук).
@@ -49,6 +54,9 @@
 - Commit на Етап 2а: `f19e3d3` „feat(voice): add voice chat backend foundation“. Съдържа само backend основата и този документ.
 - Етап 2б (`e58d292`, `fdb8697`, `7fa9fa9`): официален `livekit-server-sdk@2.19.2` (pin), LiveKit API клиент, токени, участия с право за говорене, session binding, ротация, reconciliation, игрови куки и тестове.
 - Етап 3 (commit „feat(voice): add lazy frontend voice controller“): `livekit-client@2.23.0` (точен pin, само в lazy chunk), `src/app/voice/*` (в основния bundle само `voiceFacade.ts`), минимална интеграция в `main.ts`, тестове `scripts/checkVoiceController.ts` и `scripts/checkVoiceBundle.mjs`. **Без UI.**
+- Етап 4 (`5efb87d`) — мобилен интерфейс; Етап 5 (`c50149c`) — desktop интерфейс.
+- Етап 6 („feat(voice): add admin monitoring and controls“) — админ панел „Гласови разговори“, метрики и Caddy маршрут (раздел 17).
+- **Нов компютър:** след pull пусни `npm ci` в root и в `server/` (`livekit-client` / `livekit-server-sdk` са добавени в Етапи 2б/3). Ако локално върви Vite или `tsx src/index.ts`, спри ги преди `npm ci` (на Windows заключват файлове в `node_modules`), или използвай `npm install` — ако липсват само нови пакети, lock файловете не се променят.
 
 ---
 
@@ -446,7 +454,7 @@ room:
 Реално налични на гласовия VPS (не се измислят други имена):
 - **LiveKit:** `livekit_room_total`, `livekit_participant_total`, `livekit_track_published_total`, `livekit_track_subscribed_total`, `livekit_rtt_ms`, `livekit_jitter_us`, `livekit_packet_loss_percent`, `livekit_packet_out_of_order_percent`, `livekit_quality_rating`, `livekit_quality_score`, `livekit_session_join_latency_ms`, `livekit_packet_bytes`, `livekit_packet_total`, `livekit_forward_latency_ns`, `livekit_node_twirp_request_latency_ms`, `livekit_node_twirp_request_status`, `livekit_participant_join_total`, `livekit_room_duration_seconds`.
 - **Node Exporter:** `node_cpu_seconds_total{cpu="0..3",mode="steal"}` — **натрупани секунди, не проценти**. Процентът се изчислява като разлика между две четения / (интервал × брой ядра).
-- Пътят на метриките до игровия backend остава нерешен (раздел 9). Без публичен Prometheus.
+- Пътят на метриките до игровия backend: защитен Caddy маршрут на `:8443` (решено, раздел 17.5; подготвено, не е внедрено). Без публичен Prometheus.
 - В Етап 2б `GET /api/admin/voice-chat` вече връща и `runtime` (breaker, опашки, активни сесии, блокирани маси, броячи) — технически данни от Pika процеса, без тайни. Dashboard UI не е направен.
 - **Ресурси на контейнерите:**
   - LiveKit: 3 GiB RAM лимит, `GOMEMLIMIT` 2500 MiB, четирите vCPU без CPU quota;
@@ -1001,7 +1009,7 @@ node node_modules/tsx/dist/cli.mjs scripts/checkVoiceChatWebSocketIntegration.ts
 2. **Изолация на средите — РЕШЕНО** с `VOICE_ROOM_NAMESPACE` (8А.6Б). Остатъчно: две среди с един и същ namespace. Ръчните тестове ползват имена без `pv_`.
 3. **Валидност на LiveKit refresh токените — ИЗМЕРЕНА: 600 s** (тест 12). Хоризонтът от 20 min се запазва (8А.6В); не е абсолютна гаранция.
 4. **`revokeTokenTs` — НЕ предотвратява повторно влизане със стар токен на v1.13.11** (тест 16). Не разчитаме на него; ротацията остава задължителна.
-5. **Безопасен път на метриките до игровия backend** (Етап 6, промяна в инфраструктурата): (а) Caddy route с mTLS/Bearer + IP allowlist; (б) SSH тунел; (в) без VPS метрики.
+5. **Безопасен път на метриките до игровия backend — РЕШЕНО (собственик, 2026-11-13):** защитени HTTPS маршрути през съществуващия Caddy, само от IP на игровия VPS + отделна автентикация; метриките остават на loopback. Без Prometheus, Grafana и SSH тунел. Подготвено в `ops/voice-metrics-caddy/` (раздел 17.5), **не е внедрено**.
 6. **Общи условия и Политика за поверителност** — юридическа задача преди публичното активиране.
 7. **„Инкогнито режим“** — да се уточни кой механизъм се има предвид (не е намерен в кода).
 8. **`stopMicTrackOnMute`** на Android/iPhone — Етап 3 и 7.
@@ -1153,19 +1161,21 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
 
 | Етап | Съдържание | Критерии за приемане |
 |---|---|---|
-| **2б** | LiveKit backend (раздел 8А) — **имплементиран, чака преглед** | fake Twirp тестове ✓; race тестове ✓; декодирани JWT ✓; реален тест срещу LiveKit v1.13.11 ✓ (раздел 13.1) |
+| **2б** | LiveKit backend (раздел 8А) — **завършен и commit-нат** (`e58d292`, `fdb8697`, `7fa9fa9`) | fake Twirp тестове ✓; race тестове ✓; декодирани JWT ✓; реален тест срещу LiveKit v1.13.11 ✓ (раздел 13.1) |
 | **3** | Frontend voice controller (раздел 14) — **одобрен и commit-нат**; без debug бутон (само `window.__pikaVoice` в dev) | fake adapter тестове 52/52 ✓; 0 дублирани audio елементи/listeners/таймери ✓; ≤1 стая ✓; chunk извън precache ✓; главният bundle **+1.9 KB gzip / ~+1.1–1.3 KB brotli — приет от собственика** (14.9, 14.15); реални браузъри — **предстои** (14.10) |
-| **4** | Мобилен UI: лоби, създаване, popup-и, чакалня, бутон и панел, speaking микрофончета, всички състояния | Playwright screenshots (2.14); одобрение на всеки екран; touch regression (`b4f2271`) с активен глас |
-| **5** | Desktop UI | screenshots 1280×800, 1366×768, 1920×1080 |
-| **6** | Admin dashboard + failure handling | спрян LiveKit → играта е без разлика в event loop lag (`eventLoopHealth`) и времената на ходовете; dashboard показва „недостъпна“ |
-| **7** | Интеграция и реални устройства | Android Chrome, iPhone Safari, Desktop Chrome/Edge; 4 говорят; listen без permission; Wi-Fi↔4G; обаждане; заключване; Bluetooth; refresh; повторна игра; **сценарият с първото включване на микрофона ×10**; ехо |
-| **8** | Внедряване | deploy с режим OFF → „Само админ“ с информирани тестери → „Активен“ с лимит 10 |
+| **4** | Мобилен UI (раздел 15) — **одобрен и commit-нат** (`5efb87d`) | Playwright screenshots (2.14) ✓; одобрение на екраните ✓ |
+| **5** | Desktop UI (раздел 16) — **одобрен и commit-нат** (`c50149c`) | screenshots 1280×800, 1366×768, 1920×1080 ✓ |
+| **6** | Админ панел „Гласови разговори“ + метрики (раздел 17) — **одобрен и commit-нат** | целеви проверки ✓ (17.7); „Недостъпно“ вместо 0 ✓; Caddy маршрутът е подготвен, не е внедрен |
+| **7** | **Внедряване с изключен глас** (production) | deploy на backend + frontend с режим „Изключено“; обичайното поведение е непроменено; по желание — внедряване на Caddy маршрута и `VOICE_VPS_METRICS_*` (панелът показва VPS метриките) |
+| **8** | **Затворена бета на production** | режим „Само админ“, **заключена частна маса с четирима доверени играчи**, реални устройства: Android Chrome, iPhone Safari (+PWA), Desktop Chrome/Edge; 4 говорят; listen без permission; Wi-Fi↔4G; обаждане; заключване; Bluetooth; refresh; повторна игра; **сценарият с първото включване на микрофона ×10**; ехо; спрян LiveKit → играта продължава без разлика в event loop lag (`eventLoopHealth`) и времената на ходовете |
+| **9** | **Публична бета** | само след успешна затворена бета: режим „Активен“, лимит 10, наблюдение в панела; Общите условия/Политиката (2.15) — преди това |
 
 **Deploy и rollback** (без изпълнение досега):
 - **Deploy:**
   - backend чрез `scripts/deploy-backend-production.sh` (миграцията е само добавяща, режимът по подразбиране е `off`);
   - frontend чрез `scripts/deployFrontendAtomic.sh`;
-  - env на сървъра: `LIVEKIT_API_URL=https://voice.pika.bg`, `LIVEKIT_WS_URL=wss://voice.pika.bg`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` (само в `server/.env`), **`VOICE_ROOM_NAMESPACE=prod`** (задължителен; локално напр. `dev`), `VOICE_CHAT_ENABLED`.
+  - env на сървъра: `LIVEKIT_API_URL=https://voice.pika.bg`, `LIVEKIT_WS_URL=wss://voice.pika.bg`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` (само в `server/.env`), **`VOICE_ROOM_NAMESPACE=prod`** (задължителен; локално напр. `dev`), `VOICE_CHAT_ENABLED`;
+  - по избор (Етап 6, метрики на гласовия VPS): `VOICE_VPS_METRICS_URL=https://voice.pika.bg:8443`, `VOICE_VPS_METRICS_USERNAME`, `VOICE_VPS_METRICS_PASSWORD` (само в `server/.env`) + Caddy маршрутът от `ops/voice-metrics-caddy/README.md`.
 - **Rollback**, по нива от най-бързото:
   1. режим „Изключен“ от админа;
   2. `VOICE_CHAT_ENABLED=0` + рестарт;
@@ -1390,8 +1400,13 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
   - По-нататъшно намаляване би изисквало да махнем защитата преди зареждането или typed snapshot-а – не е направено по указанието „без прекомерно усложняване“.
   - Направени съкращения: HTTPS транспортът е в runtime-а; локалното заглушаване преди първото включване е премахнато.
 
-### 14.10 План за реални browser тестове (Етап 7 — mock тестовете НЕ доказват Safari/Chrome/PWA)
-Среда: локален dev backend + локална dev база + тестови профили (admin+VIP, VIP, non-VIP), режим „Само админ“, **без production потребители, база или реални маси**. LiveKit е в отделен `VOICE_ROOM_NAMESPACE=dev`.
+### 14.10 План за реални browser тестове (затворена бета — mock тестовете НЕ доказват Safari/Chrome/PWA)
+**Променено (решение на собственика, 2026-11-13):** тестовете се провеждат **на production**, не на локален dev:
+1. deploy с изключен глас;
+2. режим „Само админ“ на **заключена частна маса с четирима доверени играчи** (затворена бета), `VOICE_ROOM_NAMESPACE=prod`;
+3. публична бета — само след успешна затворена бета.
+
+Сценариите по-долу остават в сила; изпълняват се на затворената бета. Наблюдението е през админ панела „Гласови разговори“ (раздел 17).
 | Среда | Сценарии |
 |---|---|
 | Desktop Chrome, Edge, Firefox | <ul><li>DevTools Network: voice chunk **не** се тегли при сядане/игра, тегли се при първото „Само слушай“</li><li>два таба/профила: listen без permission prompt; VIP микрофон; non-VIP отказ без prompt</li><li>disable → индикаторът изгасва; mute/unmute от админ</li><li>ротация: индикаторът не мига, без нов prompt</li><li>„Изчакай в лоби“ и връщане; refresh; затваряне на таб; изместена сесия</li></ul> |
@@ -1450,7 +1465,7 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
 
 ---
 
-## 15. Етап 4 — мобилен интерфейс (имплементиран 2026-11-13, БЕЗ commit, чака визуален преглед)
+## 15. Етап 4 — мобилен интерфейс (одобрен и commit-нат 2026-11-13, `5efb87d`)
 
 Само мобилната версия (`isPhoneLayoutViewport()`); desktop е Етап 5. Интерфейсът само чете `VoiceSnapshot` и вика действията на съществуващия controller, без дублирана логика. Размерите на картите, аватарите и останалите контроли не са променяни.
 
@@ -1557,8 +1572,8 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
 
 ### 15.9 Отворени въпроси / не е направено в тази стъпка
 - Окончателните позиции и размери чакат визуалното одобрение на собственика.
-- Не са направени:
-  - desktop (Етап 5).
+- Не са направени в тази стъпка:
+  - desktop (направен в Етап 5, раздел 16).
 - Картите на ръката влизат под долната лента в fixture-а. Под новия бутон има част от карта, точно както под съществуващия „Фрази“ — не е ново поведение, но трябва да се потвърди на реално устройство.
 
 ### 15.10 Финални доработки (одобрени 2026-11-13)
@@ -1626,3 +1641,147 @@ ss -lntup | grep -E ":(7880|7881|3478|6789|9100) "
 ### 16.7 Отворени въпроси
 - Визуалният преглед на собственика е успешен (позициите и размерите са одобрени).
 - Желаният размер за 1024–1279px (малки лаптопи) не е проверяван отделно.
+
+---
+
+## 17. Етап 6 — админ панел „Гласови разговори“ (одобрен и commit-нат 2026-11-13)
+
+Admin → **„Гласови разговори“**, само за пълен admin. Ролята се проверява на сървъра при всяка заявка. Записът е в трите админ менюта на лобито: тъмното desktop меню, мобилното и светлото.
+
+- Само технически показатели: без слушане, без записи и без имена или идентичности на участниците.
+- Липсваща, недостъпна или неизчислена стойност се показва като **„Недостъпно“** (или „Изчислява се…“ до второто четене), **никога като 0**.
+- Панелът е отделен chunk (`showAdminVoiceChatPanel-*`, ~11.9 KB gzip), зареждан с dynamic import само при отваряне.
+- Обновява се на 15 s само докато е отворен и табът е видим. След затваряне не прави заявки.
+
+### 17.1 Секции
+1. **Управление:**
+   - режим Изключено / Само админ / Включено, с потвърждение;
+   - лимит 0–200 и заети слотове (предупреждение при „над лимита“);
+   - **„Аварийно изключване“** с отделно потвърждение. То е `POST /mode {mode:'off', confirm:true}`: веднага освобождава всички гласови маси (резервираните слотове стават 0) и спира новите токени, а игрите, масите и местата продължават. **Изтриването на LiveKit стаите е асинхронно** (durable DeleteRoom опашка). Затова съобщението:
+     - казва колко стаи **чакат потвърждение** и че дотогава свързаните участници може още да се чуват;
+     - сменя се на „LiveKit стаите са изтрити (потвърдено)“ едва когато чакащите DeleteRoom станат 0 (`pendingRoomDeletions`, след потвърждение с ListRooms).
+     - Отговорът съдържа `releasedVoiceTables`, `retiredRooms` и `pendingRoomDeletions`;
+   - статус на env конфигурацията (LiveKit и VPS метрики, само имената на липсващите);
+   - чакащи DeleteRoom;
+   - одит (50 реда);
+   - банер при `VOICE_CHAT_ENABLED=0`.
+2. **Текущо състояние:**
+   - резервирани маси спрямо лимита, активни LiveKit стаи, свързани участници, с включен микрофон, само слушат;
+   - списък на текущите гласови маси: кратко id, фаза, отворена от, генерация, седнали, в гласа, микрофон/слушат, състояние (активна стая / смяна на стаята / прекратява се / без активна стая);
+   - на телефон — компактни карти вместо таблица.
+3. **Статистика и качество:**
+   - успешни и неуспешни включвания (клиентски отчети, % успех);
+   - издадени и отказани токени и **откази по причина** (код + български етикет);
+   - грешки при клиента по причина (свързване, токен, микрофон);
+   - reconnect събития (успешни, загубени, неуспешно възстановяване);
+   - **TURN дял** и разбивка host / srflx+prflx / relay (UDP/TCP/TLS до TURN);
+   - клиентски RTT, jitter и загуба на пакети;
+   - качество според LiveKit сървъра: RTT, jitter, загуба, quality score/rating, време за влизане — средно за интервала и от старта на LiveKit;
+   - сървърни събития: ротации, CreateRoom, lease, 120 s, отключено/отнето говорене, LiveKit API заявки, circuit breaker.
+4. **Гласов VPS:**
+   - общ статус и статус на двата източника, с причина и последно успешно четене;
+   - версия на LiveKit, uptime и последен рестарт на LiveKit и на VPS;
+   - CPU общо и **по vCPU** (заетост и steal);
+   - CPU steal, натиск върху CPU (PSI), натоварване, RAM, swap;
+   - **мрежов трафик** по интерфейс (скорост + общо; без `lo`, `veth*`, `docker*`, `br-*`);
+   - стаи, участници и потоци на целия LiveKit сървър.
+
+### 17.2 Backend (преизползва съществуващото админ API)
+- **`GET /api/admin/voice-chat/monitoring`** (нов подпът на същия handler):
+  - достъп само за пълен admin, само GET, `no-store`;
+  - таван 6 s (`503 monitoring_timeout`).
+  - Отговорът `{ live, vps, server, clients }` съдържа само агрегати, без тайни.
+- **`GET /api/admin/voice-chat`** добавя `vpsMetrics: { configured, missing }` (само имената на липсващите).
+- **`voiceAdminLiveProbe.ts`:**
+  - `ListRooms` само за живите имена на активните маси;
+  - `ListParticipants` само за стаи с участници, най-много 20 на обновяване (иначе `partial` и разделянето е null);
+  - заявките минават през **съществуващия dispatcher** с приоритет `normal` (timeout, ≤4 едновременни, ограничени опашки, breaker). Отнемането на права и DeleteRoom остават с предимство;
+  - кеш **20 s** и single-flight **само за отговорите на LiveKit** (по име на стая). Списъкът с маси и резервираните слотове се четат свежо при всяко извикване: прекратена маса изчезва веднага, а нова генерация е „непроверена“ (null) до следващото четене;
+  - при смяна на режима (`onModeChanged` в `index.ts`) кешът се изчиства (`invalidate()`), без остарели данни след изключване.
+  - Нов незадължителен метод `listParticipants` в `voiceLiveKitApi.ts`. Връща само `state`, `microphonePublished` и `microphoneMuted` (без identity, име и metadata).
+- **`voiceVpsMetrics.ts`:**
+  - асинхронен `fetch` към двата Caddy маршрута с HTTP Basic, timeout **4 s**, лимит на отговора 2 MB, `redirect:'error'`, кеш **20 s**, single-flight;
+  - толерантен Prometheus парсер;
+  - скоростите (CPU %, steal, PSI, трафик) са разлика между две поредни четения (≤180 s);
+  - средните стойности на histogram-ите за интервала са от `_sum`/`_count`;
+  - при грешка стойностите стават null (не старите), а `lastSuccessAt` се пази;
+  - версия на LiveKit — **само ако** присъства като етикет `version` на `livekit_*` метрика (иначе „Недостъпно“, не се измисля);
+  - CPU throttling: контейнерът е без CPU quota, а Node Exporter не вижда cgroup. Вместо това се показва „Натиск върху CPU (PSI)“ (`node_pressure_cpu_waiting_seconds_total`), ако се събира.
+- **`voiceClientDiagnostics.ts`** + **`POST /api/voice/client-report`:**
+  - анонимни събития `connected`, `connect_failed{reason}`, `reconnecting`, `reconnected`, `connection_lost`, `reconnect_failed`, `mic_failed{reason}` и веднъж на връзка `transport{candidateType, protocol, rttMs, jitterMs, packetLossPercent}`;
+  - сесия + origin, затворени изброявания, числа в граници, **30 отчета/мин на профил**;
+  - само броячи в паметта от старта на процеса: без профил, IP, identity, база и логове.
+- **`voiceChatService`:**
+  - `stats().tokensDeniedByCode` — броячи по код на отказа;
+  - `adminTables()` — активните маси: фаза, генерация, седнали, активни гласови сесии, блокиране. Без профили.
+- **`voiceAdminMonitoring.ts`** събира четирите източника паралелно.
+- **`index.ts`:** dispatcher-ът и LiveKit API-то са изнесени в именувани константи (същото поведение), за да ги ползва и мониторингът. Нищо от мониторинга не се вика от игровите пътища.
+
+### 17.3 Frontend
+- `src/app/adminVoiceChat/showAdminVoiceChatPanel.ts` — панелът (шаблон: `showAdminProfileCustomizationPanel`).
+- Записи в менюто: `renderLobbyScreen.ts` (`data-lobby-nav-admin-voice-chat`), `createLobbyFlowController.ts` (`onAdminVoiceChatRequest`), `main.ts` (`openAdminVoiceChatPanel` с dynamic import).
+- **Клиентска диагностика** (lazy voice chunk):
+  - `createVoiceController.ts` има незадължителна `reportDiagnostic`. Без нея поведението и таймерите не се променят;
+  - `transport` отчетът се изпраща веднъж, 5 s след свързване (един повторен опит след 15 s);
+  - `voiceRuntime.ts` праща отчетите best-effort към `/api/voice/client-report`;
+  - `liveKitVoiceAdapter.ts`: `getTransportInfo()` чрез публичното `track.getRTCStatsReport()`;
+  - `voiceTransportStats.ts` — чиста функция върху `RTCStatsReport`, без адреси и IP.
+
+### 17.4 Конфигурация (env, само имена)
+`VOICE_VPS_METRICS_URL` (https; http само за loopback; без потребител/query в URL), `VOICE_VPS_METRICS_USERNAME`, `VOICE_VPS_METRICS_PASSWORD`. Без тях панелът показва „Метриките на гласовия VPS не са конфигурирани“, а останалите секции работят.
+
+### 17.5 Caddy маршрут (подготвен, НЕ е внедрен) — `ops/voice-metrics-caddy/`
+- `README.md`: read-only проверки → парола + bcrypt хеш → резервно копие → фрагмент → `caddy validate` → `caddy reload` → UFW → env → проверка → rollback.
+- Фрагменти `Caddyfile.snippet` и `caddy-http-server.json`. Подготвени са **без достъп до реалната конфигурация на `lk-caddy`**. Препоръката е собственикът първо да изпрати изхода на read-only проверките (стъпка 0), за да се подготви точният diff.
+- Маршрутите са `https://voice.pika.bg:8443/pika-ops/livekit-metrics` и `/pika-ops/node-metrics`, проксирани към `127.0.0.1:6789` и `127.0.0.1:9100`.
+- **Отделен порт 8443**, а не път под `:443`. Layer4 маршрутът на `:443` решава по първата заявка на TLS връзката, а Node `fetch` преизползва keep-alive връзките за един origin. Така метриките и Twirp API-то могат да се объркат. LiveKit пътят не се пипа.
+- Защита:
+  - UFW: `8443/tcp` само от `185.203.117.14`;
+  - Caddy `remote_ip` (иначе 403);
+  - HTTP Basic с bcrypt хеш (паролата е само в `server/.env` на игровия VPS).
+
+### 17.6 Скрийншоти (fixture данни — не са реални стойности)
+`<tmp>/belot-v2-voice-admin-screenshots/<viewport>/*.png`, където viewport е `desktop-1280x800`, `mobile-390x844` или `mobile-320x568`:
+- `full-01-control` … `full-04-vps` — пълни данни, четирите таба;
+- `unconfigured-*` — без LiveKit и без VPS метрики („Недостъпно“);
+- `offline-*` — недостъпен LiveKit (breaker) и VPS (timeout/401);
+- `computing-04-vps` — първо четене („Изчислява се…“), само на desktop;
+- `action-01…04-emergency-*` — аварийното изключване, само на desktop: потвърждение; резултат 0/10 с 2 чакащи DeleteRoom; празно „Текущо състояние“; потвърдено изтриване;
+- `forbidden` — без права, само на desktop.
+
+### 17.7 Проверки (само целевите за Етап 6)
+- `node node_modules/tsx/dist/cli.mjs scripts/checkVoiceChatStage6.ts` (от `server/`) → **18/18** (+ L5 свежи маси при кеширан LiveKit и invalidate; A1 `POST /mode off` с `retiredRooms` и чакащи DeleteRoom):
+  - парсер; VPS конфигурация, 2 четения, кеш/single-flight, 401/timeout/голям отговор, без парола в снимката;
+  - live probe (не е конфигуриран / ok / недостъпен / partial);
+  - клиентска диагностика (валидация, лимит, агрегати, без профили);
+  - HTTP през реален `node:http` (client-report и monitoring: права, методи, `no-store`, таймаут, без тайни);
+  - статична проверка на `index.ts`.
+- `node server/node_modules/tsx/dist/cli.mjs scripts/checkVoiceAdminPanel.ts` → **14/14** в реален Chromium. Fixture-ът се държи като реалния сървър след „Изключено“: 0 резервации, без маси, стаите чакат DeleteRoom до `?confirmAfter`. Проверява:
+  - 4 таба без хоризонтален overflow на 1280/390/320;
+  - „Недостъпно“ вместо 0 при липсваща конфигурация и при недостъпни източници;
+  - „Изчислява се…“ на първото четене;
+  - смяна на режима и аварийното изключване само след потвърждение (`POST /mode off, confirm:true`);
+  - лимитът се валидира;
+  - обновяването спира при затваряне;
+  - 403.
+- `scripts/checkVoiceController.ts` (контролерът е променен) → нови **DG1–DG3** ✓:
+  - DG1: `connected` + един `transport` отчет без JWT/identity;
+  - DG2: неуспешно свързване, reconnect, грешка на микрофона, без висящи таймери;
+  - DG3: без `reportDiagnostic` няма нищо.
+  - **55/55.** Статичното правило **[W1]** е обновено спрямо lazy архитектурата след Етап 4, без да се отслабва:
+    - runtime импортите от `src/app/voice/` в `main.ts` са разрешени само от посредника и от изброените леки UI модули (`ui/createVoiceMobileUi`, `ui/voiceSpeakingIndicator`, `ui/voiceUiIcons`, `ui/voiceUiStatus`);
+    - **транзитивно** по статичните не-type импорти от тях не се стига до `createVoiceController`, `voiceRuntime`, `liveKitVoiceAdapter`, `voiceAdapter`, `voiceAudioSink`, `voiceProtocol`, `voiceTransportStats`, `ui/renderVoicePanel` или `livekit-client`/`@livekit/*`;
+    - `renderVoicePanel` се зарежда само с `import()`.
+    - Mutation проверка: статичен импорт на controller-а в UI модул, на runtime-а в `main.ts` и на lazy панела в индикатора — и трите се хващат.
+- Typecheck: server `tsc -p tsconfig.json` ✓, `tsconfig.scripts.json` ✓, frontend `tsc --noEmit` ✓.
+- Production build (в scratchpad, `dist/` не е пипан) ✓. `checkVoiceBundle.mjs` спрямо build на HEAD ✓:
+  - главният bundle е **+281 B gzip** (+182 B brotli) — записите в менюто и dynamic import-ът;
+  - voice runtime chunk-ът е +~0.9 KB gzip (диагностиката);
+  - voice chunk-овете остават извън precache.
+
+### 17.8 Отворени въпроси
+- Desktop дизайнът и финалните корекции са одобрени от собственика.
+- Caddy маршрутът се внедрява само след одобрение и след read-only проверките (17.5). Дотогава табът „Гласов VPS“ показва „Не е конфигурирано“.
+- Версията на LiveKit се показва, само ако реалните метрики я съдържат (в потвърдения списък от 4.1 такава няма). Иначе е „Недостъпно“.
+- Клиентските броячи и статистиката са от последния рестарт на игровия сървър, без история. Историческите данни са извън обхвата (без нова инфраструктура).
+- Метриките на LiveKit са за целия сървър (всички namespace-и, вкл. ръчни тестове). Броевете на Pika (live probe) са само за собствените маси.

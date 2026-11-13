@@ -84,6 +84,10 @@ import { createVoiceLiveKitApi, readVoiceLiveKitConfig } from './voice/voiceLive
 import { createVoiceLiveKitDispatcher } from './voice/voiceLiveKitDispatcher.js'
 import { createVoiceTokenSigner } from './voice/voiceTokenIssuer.js'
 import type { VoiceTableRecord } from './voice/voiceChatTypes.js'
+import { createVoiceAdminLiveProbe } from './voice/voiceAdminLiveProbe.js'
+import { createVoiceAdminMonitoring } from './voice/voiceAdminMonitoring.js'
+import { createVoiceClientDiagnostics } from './voice/voiceClientDiagnostics.js'
+import { createVoiceVpsMetricsCollector, readVoiceVpsMetricsConfig } from './voice/voiceVpsMetrics.js'
 import {
   PROFILE_CUSTOMIZATION_COLOR_GROUPS,
   PROFILE_CUSTOMIZATION_COLOR_GROUP_LABELS,
@@ -1183,18 +1187,20 @@ const voiceChatStore = await createVoiceChatStore(
   databaseBootstrap.databaseFilePath,
   voiceLiveKitConfig === null ? {} : { roomNamespace: voiceLiveKitConfig.roomNamespace },
 )
+const voiceLiveKitApi = voiceLiveKitConfig === null ? null : createVoiceLiveKitApi(voiceLiveKitConfig)
+const voiceLiveKitDispatcher = createVoiceLiveKitDispatcher({ log: (line) => console.log(line) })
 const voiceChatService = createVoiceChatService({
   store: voiceChatStore,
   liveKit:
-    voiceLiveKitConfig === null
+    voiceLiveKitConfig === null || voiceLiveKitApi === null
       ? null
       : {
-          api: createVoiceLiveKitApi(voiceLiveKitConfig),
+          api: voiceLiveKitApi,
           wsUrl: voiceLiveKitConfig.wsUrl,
           signToken: createVoiceTokenSigner(voiceLiveKitConfig),
           roomNamespace: voiceLiveKitConfig.roomNamespace,
         },
-  dispatcher: createVoiceLiveKitDispatcher({ log: (line) => console.log(line) }),
+  dispatcher: voiceLiveKitDispatcher,
   resolveSeat: (profileId, table) => resolveVoiceSeat(profileId, table),
   isConnectionOpen: (connectionId) => getSocketByConnectionId(connectionId)?.readyState === WebSocket.OPEN,
   sendToConnection: (connectionId, message) => safeSendToConnection(connectionId, message),
@@ -21382,6 +21388,22 @@ async function handleAdminProfileCustomizationRequest(
   return true
 }
 
+// Гласов чат (Етап 6) — показатели за админ панела „Гласови разговори“. Само
+// при отворен панел (GET /api/admin/voice-chat/monitoring), с кеш ~20 s и
+// timeout; никога от игровия hot path. Без идентичности, токени и аудио.
+const voiceClientDiagnostics = createVoiceClientDiagnostics()
+const voiceAdminLiveProbe = createVoiceAdminLiveProbe({
+  listTables: () => voiceChatService.adminTables(),
+  api: voiceLiveKitApi,
+  dispatcher: voiceLiveKitDispatcher,
+})
+const voiceAdminMonitoring = createVoiceAdminMonitoring({
+  liveProbe: voiceAdminLiveProbe,
+  vpsCollector: createVoiceVpsMetricsCollector({ config: readVoiceVpsMetricsConfig() }),
+  clientDiagnostics: voiceClientDiagnostics,
+  getRuntimeStats: () => voiceChatService.stats(),
+  processStartedAt: new Date().toISOString(),
+})
 // Гласов чат (Етап 2а) — Admin → Гласов чат: режим, лимит, одит. Само пълен
 // admin от свежа сесия; мутациите минават през origin guard-а. Без LiveKit.
 const handleAdminVoiceChatRequest = createVoiceChatAdminRequestHandler({
@@ -21393,8 +21415,13 @@ const handleAdminVoiceChatRequest = createVoiceChatAdminRequestHandler({
   isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),
   readJsonBody: (req) => readJsonRequestBody(req),
   resolveDisplayName: (profileId) => playerProgressStore.getPublicProfile(profileId)?.displayName ?? null,
-  onModeChanged: (result) => voiceChatService.onModeChanged(result),
+  onModeChanged: (result) => {
+    voiceChatService.onModeChanged(result)
+    // Без остарели LiveKit броеве в панела след изключване/смяна на режима.
+    voiceAdminLiveProbe.invalidate()
+  },
   getRuntimeStats: () => voiceChatService.stats() as unknown as Record<string, unknown>,
+  getMonitoring: voiceAdminMonitoring,
 })
 // Гласов чат (Етап 2б) — HTTPS: токени и повишаване на правата (никога WS).
 const handleVoiceChatApiRequest = createVoiceChatHttpRequestHandler({
@@ -21403,6 +21430,7 @@ const handleVoiceChatApiRequest = createVoiceChatHttpRequestHandler({
   isFullAdminProfile: (profileId) => authStore.getAccountRoleForProfile(profileId) === 'admin',
   isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),
   readJsonBody: (req) => readJsonRequestBody(req),
+  clientDiagnostics: voiceClientDiagnostics,
 })
 // Гласов чат — reconciliation при старт: освобождава изгубените чакални и
 // невъзстановените игри, пази възстановените (с участията на активните
