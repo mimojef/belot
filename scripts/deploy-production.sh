@@ -123,6 +123,26 @@ classify_path() {
       # ops/pikabg-backup/README.md), никога от deploy-а. Drop-in пътища
       # (*.timer.d/*.conf) НЕ са тук -> остават "unclassified" -> STOP.
       echo "non-runtime" ;;
+    ops/deploy-migration-backup-retention/prune-deploy-migration-backups.mjs|ops/deploy-migration-backup-retention/check-prune-deploy-migration-backups.mjs|ops/deploy-migration-backup-retention/systemd/pikabg-deploy-backup-retention.service|ops/deploy-migration-backup-retention/systemd/pikabg-deploy-backup-retention.timer)
+      # T2: почистване на snapshot-ите преди миграции (README в същата папка).
+      # Не е build вход (root tsconfig include=src, server include=src/**/*.ts,
+      # нищо в src/ или server/src/ не го импортира); worker-ите не го пускат и
+      # не инсталират unit-ите. Таймерът се инсталира/активира РЪЧНО на VPS и
+      # чете скрипта директно от checkout-а — новата версия важи от git
+      # обновяването на checkout-а, без build/рестарт. Drop-in-и и други имена
+      # остават "unclassified" -> STOP.
+      echo "non-runtime" ;;
+    ops/voice-livekit-it/run.mjs|ops/voice-livekit-it/package.json|ops/voice-livekit-it/package-lock.json|ops/voice-livekit-it/.gitignore)
+      # Самостоятелни интеграционни тестове срещу реален LiveKit (пускат се
+      # ръчно, извън production). Собствен package.json: root/server нямат
+      # npm workspaces, затова `npm ci` в root и server/ не го инсталира; не е
+      # build вход и не се импортира от src/ или server/src/.
+      echo "non-runtime" ;;
+    ops/voice-metrics-caddy/Caddyfile.snippet|ops/voice-metrics-caddy/caddy-http-server.json|ops/voice-metrics-caddy/caddy-yaml-block.yaml)
+      # Референтна Caddy конфигурация за ГЛАСОВИЯ VPS (прилага се ръчно там).
+      # Игровият deploy не я чете и не я прилага; в src/ и server/src/ има
+      # само текстови препратки (коментар/админ текст), не импорти.
+      echo "non-runtime" ;;
     temp/*.png)
       # Дизайн source изображения (напр. 3574009 — 27 PNG икони, mobile
       # redesign art). Проверено: temp/ НЕ е build/runtime вход — frontend

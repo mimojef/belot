@@ -284,7 +284,9 @@ check('[6h] Контролерът вика двата git diff-а с core.quote
   const src = deployScriptSource.replace(/\r\n/g, '\n')
   assert(src.includes('git -c core.quotePath=false diff --name-only "$from_sha" "$TARGET_SHA"'), 'delta diff-ът не е с core.quotePath=false')
   assert(src.includes('git -c core.quotePath=false diff --name-status "$BACKEND_SHA" "$TARGET_SHA" -- "server/database/migrations/"'), 'migration diff-ът не е с core.quotePath=false')
-  const quoted = execFileSync('git', ['diff', '--name-only', `${ICONS_COMMIT_REF}^`, ICONS_COMMIT_REF], { cwd: repoRoot, encoding: 'utf8' })
+  // Изрично core.quotePath=true (git default-ът, т.е. production без флага) —
+  // иначе глобален core.quotepath=false на машината на разработчика скрива ефекта.
+  const quoted = execFileSync('git', ['-c', 'core.quotePath=true', 'diff', '--name-only', `${ICONS_COMMIT_REF}^`, ICONS_COMMIT_REF], { cwd: repoRoot, encoding: 'utf8' })
     .split('\n').filter((l) => l.startsWith('"'))
   assert(quoted.length === 1, `очаквах точно 1 quote-нат path без флага (кирилското име), получих ${quoted.length}`)
   assert(classifyPaths(quoted).get(quoted[0]!) === 'unclassified', 'quote-натият path би трябвало да е unclassified (доказва нуждата от флага)')
@@ -391,6 +393,99 @@ check('[7f] Текущите (некоммитнати) промени спря�
   const classified = classifyPaths(delta)
   const unclassified = delta.filter((p) => classified.get(p) === 'unclassified')
   assert(unclassified.length === 0, `${unclassified.length} unclassified path(и): ${unclassified.join(', ')}`)
+})
+
+// ─── [8] Гласов чат: ops/ инструменти (T2, LiveKit IT, Caddy метрики) ──────
+// Smart Deploy спря при b4ab687 с точно тези 11 unclassified файла. Всички са
+// non-runtime: не са build вход, worker-ите не ги пускат/инсталират.
+const VOICE_OPS_NON_RUNTIME = [
+  'ops/deploy-migration-backup-retention/check-prune-deploy-migration-backups.mjs',
+  'ops/deploy-migration-backup-retention/prune-deploy-migration-backups.mjs',
+  'ops/deploy-migration-backup-retention/systemd/pikabg-deploy-backup-retention.service',
+  'ops/deploy-migration-backup-retention/systemd/pikabg-deploy-backup-retention.timer',
+  'ops/voice-livekit-it/.gitignore',
+  'ops/voice-livekit-it/package-lock.json',
+  'ops/voice-livekit-it/package.json',
+  'ops/voice-livekit-it/run.mjs',
+  'ops/voice-metrics-caddy/Caddyfile.snippet',
+  'ops/voice-metrics-caddy/caddy-http-server.json',
+  'ops/voice-metrics-caddy/caddy-yaml-block.yaml',
+]
+const VOICE_OPS_DIRS = ['ops/deploy-migration-backup-retention', 'ops/voice-livekit-it', 'ops/voice-metrics-caddy', 'ops/voice-production-env']
+const VOICE_DEPLOY_TARGET_REF = 'b4ab687'
+
+check('[8a] 11-те файла от STOP-а при b4ab687 класифицират като "non-runtime"', () => {
+  const classified = classifyPaths(VOICE_OPS_NON_RUNTIME)
+  for (const p of VOICE_OPS_NON_RUNTIME) {
+    assert(classified.get(p) === 'non-runtime', `${p} -> ${classified.get(p)}, очаквах "non-runtime"`)
+  }
+})
+
+check('[8b] Сходни/нови имена под същите папки остават "unclassified" (точен списък, не wildcard)', () => {
+  const paths = [
+    'ops/deploy-migration-backup-retention/systemd/pikabg-deploy-backup-retention.timer.d/override.conf',
+    'ops/deploy-migration-backup-retention/systemd/pikabg-deploy-backup-retention.service.d/override.conf',
+    'ops/deploy-migration-backup-retention/systemd/other.timer',
+    'ops/deploy-migration-backup-retention/prune-deploy-migration-backups.mjs.bak',
+    'ops/deploy-migration-backup-retention/new-tool.sh',
+    'ops/voice-livekit-it/results/run-1.json',
+    'ops/voice-livekit-it/node_modules/livekit-server-sdk/index.js',
+    'ops/voice-livekit-it/other.mjs',
+    'ops/voice-livekit-it/.env',
+    'ops/voice-metrics-caddy/Caddyfile',
+    'ops/voice-metrics-caddy/other.yaml',
+    'ops/voice-production-env/server.env',
+    'ops/voice-production-env/install.sh',
+    'ops/voice-new-tool/run.mjs',
+  ]
+  const classified = classifyPaths(paths)
+  for (const p of paths) {
+    assert(classified.get(p) === 'unclassified', `${p} -> ${classified.get(p)}, очаквах "unclassified"`)
+  }
+})
+
+check('[8c] Всеки tracked файл в гласовите ops/ папки е "non-runtime" (README.md по общия *.md шаблон)', () => {
+  const tracked = execFileSync('git', ['-c', 'core.quotePath=false', 'ls-files', '--', ...VOICE_OPS_DIRS], { cwd: repoRoot, encoding: 'utf8' })
+    .split('\n').filter((line) => line.length > 0)
+  assert(tracked.length === 15, `очаквах 15 tracked файла (11 + 4 README.md), намерих ${tracked.length}: ${tracked.join(', ')}`)
+  const classified = classifyPaths(tracked)
+  const wrong = tracked.filter((p) => classified.get(p) !== 'non-runtime')
+  assert(wrong.length === 0, `не са "non-runtime": ${wrong.map((p) => `${p} -> ${classified.get(p)}`).join(', ')}`)
+})
+
+check('[8d] Не са build вход: без npm workspaces, tsconfig include само src, без импорти от ops/ в src/ и server/src/', () => {
+  for (const pkg of ['package.json', 'server/package.json']) {
+    assert(!('workspaces' in JSON.parse(readRepoFile(pkg))), `${pkg} има workspaces`)
+  }
+  assert(/"include":\s*\["src"\]/.test(readRepoFile('tsconfig.json')), 'root tsconfig include')
+  assert(/"include":\s*\["src\/\*\*\/\*\.ts"\]/.test(readRepoFile('server/tsconfig.json')), 'server tsconfig include')
+  assert(!/ops\//.test(readRepoFile('vite.config.ts')), 'vite.config.ts реферира ops/')
+  let importsFromOps = ''
+  try {
+    importsFromOps = execFileSync('git', ['grep', '-nE', `(from|import\\()\\s*['"][^'"]*ops/`, VOICE_DEPLOY_TARGET_REF, '--', 'src', 'server/src'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+  } catch (error) {
+    // git grep: изход 1 = няма съвпадения (очакваното); друго е истинска грешка.
+    if ((error as { status?: number }).status !== 1) throw error
+  }
+  assert(importsFromOps.length === 0, `импорти от ops/: ${importsFromOps}`)
+})
+
+// fdb8697 = родителят на 7fa9fa9 (добавя ops/voice-livekit-it/). Delta-та
+// fdb8697..b4ab687 съдържа точно 11-те файла от STOP-а — production marker-ите
+// са на или преди fdb8697. Закрепено към b4ab687 (по-късни commit-и не го чупят).
+const VOICE_PRE_TOOLING_REF = 'fdb8697'
+
+check(`[8e] Delta ${VOICE_PRE_TOOLING_REF}..${VOICE_DEPLOY_TARGET_REF}: 0 "unclassified", съдържа 11-те файла, frontend + backend impact -> решение FULL`, () => {
+  const delta = gitDiffNameOnly(VOICE_PRE_TOOLING_REF, VOICE_DEPLOY_TARGET_REF)
+  const classified = classifyPaths(delta)
+  const unclassified = delta.filter((p) => classified.get(p) === 'unclassified')
+  assert(unclassified.length === 0, `${unclassified.length} unclassified path(и): ${unclassified.join(', ')}`)
+  const opsNonMd = delta.filter((p) => p.startsWith('ops/') && !p.endsWith('.md')).sort()
+  assert(opsNonMd.join('|') === [...VOICE_OPS_NON_RUNTIME].sort().join('|'), `ops/ файлове в delta-та: ${opsNonMd.join(', ')}`)
+  const frontendImpact = delta.some((p) => classified.get(p) === 'frontend')
+  const backendImpact = delta.some((p) => classified.get(p) === 'backend' || classified.get(p) === 'migration')
+  assert(frontendImpact && backendImpact, `frontend=${frontendImpact} backend=${backendImpact}`)
+  assert(delta.includes('src/app/lobby/publicLegalPages.ts') && delta.includes('server/src/voice/voiceRetentionSweeper.ts'), 'правните текстове и T1 са в delta-та')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)
