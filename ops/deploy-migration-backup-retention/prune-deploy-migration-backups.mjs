@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Pika.bg — T2: срок от 90 дни за автоматичните snapshot-и преди миграции,
+// Pika.bg — T2: срок от 7 дни за автоматичните snapshot-и преди миграции,
 // създадени от scripts/deploy-backend-production.sh в
 //   /var/www/belot-v2/server/database/backups/backend-deploy-migration/<ID>/
 // където <ID> = <UTC YYYYMMDDHHMMSS>-<git short sha>, а директорията съдържа
@@ -13,15 +13,17 @@
 //     се ПРОПУСКА и само се отчита.
 //   * Възрастта е по времето в ИМЕТО (UTC), не по mtime. Име в бъдещето ->
 //     пропуска се.
-//   * Най-новото УСПЕШНО копие (и двата файла, валиден SHA256 ред, непразна
-//     база) е ЗАЩИТЕНО независимо от възрастта.
+//   * Последните ДВЕ УСПЕШНИ копия (и двата файла, валиден SHA256 ред,
+//     непразна база) са ЗАЩИТЕНИ независимо от възрастта. Недовършените и
+//     пропуснатите не се броят за успешни.
+//   * Срокът не може да е под 7 дни (MIN_RETENTION_DAYS).
 //   * Изтриване: двата известни файла поотделно + rmdir (НЕ рекурсивно) —
 //     ако междувременно се появи друг файл, rmdir отказва и нищо друго не се
 //     губи.
 //   * Ежечасните backup-и (ops/pikabg-backup) са в други директории и не се
 //     докосват — скриптът работи само в посочения корен.
 //
-//   node prune-deploy-migration-backups.mjs [--root <dir>] [--retention-days 90] [--apply] [--json]
+//   node prune-deploy-migration-backups.mjs [--root <dir>] [--retention-days 7] [--apply] [--json]
 //
 // Изход: 0 — успех (вкл. dry-run); 1 — грешка при изтриване; 2 — грешни аргументи / корен.
 
@@ -30,8 +32,10 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export const DEFAULT_ROOT = '/var/www/belot-v2/server/database/backups/backend-deploy-migration'
-export const DEFAULT_RETENTION_DAYS = 90
-export const MIN_RETENTION_DAYS = 30
+export const DEFAULT_RETENTION_DAYS = 7
+export const MIN_RETENTION_DAYS = 7
+/** Колко от най-новите успешни копия са защитени независимо от възрастта. */
+export const PROTECTED_LATEST_COUNT = 2
 export const DB_FILE = 'belot-v2.sqlite'
 export const SHA_FILE = 'belot-v2.sqlite.sha256'
 const ID_PATTERN = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})-([0-9a-f]{4,40})$/
@@ -82,15 +86,17 @@ export async function scanBackups(root, nowMs) {
 
 /** Решение какво се изтрива (чиста функция). */
 export function planPrune(items, retentionDays) {
-  const successful = items.filter((item) => item.kind === 'automatic').sort((a, b) => b.createdMs - a.createdMs)
-  const protectedName = successful[0]?.name ?? null
+  const successful = items
+    .filter((item) => item.kind === 'automatic')
+    .sort((a, b) => b.createdMs - a.createdMs || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
+  const protectedNames = successful.slice(0, PROTECTED_LATEST_COUNT).map((item) => item.name)
   const plan = items.map((item) => {
     if (item.kind !== 'automatic') return { ...item, action: 'keep', why: item.kind === 'incomplete' ? `incomplete:${item.reason}` : `skipped:${item.reason}` }
-    if (item.name === protectedName) return { ...item, action: 'keep', why: 'latest_successful' }
+    if (protectedNames.includes(item.name)) return { ...item, action: 'keep', why: `latest_${PROTECTED_LATEST_COUNT}_successful` }
     if (item.ageDays > retentionDays) return { ...item, action: 'delete', why: `older_than_${retentionDays}_days` }
     return { ...item, action: 'keep', why: 'within_retention' }
   })
-  return { protectedName, plan }
+  return { protectedNames, plan }
 }
 
 async function deleteBackup(root, name) {
@@ -108,10 +114,13 @@ async function deleteBackup(root, name) {
 export async function run({ root = DEFAULT_ROOT, retentionDays = DEFAULT_RETENTION_DAYS, apply = false, nowMs = Date.now(), log = console.log } = {}) {
   const absoluteRoot = resolve(root)
   const rootInfo = await lstat(absoluteRoot).catch(() => null)
-  if (rootInfo === null) return { exitCode: 0, mode: apply ? 'apply' : 'dry-run', root: absoluteRoot, note: 'root_missing', plan: [], deleted: [], errors: [] }
+  if (!Number.isInteger(retentionDays) || retentionDays < MIN_RETENTION_DAYS) {
+    throw Object.assign(new Error(`retentionDays трябва да е цяло число >= ${MIN_RETENTION_DAYS}`), { exitCode: 2 })
+  }
+  if (rootInfo === null) return { exitCode: 0, mode: apply ? 'apply' : 'dry-run', root: absoluteRoot, note: 'root_missing', protectedNames: [], plan: [], deleted: [], wouldDelete: [], errors: [] }
   if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw Object.assign(new Error(`коренът не е обикновена директория: ${absoluteRoot}`), { exitCode: 2 })
   const items = await scanBackups(absoluteRoot, nowMs)
-  const { protectedName, plan } = planPrune(items, retentionDays)
+  const { protectedNames, plan } = planPrune(items, retentionDays)
   const deleted = []
   const errors = []
   for (const item of plan) {
@@ -127,9 +136,9 @@ export async function run({ root = DEFAULT_ROOT, retentionDays = DEFAULT_RETENTI
     }
   }
   const wouldDelete = plan.filter((item) => item.action === 'delete').map((item) => item.name)
-  log(`mode=${apply ? 'apply' : 'dry-run'} root=${absoluteRoot} retentionDays=${retentionDays} protected=${protectedName ?? '(none)'} ` +
+  log(`mode=${apply ? 'apply' : 'dry-run'} root=${absoluteRoot} retentionDays=${retentionDays} protected=${protectedNames.length > 0 ? protectedNames.join(',') : '(none)'} ` +
     `${apply ? `deleted=${deleted.length}` : `wouldDelete=${wouldDelete.length}`} kept=${plan.length - wouldDelete.length} errors=${errors.length}`)
-  return { exitCode: errors.length > 0 ? 1 : 0, mode: apply ? 'apply' : 'dry-run', root: absoluteRoot, protectedName, plan, deleted, wouldDelete, errors }
+  return { exitCode: errors.length > 0 ? 1 : 0, mode: apply ? 'apply' : 'dry-run', root: absoluteRoot, protectedNames, plan, deleted, wouldDelete, errors }
 }
 
 function parseArgs(argv) {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily 90-day retention for pre-migration deploy DB snapshots (T2)
+Description=Daily 7-day retention (latest 2 always kept) for pre-migration deploy DB snapshots (T2)
 
 [Timer]
 OnCalendar=*-*-* 04:10:00

@@ -5,11 +5,11 @@
 //   node ops/deploy-migration-backup-retention/check-prune-deploy-migration-backups.mjs
 
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseBackupId, planPrune, run, scanBackups } from './prune-deploy-migration-backups.mjs'
+import { DEFAULT_RETENTION_DAYS, MIN_RETENTION_DAYS, PROTECTED_LATEST_COUNT, parseBackupId, planPrune, run, scanBackups } from './prune-deploy-migration-backups.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 let passed = 0
@@ -31,6 +31,7 @@ function assert(condition, message) {
 const NOW = Date.UTC(2026, 10, 13, 12, 0, 0)
 const DAY = 24 * 60 * 60 * 1000
 const SHA = 'a'.repeat(64)
+const MISSING_ROOT = join(tmpdir(), 'pika-t2-does-not-exist-xyz')
 
 function idFor(daysAgo, sha = 'abc1234') {
   const d = new Date(NOW - daysAgo * DAY)
@@ -57,7 +58,8 @@ async function fixture() {
   const names = {
     old200: await makeBackup(root, idFor(200, 'aaaa111')),
     old100: await makeBackup(root, idFor(100, 'bbbb222')),
-    recent10: await makeBackup(root, idFor(10, 'cccc333')),
+    old10: await makeBackup(root, idFor(10, 'cccc333')),
+    recent5: await makeBackup(root, idFor(5, 'c5c5c5c')),
     newest2: await makeBackup(root, idFor(2, 'dddd444')),
     manual: await makeBackup(root, 'manual-before-upgrade'),
     withExtra: await makeBackup(root, idFor(150, 'eeee555'), { extra: 'NOTES.txt' }),
@@ -70,6 +72,10 @@ async function fixture() {
 }
 
 console.log('\ncheck-prune-deploy-migration-backups\n')
+
+await check('[P0] Политика: 7 дни по подразбиране, минимум 7, защитени са последните 2 успешни', () => {
+  assert(DEFAULT_RETENTION_DAYS === 7 && MIN_RETENTION_DAYS === 7 && PROTECTED_LATEST_COUNT === 2, `${DEFAULT_RETENTION_DAYS}/${MIN_RETENTION_DAYS}/${PROTECTED_LATEST_COUNT}`)
+})
 
 await check('[P1] Име: само <UTC YYYYMMDDHHMMSS>-<sha>; невалидни дати се отхвърлят', () => {
   assert(parseBackupId('20261113120000-abc1234') === Date.UTC(2026, 10, 13, 12, 0, 0), 'валидно')
@@ -85,65 +91,79 @@ await check('[P2] DRY-RUN по подразбиране: нищо не се из
     const lines = []
     const result = await run({ root, nowMs: NOW, log: (line) => lines.push(line) })
     assert(result.mode === 'dry-run', 'режим')
-    assert(result.wouldDelete.sort().join(',') === [names.old100, names.old200].sort().join(','), `кандидати: ${result.wouldDelete.join(',')}`)
+    assert(result.wouldDelete.sort().join(',') === [names.old10, names.old100, names.old200].sort().join(','), `кандидати: ${result.wouldDelete.join(',')}`)
     const after = (await readdir(root)).sort()
-    assert(after.includes(names.old200) && after.includes(names.old100), 'файловете са непокътнати')
+    assert([names.old200, names.old100, names.old10].every((name) => after.includes(name)), 'файловете са непокътнати')
     assert(lines.some((line) => line.startsWith('WOULD-DELETE')), 'WOULD-DELETE редове')
+    assert(lines.some((line) => line.includes(`protected=${names.newest2},${names.recent5}`)), 'обобщението показва двете защитени')
   } finally {
     await rm(base, { recursive: true, force: true })
   }
 })
 
-await check('[P3] --apply: изтрива само успешните автоматични копия >90 дни; ръчни, с допълнителни файлове, недовършени, невалиден SHA, бъдещи и файлове в корена остават; ежечасните не се докосват', async () => {
+await check('[P3] --apply: изтрива само успешните автоматични копия >7 дни извън последните 2; ръчни, с допълнителни файлове, недовършени, невалиден SHA, бъдещи и файлове в корена остават; ежечасните не се докосват', async () => {
   const { base, root, hourly, names } = await fixture()
   try {
     const result = await run({ root, nowMs: NOW, apply: true, log: () => {} })
     assert(result.exitCode === 0 && result.errors.length === 0, 'без грешки')
-    assert(result.deleted.sort().join(',') === [names.old100, names.old200].sort().join(','), `изтрити: ${result.deleted.join(',')}`)
+    assert(result.deleted.sort().join(',') === [names.old10, names.old100, names.old200].sort().join(','), `изтрити: ${result.deleted.join(',')}`)
     const after = (await readdir(root)).sort()
-    for (const keep of [names.recent10, names.newest2, names.manual, names.withExtra, names.incomplete, names.badSha, names.future, 'README-manual.txt']) {
+    for (const keep of [names.recent5, names.newest2, names.manual, names.withExtra, names.incomplete, names.badSha, names.future, 'README-manual.txt']) {
       assert(after.includes(keep), `остава ${keep}`)
     }
-    assert(!after.includes(names.old200) && !after.includes(names.old100), 'старите са изтрити')
+    assert(!after.includes(names.old200) && !after.includes(names.old100) && !after.includes(names.old10), 'старите са изтрити')
     assert((await readdir(hourly)).length === 1, 'ежечасните backup-и са непокътнати')
-    assert(result.protectedName === names.newest2, 'защитено е най-новото успешно')
+    assert(result.protectedNames.join(',') === [names.newest2, names.recent5].join(','), `защитени: ${result.protectedNames.join(',')}`)
   } finally {
     await rm(base, { recursive: true, force: true })
   }
 })
 
-await check('[P4] Защита на последното успешно копие: ако всички са >90 дни, най-новото успешно остава (невалидните не се броят за успешни)', async () => {
+await check('[P4] Защита на последните 2 успешни: ако всички са >7 дни, двете най-нови успешни остават (недовършените и невалидните не се броят)', async () => {
   const base = await mkdtemp(join(tmpdir(), 'pika-t2-'))
   const root = join(base, 'root')
   await mkdir(root)
   try {
     const a = await makeBackup(root, idFor(300, 'aaaa111'))
     const b = await makeBackup(root, idFor(200, 'bbbb222'))
-    const badNewest = await makeBackup(root, idFor(150, 'cccc333'), { sha: 'nope' })
+    const c = await makeBackup(root, idFor(20, 'cccc333'))
+    const badNewer = await makeBackup(root, idFor(15, 'dddd444'), { sha: 'nope' })
+    const incompleteNewest = await makeBackup(root, idFor(10, 'eeee555'), { skipSha: true })
+    const emptyDb = await makeBackup(root, idFor(9, 'ffff666'), { db: '' })
     const result = await run({ root, nowMs: NOW, apply: true, log: () => {} })
-    assert(result.protectedName === b, `защитено: ${result.protectedName}`)
+    assert(result.protectedNames.join(',') === [c, b].join(','), `защитени: ${result.protectedNames.join(',')}`)
     const after = (await readdir(root)).sort()
-    assert(after.includes(b), 'най-новото успешно остава')
-    assert(!after.includes(a), 'по-старото успешно е изтрито')
-    assert(after.includes(badNewest), 'невалидното не се трие и не се брои за успешно')
+    assert(after.includes(c) && after.includes(b), 'двете най-нови успешни остават, макар и >7 дни')
+    assert(!after.includes(a), 'третото успешно (>7 дни) е изтрито')
+    assert([badNewer, incompleteNewest, emptyDb].every((name) => after.includes(name)), 'невалидните/недовършените не се трият и не се броят за успешни')
   } finally {
     await rm(base, { recursive: true, force: true })
   }
 })
 
-await check('[P5] Чиста функция planPrune: граница 90 дни, keep/delete причини', () => {
+await check('[P5] Чиста функция planPrune: граница 7 дни, защита на 2, keep/delete причини', () => {
+  const at = (days) => ({ createdMs: NOW - days * DAY, ageDays: days })
   const items = [
-    { name: 'n1', kind: 'automatic', createdMs: NOW - 91 * DAY, ageDays: 91 },
-    { name: 'n2', kind: 'automatic', createdMs: NOW - 89 * DAY, ageDays: 89 },
-    { name: 'n3', kind: 'automatic', createdMs: NOW - 1 * DAY, ageDays: 1 },
+    { name: 'd8', kind: 'automatic', ...at(8) },
+    { name: 'e7', kind: 'automatic', ...at(7) },
+    { name: 'k6', kind: 'automatic', ...at(6.9) },
+    { name: 'p3', kind: 'automatic', ...at(3) },
+    { name: 'p1', kind: 'automatic', ...at(1) },
+    { name: 'i0', kind: 'incomplete', reason: 'missing_files', ...at(0.5) },
     { name: 'x', kind: 'skipped', reason: 'not_a_deploy_backup_name' },
   ]
-  const { protectedName, plan } = planPrune(items, 90)
-  assert(protectedName === 'n3', 'защитено')
+  const { protectedNames, plan } = planPrune(items, 7)
+  assert(protectedNames.join(',') === 'p1,p3', `защитени: ${protectedNames.join(',')}`)
   const byName = Object.fromEntries(plan.map((item) => [item.name, item]))
-  assert(byName.n1.action === 'delete', '91 дни -> delete')
-  assert(byName.n2.action === 'keep' && byName.n2.why === 'within_retention', '89 дни -> keep')
-  assert(byName.x.action === 'keep', 'пропуснатите остават')
+  assert(byName.d8.action === 'delete' && byName.d8.why === 'older_than_7_days', '8 дни -> delete')
+  assert(byName.e7.action === 'keep' && byName.e7.why === 'within_retention', 'точно 7 дни -> keep')
+  assert(byName.k6.action === 'keep' && byName.k6.why === 'within_retention', '6.9 дни -> keep')
+  assert(byName.p1.why === 'latest_2_successful' && byName.p3.why === 'latest_2_successful', 'причина за защитата')
+  assert(byName.i0.action === 'keep' && byName.x.action === 'keep', 'недовършените и пропуснатите остават')
+  const single = planPrune([{ name: 'only', kind: 'automatic', ...at(400) }], 7)
+  assert(single.protectedNames.join(',') === 'only' && single.plan[0].action === 'keep', 'единственото успешно копие остава')
+  const none = planPrune([{ name: 'i', kind: 'incomplete', reason: 'missing_files', ...at(400) }], 7)
+  assert(none.protectedNames.length === 0 && none.plan.every((item) => item.action === 'keep'), 'без успешни копия нищо не се трие')
 })
 
 await check('[P6] Symlink към директория се пропуска (не се следва)', async () => {
@@ -154,6 +174,7 @@ await check('[P6] Symlink към директория се пропуска (н�
   try {
     await makeBackup(base, 'outside')
     await makeBackup(root, idFor(2, 'dddd444'))
+    await makeBackup(root, idFor(1, 'dddd555'))
     let created = true
     try {
       await symlink(outside, join(root, idFor(200, 'aaaa111')), 'junction')
@@ -174,7 +195,7 @@ await check('[P6] Symlink към директория се пропуска (н�
   }
 })
 
-await check('[P7] CLI: --retention-days < 30 и непознат аргумент -> изход 2; липсващ корен -> 0 без действия', async () => {
+await check('[P7] CLI/API: срок < 7 и непознат аргумент -> изход 2; 7 се приема; липсващ корен -> 0 без действия', async () => {
   const script = join(here, 'prune-deploy-migration-backups.mjs')
   const code = (args) => {
     try {
@@ -184,9 +205,29 @@ await check('[P7] CLI: --retention-days < 30 и непознат аргумен�
       return error.status
     }
   }
-  assert(code(['--retention-days', '7', '--root', tmpdir()]) === 2, 'кратък срок')
+  assert(code(['--retention-days', '6', '--root', tmpdir()]) === 2, 'кратък срок')
+  assert(code(['--retention-days', '7', '--root', MISSING_ROOT]) === 0, '7 дни се приемат')
   assert(code(['--bogus']) === 2, 'непознат аргумент')
-  assert(code(['--root', join(tmpdir(), 'pika-t2-does-not-exist-xyz')]) === 0, 'липсващ корен')
+  assert(code(['--root', MISSING_ROOT]) === 0, 'липсващ корен')
+  let apiError = null
+  try {
+    await run({ root: MISSING_ROOT, retentionDays: 3, log: () => {} })
+  } catch (error) {
+    apiError = error
+  }
+  assert(apiError?.exitCode === 2, 'run() отказва срок < 7')
+})
+
+await check('[P8] systemd: веднъж дневно (Persistent), --apply със срока по подразбиране (без --retention-days/--root)', async () => {
+  const service = await readFile(join(here, 'systemd', 'pikabg-deploy-backup-retention.service'), 'utf8')
+  const timer = await readFile(join(here, 'systemd', 'pikabg-deploy-backup-retention.timer'), 'utf8')
+  const exec = /^ExecStart=(.+)$/m.exec(service)?.[1]?.trim() ?? ''
+  assert(exec.endsWith('prune-deploy-migration-backups.mjs --apply'), `ExecStart: ${exec}`)
+  assert(!/--retention-days|--root/.test(service), 'без override на срока или корена')
+  const calendars = timer.match(/^OnCalendar=.*$/gm) ?? []
+  assert(calendars.length === 1 && /^OnCalendar=\*-\*-\* \d{2}:\d{2}:\d{2}\s*$/.test(calendars[0]), `един дневен OnCalendar: ${calendars.join(' | ')}`)
+  assert(/^Persistent=true\s*$/m.test(timer), 'Persistent=true')
+  assert(!/90/.test(service + timer), 'без стария срок 90 дни')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)
