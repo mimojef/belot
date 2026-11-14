@@ -9507,6 +9507,9 @@ client = createGameServerClient({
     }
 
     if (message.type === 'private_room_created_notice') {
+      // Едно Белот участие: по време на търсене на случайна маса известието
+      // (с бутон „Влез“) не се показва — първо се прекратява търсенето.
+      if (lobby.isSearchingMatchmaking()) return
       privateRoomCreatedNotification.handleIncoming({
         notificationId: message.notificationId,
         creatorDisplayName: message.creatorDisplayName,
@@ -9703,6 +9706,12 @@ client = createGameServerClient({
     if (activeRoom.handleServerMessage(message)) {
       requestPwaUpdateApplyAttempt()
       return
+    }
+
+    // Едно Белот участие: мястото на чакаща частна маса е освободено, докато
+    // сме в активна игра — лобито само забравя членството (без render).
+    if (message.type === 'private_room_left' && activeRoom.hasActiveRoom()) {
+      lobby.forgetPrivateRoomMembership(message.privateRoomId)
     }
 
     if (!activeRoom.hasActiveRoom() && !_isStandaloneDedicatedPath) {

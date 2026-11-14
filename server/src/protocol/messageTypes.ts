@@ -915,6 +915,15 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_partner_level_required'
   // Резервацията/масата вече не съществува (остаряло действие от известието).
   | 'private_room_partner_reservation_missing'
+  // Едно Белот участие: профилът вече е в активен мач / на чакаща частна маса /
+  // в опашката за случайна маса. Ръчен старт: член вече е в друг активен мач
+  // (мястото му е освободено, масата не стартира).
+  | 'belot_active_match_conflict'
+  | 'belot_private_seat_conflict'
+  | 'belot_matchmaking_conflict'
+  // Още е прикрепен към приключил мач с възможност за „Преиграй“.
+  | 'belot_finished_match_conflict'
+  | 'private_room_member_in_active_game'
   // Гласов чат (Етап 2б) — масата НЕ е създадена; клиентът пита изрично дали
   // да я създаде без гласов чат (никога автоматично).
   | 'voice_chat_off'

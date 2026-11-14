@@ -5,7 +5,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHmac, randomUUID } from 'node:crypto'
-import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -58,11 +58,19 @@ const freePort = () => new Promise<number>((done, failPort) => {
 
 const projectRoot = process.cwd()
 
-async function createIsolatedServerRoot() {
+async function createIsolatedServerRoot(patches: ServerSourcePatch[] = []) {
   const root = await mkdtemp(join(tmpdir(), 'belot-gift-back-'))
   const serverDir = join(root, 'server')
   await mkdir(serverDir, { recursive: true })
   await cp(join(projectRoot, 'server', 'src'), join(serverDir, 'src'), { recursive: true, preserveTimestamps: true })
+  // Fault injection само в изолираното копие (реалният server/src не се пипа).
+  for (const patch of patches) {
+    const file = join(serverDir, 'src', patch.file)
+    const code = await readFile(file, 'utf8')
+    const occurrences = code.split(patch.find).length - 1
+    if (occurrences !== 1) throw new Error(`patch ${patch.file}: expected exactly 1 match, got ${occurrences}`)
+    await writeFile(file, code.replace(patch.find, patch.replace), 'utf8')
+  }
   await cp(join(projectRoot, 'server', 'dist'), join(serverDir, 'dist'), { recursive: true, preserveTimestamps: true })
   await mkdir(join(serverDir, 'database', 'data'), { recursive: true })
   await cp(join(projectRoot, 'server', 'database', 'migrations'), join(serverDir, 'database', 'migrations'), { recursive: true, preserveTimestamps: true })
@@ -131,13 +139,17 @@ export type GiftBackHarness = {
   close: () => Promise<void>
 }
 
+export type ServerSourcePatch = { file: string; find: string; replace: string }
+
 export type GiftBackHarnessOptions = {
   /** Допълнителни Vite plugins (напр. тестова подмяна на модул). */
   vitePlugins?: PluginOption[]
+  /** Fault injection в ИЗОЛИРАНОТО копие на server/src (точно едно съвпадение). */
+  patchServerSource?: ServerSourcePatch[]
 }
 
 export async function startGiftBackHarness(options: GiftBackHarnessOptions = {}): Promise<GiftBackHarness> {
-  const isolated = await createIsolatedServerRoot()
+  const isolated = await createIsolatedServerRoot(options.patchServerSource)
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const browser = await chromium.launch({ headless: true })
   const backendPort = await freePort()

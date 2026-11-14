@@ -1653,6 +1653,10 @@ export type LobbyFlowController = {
   forceTopicMessagesResubscribeIfOnTopicsScreen: () => void
   forceTopicsDirectoryResubscribeIfOnTopicsScreen: () => void
   resyncPrivateRoomMembership: () => void
+  /** Сървърът освободи мястото на частната маса по време на активна игра (без render). */
+  forgetPrivateRoomMembership: (privateRoomId: string) => void
+  /** Търси случайна маса — известието за нова частна маса не се показва. */
+  isSearchingMatchmaking: () => boolean
   /**
    * Тихо възстановяване на WS (без reload): заявява авторитетното състояние
    * на частните маси по новата връзка и вика done(true), когато е получено и
@@ -24549,6 +24553,21 @@ export function createLobbyFlowController(
     state.privateRoomPartnerNoticeBusy = false
   }
 
+  // Едно Белот участие: сървърът освободи мястото на чакаща частна маса,
+  // докато сме в активна игра (лобито е скрито и не получава съобщенията си).
+  // Само забравя членството — без render; лобито се рисува наново при връщане.
+  function forgetPrivateRoomMembership(privateRoomId: string): void {
+    if (state.myPrivateRoom?.id === privateRoomId) {
+      leavePrivateRoomWaitingScreen()
+      state.myPrivateRoom = null
+      state.privateRoomInvitedProfileIds = new Set()
+    }
+    if (state.previewedPrivateRoomId === privateRoomId) state.previewedPrivateRoomId = null
+    if (state.currentScreen === 'private-room-waiting' && state.myPrivateRoom === null && state.previewedPrivateRoomId === null) {
+      state.currentScreen = 'lobby'
+    }
+  }
+
   // Reopens the SAME waiting room the user is already a member of — no new
   // join_private_room, no dublirano membership. Server-authoritative
   // membership (privateRoomsStore) never changed; this is purely a client
@@ -25204,6 +25223,8 @@ export function createLobbyFlowController(
     forceTopicMessagesResubscribeIfOnTopicsScreen,
     forceTopicsDirectoryResubscribeIfOnTopicsScreen,
     resyncPrivateRoomMembership,
+    forgetPrivateRoomMembership,
+    isSearchingMatchmaking: () => state.isSearching,
     beginReconnectSync,
     markReconnectSyncSessionInGame: () => {
       if (reconnectSync !== null) reconnectSync.sessionInGame = true

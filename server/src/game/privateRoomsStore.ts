@@ -514,6 +514,13 @@ type StoreCallbacks = {
   // напускането (съдържа напусналия). Без тази кука гласовият слот би
   // останал зает.
   onRoomEmptied?: (room: PrivateRoom, leavingOccupant: PrivateRoomHumanOccupant) => void
+  // Едно Белот участие — синхронно, непосредствено преди старт (авто и ръчен):
+  // човешките участници, които вече са в друг активен мач. Тяхното място се
+  // освобождава (leaveRoom), масата НЕ стартира.
+  resolveStartConflicts?: (room: PrivateRoom) => PrivateRoomHumanOccupant[]
+  // Мястото на такъв участник е освободено. roomAfter === null -> масата
+  // остана без хора и е изтрита (onRoomEmptied вече е извикан).
+  onMemberReleasedForConflict?: (roomAfter: PrivateRoom | null, roomBefore: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
 }
 
 type StoreOptions = {
@@ -645,6 +652,9 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
 
     const readiness = evaluateRoomReadiness(room, isBlockedWith)
     if (readiness.ready && !room.manualStart) {
+      // leaveRoom вече е извикал onRoomsChanged.
+      const afterRelease = releaseStartConflicts(room)
+      if (afterRelease !== null) return { room: afterRelease, readyToStart: false }
       detachReadyRoom(room)
       callbacks.onRoomReady(room)
       callbacks.onRoomsChanged()
@@ -655,6 +665,29 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     // readiness отказа, или защото manualStart чака explicit START).
     callbacks.onRoomsChanged()
     return { room, readyToStart: false, readiness }
+  }
+
+  // Едно Белот участие: освобождава местата на участниците, които вече са в
+  // друг активен мач (същият leaveRoom път като доброволно напускане —
+  // orphan-бот, домакин, резервация, известия). null = няма конфликт.
+  // Иначе — масата след освобождаването (или последното ѝ състояние, ако е
+  // останала без хора).
+  function releaseStartConflicts(room: PrivateRoom): PrivateRoom | null {
+    const busy = callbacks.resolveStartConflicts?.(room) ?? []
+    if (busy.length === 0) return null
+    let last: PrivateRoom = room
+    for (const occupant of busy) {
+      const before = rooms.get(room.id)
+      if (before === undefined) break
+      // Мъртва връзка (reload/прекъсване) вече не е в connectionToRoom —
+      // leaveRoom търси по нея.
+      connectionToRoom.set(occupant.connectionId, room.id)
+      const after = leaveRoom(occupant.connectionId)
+      callbacks.onMemberReleasedForConflict?.(after, before, occupant)
+      if (after === null) break
+      last = after
+    }
+    return last
   }
 
   function createRoom(input: CreateRoomInput): CreateRoomResult {
@@ -954,6 +987,16 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
         message: 'Масата не може да стартира в момента.',
         code: 'private_room_not_ready_to_start',
         readiness,
+      }
+    }
+
+    // Едно Белот участие — член вече е в друг активен мач: мястото му се
+    // освобождава, масата не стартира.
+    if (releaseStartConflicts(room) !== null) {
+      return {
+        ok: false,
+        message: 'Играч от масата вече е в друга игра. Мястото му беше освободено.',
+        code: 'private_room_member_in_active_game',
       }
     }
 
