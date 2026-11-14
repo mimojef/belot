@@ -24134,6 +24134,12 @@ export function createLobbyFlowController(
         // from a previous room into a freshly (re)joined one.
         state.privateRoomInfoText = null
       }
+      // "Изпратена" следва авторитетния списък с висящи покани на този играч:
+      // приета, отказана или изтекла покана изчезва оттам -> бутонът отново е
+      // "Покани" без презареждане. Стар сървър без полето -> маркировката остава.
+      if (Array.isArray(message.room.ownPendingInviteProfileIds)) {
+        state.privateRoomInvitedProfileIds = new Set(message.room.ownPendingInviteProfileIds)
+      }
       if (shouldForceWaitingScreen) {
         state.currentScreen = 'private-room-waiting'
       }

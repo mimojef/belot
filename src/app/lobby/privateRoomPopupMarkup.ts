@@ -809,11 +809,11 @@ export function renderPrivateRoomPartnerEligibilityPopup(text: string | null, li
 }
 
 // Eligible = вече изключени: самия viewer, вече седнали в масата хора.
-// "sent" state се пази client-side (виж createLobbyFlowController.ts's
-// privateRoomInvitedProfileIds) — сървърът не излага pendingInvites в
-// PrivateRoomSnapshot, затова UI-ът проследява собствените си изпратени
-// покани оптимистично; сървърът си остава authority срещу реален spam
-// (inviteFriend отхвърля дубликат с 'Вече е изпратена покана до този играч.').
+// "sent" state (createLobbyFlowController.ts's privateRoomInvitedProfileIds):
+// маркира се оптимистично при клик и се заменя от ownPendingInviteProfileIds в
+// snapshot-а към поканилия (само неговите висящи покани) — приета, отказана
+// или изтекла покана връща бутона на "Покани". Сървърът си остава authority
+// срещу spam (inviteFriend отхвърля дубликат с 'Вече е изпратена покана до този играч.').
 export type PrivateRoomInviteEligibleFriend = {
   profileId: string
   displayName: string

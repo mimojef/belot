@@ -14694,6 +14694,8 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
     const minutesLeft = Math.ceil(timeLeft / 60000)
     const isLocked = room.kind === 'locked'
     const isMine = room.id === myRoom?.id
+    // Заключена маса с приета от мен покана (флаг от сървъра само за мен).
+    const isInvitedToLocked = isLocked && !isMine && room.viewerInvited === true
 
     const occupiedCount = room.slots.filter((s) => s.occupant !== null).length
     const hostOccupant = room.slots.map((s) => s.occupant).find((o) => o?.isHost === true) ?? null
@@ -14742,10 +14744,10 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
 
       // Свободен слот. Кликаем "+" само когато: не е собствената ми маса
       // (за own room "+" е чисто визуален — виж §8 от спецификацията) и
-      // масата е "open" (заключените маси пазят старото поведение — никакво
-      // взаимодействие със слот без покана/authorization, сървърът си остава
-      // единствен authority, тук просто не даваме UI да го подканя).
-      if (!isMine && !isLocked) {
+      // масата е "open" или съм поканен в заключената (viewerInvited от
+      // сървъра). Без покана заключената маса остава некликаема; сървърът си
+      // остава единствен authority (joinTeam проверява authorization отново).
+      if (!isMine && (!isLocked || isInvitedToLocked)) {
         return `<button type="button" class="prl-slot-plus" data-private-room-list-slot-join="${room.id}:${team}:${slotIndex}" aria-label="Заеми място в Отбор ${team === 'A' ? 'А' : 'Б'}">+</button>`
       }
       return `<div class="prl-slot-plus">+</div>`
@@ -14777,7 +14779,9 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
               ? `<button type="button" data-private-room-invite-open="1" style="${PRIVATE_ROOMS_LIGHT_SECONDARY_BUTTON_STYLE}height:32px;padding:0 10px;font-size:12px;">+ Покани приятели</button>`
               : ''}
           </div>`
-        : (isLocked
+        : (isInvitedToLocked
+            ? `<div data-private-room-list-invited="${escapeHtml(room.id)}" style="flex:0 0 auto;padding:4px 9px;border:1px solid #ABEFC6;border-radius:999px;background:#ECFDF3;color:#067647;font-size:11.5px;font-weight:800;white-space:nowrap;">Поканен си</div>`
+            : isLocked
             ? `<div style="flex:0 0 auto;padding:4px 9px;border:1px solid #FECDCA;border-radius:999px;background:#FEF3F2;color:#B42318;font-size:11.5px;font-weight:800;white-space:nowrap;">Заключена</div>`
             : '')
 
@@ -14816,7 +14820,9 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
               ">+ Покани приятели</button>`
             : ''}
         </div>`
-      : (isLocked
+      : (isInvitedToLocked
+          ? `<div data-private-room-list-invited="${escapeHtml(room.id)}" style="font-size:12px;color:#4ade80;font-weight:700;padding:5px 12px;border:1px solid rgba(74,222,128,0.35);border-radius:8px;white-space:nowrap;">Поканен си</div>`
+          : isLocked
           ? `<div style="font-size:12px;color:rgba(239,68,68,0.7);font-weight:600;padding:5px 12px;border:1px solid rgba(239,68,68,0.25);border-radius:8px;">Заключена</div>`
           : '')
 

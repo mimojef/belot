@@ -5326,6 +5326,14 @@ function buildPrivateRoomSnapshot(room: PrivateRoom, viewerProfileId: string | n
   return {
     voiceEnabled: room.voiceTableId !== null,
     voiceTableId: viewerIsSeated ? room.voiceTableId : null,
+    viewerInvited: isPrivateRoomViewerInvited(room, viewerProfileId),
+    ...(viewerIsSeated
+      ? {
+          ownPendingInviteProfileIds: room.pendingInvites
+            .filter((invite) => invite.fromProfileId === viewerProfileId)
+            .map((invite) => invite.toProfileId),
+        }
+      : {}),
     id: room.id,
     kind: room.kind,
     stake: room.stake,
@@ -5384,14 +5392,50 @@ function buildPrivateRoomSnapshot(room: PrivateRoom, viewerProfileId: string | n
   }
 }
 
+// "Поканен си": профилът е приел покана за заключената маса (room-lifetime
+// authorization), не е създателят и в момента не седи на нея. Само четене от
+// in-memory състоянието — правото за сядане се проверява отново в joinTeam.
+function isPrivateRoomViewerInvited(room: PrivateRoom, viewerProfileId: string | null): boolean {
+  if (viewerProfileId === null || room.kind !== 'locked') return false
+  if (room.creatorProfileId === viewerProfileId) return false
+  if (!room.authorizedProfileIds.has(viewerProfileId)) return false
+  return !room.slots.some((slot) => slot.occupant?.kind === 'human' && slot.occupant.profileId === viewerProfileId)
+}
+
+// Списъкът е общ за всички; само масите, за които получателят е поканен, се
+// копират с viewerInvited:true. Без поканени маси -> същият общ масив.
+function personalizePrivateRoomsListForViewer(
+  rooms: PrivateRoom[],
+  snapshots: PrivateRoomSnapshot[],
+  viewerProfileId: string | null,
+): PrivateRoomSnapshot[] {
+  if (viewerProfileId === null) return snapshots
+  let personalized: PrivateRoomSnapshot[] | null = null
+  rooms.forEach((room, index) => {
+    if (!isPrivateRoomViewerInvited(room, viewerProfileId)) return
+    personalized ??= snapshots.slice()
+    personalized[index] = { ...snapshots[index], viewerInvited: true }
+  })
+  return personalized ?? snapshots
+}
+
+function buildPrivateRoomsListForViewer(viewerProfileId: string | null): PrivateRoomSnapshot[] {
+  const rooms = privateRoomsStore.listRooms()
+  return personalizePrivateRoomsListForViewer(rooms, rooms.map((room) => buildPrivateRoomSnapshot(room)), viewerProfileId)
+}
+
 function broadcastPrivateRoomsListToLobbyConnections(): void {
-  const snapshots = privateRoomsStore.listRooms().map((room) => buildPrivateRoomSnapshot(room))
+  const rooms = privateRoomsStore.listRooms()
+  const snapshots = rooms.map((room) => buildPrivateRoomSnapshot(room))
 
   for (const conn of Object.values(serverState.connections)) {
     if (conn.status !== 'connected' || conn.currentRoomId !== null) {
       continue
     }
-    safeSendToConnection(conn.id, { type: 'private_rooms_list', rooms: snapshots })
+    safeSendToConnection(conn.id, {
+      type: 'private_rooms_list',
+      rooms: personalizePrivateRoomsListForViewer(rooms, snapshots, conn.profileId ?? null),
+    })
   }
 }
 
@@ -5628,15 +5672,14 @@ function buildOwnPrivateRoomVoiceSpeak(room: PrivateRoom, profileId: string | nu
 
 function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
   // Гласов чат: получателите тук са само седналите играчи -> voiceTableId е
-  // позволен (общият snapshot без зрител го нулира за лобито).
-  const snapshot = { ...buildPrivateRoomSnapshot(room), voiceTableId: room.voiceTableId }
-  const ownerProfileId = room.partnerReservation?.ownerProfileId ?? null
-  const ownerSnapshot = ownerProfileId !== null ? buildPrivateRoomSnapshot(room, ownerProfileId) : snapshot
+  // позволен (общият snapshot без зрител го нулира за лобито). Snapshot-ът е
+  // за всеки член поотделно: детайлите на партньорската покана (само за
+  // собственика на резервацията) и собствените му висящи покани.
   for (const slot of room.slots) {
     if (slot.occupant?.kind === 'human') {
       safeSendToConnection(slot.occupant.connectionId, {
         type: 'private_room_updated',
-        room: ownerProfileId !== null && slot.occupant.profileId === ownerProfileId ? ownerSnapshot : snapshot,
+        room: { ...buildPrivateRoomSnapshot(room, slot.occupant.profileId), voiceTableId: room.voiceTableId },
         voiceSpeak: buildOwnPrivateRoomVoiceSpeak(room, slot.occupant.profileId),
       })
     }
@@ -6112,12 +6155,17 @@ function schedulePrivateRoomInviteExpiry(
       return
     }
 
-    privateRoomsStore.removeInviteById(inviteId)
+    const expiredInvite = privateRoomsStore.removeInviteById(inviteId)
     const targetConn = Object.values(serverState.connections).find(
       (c) => c.profileId === toProfileId && c.status === 'connected',
     )
     if (targetConn) {
       safeSendToConnection(targetConn.id, { type: 'private_room_invite_expired', inviteId })
+    }
+    // Поканата изтече неотговорена -> поканилият вижда отново "Покани".
+    if (expiredInvite !== null) {
+      const room = privateRoomsStore.listRooms().find((r) => r.id === expiredInvite.privateRoomId)
+      if (room !== undefined) sendPrivateRoomUpdateToMembers(room)
     }
   }), delay)
   privateRoomInviteTimers.set(inviteId, timer)
@@ -27917,8 +27965,10 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             safeSendToConnection(connection.id, buildPrivateRoomPartnerInviteReceivedMessage(invitingRoom, invite))
           }
         }
-        const snapshots = privateRoomsStore.listRooms().map((room) => buildPrivateRoomSnapshot(room))
-        safeSendToConnection(connection.id, { type: 'private_rooms_list', rooms: snapshots })
+        safeSendToConnection(connection.id, {
+          type: 'private_rooms_list',
+          rooms: buildPrivateRoomsListForViewer(latestConnection?.profileId ?? null),
+        })
         return
       }
 
@@ -29309,6 +29359,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         const hostConn = Object.values(serverState.connections).find(
           (c) => c.profileId === respondResult.room.hostProfileId && c.status === 'connected',
         )
+
+        // Поканата вече не чака -> поканилият вижда отново "Покани" (без reload).
+        sendPrivateRoomUpdateToMembers(respondResult.room)
 
         if (message.accept) {
           if (hostConn) {

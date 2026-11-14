@@ -1360,6 +1360,14 @@ export type PrivateRoomSnapshot = {
   voiceEnabled: boolean
   // Само в snapshot-а към играч, който седи на масата; null за всички останали.
   voiceTableId: string | null
+  // Персонално за получателя: заключена маса, за която той има приета покана
+  // (privateRoomsStore.authorizedProfileIds), но в момента не седи на нея.
+  // Създателят не се брои. Другите получатели винаги виждат false — кой е
+  // поканен не се разкрива. Само показва "+"; сървърът проверява при сядане.
+  viewerInvited: boolean
+  // Само в snapshot-а към седнал играч: кои профили ТОЙ е поканил и поканата
+  // още чака отговор (бутонът "Изпратена"). Липсва във всички други snapshot-и.
+  ownPendingInviteProfileIds?: string[]
 }
 
 export type PrivateRoomPartnerReservationSnapshot = {

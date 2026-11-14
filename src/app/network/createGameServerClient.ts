@@ -1497,6 +1497,13 @@ export type PrivateRoomSnapshot = {
   // Гласов чат (Етап 2б). voiceTableId идва само към седнал играч.
   voiceEnabled?: boolean
   voiceTableId?: string | null
+  // "Поканен си" — само за получателя: заключена маса с приета от него покана,
+  // на която в момента не седи. Сървърът проверява правото при сядане.
+  // Optional — стар сървър по време на deploy не го праща.
+  viewerInvited?: boolean
+  // Само към седнал играч: профилите, които ТОЙ е поканил и още не са
+  // отговорили (бутонът "Изпратена"). Липсва -> клиентът не пипа маркировката.
+  ownPendingInviteProfileIds?: string[]
 }
 
 export type PrivateRoomPartnerReservationSnapshot = {
