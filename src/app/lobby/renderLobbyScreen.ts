@@ -1003,6 +1003,12 @@ export type LobbyScreenState = {
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
   privateRoomsCreatePopupOpen: boolean
+  /**
+   * Избраните настройки в отворения прозорец „Нова маса“ (null = стойностите по
+   * подразбиране). Без тях всяко външно прерисуване (напр. private_rooms_list)
+   * пресъздава формата и нулира избора.
+   */
+  privateRoomCreateDraft?: PrivateRoomCreateDraft | null
   // Гласов чат (Етап 4) — „Нова маса“ (само светлият мобилен вариант).
   privateRoomVoiceCreateOption: { visible: boolean; canCreate: boolean; reason: 'vip_required' | null } | null
   privateRoomVoiceVipPopupOpen: boolean
@@ -1594,6 +1600,8 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsLifecycleTabChange: (tab: 'waiting' | 'playing' | 'finished') => void
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
+  /** Всяка промяна във формата „Нова маса“ — пази избора при прерисуване (без render). */
+  onPrivateRoomCreateDraftChange?: (draft: PrivateRoomCreateDraft) => void
   onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs, invitePartner: boolean, voiceEnabled?: boolean) => void
   onPrivateRoomVoiceVipOpen?: () => void
   onPrivateRoomVoiceVipClose?: () => void
@@ -1810,6 +1818,18 @@ const keptFormRenderedHtml = new WeakMap<Element, string>()
 // Запазените при последния rebuild контейнери и техните предшественици.
 let keptLobbyNodes = new WeakSet<Element>()
 
+// Форми, чийто избор (checked/selected) се пази и в state (черновата на „Нова
+// маса“): при запазен възел DOM-ът вече показва избора на потребителя, затова
+// само тези атрибути не правят формата „различна“. Структурна промяна (нов
+// залог, видима опция „Гласов чат“, друг вариант) -> обичаен rebuild от
+// черновата.
+const KEEP_FORM_CHOICE_INSENSITIVE_KEYS = new Set(['private-room-create'])
+const KEEP_FORM_CHOICE_ATTRIBUTE_PATTERN = /\s(?:checked|selected)(?:="[^"]*")?(?=[\s>/])/g
+
+function toKeepFormCompareKey(key: string, html: string): string {
+  return KEEP_FORM_CHOICE_INSENSITIVE_KEYS.has(key) ? html.replace(KEEP_FORM_CHOICE_ATTRIBUTE_PATTERN, '') : html
+}
+
 function isKeptLobbyNode(el: Element | null): boolean {
   return el !== null && keptLobbyNodes.has(el)
 }
@@ -1850,7 +1870,8 @@ function replaceLobbyRootHtml(root: HTMLElement, html: string): void {
     const key = oldForm.getAttribute(KEEP_FORM_ATTRIBUTE) ?? ''
     const newForm = Array.from(fragment.querySelectorAll(`[${KEEP_FORM_ATTRIBUTE}]`))
       .find((el) => el.getAttribute(KEEP_FORM_ATTRIBUTE) === key)
-    if (newForm === undefined || keptFormRenderedHtml.get(oldForm) !== newForm.outerHTML) continue
+    const storedHtml = keptFormRenderedHtml.get(oldForm)
+    if (newForm === undefined || storedHtml === undefined || toKeepFormCompareKey(key, storedHtml) !== toKeepFormCompareKey(key, newForm.outerHTML)) continue
     const pairs: Array<[Node, Element]> = []
     let oldNode: Element | null = oldForm
     let newNode: Node | null = newForm
@@ -15145,10 +15166,44 @@ function renderPrivateRoomListVoiceBadge(light: boolean): string {
  * докато видимостта не е заредена. Без VIP — заключен ред, който отваря VIP
  * прозореца (не е поле на формата).
  */
+export type PrivateRoomCreateDraft = {
+  stake: number | null
+  isLocked: boolean
+  manualStart: boolean
+  invitePartner: boolean
+  voiceEnabled: boolean
+  waitMinutes: 5 | 10 | 15 | 30
+  humanTurnTimeoutMs: HumanTurnTimeoutMs
+}
+
+const PRIVATE_ROOM_CREATE_WAIT_MINUTES_OPTIONS: ReadonlyArray<5 | 10 | 15 | 30> = [5, 10, 15, 30]
+const PRIVATE_ROOM_CREATE_DEFAULT_WAIT_MINUTES = 15
+
+/** Стойностите във формата „Нова маса“ — един парсер за submit и за черновата. */
+export function readPrivateRoomCreateForm(form: HTMLFormElement): PrivateRoomCreateDraft {
+  const data = new FormData(form)
+  const rawStake = Number(data.get('stake'))
+  const rawWaitMinutes = Number(data.get('waitMinutes'))
+  const rawHumanTurnTimeoutMs = Number(data.get('humanTurnTimeoutMs'))
+  return {
+    stake: Number.isInteger(rawStake) && rawStake >= 1 ? rawStake : null,
+    isLocked: (data.get('isLocked') ?? null) !== null,
+    manualStart: (data.get('manualStart') ?? null) !== null,
+    invitePartner: (data.get('invitePartner') ?? null) !== null,
+    voiceEnabled: (data.get('voiceEnabled') ?? null) !== null,
+    waitMinutes: PRIVATE_ROOM_CREATE_WAIT_MINUTES_OPTIONS.includes(rawWaitMinutes as 5 | 10 | 15 | 30)
+      ? (rawWaitMinutes as 5 | 10 | 15 | 30)
+      : PRIVATE_ROOM_CREATE_DEFAULT_WAIT_MINUTES,
+    humanTurnTimeoutMs: isHumanTurnTimeoutMs(rawHumanTurnTimeoutMs) ? rawHumanTurnTimeoutMs : DEFAULT_HUMAN_TURN_TIMEOUT_MS,
+  }
+}
+
 function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState, light = true): string {
   const option = state.privateRoomVoiceCreateOption
   if (option === null || !option.visible) return ''
-  if (!light) return renderPrivateRoomVoiceCreateRowDark(option.canCreate)
+  // Изборът се пази при прерисуване, докато прозорецът е отворен.
+  const checkedAttr = state.privateRoomCreateDraft?.voiceEnabled === true ? ' checked' : ''
+  if (!light) return renderPrivateRoomVoiceCreateRowDark(option.canCreate, checkedAttr)
   const vipBadge = '<span style="display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:999px;background:#FEF0C7;color:#93370D;font-size:10px;font-weight:800;letter-spacing:0.04em;">VIP</span>'
   const title = `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:#6941C6;display:inline-flex;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>Гласов чат ${vipBadge}</span>`
   const hint = 'Разговор с микрофон между играчите на масата'
@@ -15165,7 +15220,7 @@ function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState, light = true):
   }
   return `
     <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#FFFFFF;cursor:pointer;user-select:none;">
-      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1" style="width:18px;height:18px;margin:1px 0 0;flex-shrink:0;cursor:pointer;accent-color:#7950E8;">
+      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1"${checkedAttr} style="width:18px;height:18px;margin:1px 0 0;flex-shrink:0;cursor:pointer;accent-color:#7950E8;">
       <span style="min-width:0;display:grid;gap:2px;">
         <span style="font-size:14px;font-weight:700;line-height:1.3;color:#111827;">${title}</span>
         <span style="font-size:12px;font-weight:500;line-height:1.35;color:#667085;">${hint}</span>
@@ -15175,7 +15230,7 @@ function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState, light = true):
 }
 
 /** Desktop (Етап 5): същият ред в тъмния стил на desktop формата „Нова маса“. */
-function renderPrivateRoomVoiceCreateRowDark(canCreate: boolean): string {
+function renderPrivateRoomVoiceCreateRowDark(canCreate: boolean, checkedAttr = ''): string {
   const vipBadge = '<span style="display:inline-flex;align-items:center;height:17px;padding:0 6px;border-radius:999px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#101010;font-size:10px;font-weight:900;letter-spacing:0.04em;">VIP</span>'
   const title = `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:#a78bfa;display:inline-flex;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>Гласов чат ${vipBadge}</span>`
   if (!canCreate) {
@@ -15188,7 +15243,7 @@ function renderPrivateRoomVoiceCreateRowDark(canCreate: boolean): string {
   }
   return `
     <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
+      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1"${checkedAttr} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
       <span style="font-size:13px;color:rgba(255,255,255,0.7);">${title} <span style="color:rgba(255,255,255,0.4);">(разговор с микрофон)</span></span>
     </label>
   `
@@ -15254,8 +15309,14 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
   const AVAILABLE_STAKES: MatchStake[] = state.matchRooms
     .filter((r) => r.isEnabled)
     .map((r) => r.stakeAmount)
-  const WAIT_MINUTES_OPTIONS: Array<5 | 10 | 15 | 30> = [5, 10, 15, 30]
-  const DEFAULT_WAIT_MINUTES = 15
+  const WAIT_MINUTES_OPTIONS = PRIVATE_ROOM_CREATE_WAIT_MINUTES_OPTIONS
+  // Изборът на потребителя (черновата) печели над стойностите по подразбиране —
+  // външно прерисуване на лобито не нулира формата, докато прозорецът е отворен.
+  const draft = state.privateRoomCreateDraft ?? null
+  const selectedWaitMinutes = draft?.waitMinutes ?? PRIVATE_ROOM_CREATE_DEFAULT_WAIT_MINUTES
+  const selectedHumanTurnTimeoutMs = draft?.humanTurnTimeoutMs ?? DEFAULT_HUMAN_TURN_TIMEOUT_MS
+  const stakeSelectedAttr = (stake: number): string => (draft?.stake === stake ? ' selected' : '')
+  const checkedAttr = (field: 'isLocked' | 'manualStart' | 'invitePartner'): string => (draft?.[field] === true ? ' checked' : '')
 
   // Светъл мобилен вариант — същите полета (name/стойности/по подразбиране)
   // и data-* атрибути; формата се обработва от същия submit handler.
@@ -15284,30 +15345,30 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
           <div>
             <div style="${fieldLabelStyle}">Вход</div>
             <select name="stake" style="${selectStyle}">
-              ${AVAILABLE_STAKES.map((s) => `<option value="${s}">${formatStake(s)} жълтици</option>`).join('')}
+              ${AVAILABLE_STAKES.map((s) => `<option value="${s}"${stakeSelectedAttr(s)}>${formatStake(s)} жълтици</option>`).join('')}
             </select>
           </div>
-          ${checkboxRow('name="isLocked"', 'Заключена маса', 'Само с покана')}
-          ${checkboxRow('name="manualStart"', 'Ръчен старт от създателя', 'Маса 4/4 чака бутон „СТАРТ“')}
-          ${checkboxRow('name="invitePartner" data-private-room-invite-partner-checkbox="1"', 'Покани партньор', 'Мястото до вас се пази за поканен приятел')}
+          ${checkboxRow(`name="isLocked"${checkedAttr('isLocked')}`, 'Заключена маса', 'Само с покана')}
+          ${checkboxRow(`name="manualStart"${checkedAttr('manualStart')}`, 'Ръчен старт от създателя', 'Маса 4/4 чака бутон „СТАРТ“')}
+          ${checkboxRow(`name="invitePartner" data-private-room-invite-partner-checkbox="1"${checkedAttr('invitePartner')}`, 'Покани партньор', 'Мястото до вас се пази за поканен приятел')}
           ${renderPrivateRoomVoiceCreateRow(state)}
           <div>
             <div style="${fieldLabelStyle}">Време за изчакване на играчи</div>
             <select name="waitMinutes" style="${selectStyle}">
-              ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === DEFAULT_WAIT_MINUTES ? ' selected' : ''}>${m} минути</option>`).join('')}
+              ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === selectedWaitMinutes ? ' selected' : ''}>${m} минути</option>`).join('')}
             </select>
           </div>
           <div>
             <div style="${fieldLabelStyle}">Време за реакция</div>
             <select name="humanTurnTimeoutMs" data-private-room-reaction-time="1" style="${selectStyle}">
-              ${HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === DEFAULT_HUMAN_TURN_TIMEOUT_MS ? ' selected' : ''}>${ms / 1000} секунди</option>`).join('')}
+              ${HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === selectedHumanTurnTimeoutMs ? ' selected' : ''}>${ms / 1000} секунди</option>`).join('')}
             </select>
           </div>
           <button type="submit" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="${PRIVATE_ROOMS_LIGHT_PRIMARY_BUTTON_STYLE}margin-top:4px;height:46px;border-radius:10px;font-size:15px;">Създай маса</button>
         </form>
       `
     return `
-      <div data-private-rooms-create-backdrop="1" style="${PRIVATE_ROOMS_LIGHT_POPUP_BACKDROP_STYLE}">
+      <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="${PRIVATE_ROOMS_LIGHT_POPUP_BACKDROP_STYLE}">
         <div role="dialog" aria-modal="true" aria-label="Нова маса" style="${PRIVATE_ROOMS_LIGHT_POPUP_CARD_STYLE}width:380px;">
           ${lightHeaderHtml}
           ${bodyHtml}
@@ -15318,7 +15379,7 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
 
   if (AVAILABLE_STAKES.length === 0) {
     return `
-      <div data-private-rooms-create-backdrop="1" style="
+      <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="
         position:fixed;inset:0;z-index:9500;
         background:rgba(0,0,0,0.7);
         display:flex;align-items:center;justify-content:center;
@@ -15350,7 +15411,7 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
   }
 
   return `
-    <div data-private-rooms-create-backdrop="1" style="
+    <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="
       position:fixed;inset:0;z-index:9500;
       background:rgba(0,0,0,0.7);
       display:flex;align-items:center;justify-content:center;
@@ -15381,19 +15442,19 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
               border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
               color-scheme:dark;
             ">
-              ${AVAILABLE_STAKES.map((s) => `<option value="${s}">${formatStake(s)} жълтици</option>`).join('')}
+              ${AVAILABLE_STAKES.map((s) => `<option value="${s}"${stakeSelectedAttr(s)}>${formatStake(s)} жълтици</option>`).join('')}
             </select>
           </div>
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-            <input type="checkbox" name="isLocked" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
+            <input type="checkbox" name="isLocked"${checkedAttr('isLocked')} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
             <span style="font-size:13px;color:rgba(255,255,255,0.7);">Заключена маса <span style="color:rgba(255,255,255,0.4);">(само с покана)</span></span>
           </label>
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-            <input type="checkbox" name="manualStart" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
+            <input type="checkbox" name="manualStart"${checkedAttr('manualStart')} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
             <span style="font-size:13px;color:rgba(255,255,255,0.7);">Ръчен старт от създателя <span style="color:rgba(255,255,255,0.4);">(маса 4/4 чака бутон „СТАРТ“)</span></span>
           </label>
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-            <input type="checkbox" name="invitePartner" data-private-room-invite-partner-checkbox="1" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
+            <input type="checkbox" name="invitePartner" data-private-room-invite-partner-checkbox="1"${checkedAttr('invitePartner')} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
             <span style="font-size:13px;color:rgba(255,255,255,0.7);">Покани партньор <span style="color:rgba(255,255,255,0.4);">(мястото до вас се пази за поканен приятел)</span></span>
           </label>
           ${renderPrivateRoomVoiceCreateRow(state, false)}
@@ -15404,7 +15465,7 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
               border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
               color-scheme:dark;
             ">
-              ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === DEFAULT_WAIT_MINUTES ? ' selected' : ''}>${m} минути</option>`).join('')}
+              ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === selectedWaitMinutes ? ' selected' : ''}>${m} минути</option>`).join('')}
             </select>
           </div>
           <div>
@@ -15414,7 +15475,7 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
               border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
               color-scheme:dark;
             ">
-              ${HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === DEFAULT_HUMAN_TURN_TIMEOUT_MS ? ' selected' : ''}>${ms / 1000} секунди</option>`).join('')}
+              ${HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === selectedHumanTurnTimeoutMs ? ' selected' : ''}>${ms / 1000} секунди</option>`).join('')}
             </select>
           </div>
           <button type="submit" style="
@@ -21806,13 +21867,20 @@ export function renderLobbyScreen(
   root.querySelector<HTMLButtonElement>('[data-private-rooms-create-open="1"]')
     ?.addEventListener('click', options.onPrivateRoomsCreateOpen)
 
-  root.querySelector<HTMLButtonElement>('[data-private-rooms-create-close="1"]')
-    ?.addEventListener('click', options.onPrivateRoomsCreateClose)
+  // „Нова маса“ е запазена форма (data-lobby-keep-form): при външно
+  // прерисуване (напр. private_rooms_list) прозорецът остава СЪЩИЯТ DOM възел
+  // (отворените падащи менюта, фокусът и изборът не се губят) и слушателите
+  // му вече са закачени — не се закачат втори път.
+  const isPrivateRoomCreatePopupKept = isKeptLobbyNode(root.querySelector('[data-lobby-keep-form="private-room-create"]'))
+  if (!isPrivateRoomCreatePopupKept) {
+    root.querySelector<HTMLButtonElement>('[data-private-rooms-create-close="1"]')
+      ?.addEventListener('click', options.onPrivateRoomsCreateClose)
 
-  root.querySelector<HTMLElement>('[data-private-rooms-create-backdrop="1"]')
-    ?.addEventListener('click', (e) => {
-      if (e.target === e.currentTarget) options.onPrivateRoomsCreateClose()
-    })
+    root.querySelector<HTMLElement>('[data-private-rooms-create-backdrop="1"]')
+      ?.addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) options.onPrivateRoomsCreateClose()
+      })
+  }
 
   root.querySelectorAll<HTMLButtonElement>('[data-private-rooms-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -21828,31 +21896,24 @@ export function renderLobbyScreen(
     })
   })
 
-  root.querySelector<HTMLFormElement>('[data-private-room-create-form="1"]')
-    ?.addEventListener('submit', (e) => {
-      e.preventDefault()
-      const form = e.currentTarget as HTMLFormElement
-      const data = new FormData(form)
-      const stake = Number(data.get('stake')) as MatchStake
-      if (!Number.isInteger(stake) || stake < 1) return
-      const isLocked = (data.get('isLocked') ?? null) !== null
-      const manualStart = (data.get('manualStart') ?? null) !== null
-      const invitePartner = (data.get('invitePartner') ?? null) !== null
-      const voiceEnabled = (data.get('voiceEnabled') ?? null) !== null
-      const rawWaitMinutes = Number(data.get('waitMinutes'))
-      const waitMinutes: 5 | 10 | 15 | 30 = [5, 10, 15, 30].includes(rawWaitMinutes)
-        ? (rawWaitMinutes as 5 | 10 | 15 | 30)
-        : 15
-      const rawHumanTurnTimeoutMs = Number(data.get('humanTurnTimeoutMs'))
-      const humanTurnTimeoutMs: HumanTurnTimeoutMs = isHumanTurnTimeoutMs(rawHumanTurnTimeoutMs)
-        ? rawHumanTurnTimeoutMs
-        : DEFAULT_HUMAN_TURN_TIMEOUT_MS
-      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled)
-    })
+  const privateRoomCreateForm = isPrivateRoomCreatePopupKept ? null : root.querySelector<HTMLFormElement>('[data-private-room-create-form="1"]')
+  // Всяка промяна (отметка/избор) се пази в черновата — външно прерисуване на
+  // лобито (напр. private_rooms_list) не нулира формата, докато е отворена.
+  privateRoomCreateForm?.addEventListener('change', (e) => {
+    options.onPrivateRoomCreateDraftChange?.(readPrivateRoomCreateForm(e.currentTarget as HTMLFormElement))
+  })
+  privateRoomCreateForm?.addEventListener('submit', (e) => {
+    e.preventDefault()
+    const draft = readPrivateRoomCreateForm(e.currentTarget as HTMLFormElement)
+    if (draft.stake === null) return
+    options.onPrivateRoomCreate(draft.stake as MatchStake, draft.isLocked, draft.waitMinutes, draft.manualStart, draft.humanTurnTimeoutMs, draft.invitePartner, draft.voiceEnabled)
+  })
 
   // Гласов чат (Етап 4) — VIP прозорец и изричният избор при отказ на сървъра.
-  root.querySelector<HTMLButtonElement>('[data-private-room-voice-vip="1"]')
-    ?.addEventListener('click', () => options.onPrivateRoomVoiceVipOpen?.())
+  if (!isPrivateRoomCreatePopupKept) {
+    root.querySelector<HTMLButtonElement>('[data-private-room-voice-vip="1"]')
+      ?.addEventListener('click', () => options.onPrivateRoomVoiceVipOpen?.())
+  }
   root.querySelector<HTMLElement>('[data-private-room-voice-vip-popup-backdrop="1"]')?.addEventListener('click', (event) => {
     if (event.target === event.currentTarget) options.onPrivateRoomVoiceVipClose?.()
   })

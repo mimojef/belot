@@ -19,6 +19,8 @@ Object.defineProperty(window, 'Audio', { configurable: true, value: FakeAudio })
 
 const params = new URLSearchParams(location.search)
 const isVip = params.get('vip') !== '0'
+// Статусът от /api/vip/status (voiceOwnVipStatus): vip=0 -> inactive, vip=error/pending -> error/unknown.
+const ownVipStatus = params.get('vip') === 'error' ? 'error' as const : params.get('vip') === 'pending' ? 'unknown' as const : isVip ? 'active' as const : 'inactive' as const
 const createOption = params.get('option') === 'locked'
   ? { visible: true, canCreate: false, reason: 'vip_required' as const }
   : { visible: true, canCreate: true, reason: null }
@@ -226,7 +228,7 @@ async function frames(count = 2): Promise<void> {
   },
   async showWaiting(): Promise<void> {
     snapshot = baseSnapshot('waiting')
-    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(true), isOwnVip: () => isVip, isPhoneLayout: () => isPhoneLayoutViewport(), onGetVip: record('getVip') })
+    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(true), getOwnVipStatus: () => ownVipStatus, getSpeakPreview: () => null, isPhoneLayout: () => isPhoneLayoutViewport(), onGetVip: record('getVip') })
     const room = waitingRoom()
     lobby.handleServerMessage({ type: 'private_rooms_list', rooms: [room] } as any)
     lobby.joinPrivateRoom(room.id)
@@ -245,7 +247,7 @@ async function frames(count = 2): Promise<void> {
     const message = { type: 'room_snapshot', roomId: 'room-play', roomStatus: 'playing', yourSeat: 'bottom', reconnectToken: 't', seats, game: playingGame(), isGuestTrial: false, isPrivateTableOrigin: true, isTournamentMatchOrigin: false, stakeAmount: 5000, voiceTableId: TABLE } as RoomSnapshotMessage
     activeRoom.handleServerMessage(message)
     snapshot = baseSnapshot('game')
-    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(false), isOwnVip: () => isVip, isPhoneLayout: () => isPhoneLayoutViewport(), onGetVip: record('getVip') })
+    ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(false), getOwnVipStatus: () => ownVipStatus, getSpeakPreview: () => null, isPhoneLayout: () => isPhoneLayoutViewport(), onGetVip: record('getVip') })
     emit()
     const startedAt = performance.now()
     while (document.querySelector('[data-playing-bottom-hand-host] [data-card-id]') === null && performance.now() - startedAt < 8000) {

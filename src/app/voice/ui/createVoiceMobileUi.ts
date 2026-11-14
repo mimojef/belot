@@ -19,6 +19,9 @@
 // В игра няма автоматични прозорци (2.5: нищо модално по време на хода).
 
 import type { VoiceController, VoiceSnapshot } from '../createVoiceController'
+import type { VoiceOwnVipStatus } from '../voiceOwnVipStatus'
+import type { VoiceSpeakPreview } from '../voiceSpeakPreview'
+import { resolveVoiceJoinOffer, type VoiceJoinOffer } from './voiceJoinOffer'
 import { applyVoiceSpeakingProfiles, ensureVoiceSpeakingStyles } from './voiceSpeakingIndicator'
 import { voiceIcon } from './voiceUiIcons'
 import { describeVoiceStatus, isInVoice, type VoiceUiSeat, type VoiceUiTheme } from './voiceUiStatus'
@@ -30,7 +33,10 @@ export type VoiceMobileUiDeps = {
   voice: VoiceController
   /** Местата на масата в реда на екрана (имена/аватари от авторитетните snapshot-и). */
   getSeats: () => readonly VoiceUiSeat[]
-  isOwnVip: () => boolean
+  /** Собственият VIP статус от /api/vip/status (voiceOwnVipStatus) — НЕ profile.isVip от сесията. */
+  getOwnVipStatus: () => VoiceOwnVipStatus
+  /** Сървърното решение за говорене преди включване от WS snapshot-ите (voiceSpeakPreview); null = неизвестно. */
+  getSpeakPreview: (voiceTableId: string) => VoiceSpeakPreview | null
   isPhoneLayout: () => boolean
   /** „Вземи VIP“ (само от чакалнята — магазинът е достъпен там). */
   onGetVip: () => void
@@ -45,6 +51,8 @@ export type VoiceMobileUi = {
   openPanel: () => void
   closePanel: () => void
   isPanelOpen: () => boolean
+  /** Преизчисляване без нов snapshot от гласа (напр. зареден VIP статус). */
+  refresh: () => void
   dispose: () => void
 }
 
@@ -95,6 +103,8 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
   const voice = deps.voice
   let panelOpen = false
   let promptOpen = false
+  /** Вариантът в отворения прозорец — при промяна (напр. зареден статус) съдържанието се обновява. */
+  let promptOffer: VoiceJoinOffer | null = null
   let lastScreen: VoiceSnapshot['screen'] = null
   /** Прозорецът за включване е отработен за текущото посещение на чакалнята. */
   let promptHandledThisVisit = false
@@ -130,6 +140,11 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
   }
 
   const isDesktop = (): boolean => !deps.isPhoneLayout()
+  /** Преди включване: последното сървърно решение от WS snapshot-ите (в гласа — това на контролера). */
+  const preJoinSpeakOf = (snapshot: VoiceSnapshot): VoiceSpeakPreview | null =>
+    snapshot.voiceTableId === null || isInVoice(snapshot) ? null : deps.getSpeakPreview(snapshot.voiceTableId)
+  const joinOfferOf = (snapshot: VoiceSnapshot): VoiceJoinOffer =>
+    resolveVoiceJoinOffer(preJoinSpeakOf(snapshot) ?? snapshot.speak, deps.getOwnVipStatus())
   /** Мобилно: игра — тъмна, чакалня — светла. Desktop: навсякъде черно-златиста. */
   const themeFor = (snapshot: VoiceSnapshot): VoiceUiTheme | null =>
     snapshot.voiceTableId === null ? null
@@ -206,7 +221,8 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       snapshot,
       seats: deps.getSeats(),
       theme,
-      isOwnVip: deps.isOwnVip(),
+      joinOffer: joinOfferOf(snapshot),
+      preJoinSpeak: preJoinSpeakOf(snapshot),
       // Магазинът е достъпен от чакалнята (мобилно и desktop), не в активна игра.
       canOpenShop: snapshot.screen === 'waiting',
     })
@@ -267,34 +283,49 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
   function closePrompt(handled: boolean): void {
     if (handled) promptHandledThisVisit = true
     promptOpen = false
+    promptOffer = null
     doc.querySelector(PROMPT_SELECTOR)?.remove()
   }
 
   function syncPrompt(snapshot: VoiceSnapshot): void {
-    const shouldShow = snapshot.voiceTableId !== null && snapshot.screen === 'waiting' && snapshot.status === 'idle'
+    const eligible = snapshot.voiceTableId !== null && snapshot.screen === 'waiting' && snapshot.status === 'idle'
       && !promptHandledThisVisit && !panelOpen
-    if (shouldShow && !promptOpen) {
-      if (view === null) {
-        // Lazy chunk-ът още се зарежда — прозорецът се показва веднага след него (ако още е уместен).
-        void loadView().then(() => { if (!disposed) syncPrompt(voice.getSnapshot()) }, () => {})
+    if (!eligible) {
+      if (promptOpen) closePrompt(false)
+      return
+    }
+    // Неизвестният VIP статус НЕ е „без VIP“: прозорецът изчаква (без грешен
+    // първи кадър). Вече отворен прозорец остава с последния известен вариант.
+    const offer = joinOfferOf(snapshot)
+    if (offer === 'pending') return
+    if (view === null) {
+      // Lazy chunk-ът още се зарежда — прозорецът се показва веднага след него (ако още е уместен).
+      void loadView().then(() => { if (!disposed) syncPrompt(voice.getSnapshot()) }, () => {})
+      return
+    }
+    const html = view.renderVoiceJoinPrompt({ offer, canOpenShop: true, theme: isDesktop() ? 'dark' : 'light' })
+    const existing = promptOpen ? doc.querySelector<HTMLElement>(PROMPT_SELECTOR) : null
+    if (existing !== null) {
+      if (promptOffer !== offer) {
+        existing.innerHTML = html
+        promptOffer = offer
+      }
+      return
+    }
+    const layer = doc.createElement('div')
+    layer.setAttribute('data-voice-prompt-layer', '1')
+    layer.innerHTML = html
+    layer.addEventListener('click', (event) => {
+      if (event.target === layer.firstElementChild) {
+        closePrompt(true)
+        voice.notNow()
         return
       }
-      const layer = doc.createElement('div')
-      layer.setAttribute('data-voice-prompt-layer', '1')
-      layer.innerHTML = view.renderVoiceJoinPrompt({ isOwnVip: deps.isOwnVip(), canOpenShop: true, theme: isDesktop() ? 'dark' : 'light' })
-      layer.addEventListener('click', (event) => {
-        if (event.target === layer.firstElementChild) {
-          closePrompt(true)
-          voice.notNow()
-          return
-        }
-        onDelegatedClick(event)
-      })
-      doc.body.appendChild(layer)
-      promptOpen = true
-    } else if (!shouldShow && promptOpen) {
-      closePrompt(false)
-    }
+      onDelegatedClick(event)
+    })
+    doc.body.appendChild(layer)
+    promptOpen = true
+    promptOffer = offer
   }
 
   // ─── Бутон в игра ───────────────────────────────────────────────────
@@ -435,6 +466,9 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
     openPanel,
     closePanel,
     isPanelOpen: () => panelOpen,
+    refresh() {
+      onSnapshot(voice.getSnapshot())
+    },
     dispose() {
       disposed = true
       unsubscribe()

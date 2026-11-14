@@ -19,6 +19,7 @@ import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 import type { TopicSnapshot } from '../db/topicStore.js'
 import type { NameHighlightRole } from '../core/nameHighlightRole.js'
+import type { VoiceSpeakPreview } from '../voice/voiceChatProtocol.js'
 import type { ProfileCustomizationDisplay } from '../profileCustomization/profileCustomizationStore.js'
 import type { VoicePresenceClientMessage, VoiceServerMessage } from '../voice/voiceChatProtocol.js'
 import type { LudoEngineEvent } from '../game/ludoEngine/ludoEngineEvents.js'
@@ -781,6 +782,8 @@ export type RoomSnapshotMessage = {
    * само по HTTPS след авторитетна проверка на участието.
    */
   voiceTableId: string | null
+  /** Гласов чат: решението за говорене на самия играч преди включване (само при voiceTableId). */
+  voiceSpeak?: VoiceSpeakPreview | null
   tournamentId?: string | null
   tournamentMatchId?: string | null
   tournamentRoundType?: TournamentRoundType | null
@@ -1619,6 +1622,11 @@ export type LudoGamesListMessage = {
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
   room: PrivateRoomSnapshot
+  /**
+   * Гласов чат: решението за говорене на САМИЯ получател преди включване
+   * (само към седнал играч на гласова маса; иначе липсва/null).
+   */
+  voiceSpeak?: VoiceSpeakPreview | null
 }
 
 export type PrivateRoomLeftMessage = {

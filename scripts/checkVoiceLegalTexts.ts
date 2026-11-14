@@ -122,10 +122,10 @@ await check('[L6] Съществуващият прозорец при първ�
   const note = renderVoicePrivacyNote()
   assert(note.includes(VOICE_PRIVACY_NOTE), 'одобреният текст е запазен')
   assert(note.includes(`href="${VOICE_CHAT_PRIVACY_PATH}"`) && note.includes('target="_blank"') && note.includes('rel="noopener noreferrer"'), 'връзка в нов таб')
-  for (const isOwnVip of [true, false]) {
+  for (const offer of ['speak', 'listen_vip', 'muted', 'neutral'] as const) {
     for (const theme of ['light', 'dark'] as const) {
-      const prompt = renderVoiceJoinPrompt({ isOwnVip, canOpenShop: true, theme })
-      assert(prompt.includes('data-voice-privacy-link="1"'), `прозорецът (${isOwnVip ? 'VIP' : 'non-VIP'}, ${theme}) съдържа връзката`)
+      const prompt = renderVoiceJoinPrompt({ offer, canOpenShop: true, theme })
+      assert(prompt.includes('data-voice-privacy-link="1"'), `прозорецът (${offer}, ${theme}) съдържа връзката`)
       assert((prompt.match(/role="dialog"/g) ?? []).length === 1, 'един диалог — без нов прозорец')
     }
   }

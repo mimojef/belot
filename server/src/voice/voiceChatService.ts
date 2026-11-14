@@ -74,6 +74,7 @@ import type {
   VoicePresenceClientMessage,
   VoicePresenceErrorCode,
   VoiceServerMessage,
+  VoiceSpeakPreview,
   VoiceSpeakState,
 } from './voiceChatProtocol.js'
 import type { SetModeResult, VoiceChatStore } from './voiceChatStore.js'
@@ -229,6 +230,12 @@ export type VoiceChatService = {
   reserveVoiceTableForPrivateRoom: (input: { profileId: string; isFullAdmin: boolean }) => VoiceTableCreationResult
   /** Само четене (формата за създаване) — без резервация, без I/O. */
   describeCreationOption: (input: { profileId: string; isFullAdmin: boolean }) => VoiceTableCreationOption
+  /**
+   * Само четене: решението за говорене на играча преди включване (за
+   * private_room_updated / room_snapshot към самия него). Не създава участие,
+   * binding или право; null = масата не е активна.
+   */
+  describeSpeakPreview: (voiceTableId: VoiceTableId, profileId: string) => VoiceSpeakPreview | null
   attachPrivateRoom: (voiceTableId: VoiceTableId, privateRoomId: string, creatorProfileId: string) => void
   abortReservation: (voiceTableId: VoiceTableId) => void
   onMemberSeated: (voiceTableId: VoiceTableId, profileId: string) => void
@@ -478,9 +485,9 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
   function currentSpeakState(voiceTableId: VoiceTableId, profileId: string): VoiceSpeakState {
     const mute = readMute(profileId)
     const entitled = memberships.get(key(voiceTableId, profileId))?.entitled === true
-    const vip = deps.isVipActive(profileId)
     if (mute.isMuted) return { canSpeak: false, blockedReason: 'muted', hasSpeakingEntitlement: entitled, mutedUntil: mute.mutedUntil }
-    if (vip || entitled) return { canSpeak: true, blockedReason: null, hasSpeakingEntitlement: entitled, mutedUntil: null }
+    // Същото решение (VIP || придобито право); VIP се чете само без придобито право.
+    if (entitled || deps.isVipActive(profileId)) return { canSpeak: true, blockedReason: null, hasSpeakingEntitlement: entitled, mutedUntil: null }
     return { canSpeak: false, blockedReason: 'vip_required', hasSpeakingEntitlement: false, mutedUntil: null }
   }
 
@@ -839,6 +846,16 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         requester: { profileId, isFullAdmin, isVipActive: deps.isVipActive(profileId), isBanned: deps.isBanned(profileId) },
       })
     },
+
+    describeSpeakPreview(voiceTableId, profileId) {
+      // Само в паметта (без SQL): участие има само докато масата е активна —
+      // освобождаването (вкл. режим „Изключен“) го премахва в handleTableReleased;
+      // маса в процес на освобождаване -> също няма решение.
+      if (!memberships.has(key(voiceTableId, profileId)) || blockedTables.get(voiceTableId) === 'releasing') return null
+      // Същото решение като presence/известията (мют > VIP или придобито право).
+      const speak = currentSpeakState(voiceTableId, profileId)
+      return { canSpeak: speak.canSpeak, blockedReason: speak.blockedReason, mutedUntil: speak.mutedUntil }
+    },
     reserveVoiceTableForPrivateRoom({ profileId, isFullAdmin }) {
       const settings = store.getSettings()
       const emergencyStop = isVoiceChatEmergencyStopActive(env)
@@ -962,6 +979,21 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
           type: 'voice_speak_access_updated',
           voiceTableId: binding.voiceTableId,
           speak: currentSpeakState(binding.voiceTableId, profileId),
+        })
+      }
+      // Играч на масата, който още не е включен в гласа (без binding): същото
+      // известие до връзката, която държи мястото — прозорецът/панелът преди
+      // включване показват актуалното решение без нова заявка.
+      for (const membership of memberships.values()) {
+        if (membership.profileId !== profileId || bindings.has(key(membership.voiceTableId, profileId))) continue
+        const table = store.getVoiceTable(membership.voiceTableId)
+        if (table === null || table.status !== 'active') continue
+        const seat = deps.resolveSeat(profileId, table)
+        if (seat.relation !== 'player' || seat.permanentlyLeft || seat.seatConnectionId === null) continue
+        send(seat.seatConnectionId, {
+          type: 'voice_speak_access_updated',
+          voiceTableId: membership.voiceTableId,
+          speak: currentSpeakState(membership.voiceTableId, profileId),
         })
       }
     },

@@ -171,6 +171,8 @@ import {
 import { VIOLET_3D_BUTTON_CLASS, ensureViolet3dButtonStyles } from './ui/layout/violet3dButton'
 import type { VoiceContext, VoiceController } from './app/voice/createVoiceController'
 import { createLazyVoiceController } from './app/voice/voiceFacade'
+import { createVoiceOwnVipStatusSource, type VoiceOwnVipLoadResult, type VoiceOwnVipStatusSource } from './app/voice/voiceOwnVipStatus'
+import { createVoiceSpeakPreviewTracker } from './app/voice/voiceSpeakPreview'
 import { createVoiceMobileUi, type VoiceMobileUi } from './app/voice/ui/createVoiceMobileUi'
 import type { VoiceUiSeat } from './app/voice/ui/voiceUiStatus'
 import { setVoiceSpeakingSlotsEnabled } from './app/voice/ui/voiceSpeakingIndicator'
@@ -504,6 +506,11 @@ let voiceController: VoiceController | null = null
 let isVoiceContextSyncQueued = false
 /** Гласов чат (Етап 4) — мобилният интерфейс върху voiceController. */
 let voiceMobileUi: VoiceMobileUi | null = null
+/** Собственият VIP статус за гласовия интерфейс — от /api/vip/status, НЕ от profile.isVip на сесията (там е винаги null). */
+let voiceOwnVipStatus: VoiceOwnVipStatusSource | null = null
+let isVoiceUiRefreshQueued = false
+/** Сървърното решение за говорене преди включване — от вече пристигналите WS съобщения (без заявки). */
+const voiceSpeakPreview = createVoiceSpeakPreviewTracker()
 /** Последният room_snapshot на активната маса — само voiceTableId и местата. */
 let voiceRoomSnapshot: { roomId: string; voiceTableId: string | null; yourSeat: string | null; seats: RoomSnapshotMessage['seats'] } | null = null
 
@@ -2160,6 +2167,7 @@ function playVipPurchaseConfirmedSound(): void {
 
 async function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): Promise<void> {
   lobby.invalidateOwnVipStatus()
+  voiceOwnVipStatus?.refresh()
 
   // Датата на popup-а идва от ОБНОВЕНИЯ server VIP status (не от client-side
   // изчисление "днес + days") — webhook settlement-ът вече е приложил
@@ -6694,6 +6702,8 @@ async function claimTopicsLaunchGiftRequest(): Promise<
       }
       saveSessionCache(currentAuthSession)
     }
+    // Гласов чат: свеж статус от /api/vip/status (на гласова маса; иначе нищо).
+    voiceOwnVipStatus?.refresh()
     return { ok: true, isActive, activeUntil }
   } catch {
     return { ok: false, alreadyClaimed: false, giftDisabled: false }
@@ -8715,10 +8725,16 @@ const muteEndNoticePopup = createMuteEndNoticePopupController({
 })
 
 voiceController = createAppVoiceController()
+voiceOwnVipStatus = createVoiceOwnVipStatusSource({
+  load: () => loadVoiceOwnVipStatus(),
+  // Отложено (microtask): статусът може да се смени по време на рендериране на лобито.
+  onChange: () => scheduleVoiceUiRefresh(),
+})
 voiceMobileUi = createVoiceMobileUi({
   voice: voiceController,
   getSeats: () => resolveVoiceUiSeats(),
-  isOwnVip: () => currentAuthSession?.profile.isVip === true,
+  getOwnVipStatus: () => voiceOwnVipStatus?.get() ?? 'unknown',
+  getSpeakPreview: (voiceTableId) => voiceSpeakPreview.get(voiceTableId),
   isPhoneLayout: () => isPhoneLayoutViewport(),
   onGetVip: () => lobby.openVipShop(),
 })
@@ -8952,6 +8968,9 @@ client = createGameServerClient({
       // Синхронно, преди activeRoom да рендерира: слотовете „говори“ само на гласова маса.
       setVoiceSpeakingSlotsEnabled((message.voiceTableId ?? null) !== null && message.yourSeat !== null)
     }
+    // Решението за говорене преди включване (voiceSpeak / voice_speak_access_updated /
+    // voice_presence_result) — преди контролера, който поглъща гласовите съобщения.
+    if (voiceSpeakPreview.applyServerMessage(message)) scheduleVoiceUiRefresh()
     if (voiceController !== null && voiceController.handleServerMessage(message)) return
     if (!isVoiceContextSyncQueued) {
       isVoiceContextSyncQueued = true
@@ -10479,10 +10498,46 @@ function syncVoiceContext(): void {
   isVoiceContextSyncQueued = false
   if (voiceController === null) return
   try {
-    voiceController.setContext(resolveVoiceContext())
+    const context = resolveVoiceContext()
+    voiceController.setContext(context)
+    // Една заявка към /api/vip/status при нова гласова маса и при влизане в
+    // чакалнята (без периодично презареждане); извън гласова маса — нищо.
+    voiceOwnVipStatus?.sync(context.kind === 'table'
+      ? { profileId: context.selfProfileId, voiceTableId: context.voiceTableId, screen: context.screen }
+      : null)
   } catch {
     // Гласът никога не прекъсва лобито/играта.
   }
+}
+
+/**
+ * GET /api/vip/status — собственият VIP статус за гласовия интерфейс (същият
+ * сървърен vipStore, по който се решава правото за говорене). Без isActive
+ * от boolean тип -> грешка (неизвестното не се приема за „без VIP“).
+ */
+async function loadVoiceOwnVipStatus(): Promise<VoiceOwnVipLoadResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/status`, { method: 'GET', credentials: 'include', cache: 'no-store' })
+    if (!response.ok) return { ok: false }
+    const data = (await response.json().catch(() => null)) as { ok?: unknown; status?: { isActive?: unknown } } | null
+    if (data?.ok !== true || typeof data.status?.isActive !== 'boolean') return { ok: false }
+    return { ok: true, isActive: data.status.isActive }
+  } catch {
+    return { ok: false }
+  }
+}
+
+function scheduleVoiceUiRefresh(): void {
+  if (isVoiceUiRefreshQueued) return
+  isVoiceUiRefreshQueued = true
+  queueMicrotask(() => {
+    isVoiceUiRefreshQueued = false
+    try {
+      voiceMobileUi?.refresh()
+    } catch {
+      // Гласът никога не прекъсва лобито/играта.
+    }
+  })
 }
 
 }

@@ -10,6 +10,8 @@
 // HANDOFF (2.5, 2.8Б, 2.11А, 2.15). Само data-* атрибути за действията.
 
 import type { VoiceSnapshot } from '../createVoiceController'
+import type { VoiceSpeakPreview } from '../voiceSpeakPreview'
+import type { VoiceJoinOffer } from './voiceJoinOffer'
 import { renderVoiceSpeakingSlot } from './voiceSpeakingIndicator'
 import { lucideIcon, voiceIcon as baseIcon } from './voiceUiIcons'
 import { describeVoiceStatus, isInVoice, type VoiceUiSeat, type VoiceUiTheme } from './voiceUiStatus'
@@ -40,7 +42,10 @@ export type VoicePanelOptions = {
   snapshot: VoiceSnapshot
   seats: readonly VoiceUiSeat[]
   theme: VoiceUiTheme
-  isOwnVip: boolean
+  /** Вариантът преди включване (resolveVoiceJoinOffer: сървърно решение -> /api/vip/status). */
+  joinOffer: VoiceJoinOffer
+  /** Сървърното решение преди включване (WS snapshot-ите) — за съобщението при мют; null = неизвестно. */
+  preJoinSpeak?: VoiceSpeakPreview | null
   /** „Вземи VIP“ само където магазинът е достъпен (чакалнята), не в активна игра. */
   canOpenShop: boolean
 }
@@ -103,10 +108,12 @@ function renderNotices(options: VoicePanelOptions): string {
     notice('warn', 'Браузърът спря звука.', 'Натиснете, за да чувате останалите.', button('data-voice-action="unlock-audio"', 'Включи звука', 'primary', voiceIcon.volume(16)))
   }
   const code = snapshot.uiError?.code ?? null
-  const muted = snapshot.speak?.blockedReason === 'muted'
+  // Преди включване — последното сървърно решение от WS snapshot-ите.
+  const speak = isInVoice(snapshot) ? snapshot.speak : (options.preJoinSpeak ?? snapshot.speak)
+  const muted = speak?.blockedReason === 'muted'
   if (muted || code === 'mic_blocked') {
     // 2.8Б: срокът само за самия наказан (speak е само на този играч).
-    const until = formatMutedUntil(snapshot.speak?.mutedUntil ?? null)
+    const until = formatMutedUntil(speak?.mutedUntil ?? null)
     notice('error', 'Микрофонът е блокиран', `Имате активно наказание за чат. Можете да слушате останалите участници.${until ? ` Наказанието е ${until}` : ''}`)
   } else if (code !== null && MIC_ERROR_TEXT[code] !== undefined) {
     // Нов микрофон след грешката — същото съобщение, същият единствен бутон.
@@ -180,8 +187,28 @@ function renderRows(options: VoicePanelOptions): string {
   }).join('')
 }
 
+/**
+ * Бутоните за включване според варианта. „Вземи VIP“ — само при известна
+ * липса на право; 'pending'/'neutral' — без него (неизвестното не е „без VIP“).
+ */
+function renderJoinButtons(offer: VoiceJoinOffer, canOpenShop: boolean): string {
+  const joinMic = (variant: 'primary' | 'secondary') => button('data-voice-action="join-mic"', 'Включи микрофона', variant, voiceIcon.mic(18))
+  const joinListen = (variant: 'primary' | 'secondary') => button('data-voice-action="join-listen"', 'Само слушай', variant, voiceIcon.headphones(18))
+  switch (offer) {
+    case 'speak':
+      return `${joinMic('primary')}${joinListen('secondary')}`
+    case 'listen_vip':
+      return `${joinListen('primary')}${canOpenShop ? button('data-voice-action="get-vip"', 'Вземи VIP', 'vip') : ''}`
+    case 'muted':
+      return joinListen('primary')
+    case 'neutral':
+    case 'pending':
+      return `${joinListen('primary')}${joinMic('secondary')}`
+  }
+}
+
 function renderActions(options: VoicePanelOptions): string {
-  const { snapshot, isOwnVip, canOpenShop } = options
+  const { snapshot, canOpenShop } = options
   if (!isInVoice(snapshot)) {
     if (snapshot.status === 'unavailable' || snapshot.status === 'error') {
       return button('data-voice-action="retry-connection"', 'Опитай отново', 'primary')
@@ -189,9 +216,7 @@ function renderActions(options: VoicePanelOptions): string {
     if (snapshot.canRestore) {
       return button('data-voice-action="join-listen"', 'Възстанови гласовия чат', 'primary', voiceIcon.headphones(18))
     }
-    return isOwnVip
-      ? `${button('data-voice-action="join-mic"', 'Включи микрофона', 'primary', voiceIcon.mic(18))}${button('data-voice-action="join-listen"', 'Само слушай', 'secondary', voiceIcon.headphones(18))}`
-      : `${button('data-voice-action="join-listen"', 'Само слушай', 'primary', voiceIcon.headphones(18))}${canOpenShop ? button('data-voice-action="get-vip"', 'Вземи VIP', 'vip') : ''}`
+    return renderJoinButtons(options.joinOffer, canOpenShop)
   }
   const connecting = snapshot.status === 'connecting' || snapshot.status === 'rotating' || snapshot.status === 'disconnecting'
   let mic: string
@@ -237,26 +262,27 @@ export function renderVoicePanel(options: VoicePanelOptions): string {
   `
 }
 
-/** Прозорец за включване (2.5) — само в чакалнята, веднъж за посещение. light: мобилно; dark: desktop. */
-export function renderVoiceJoinPrompt(options: { isOwnVip: boolean; canOpenShop: boolean; theme?: VoiceUiTheme }): string {
+const JOIN_PROMPT_TEXT: Record<Exclude<VoiceJoinOffer, 'pending'>, string> = {
+  speak: 'Говорете с останалите играчи на масата.',
+  listen_vip: 'Можеш да слушаш разговора безплатно. Говоренето през микрофона е VIP привилегия.',
+  muted: 'Имате активно наказание за чат. Можете да слушате останалите участници.',
+  neutral: 'Можеш да се включиш в гласовия разговор с останалите играчи на масата.',
+}
+
+/**
+ * Прозорец за включване (2.5) — само в чакалнята, веднъж за посещение.
+ * light: мобилно; dark: desktop. 'pending' не се показва (createVoiceMobileUi изчаква).
+ */
+export function renderVoiceJoinPrompt(options: { offer: Exclude<VoiceJoinOffer, 'pending'>; canOpenShop: boolean; theme?: VoiceUiTheme }): string {
   const theme = options.theme ?? 'light'
-  const body = options.isOwnVip
-    ? `
-      <p class="pvp-prompt-text">Говорете с останалите играчи на масата.</p>
+  const body = `
+      <p class="pvp-prompt-text">${escapeHtml(JOIN_PROMPT_TEXT[options.offer])}</p>
       <div class="pvp-prompt-actions">
-        ${button('data-voice-action="join-mic"', 'Включи микрофона', 'primary', voiceIcon.mic(18))}
-        ${button('data-voice-action="join-listen"', 'Само слушай', 'secondary', voiceIcon.headphones(18))}
-        ${button('data-voice-action="not-now"', 'Не сега', 'quiet')}
-      </div>`
-    : `
-      <p class="pvp-prompt-text">Можеш да слушаш разговора безплатно. Говоренето през микрофона е VIP привилегия.</p>
-      <div class="pvp-prompt-actions">
-        ${button('data-voice-action="join-listen"', 'Само слушай', 'primary', voiceIcon.headphones(18))}
-        ${options.canOpenShop ? button('data-voice-action="get-vip"', 'Вземи VIP', 'vip') : ''}
+        ${renderJoinButtons(options.offer, options.canOpenShop)}
         ${button('data-voice-action="not-now"', 'Не сега', 'quiet')}
       </div>`
   return `
-    <div class="pvp-prompt-backdrop pvp-prompt-backdrop--${theme}" data-voice-prompt="1">
+    <div class="pvp-prompt-backdrop pvp-prompt-backdrop--${theme}" data-voice-prompt="1" data-voice-prompt-offer="${options.offer}">
       <section class="pvp pvp--${theme} pvp-prompt" role="dialog" aria-modal="true" aria-label="Гласов чат">
         <header class="pvp-head">
           <span class="pvp-title pvp-title--lg"><span class="pvp-title-badge">${voiceIcon.mic(18)}</span>Гласов чат</span>

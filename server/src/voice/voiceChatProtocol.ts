@@ -71,6 +71,20 @@ export type VoiceSpeakState = {
   mutedUntil: string | null
 }
 
+/**
+ * Сървърното решение за говорене ПРЕДИ включване в гласовия разговор — само
+ * към самия играч, като поле `voiceSpeak` в private_room_updated (чакалня) и
+ * room_snapshot (игра). Същото решение като currentSpeakState (VIP, придобито
+ * в участието право, административен мют), но само полетата, които
+ * интерфейсът показва: без придобитото право като отделен факт.
+ */
+export type VoiceSpeakPreview = {
+  canSpeak: boolean
+  blockedReason: VoiceSpeakBlockedReason | null
+  /** Само при 'muted' и ако е известен. */
+  mutedUntil: string | null
+}
+
 export type VoiceSpeakAccessUpdatedMessage = {
   type: 'voice_speak_access_updated'
   voiceTableId: string

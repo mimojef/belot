@@ -87,6 +87,7 @@ import {
   type GuestContactFormInput,
   type LobbyAuthModalMode,
   type LobbyScreenState,
+  type PrivateRoomCreateDraft,
   type ProfilePopupCallbacks,
 } from './renderLobbyScreen'
 import type { PlayerAccountRole } from '../../ui/overlays/renderPlayerProfilePopup'
@@ -2375,6 +2376,8 @@ type InternalLobbyFlowState = {
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
   privateRoomsCreatePopupOpen: boolean
+  /** Избраните настройки в отворения прозорец „Нова маса“ (null = по подразбиране; нулира се при отваряне). */
+  privateRoomCreateDraft: PrivateRoomCreateDraft | null
   // Гласов чат (Етап 4) — „Нова маса“.
   privateRoomVoiceCreateOption: PrivateRoomVoiceCreateOption | null
   privateRoomVoiceVipPopupOpen: boolean
@@ -3187,6 +3190,7 @@ function createInitialState(): InternalLobbyFlowState {
     matchRoomsErrorText: null,
     adminMatchRoomEdit: null,
     privateRoomsCreatePopupOpen: false,
+    privateRoomCreateDraft: null,
     privateRoomVoiceCreateOption: null,
     privateRoomVoiceVipPopupOpen: false,
     privateRoomVoiceVipClaimSubmitting: false,
@@ -6091,6 +6095,7 @@ export function createLobbyFlowController(
       matchRoomsErrorText: state.matchRoomsErrorText,
       adminMatchRoomEdit: state.adminMatchRoomEdit,
       privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
+      privateRoomCreateDraft: state.privateRoomCreateDraft,
       privateRoomVoiceCreateOption: state.privateRoomVoiceCreateOption,
       privateRoomVoiceVipPopupOpen: state.privateRoomVoiceVipPopupOpen,
       privateRoomVoiceVipClaimSubmitting: state.privateRoomVoiceVipClaimSubmitting,
@@ -7806,6 +7811,8 @@ export function createLobbyFlowController(
       },
       onPrivateRoomsCreateOpen: () => {
         state.privateRoomsCreatePopupOpen = true
+        // Ново отваряне — стойностите по подразбиране (изборът се пази само докато прозорецът е отворен).
+        state.privateRoomCreateDraft = null
         render()
         void refreshPrivateRoomVoiceCreateOption()
       },
@@ -7848,6 +7855,10 @@ export function createLobbyFlowController(
       onPrivateRoomsCreateClose: () => {
         state.privateRoomsCreatePopupOpen = false
         render()
+      },
+      onPrivateRoomCreateDraftChange: (draft) => {
+        // Без render: DOM-ът вече показва избора; черновата е за следващото прерисуване.
+        if (state.privateRoomsCreatePopupOpen) state.privateRoomCreateDraft = draft
       },
       onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled) => {
         if (state.myPrivateRoom !== null) {

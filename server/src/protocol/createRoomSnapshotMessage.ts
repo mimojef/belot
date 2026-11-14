@@ -3,6 +3,7 @@ import { getValidServerBidActions } from '../game/getValidServerBidActions.js'
 import { getServerValidPlayCards } from '../game/getServerValidPlayCards.js'
 import { getServerHumanTurnTimeoutMsForPhase } from '../game/serverTimerStateHelpers.js'
 import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
+import type { VoiceSpeakPreview } from '../voice/voiceChatProtocol.js'
 import {
   getDisplayNameFromIdentity,
   type RoomBiddingSnapshot,
@@ -457,6 +458,8 @@ export function deriveTournamentAttendanceForSend(
 export function createRoomSnapshotMessage(
   room: ServerRoom,
   yourSeat: Seat | null,
+  /** Гласов чат: решението за говорене на играча на yourSeat (само на гласова маса). */
+  voiceSpeak: VoiceSpeakPreview | null = null,
 ): RoomSnapshotMessage {
   const nowMs = Date.now()
 
@@ -474,6 +477,7 @@ export function createRoomSnapshotMessage(
     isTournamentMatchOrigin: room.config.isTournamentMatchOrigin === true,
     // Гласов чат (Етап 2б) — само за играч на мястото си (yourSeat !== null).
     voiceTableId: yourSeat !== null ? (room.config.voiceTableId ?? null) : null,
+    voiceSpeak: yourSeat !== null && (room.config.voiceTableId ?? null) !== null ? voiceSpeak : null,
     tournamentId: room.config.tournamentId ?? null,
     tournamentMatchId: room.config.tournamentMatchId ?? null,
     tournamentRoundType: room.config.tournamentRoundType ?? null,

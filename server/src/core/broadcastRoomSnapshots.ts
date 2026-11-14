@@ -2,6 +2,7 @@ import { WebSocket } from 'ws'
 import { createRoomSnapshotMessage } from '../protocol/createRoomSnapshotMessage.js'
 import { sendSerializedJsonMessage } from './sendJsonMessage.js'
 import { safeInvokeTimingHook, type MainThreadTimingHook } from '../monitoring/mainThreadTimingMetrics.js'
+import type { VoiceSpeakPreview } from '../voice/voiceChatProtocol.js'
 import {
   SERVER_SEAT_ORDER,
   type ConnectionId,
@@ -36,6 +37,26 @@ let timingHook: MainThreadTimingHook | null = null
 
 export function setBroadcastRoomSnapshotsTimingHook(hook: MainThreadTimingHook | null): void {
   timingHook = hook
+}
+
+// Гласов чат: решението за говорене на играча преди включване (поле
+// voiceSpeak). Вика се САМО за гласови маси (room.config.voiceTableId) и само
+// за човек с профил; wiring-ът (index.ts) подава voiceChatService. Дефолт: няма.
+let voiceSpeakHook: ((voiceTableId: string, profileId: string) => VoiceSpeakPreview | null) | null = null
+
+export function setBroadcastRoomSnapshotsVoiceSpeakHook(hook: ((voiceTableId: string, profileId: string) => VoiceSpeakPreview | null) | null): void {
+  voiceSpeakHook = hook
+}
+
+function resolveVoiceSpeak(room: ServerRoom, profileId: string | null): VoiceSpeakPreview | null {
+  const voiceTableId = room.config.voiceTableId ?? null
+  if (voiceSpeakHook === null || voiceTableId === null || profileId === null) return null
+  try {
+    return voiceSpeakHook(voiceTableId, profileId)
+  } catch {
+    // Гласът никога не спира snapshot-а на играта.
+    return null
+  }
 }
 
 export function broadcastRoomSnapshots(
@@ -77,7 +98,7 @@ export function broadcastRoomSnapshots(
       // build → JSON.stringify → socket.send → monitoring hook с payload.type —
       // само разделено на стъпки, за да се мерят поотделно.
       const buildStartedAt = hook !== null ? performance.now() : 0
-      const message = createRoomSnapshotMessage(room, seat)
+      const message = createRoomSnapshotMessage(room, seat, resolveVoiceSpeak(room, participant.identity.profileId))
       const stringifyStartedAt = hook !== null ? performance.now() : 0
       const serialized = JSON.stringify(message)
       const sendStartedAt = hook !== null ? performance.now() : 0

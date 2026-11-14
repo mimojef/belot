@@ -84,6 +84,7 @@ import { createVoiceLiveKitApi, readVoiceLiveKitConfig } from './voice/voiceLive
 import { createVoiceLiveKitDispatcher } from './voice/voiceLiveKitDispatcher.js'
 import { createVoiceTokenSigner } from './voice/voiceTokenIssuer.js'
 import type { VoiceTableRecord } from './voice/voiceChatTypes.js'
+import type { VoiceSpeakPreview } from './voice/voiceChatProtocol.js'
 import { createVoiceAdminLiveProbe } from './voice/voiceAdminLiveProbe.js'
 import { createVoiceAdminMonitoring } from './voice/voiceAdminMonitoring.js'
 import { createVoiceClientDiagnostics } from './voice/voiceClientDiagnostics.js'
@@ -338,6 +339,7 @@ import {
   setBroadcastRoomSnapshotsMonitoringHook,
   setBroadcastRoomSnapshotsTimingHook,
   setBroadcastRoomSnapshotsSpectatorHook,
+  setBroadcastRoomSnapshotsVoiceSpeakHook,
 } from './core/broadcastRoomSnapshots.js'
 import {
   createBelotSpectatorRegistry,
@@ -5608,6 +5610,22 @@ function broadcastPrivateRoomCreatedNotice(input: {
   }
 }
 
+/**
+ * Гласов чат: решението за говорене на САМИЯ получател преди включване (поле
+ * voiceSpeak на private_room_updated). Само за седнал играч на гласова маса;
+ * иначе null. Само четене — не създава участие, binding или право.
+ */
+function buildOwnPrivateRoomVoiceSpeak(room: PrivateRoom, profileId: string | null): VoiceSpeakPreview | null {
+  if (room.voiceTableId === null || profileId === null) return null
+  const seated = room.slots.some((slot) => slot.occupant?.kind === 'human' && slot.occupant.profileId === profileId)
+  if (!seated) return null
+  try {
+    return voiceChatService.describeSpeakPreview(room.voiceTableId, profileId)
+  } catch {
+    return null
+  }
+}
+
 function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
   // Гласов чат: получателите тук са само седналите играчи -> voiceTableId е
   // позволен (общият snapshot без зрител го нулира за лобито).
@@ -5619,6 +5637,7 @@ function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {
       safeSendToConnection(slot.occupant.connectionId, {
         type: 'private_room_updated',
         room: ownerProfileId !== null && slot.occupant.profileId === ownerProfileId ? ownerSnapshot : snapshot,
+        voiceSpeak: buildOwnPrivateRoomVoiceSpeak(room, slot.occupant.profileId),
       })
     }
   }
@@ -25541,6 +25560,10 @@ setBroadcastRoomSnapshotsSpectatorHook((room) => {
   })
 })
 
+// Гласов чат: решението за говорене на играча преди включване в room_snapshot
+// (само гласови маси; само четене — без участие/binding/право).
+setBroadcastRoomSnapshotsVoiceSpeakHook((voiceTableId, profileId) => voiceChatService.describeSpeakPreview(voiceTableId, profileId))
+
 const httpServer = createServer((req, res) => {
   // Phase 0B — 'http' = HTTP active wall (wall − tracked body/io wait, не е
   // доказано CPU време), 'httpWall' = end-to-end,
@@ -27878,6 +27901,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             safeSendToConnection(connection.id, {
               type: 'private_room_updated',
               room: buildPrivateRoomSnapshot(reconnected, latestConnection.profileId),
+              voiceSpeak: buildOwnPrivateRoomVoiceSpeak(reconnected, latestConnection.profileId),
             })
           }
           // Refresh/reconnect на поканения — висящата партньорска покана се
@@ -28611,6 +28635,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         safeSendToConnection(connection.id, {
           type: 'private_room_updated',
           room: buildPrivateRoomSnapshot(createResult.room, latestConnection.profileId),
+          voiceSpeak: buildOwnPrivateRoomVoiceSpeak(createResult.room, latestConnection.profileId),
         })
 
         broadcastPrivateRoomCreatedNotice({
