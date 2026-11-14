@@ -1,0 +1,15 @@
+[Unit]
+Description=Pika.bg - LiveKit version for the Node Exporter textfile collector
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=PIKA_LIVEKIT_CONTAINER=lk-server
+Environment=PIKA_TEXTFILE_DIR=/var/lib/prometheus/node-exporter
+ExecStart=/usr/local/sbin/pika-livekit-version-textfile
+TimeoutStartSec=60
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only

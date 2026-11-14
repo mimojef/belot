@@ -411,7 +411,13 @@ const VOICE_OPS_NON_RUNTIME = [
   'ops/voice-metrics-caddy/caddy-http-server.json',
   'ops/voice-metrics-caddy/caddy-yaml-block.yaml',
 ]
-const VOICE_OPS_DIRS = ['ops/deploy-migration-backup-retention', 'ops/voice-livekit-it', 'ops/voice-metrics-caddy', 'ops/voice-production-env']
+const VOICE_OPS_DIRS = ['ops/deploy-migration-backup-retention', 'ops/voice-livekit-it', 'ops/voice-metrics-caddy', 'ops/voice-production-env', 'ops/voice-livekit-version']
+const LIVEKIT_VERSION_OPS = [
+  'ops/voice-livekit-version/pika-livekit-version-textfile',
+  'ops/voice-livekit-version/check-pika-livekit-version-textfile.mjs',
+  'ops/voice-livekit-version/systemd/pika-livekit-version.service',
+  'ops/voice-livekit-version/systemd/pika-livekit-version.timer',
+]
 const VOICE_DEPLOY_TARGET_REF = 'b4ab687'
 
 check('[8a] 11-те файла от STOP-а при b4ab687 класифицират като "non-runtime"', () => {
@@ -444,10 +450,10 @@ check('[8b] Сходни/нови имена под същите папки ос
   }
 })
 
-check('[8c] Всеки tracked файл в гласовите ops/ папки е "non-runtime" (README.md по общия *.md шаблон)', () => {
-  const tracked = execFileSync('git', ['-c', 'core.quotePath=false', 'ls-files', '--', ...VOICE_OPS_DIRS], { cwd: repoRoot, encoding: 'utf8' })
+check('[8c] Всеки файл (tracked + нов, без ignored) в гласовите ops/ папки е "non-runtime" (README.md по общия *.md шаблон)', () => {
+  const tracked = execFileSync('git', ['-c', 'core.quotePath=false', 'ls-files', '--cached', '--others', '--exclude-standard', '--', ...VOICE_OPS_DIRS], { cwd: repoRoot, encoding: 'utf8' })
     .split('\n').filter((line) => line.length > 0)
-  assert(tracked.length === 15, `очаквах 15 tracked файла (11 + 4 README.md), намерих ${tracked.length}: ${tracked.join(', ')}`)
+  assert(tracked.length === 20, `очаквах 20 файла (11 + 4 за версията + 5 README.md), намерих ${tracked.length}: ${tracked.join(', ')}`)
   const classified = classifyPaths(tracked)
   const wrong = tracked.filter((p) => classified.get(p) !== 'non-runtime')
   assert(wrong.length === 0, `не са "non-runtime": ${wrong.map((p) => `${p} -> ${classified.get(p)}`).join(', ')}`)
@@ -486,6 +492,27 @@ check(`[8e] Delta ${VOICE_PRE_TOOLING_REF}..${VOICE_DEPLOY_TARGET_REF}: 0 "uncla
   const backendImpact = delta.some((p) => classified.get(p) === 'backend' || classified.get(p) === 'migration')
   assert(frontendImpact && backendImpact, `frontend=${frontendImpact} backend=${backendImpact}`)
   assert(delta.includes('src/app/lobby/publicLegalPages.ts') && delta.includes('server/src/voice/voiceRetentionSweeper.ts'), 'правните текстове и T1 са в delta-та')
+})
+
+check('[9a] ops/voice-livekit-version: скриптът, тестът и systemd unit-ите са "non-runtime"', () => {
+  const classified = classifyPaths(LIVEKIT_VERSION_OPS)
+  for (const p of LIVEKIT_VERSION_OPS) {
+    assert(classified.get(p) === 'non-runtime', `${p} -> ${classified.get(p)}, очаквах "non-runtime"`)
+  }
+})
+
+check('[9b] Сходни имена под ops/voice-livekit-version/ остават "unclassified"', () => {
+  const paths = [
+    'ops/voice-livekit-version/pika-livekit-version-textfile.bak',
+    'ops/voice-livekit-version/pika_livekit_version.prom',
+    'ops/voice-livekit-version/systemd/pika-livekit-version.timer.d/override.conf',
+    'ops/voice-livekit-version/systemd/pika-livekit-version.path',
+    'ops/voice-livekit-version/install.sh',
+  ]
+  const classified = classifyPaths(paths)
+  for (const p of paths) {
+    assert(classified.get(p) === 'unclassified', `${p} -> ${classified.get(p)}, очаквах "unclassified"`)
+  }
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

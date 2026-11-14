@@ -1707,7 +1707,7 @@ Admin → **„Гласови разговори“**, само за пълен 
   - скоростите (CPU %, steal, PSI, трафик) са разлика между две поредни четения (≤180 s);
   - средните стойности на histogram-ите за интервала са от `_sum`/`_count`;
   - при грешка стойностите стават null (не старите), а `lastSuccessAt` се пази;
-  - версия на LiveKit — **само ако** присъства като етикет `version` на `livekit_*` метрика (иначе „Недостъпно“, не се измисля);
+  - версия на LiveKit — от етикет `version` на `livekit_*` метрика (LiveKit 1.13.11 такава няма), иначе от Node Exporter textfile метриката `pika_livekit_build_info` (`ops/voice-livekit-version/`, 2026-11-14) — само при `pika_livekit_version_check_success 1` и проверка не по-стара от 15 мин спрямо `node_time_seconds`; иначе „Недостъпно“, не се измисля;
   - CPU throttling: контейнерът е без CPU quota, а Node Exporter не вижда cgroup. Вместо това се показва „Натиск върху CPU (PSI)“ (`node_pressure_cpu_waiting_seconds_total`), ако се събира.
 - **`voiceClientDiagnostics.ts`** + **`POST /api/voice/client-report`:**
   - анонимни събития `connected`, `connect_failed{reason}`, `reconnecting`, `reconnected`, `connection_lost`, `reconnect_failed`, `mic_failed{reason}` и веднъж на връзка `transport{candidateType, protocol, rttMs, jitterMs, packetLossPercent}`;
@@ -1804,7 +1804,7 @@ Admin → **„Гласови разговори“**, само за пълен 
 ### 17.8 Отворени въпроси
 - Desktop дизайнът и финалните корекции са одобрени от собственика.
 - Caddy маршрутът е внедрен (17.5). Докато `VOICE_VPS_METRICS_*` не са в `server/.env` и backend-ът не е рестартиран с новия код, табът „Гласов VPS“ показва „Не е конфигурирано“.
-- Версията на LiveKit се показва, само ако реалните метрики я съдържат (в потвърдения списък от 4.1 такава няма). Иначе е „Недостъпно“.
+- Версията на LiveKit: LiveKit не я публикува в метриките си (потвърдено на production 2026-11-14), затова панелът показваше „Недостъпно“. Решение (2026-11-14, **не е commit-нато/внедрено**): скрипт + systemd таймер на всеки 5 мин на гласовия VPS (`ops/voice-livekit-version/`) — `docker exec lk-server /livekit-server --version` → атомичен `pika_livekit_version.prom` за съществуващия textfile collector на Node Exporter 1.7.0; backend-ът го чете от същия Node Exporter отговор. Без нови заявки/портове/рестарти и без клиентска телеметрия. При грешка — `success 0` без версия; остаряла (>15 мин) → „Недостъпно“. Инсталация и rollback: `ops/voice-livekit-version/README.md`. Тестове: `check-pika-livekit-version-textfile.mjs` 11/11, `server/scripts/checkVoiceLiveKitVersion.ts` 7/7.
 - Клиентските броячи и статистиката са от последния рестарт на игровия сървър, без история. Историческите данни са извън обхвата (без нова инфраструктура).
 - Метриките на LiveKit са за целия сървър (всички namespace-и, вкл. ръчни тестове). Броевете на Pika (live probe) са само за собствените маси.
 

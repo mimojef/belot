@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# pika-livekit-version-textfile — версията на работещия LiveKit сървър като
+# метрика за Node Exporter textfile collector-а (гласовия VPS).
+#
+# Извлича версията от САМИЯ работещ контейнер:
+#   docker exec <container> /livekit-server --version
+#     -> "livekit-server version 1.13.11"
+# и записва АТОМИЧНО (temp файл в същата директория + mv) файла
+#   <textfile dir>/pika_livekit_version.prom:
+#
+#   pika_livekit_build_info{version="1.13.11"} 1
+#   pika_livekit_version_check_success 1
+#   pika_livekit_version_check_timestamp_seconds <unix time на проверката>
+#
+# При грешка (контейнерът не работи, docker липсва/timeout, неочакван изход)
+# файлът се ПРЕЗАПИСВА без pika_livekit_build_info и със success 0 — старата
+# версия никога не остава като актуална. Backend-ът показва версията само при
+# success 1 и timestamp не по-стар от 15 минути спрямо node_time_seconds
+# (проверка за актуалност — ако таймерът спре, версията изчезва сама).
+#
+# Без мрежа, без нови портове, без рестарт на контейнери: `--version` е
+# отделен краткоживущ процес в контейнера. Нищо не се логва освен кратка
+# причина при грешка (stderr -> journal), без тайни.
+#
+# Настройки (env, със стойности по подразбиране):
+#   PIKA_LIVEKIT_CONTAINER         lk-server
+#   PIKA_TEXTFILE_DIR              /var/lib/prometheus/node-exporter
+#   PIKA_LIVEKIT_VERSION_TIMEOUT   20   (секунди за всяко docker извикване)
+#   PIKA_DOCKER_BIN                docker
+#
+# Изход: 0 — версията е записана; 1 — проверката е неуспешна (файлът е
+# записан със success 0); 2 — грешна конфигурация (нищо не е записано).
+
+set -euo pipefail
+umask 022
+
+CONTAINER="${PIKA_LIVEKIT_CONTAINER:-lk-server}"
+TEXTFILE_DIR="${PIKA_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
+EXEC_TIMEOUT="${PIKA_LIVEKIT_VERSION_TIMEOUT:-20}"
+DOCKER="${PIKA_DOCKER_BIN:-docker}"
+OUT_NAME="pika_livekit_version.prom"
+
+fail_config() {
+  echo "pika-livekit-version-textfile: $1" >&2
+  exit 2
+}
+
+[[ "$CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || fail_config "невалидно име на контейнер"
+[[ "$EXEC_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]] || fail_config "невалиден timeout"
+[ -d "$TEXTFILE_DIR" ] && [ ! -L "$TEXTFILE_DIR" ] || fail_config "textfile директорията липсва: $TEXTFILE_DIR"
+
+now="$(date +%s)"
+version=""
+reason=""
+
+running="$(timeout "$EXEC_TIMEOUT" "$DOCKER" inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
+running="${running//$'\r'/}"
+if [ "$running" != "true" ]; then
+  reason="container_not_running"
+else
+  raw="$(timeout "$EXEC_TIMEOUT" "$DOCKER" exec "$CONTAINER" /livekit-server --version 2>/dev/null || true)"
+  line="${raw%%$'\n'*}"
+  line="${line//$'\r'/}"
+  if [[ "$line" =~ ^livekit-server\ version\ v?([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)$ ]] && [ "${#BASH_REMATCH[1]}" -le 64 ]; then
+    version="${BASH_REMATCH[1]}"
+  else
+    reason="unexpected_version_output"
+  fi
+fi
+
+tmp="$(mktemp "$TEXTFILE_DIR/.pika_livekit_version.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+{
+  if [ -n "$version" ]; then
+    echo '# HELP pika_livekit_build_info LiveKit server version reported by the running container (always 1).'
+    echo '# TYPE pika_livekit_build_info gauge'
+    echo "pika_livekit_build_info{version=\"$version\"} 1"
+  fi
+  echo '# HELP pika_livekit_version_check_success 1 if the last LiveKit version check succeeded, 0 otherwise.'
+  echo '# TYPE pika_livekit_version_check_success gauge'
+  echo "pika_livekit_version_check_success $([ -n "$version" ] && echo 1 || echo 0)"
+  echo '# HELP pika_livekit_version_check_timestamp_seconds Unix time of the last LiveKit version check.'
+  echo '# TYPE pika_livekit_version_check_timestamp_seconds gauge'
+  echo "pika_livekit_version_check_timestamp_seconds $now"
+} > "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$TEXTFILE_DIR/$OUT_NAME"
+trap - EXIT
+
+if [ -z "$version" ]; then
+  echo "pika-livekit-version-textfile: проверката е неуспешна ($reason); записано success 0 без версия" >&2
+  exit 1
+fi

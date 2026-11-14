@@ -143,6 +143,13 @@ classify_path() {
       # Игровият deploy не я чете и не я прилага; в src/ и server/src/ има
       # само текстови препратки (коментар/админ текст), не импорти.
       echo "non-runtime" ;;
+    ops/voice-livekit-version/pika-livekit-version-textfile|ops/voice-livekit-version/check-pika-livekit-version-textfile.mjs|ops/voice-livekit-version/systemd/pika-livekit-version.service|ops/voice-livekit-version/systemd/pika-livekit-version.timer)
+      # Версията на LiveKit като Node Exporter textfile метрика — скрипт и
+      # systemd unit-и за ГЛАСОВИЯ VPS (инсталират се ръчно там, README в
+      # същата папка). Игровият deploy не ги чете, не ги пуска и не ги
+      # инсталира; backend-ът само парсва метриката от съществуващия Node
+      # Exporter отговор (server/src/voice/voiceVpsMetrics.ts).
+      echo "non-runtime" ;;
     temp/*.png)
       # Дизайн source изображения (напр. 3574009 — 27 PNG икони, mobile
       # redesign art). Проверено: temp/ НЕ е build/runtime вход — frontend

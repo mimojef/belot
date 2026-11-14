@@ -186,7 +186,11 @@ export type VoiceVpsSnapshot = {
   /** Секунди между двете четения, от които са изчислени скоростите. */
   rateWindowSeconds: number | null
   liveKit: VoiceVpsSourceStatus & {
-    /** Само ако реално присъства в метриките (етикет version на livekit_* метрика). */
+    /**
+     * Само от реални данни: етикет version на livekit_* метрика или (на
+     * практика) актуалната pika_livekit_build_info от Node Exporter textfile
+     * collector-а. Иначе null.
+     */
     version: string | null
     processStartedAt: string | null
     uptimeSeconds: number | null
@@ -294,16 +298,45 @@ function qualityMetric(current: PromMetrics | null, previous: PromMetrics | null
   return { intervalMean, lifetimeMean, intervalCount, current: null }
 }
 
+const LIVEKIT_VERSION_PATTERN = /^v?\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$/
+
 function findLiveKitVersion(metrics: PromMetrics | null): string | null {
   if (metrics === null) return null
   for (const [name, list] of metrics.samples) {
     if (!name.startsWith('livekit_')) continue
     for (const sample of list) {
       const version = sample.labels.version
-      if (version !== undefined && /^v?\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$/.test(version)) return version.replace(/^v/, '')
+      if (version !== undefined && LIVEKIT_VERSION_PATTERN.test(version)) return version.replace(/^v/, '')
     }
   }
   return null
+}
+
+/**
+ * Версията от Node Exporter textfile collector-а на гласовия VPS
+ * (ops/voice-livekit-version: `docker exec lk-server /livekit-server --version`
+ * на всеки 5 минути). LiveKit не публикува версията си в своите метрики.
+ * Показва се само при успешна последна проверка, не по-стара от 15 минути
+ * спрямо часовника на VPS-а (node_time_seconds) — иначе null („Недостъпно“).
+ */
+export const LIVEKIT_VERSION_TEXTFILE_MAX_AGE_SECONDS = 15 * 60
+const LIVEKIT_VERSION_TEXTFILE_FUTURE_TOLERANCE_SECONDS = 120
+
+function findTextfileLiveKitVersion(host: PromMetrics | null, referenceNowSeconds: number | null): string | null {
+  if (host === null || referenceNowSeconds === null) return null
+  const success = host.samples.get('pika_livekit_version_check_success') ?? []
+  if (success.length !== 1 || success[0]!.value !== 1) return null
+  const checkedAt = firstValue(host, 'pika_livekit_version_check_timestamp_seconds')
+  if (checkedAt === null) return null
+  const age = referenceNowSeconds - checkedAt
+  if (age > LIVEKIT_VERSION_TEXTFILE_MAX_AGE_SECONDS || age < -LIVEKIT_VERSION_TEXTFILE_FUTURE_TOLERANCE_SECONDS) return null
+  const versions = new Set<string>()
+  for (const sample of host.samples.get('pika_livekit_build_info') ?? []) {
+    const version = sample.labels.version
+    if (sample.value !== 1 || version === undefined || !LIVEKIT_VERSION_PATTERN.test(version)) return null
+    versions.add(version.replace(/^v/, ''))
+  }
+  return versions.size === 1 ? [...versions][0]! : null
 }
 
 function toIso(seconds: number | null): string | null {
@@ -444,7 +477,7 @@ export function buildVoiceVpsSnapshot(input: {
     rateWindowSeconds: hostSeconds,
     liveKit: {
       ...input.liveKit.status,
-      version: findLiveKitVersion(lk),
+      version: findLiveKitVersion(lk) ?? findTextfileLiveKitVersion(host, nodeTime),
       processStartedAt: toIso(processStart),
       uptimeSeconds: processStart !== null && referenceNow !== null && referenceNow > processStart ? referenceNow - processStart : null,
       rooms: sumOf(lk, 'livekit_room_total'),
