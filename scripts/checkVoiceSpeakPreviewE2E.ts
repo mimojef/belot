@@ -16,7 +16,7 @@
  *   [P3] административен мют на живо (преди включване) -> прозорецът става
  *        „само слушай“ без „Вземи VIP“; махане на мюта -> обратно; известие
  *        само до наказания;
- *   [P4] мют, наложен докато връзката е прекъсната -> след reconnect
+ *   [P4] мют, наложен докато връзката е прекъсната -> след тихо reconnect (без reload, същата маса)
  *        прозорецът показва мюта (решението идва с resync snapshot-а);
  *   [P5] в играта room_snapshot носи собственото решение на всеки играч;
  *   [P6] без включване и без нови заявки: 0 voice_presence, 0 /api/voice/*.
@@ -250,22 +250,19 @@ try {
   const muteD = await api(creator, '/api/topics/profile-mute', { profileId: plainReconnect.profileId, reason: 'e2e voice preview', durationMs: 30 * 60 * 1000 })
   await sleep(1_000)
   const dBeforeReconnect = d.received.length
+  await d.page.evaluate(`window.__e2ePageMarker = 'p4-kept'`)
   d.reconnect()
-  // След възстановяване приложението се връща в лобито (съществуващо поведение);
-  // играчът остава на мястото си и се връща на същата маса.
+  // Кратко прекъсване в чакалнята -> тихо възстановяване (без reload): играчът
+  // остава на същата маса, решението идва с resync snapshot-а.
   let dMutedOk = true
   try {
     const deadlineResync = Date.now() + 25_000
     while (Date.now() < deadlineResync && !voiceSpeakFrames(d.received.slice(dBeforeReconnect), 'private_room_updated').length) await sleep(250)
-    await d.page.locator(LOBBY_READY).first().waitFor({ state: 'visible', timeout: 25_000 })
-    await d.page.locator(LOBBY_READY).first().click()
-    const enterD = d.page.locator(`[data-private-room-list-enter="${roomId}"]`)
-    await enterD.waitFor({ state: 'visible', timeout: 15_000 })
-    await enterD.click()
     await waitOffer(d.page, 'muted', 25_000)
+    dMutedOk = (await d.page.evaluate(`window.__e2ePageMarker === 'p4-kept' && !!document.querySelector('[data-private-room-waiting-screen="1"]')`)) === true
   } catch { dMutedOk = false }
 
-  await check('[P4] Мют по време на прекъсната връзка: след reconnect и връщане на масата прозорецът показва мюта (от resync snapshot-а), без „Вземи VIP“', async () => {
+  await check('[P4] Мют по време на прекъсната връзка: след тихо reconnect (без reload, същата маса) прозорецът показва мюта (от resync snapshot-а), без „Вземи VIP“', async () => {
     assert(muteD?.ok === true, `мют: ${JSON.stringify(muteD)}`)
     const resync = voiceSpeakFrames(d.received.slice(dBeforeReconnect), 'private_room_updated')
     assert(resync.some((f) => f.data.voiceSpeak?.blockedReason === 'muted'), `resync: ${JSON.stringify(resync.map((f) => f.data.voiceSpeak))}`)

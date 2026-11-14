@@ -1737,6 +1737,8 @@ export type ConnectedMessage = {
   type: 'connected'
   clientId: string
   message: string
+  /** Непрозрачен идентификатор на backend процеса; липсва при стар сървър. */
+  serverInstanceId?: string
 }
 
 export type PongMessage = {

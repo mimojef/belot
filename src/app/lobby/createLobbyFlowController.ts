@@ -1653,6 +1653,14 @@ export type LobbyFlowController = {
   forceTopicMessagesResubscribeIfOnTopicsScreen: () => void
   forceTopicsDirectoryResubscribeIfOnTopicsScreen: () => void
   resyncPrivateRoomMembership: () => void
+  /**
+   * Тихо възстановяване на WS (без reload): заявява авторитетното състояние
+   * на частните маси по новата връзка и вика done(true), когато е получено и
+   * приложено (вкл. изчезнала маса и нов абонамент за чата на чакалнята).
+   */
+  beginReconnectSync: (done: (ok: boolean) => void) => void
+  /** session_in_game по време на синхронизацията: играта е започнала през прекъсването. */
+  markReconnectSyncSessionInGame: () => void
   joinPrivateRoom: (privateRoomId: string) => void
   updateLobbyChatDraft: (value: string) => void
   submitLobbyChatMessage: () => void
@@ -2746,6 +2754,10 @@ type InternalLobbyFlowState = {
 }
 
 const DEFAULT_REQUIRED_PLAYERS = 4
+/** Прекъснато търсене на случайна маса при загубена връзка (не се подновява автоматично). */
+export const MATCHMAKING_INTERRUPTED_TEXT = 'Търсенето на маса беше прекъснато. Можете да опитате отново.'
+/** Частната маса не съществува/не е наша според сървъра след тихо възстановяване. */
+const PRIVATE_ROOM_GONE_AFTER_RECONNECT_TEXT = 'Масата вече не е налична.'
 const DEFAULT_COUNTDOWN_MS = 180000
 // Синтетичен ключ за chatUploadingFriendshipIds/chatDraftByFriendshipId,
 // докато pending vip_dm compose context (§7 в task spec-а) все още няма
@@ -20177,6 +20189,9 @@ export function createLobbyFlowController(
       ? true
       : previousScroll.scrollHeight - previousScroll.scrollTop - previousScroll.clientHeight < 48
     const previousScrollTop = previousScroll?.scrollTop ?? 0
+    // Екранът на чакалнята е собственият си вертикален scroll container
+    // (при нисък прозорец) — innerHTML го пресъздава, затова скролът се пренася.
+    const previousScreenScrollTop = options.root.querySelector<HTMLElement>('[data-private-room-waiting-screen="1"]')?.scrollTop ?? 0
     // Светлият мобилен вариант на чакалнята — само телефон; desktop/таблет — тъмният.
     const isLightWaitingScreen = isPhoneLayoutViewport()
 
@@ -20222,6 +20237,12 @@ export function createLobbyFlowController(
     })
 
     options.onPrivateRoomWaitingRendered?.(options.root)
+
+    // След попълването на лентата за гласов чат — височината вече е крайната.
+    if (previousScreenScrollTop > 0) {
+      const nextScreen = options.root.querySelector<HTMLElement>('[data-private-room-waiting-screen="1"]')
+      if (nextScreen !== null) nextScreen.scrollTop = previousScreenScrollTop
+    }
 
     attachPrivateRoomNoticeHandlers(options.root, {
       onInviteOther: () => openPartnerPickerFromNotice(),
@@ -20692,6 +20713,56 @@ export function createLobbyFlowController(
   // (виж handler-а по-долу).
   function resyncPrivateRoomMembership(): void {
     options.onPrivateRoomsOpen?.()
+  }
+
+  // ─── Тихо възстановяване на WS (без reload) ─────────────────────────
+  // main.ts/createLobbySoftReconnect: по новата връзка се иска авторитетното
+  // състояние (request_private_rooms_list — сървърът първо пренасочва
+  // членството към новата връзка (reconnectMember) и праща
+  // private_room_updated, после пълния private_rooms_list). Синхронизацията
+  // приключва с пълния списък; членството се проверява СПРЯМО НЕГО, не по
+  // липсата на отделно съобщение.
+  let reconnectSync: { done: (ok: boolean) => void; sessionInGame: boolean } | null = null
+  /** Прекъснато търсене — съобщението се показва отново след 'connected' (то нулира errorText). */
+  let matchmakingInterruptedNoticePending = false
+
+  function beginReconnectSync(done: (ok: boolean) => void): void {
+    reconnectSync = { done, sessionInGame: false }
+    // Абонаментът за чата на чакалнята е вързан за старата връзка. Нулира се
+    // СЛЕД заявката по-долу: следващото рендериране се абонира наново по
+    // същия WS (сървърът обработва съобщенията подред -> вече пренасочено
+    // членство) и получава историята (запълва пропуснатото).
+    options.onPrivateRoomsOpen?.()
+    state.privateRoomWaitingChatSubscribedRoomId = null
+  }
+
+  function completeReconnectSync(rooms: readonly PrivateRoomSnapshot[]): void {
+    const sync = reconnectSync
+    reconnectSync = null
+    if (sync === null) return
+    const myRoom = state.myPrivateRoom
+    const profileId = options.getAuthSession?.()?.profile.profileId ?? null
+    if (myRoom !== null) {
+      const authoritative = rooms.find((room) => room.id === myRoom.id) ?? null
+      const stillMember = authoritative !== null && profileId !== null
+        && authoritative.slots.some((slot) => slot.occupant !== null && !slot.occupant.isBot && slot.occupant.profileId === profileId)
+      if (!stillMember) {
+        // Масата е изчезнала/вече не е наша по време на прекъсването. Ако
+        // играта е започнала, session_in_game вече е показал съществуващия
+        // прозорец за връщане в нея — тогава без допълнително съобщение.
+        const wasOnWaitingScreen = state.currentScreen === 'private-room-waiting'
+        leavePrivateRoomWaitingScreen()
+        state.myPrivateRoom = null
+        state.previewedPrivateRoomId = null
+        state.privateRoomKickConfirmPopup = null
+        state.privateRoomInvitedProfileIds = new Set()
+        state.privateRoomPartnerPickerOpen = false
+        if (wasOnWaitingScreen) state.currentScreen = 'private-rooms'
+        if (!sync.sessionInGame) state.privateRoomInfoText = PRIVATE_ROOM_GONE_AFTER_RECONNECT_TEXT
+      }
+    }
+    render()
+    sync.done(true)
   }
 
   function updateLobbyChatDraft(value: string): void {
@@ -22022,6 +22093,11 @@ export function createLobbyFlowController(
   function handleServerMessage(message: ServerMessage): boolean {
     if (message.type === 'connected') {
       state.errorText = null
+      // Съобщението за прекъснато търсене остава видимо и след възстановяването.
+      if (matchmakingInterruptedNoticePending) {
+        matchmakingInterruptedNoticePending = false
+        state.errorText = MATCHMAKING_INTERRUPTED_TEXT
+      }
       if (_svaraReconnect) options.onSvaraTablesOpen?.()
       // Виж _isExpectingLudoMatchRestore doc коментара при декларацията му —
       // тази проба е "blind" (никакво предварително известие от сървъра, че
@@ -23842,6 +23918,10 @@ export function createLobbyFlowController(
 
     if (message.type === 'private_rooms_list') {
       state.privateRooms = message.rooms
+      if (reconnectSync !== null) {
+        completeReconnectSync(message.rooms)
+        return true
+      }
       render()
       return true
     }
@@ -24996,6 +25076,23 @@ export function createLobbyFlowController(
         for (const topicId of Object.keys(state.topicComposerPendingRequestIdByTopicId)) {
           state.topicComposerPendingRequestIdByTopicId[topicId] = null
         }
+        // Същото за действията в частна маса, чийто отговор идва САМО по WS:
+        // флаговете се освобождават, НИЩО не се изпраща повторно — истината
+        // идва от синхронизацията след повторното свързване.
+        state.privateRoomWaitingChatSending = false
+        state.privateRoomWaitingChatPendingRequestId = null
+        state.privateRoomJoinInFlight = false
+        state.privateRoomStartInFlight = false
+        state.privateRoomPartnerInviteInFlight = false
+        state.privateRoomPartnerNoticeBusy = false
+        state.privateRoomBotActionLoadingTeam = null
+        // Сървърът маха връзката от опашката при затваряне — търсенето на
+        // случайна маса е прекратено. Не се подновява автоматично.
+        if (state.isSearching) {
+          resetToLobby()
+          matchmakingInterruptedNoticePending = true
+          state.errorText = MATCHMAKING_INTERRUPTED_TEXT
+        }
       }
       render()
     },
@@ -25101,6 +25198,10 @@ export function createLobbyFlowController(
     forceTopicMessagesResubscribeIfOnTopicsScreen,
     forceTopicsDirectoryResubscribeIfOnTopicsScreen,
     resyncPrivateRoomMembership,
+    beginReconnectSync,
+    markReconnectSyncSessionInGame: () => {
+      if (reconnectSync !== null) reconnectSync.sessionInGame = true
+    },
     joinPrivateRoom: handlePrivateRoomJoin,
     updateLobbyChatDraft,
     submitLobbyChatMessage,

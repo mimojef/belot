@@ -103,10 +103,19 @@ import {
   type PlayerCampaignProfileSummary,
 } from './app/network/createGameServerClient'
 import {
+  buildOfflineReloadUrl,
+  classifyOfflineScreen,
   decideSocketCloseAction,
   decideSocketOpenAction,
+  getHealthPollDelayMs,
+  getReconnectDelayMs,
+  HEALTH_REQUEST_TIMEOUT_MS,
+  isSameAuthSessionIdentity,
   shouldOfflineRecoveryForceLobbyReload,
+  type AuthSessionIdentity,
+  type OfflineReloadVia,
 } from './app/network/socketReconnectPolicy'
+import { createLobbySoftReconnect, type SoftReconnectSessionCheck } from './app/network/createLobbySoftReconnect'
 import { createConnectionLivenessMonitor } from './app/network/createConnectionLivenessMonitor'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { MOBILE_LIGHT_PAGE_BACKGROUND } from './ui/layout/mobileLightPageBackground'
@@ -498,6 +507,13 @@ let showOfflineConnectionOverlay: () => void = () => {
   shouldReloadLobbyOnReconnect = true
 }
 let hideOfflineConnectionOverlay: () => void = () => {}
+// Тихо възстановяване в лоби контекст (виж createLobbySoftReconnect и
+// initOfflineOverlay) — UI куките се задават от initOfflineOverlay.
+let hasGameServerConnectedOnce = false
+let notifyHealthMonitorSocketState: () => void = () => {}
+let showConnectionRecoveringUi: () => void = () => {}
+let showConnectionLostFullScreen: () => void = () => {}
+let hideConnectionRecoveryUi: () => void = () => {}
 let currentAuthSession: AuthSession | null = null
 // Гласов чат (Етап 3) — един controller за цялото приложение. Създава се
 // преди WS клиента (виж createAppVoiceController); до тогава куките са no-op.
@@ -516,13 +532,15 @@ let voiceRoomSnapshot: { roomId: string; voiceTableId: string | null; yourSeat: 
 
 const SESSION_CACHE_KEY = 'pika_session_cache'
 
-function forceOfflineLobbyReload(): void {
+// via — причината от фиксиран списък (OfflineReloadVia), без лични данни;
+// вижда се в nginx лога като ...&via=<причина>.
+function forceOfflineLobbyReload(via: OfflineReloadVia): void {
   if (offlineLobbyReloadScheduled || isPageUnloading) return
   offlineLobbyReloadScheduled = true
 
   const navigateToFreshLobby = (): void => {
     window.setTimeout(() => {
-      window.location.replace(`/lobby?offlineReload=${Date.now()}`)
+      window.location.replace(buildOfflineReloadUrl(Date.now(), via))
     }, 300)
   }
 
@@ -8185,10 +8203,8 @@ function scheduleServerReconnect(): void {
     return
   }
 
-  const delayMs = Math.min(
-    SERVER_RECONNECT_DELAY_MS + reconnectAttempt * SERVER_RECONNECT_DELAY_MS,
-    SERVER_RECONNECT_MAX_DELAY_MS,
-  )
+  // Досегашната линейна стъпка (1..5 s) с ±25% jitter.
+  const delayMs = getReconnectDelayMs(reconnectAttempt, SERVER_RECONNECT_DELAY_MS, SERVER_RECONNECT_MAX_DELAY_MS)
 
   reconnectAttempt += 1
   reconnectTimerId = window.setTimeout(() => {
@@ -8739,11 +8755,69 @@ voiceMobileUi = createVoiceMobileUi({
   onGetVip: () => lobby.openVipShop(),
 })
 
+// Лоби контекст за тихо възстановяване: не активна игра, Svara, зрител или
+// самостоятелна страница; поне едно успешно свързване; без вече насрочен
+// reload от досегашния път.
+function isLobbySoftReconnectEligible(): boolean {
+  return hasGameServerConnectedOnce
+    && !_isStandaloneDedicatedPath
+    && !shouldReloadLobbyOnReconnect
+    && !activeRoom.hasActiveRoom()
+    && !isSvaraReconnectContext()
+    && !isBelotSpectatorSessionActive()
+}
+
+function toAuthSessionIdentity(session: AuthSession | null | undefined): AuthSessionIdentity {
+  return session ? { sessionId: session.sessionId, profileId: session.profile.profileId ?? null } : null
+}
+
+// Същата валидна сесия като преди прекъсването (една заявка на възстановяване).
+async function verifyAuthSessionUnchanged(): Promise<SoftReconnectSessionCheck> {
+  const before = toAuthSessionIdentity(currentAuthSession)
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/auth/me`, { method: 'GET', credentials: 'include', cache: 'no-store' })
+    if (response.status >= 500) return 'error'
+    const data = await readAuthResponse(response)
+    const after = data.ok ? toAuthSessionIdentity(data.session ?? null) : null
+    return isSameAuthSessionIdentity(before, after) ? 'same' : 'changed'
+  } catch {
+    return 'error'
+  }
+}
+
+const lobbySoftReconnect = createLobbySoftReconnect({
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+  clearTimeout: (id) => window.clearTimeout(id as number),
+  verifySession: verifyAuthSessionUnchanged,
+  onResumeLobby: () => {
+    // Същото като обичайния 'lobby' клон на onOpen — без resyncPrivateRoomMembership
+    // (заменен от beginReconnectSync) и без setErrorText(null).
+    lobby.setConnected(true)
+    lobby.forceLobbyChatResubscribeIfOnLobbyScreen()
+    lobby.forceTopicMessagesResubscribeIfOnTopicsScreen()
+    lobby.forceTopicsDirectoryResubscribeIfOnTopicsScreen()
+    lobby.refreshOpenPersonalChatAfterReconnect()
+  },
+  syncLobby: (done) => lobby.beginReconnectSync(done),
+  onShowBanner: () => showConnectionRecoveringUi(),
+  onShowFullScreen: () => showConnectionLostFullScreen(),
+  onRecovered: () => {
+    hideConnectionRecoveryUi()
+    // Гласът: presence от вече пренасочената връзка на мястото (lease/grace
+    // непроменени; без ново включване на микрофона).
+    voiceController?.setGameConnection(true)
+    requestPwaUpdateApplyAttempt()
+  },
+  onReload: (via) => forceOfflineLobbyReload(via),
+})
+
 client = createGameServerClient({
   onOpen: () => {
-    voiceController?.setGameConnection(true)
     clearReconnectTimer()
     reconnectAttempt = 0
+    hasGameServerConnectedOnce = true
+    notifyHealthMonitorSocketState()
 
     if (connectionErrorTimerId !== null) {
       clearTimeout(connectionErrorTimerId)
@@ -8772,6 +8846,17 @@ client = createGameServerClient({
       activeRoom.clearPendingTournamentSilentEntry(silentAttachedRoundTransitionRoomId)
       silentAttachedRoundTransitionRoomId = null
     }
+
+    // Тихо възстановяване в лоби контекст (лоби/чакалня): продължава след
+    // 'connected' (същият backend процес) и синхронизацията. Гласовият
+    // контролер научава за връзката едва след нея — сървърът приема
+    // voice_presence само от връзката на мястото, а тя се пренасочва при
+    // синхронизацията (reconnectMember).
+    if (lobbySoftReconnect.handleOpen()) {
+      return
+    }
+
+    voiceController?.setGameConnection(true)
 
     // Explicit bid-recovery reconnect (forceReconnectForZombieConnection) —
     // винаги тих resume в СЪЩАТА активна стая, никога forceOfflineLobbyReload
@@ -8834,7 +8919,7 @@ client = createGameServerClient({
       hideOfflineConnectionOverlay()
       activeRoom.exitSpectatorView()
     } else if (openDecision === 'forced-lobby-reload') {
-      forceOfflineLobbyReload()
+      forceOfflineLobbyReload('ws')
       return
     } else if (openDecision === 'active-room-resume') {
       activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
@@ -8928,7 +9013,20 @@ client = createGameServerClient({
       return
     }
 
+    // Лоби контекст (лоби/чакалня), след поне едно успешно свързване:
+    // компактна лента вместо целия екран, без флаг за презареждане — тихо
+    // възстановяване при същия backend, същата сесия и успешна синхронизация
+    // (createLobbySoftReconnect). Иначе — досегашният безопасен reload.
+    if (closeDecision === 'lobby-reconnect' && isLobbySoftReconnectEligible()) {
+      lobby.setConnected(false)
+      lobbySoftReconnect.beginOutage()
+      notifyHealthMonitorSocketState()
+      scheduleServerReconnect()
+      return
+    }
+
     showOfflineConnectionOverlay()
+    notifyHealthMonitorSocketState()
 
     if (closeDecision === 'active-room-reconnect') {
       shouldReloadLobbyOnReconnect = true
@@ -8994,6 +9092,8 @@ client = createGameServerClient({
         pwaBootstrapServerStateResolved = true
         requestPwaUpdateApplyAttempt()
       })
+      // Отправна точка за backend процеса / продължение на тихото възстановяване.
+      lobbySoftReconnect.noteConnected(message.serverInstanceId)
       return
     }
 
@@ -9081,6 +9181,9 @@ client = createGameServerClient({
     }
 
     if (message.type === 'session_in_game') {
+      // Играта е започнала през прекъсването: синхронизацията не показва
+      // „масата не е налична“ — съществуващият прозорец води към играта.
+      lobby.markReconnectSyncSessionInGame()
       lobby.suspendLobbyChatForActiveRoom()
       showSessionInGameOverlay(message.roomId, message.reconnectToken)
       return
@@ -10247,11 +10350,25 @@ void loadGuestTrialStatus().finally(() => {
   client.connect()
 })
 
-// Offline overlay — показва се при реална загуба на интернет връзка
+// Offline overlay и компактна лента за възстановяване на връзката.
+//
+// Лоби контекст (лоби/чакалня, след поне едно свързване): кратко прекъсване
+// на WS показва само компактната лента; целият екран — след 15 s продължаващо
+// прекъсване (createLobbySoftReconnect). Активна игра, Svara, зрители и
+// самостоятелните страници — досегашното поведение (целият екран веднага,
+// reload при възстановяване), с коректно класифициран текст.
+//
+// Класификация: само navigator.onLine === false -> „Няма връзка с интернет“.
+// Неуспешен /health (вкл. мрежова грешка) НЕ доказва липса на интернет ->
+// „Връзката със сървъра е прекъсната“.
 ;(function initOfflineOverlay() {
   let overlayEl: HTMLElement | null = null
+  let bannerEl: HTMLElement | null = null
   let networkMonitorInFlight = false
   let consecutiveNetworkFailures = 0
+  let healthTimerId: number | null = null
+  /** Номер на текущата health заявка — закъснял отговор от по-стара се игнорира. */
+  let healthRequestSeq = 0
   // Логото на светлия телефонен вариант — заредено предварително, докато
   // има връзка, и преизползвано, за да се показва и без интернет.
   const OFFLINE_LIGHT_LOGO_URL = '/assets/lobby-mobile/logo-pika-text.webp'
@@ -10260,15 +10377,30 @@ void loadGuestTrialStatus().finally(() => {
   offlineLightLogo.style.cssText = 'width:168px;height:56px;display:block;object-fit:contain;'
   if (isPhoneLayoutViewport()) offlineLightLogo.src = OFFLINE_LIGHT_LOGO_URL
 
-  function showOfflineOverlay(): void {
-    if (isSvaraReconnectContext() && !lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
-    // Phase 3B.2 (D2): активна Belot spectator сесия НЕ насрочва forced
-    // lobby reload — възстановява се чрез socket reconnect + re-watch.
-    if (shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive(), isSvaraReconnectContext())) {
-      shouldReloadLobbyOnReconnect = true
+  const OFFLINE_SCREEN_TITLES = {
+    internet: 'Няма връзка с интернет',
+    server: 'Връзката със сървъра е прекъсната',
+  } as const
+  const OFFLINE_SCREEN_TEXT = 'Опитваме се да възстановим връзката автоматично.'
+  const RECOVERING_BANNER_TEXT = 'Връзката със сървъра се възстановява…'
+
+  function updateOfflineOverlayText(): void {
+    if (overlayEl === null) return
+    const kind = classifyOfflineScreen(navigator.onLine)
+    const title = overlayEl.querySelector<HTMLElement>('[data-offline-title="1"]')
+    if (title !== null && title.textContent !== OFFLINE_SCREEN_TITLES[kind]) title.textContent = OFFLINE_SCREEN_TITLES[kind]
+    overlayEl.setAttribute('data-offline-screen', kind)
+  }
+
+  /** Само визуализацията на целия екран (без флагове за презареждане). */
+  function renderOfflineOverlayElement(): void {
+    if (overlayEl) {
+      updateOfflineOverlayText()
+      return
     }
-    if (overlayEl) return
     const el = document.createElement('div')
+    el.setAttribute('data-offline-overlay', '1')
+    el.setAttribute('role', 'alert')
     if (isPhoneLayoutViewport()) {
       // Телефон (гости и регистрирани): светлият вид на новото мобилно лоби.
       // Текстът, бутонът и handler-ът са същите като при тъмния вариант.
@@ -10283,10 +10415,8 @@ void loadGuestTrialStatus().finally(() => {
       el.innerHTML = `
         <div style="display:flex;flex-direction:column;align-items:center;gap:14px;width:100%;max-width:320px;">
           <div data-offline-logo-slot="1" style="margin-bottom:10px;"></div>
-          <h1 style="font-size:22px;font-weight:800;margin:0;color:#17233C;">Няма връзка с интернет</h1>
-          <p style="font-size:15px;font-weight:500;color:#667085;line-height:1.5;margin:0;">
-            Белот онлайн изисква активна интернет връзка. Провери свързаността и опитай отново.
-          </p>
+          <h1 data-offline-title="1" style="font-size:22px;font-weight:800;margin:0;color:#17233C;"></h1>
+          <p style="font-size:15px;font-weight:500;color:#667085;line-height:1.5;margin:0;">${OFFLINE_SCREEN_TEXT}</p>
           <button id="offline-retry-btn" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="
             margin-top:10px;width:100%;max-width:260px;height:48px;padding:0 28px;border:0;border-radius:8px;
             color:#FFFFFF;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;
@@ -10295,34 +10425,41 @@ void loadGuestTrialStatus().finally(() => {
       `
       if (!offlineLightLogo.src) offlineLightLogo.src = OFFLINE_LIGHT_LOGO_URL
       el.querySelector('[data-offline-logo-slot="1"]')?.appendChild(offlineLightLogo)
-      el.querySelector('#offline-retry-btn')?.addEventListener('click', hardReload)
-      document.body.appendChild(el)
-      overlayEl = el
-      return
+    } else {
+      el.style.cssText = [
+        'position:fixed;inset:0;z-index:99998;',
+        'background:#0a0a0a;',
+        'color:#f8fafc;',
+        'font-family:system-ui,-apple-system,sans-serif;',
+        'display:flex;flex-direction:column;align-items:center;justify-content:center;',
+        'gap:20px;padding:24px;text-align:center;',
+      ].join('')
+      el.innerHTML = `
+        <div style="font-size:64px;line-height:1;opacity:0.6;">📡</div>
+        <h1 data-offline-title="1" style="font-size:22px;font-weight:900;margin:0;"></h1>
+        <p style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.54);max-width:300px;line-height:1.5;margin:0;">${OFFLINE_SCREEN_TEXT}</p>
+        <button id="offline-retry-btn" style="
+          margin-top:8px;height:48px;padding:0 28px;border:0;border-radius:10px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+          color:#080808;font-size:15px;font-weight:900;cursor:pointer;
+        ">Опитай отново</button>
+      `
     }
-    el.style.cssText = [
-      'position:fixed;inset:0;z-index:99998;',
-      'background:#0a0a0a;',
-      'color:#f8fafc;',
-      'font-family:system-ui,-apple-system,sans-serif;',
-      'display:flex;flex-direction:column;align-items:center;justify-content:center;',
-      'gap:20px;padding:24px;text-align:center;',
-    ].join('')
-    el.innerHTML = `
-      <div style="font-size:64px;line-height:1;opacity:0.6;">📡</div>
-      <h1 style="font-size:22px;font-weight:900;margin:0;">Няма връзка с интернет</h1>
-      <p style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.54);max-width:300px;line-height:1.5;margin:0;">
-        Белот онлайн изисква активна интернет връзка. Провери свързаността и опитай отново.
-      </p>
-      <button id="offline-retry-btn" style="
-        margin-top:8px;height:48px;padding:0 28px;border:0;border-radius:10px;
-        background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
-        color:#080808;font-size:15px;font-weight:900;cursor:pointer;
-      ">Опитай отново</button>
-    `
-    el.querySelector('#offline-retry-btn')?.addEventListener('click', hardReload)
+    el.querySelector('#offline-retry-btn')?.addEventListener('click', () => hardReload('retry'))
     document.body.appendChild(el)
     overlayEl = el
+    updateOfflineOverlayText()
+  }
+
+  // Досегашният път (активна игра, Svara, зрители, самостоятелни страници).
+  function showOfflineOverlay(): void {
+    if (isSvaraReconnectContext() && !lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
+    // Phase 3B.2 (D2): активна Belot spectator сесия НЕ насрочва forced
+    // lobby reload — възстановява се чрез socket reconnect + re-watch.
+    if (shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive(), isSvaraReconnectContext())) {
+      shouldReloadLobbyOnReconnect = true
+    }
+    renderOfflineOverlayElement()
   }
 
   showOfflineConnectionOverlay = showOfflineOverlay
@@ -10334,45 +10471,120 @@ void loadGuestTrialStatus().finally(() => {
 
   hideOfflineConnectionOverlay = hideOfflineOverlay
 
+  function showRecoveringBanner(): void {
+    if (bannerEl !== null) return
+    const light = isPhoneLayoutViewport()
+    const el = document.createElement('div')
+    el.setAttribute('data-connection-recovering-banner', '1')
+    el.setAttribute('role', 'status')
+    el.setAttribute('aria-live', 'polite')
+    el.style.cssText = [
+      'position:fixed;left:50%;top:calc(10px + env(safe-area-inset-top, 0px));transform:translateX(-50%);',
+      'z-index:99990;pointer-events:none;box-sizing:border-box;max-width:calc(100vw - 24px);',
+      'display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;',
+      'font-size:13px;font-weight:700;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
+      light
+        ? `font-family:${MOBILE_LIGHT_FONT_FAMILY};background:#FFFFFF;color:#17233C;border:1px solid #E4E7EC;box-shadow:0 8px 24px rgba(16,24,40,0.14);`
+        : 'font-family:system-ui,-apple-system,sans-serif;background:rgba(20,20,24,0.94);color:#F8FAFC;border:1px solid rgba(212,165,32,0.55);box-shadow:0 8px 24px rgba(0,0,0,0.45);',
+    ].join('')
+    el.innerHTML = `
+      <style>@keyframes pikaConnPulse { 0%,100% { opacity:0.35; } 50% { opacity:1; } }</style>
+      <span aria-hidden="true" style="width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:${light ? '#7950E8' : '#F4C432'};animation:pikaConnPulse 1.2s ease-in-out infinite;"></span>
+      <span>${RECOVERING_BANNER_TEXT}</span>
+    `
+    document.body.appendChild(el)
+    bannerEl = el
+  }
+
+  function hideRecoveringBanner(): void {
+    bannerEl?.remove()
+    bannerEl = null
+  }
+
+  showConnectionRecoveringUi = showRecoveringBanner
+  showConnectionLostFullScreen = () => {
+    renderOfflineOverlayElement()
+  }
+  hideConnectionRecoveryUi = () => {
+    hideRecoveringBanner()
+    hideOfflineOverlay()
+  }
+
+  // ─── /health монитор ──────────────────────────────────────────────────
+  // Един setTimeout цикъл (никога две заявки едновременно): 30 s при отворен
+  // WS, 3 s при прекъснат. Заявката се прекъсва след HEALTH_REQUEST_TIMEOUT_MS.
+  // Смяна на състоянието на WS прави по-старите резултати невалидни.
+  function scheduleHealthCheck(delayMs: number): void {
+    if (healthTimerId !== null) window.clearTimeout(healthTimerId)
+    healthTimerId = window.setTimeout(() => {
+      healthTimerId = null
+      void checkNetworkHealth()
+    }, delayMs)
+  }
+
+  notifyHealthMonitorSocketState = () => {
+    healthRequestSeq += 1
+    consecutiveNetworkFailures = 0
+    if (networkMonitorInFlight) return // завършващата заявка насрочва следващата
+    scheduleHealthCheck(getHealthPollDelayMs(client.isConnected()))
+  }
+
+  function handleHealthResult(ok: boolean): void {
+    if (ok) {
+      consecutiveNetworkFailures = 0
+      // Тихото възстановяване управлява собствения си UI.
+      if (overlayEl === null || lobbySoftReconnect.isOutageActive()) return
+      if (shouldReloadLobbyOnReconnect) {
+        forceOfflineLobbyReload('health')
+      } else if (isSvaraReconnectContext()) {
+        if (client.isConnected()) {
+          client.requestSvaraTablesList()
+        } else scheduleServerReconnect()
+      } else if (!shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive(), isSvaraReconnectContext())) {
+        // Spectator: мрежата е обратно — само махни overlay-я; socket
+        // reconnect-ът re-watch-ва същата маса.
+        hideOfflineOverlay()
+      }
+      return
+    }
+
+    consecutiveNetworkFailures += 1
+    if (consecutiveNetworkFailures < 2) return
+    if (isLobbySoftReconnectEligible() || lobbySoftReconnect.isOutageActive()) {
+      // Сървърът не отговаря, а WS изглежда отворен (полуотворена връзка) ->
+      // изоставя се и минава по тихия път (лента; цял екран след 15 s).
+      if (client.isConnected()) client.abandonUnresponsiveSocket('health_unreachable')
+      return
+    }
+    showOfflineOverlay()
+  }
+
   async function checkNetworkHealth(): Promise<void> {
     if (networkMonitorInFlight || offlineLobbyReloadScheduled || isPageUnloading) return
     networkMonitorInFlight = true
-
+    const requestSeq = ++healthRequestSeq
+    const abortController = typeof AbortController === 'undefined' ? null : new AbortController()
+    const timeoutId = window.setTimeout(() => abortController?.abort(), HEALTH_REQUEST_TIMEOUT_MS)
+    let ok = false
     try {
       const response = await fetch(`${getApiBaseUrl()}/health`, {
         method: 'GET',
         cache: 'no-store',
+        signal: abortController?.signal,
       })
-
-      if (response.ok) {
-        consecutiveNetworkFailures = 0
-        if (overlayEl !== null && shouldReloadLobbyOnReconnect) {
-          forceOfflineLobbyReload()
-        } else if (overlayEl !== null && isSvaraReconnectContext()) {
-          if (client.isConnected()) {
-            client.requestSvaraTablesList()
-          } else scheduleServerReconnect()
-        } else if (overlayEl !== null && !shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive(), isSvaraReconnectContext())) {
-          // Spectator: мрежата е обратно — само махни overlay-я; socket
-          // reconnect-ът re-watch-ва същата маса.
-          hideOfflineOverlay()
-        }
-        return
-      }
-
-      consecutiveNetworkFailures += 1
+      ok = response.ok
     } catch {
-      consecutiveNetworkFailures += 1
+      ok = false
     } finally {
+      window.clearTimeout(timeoutId)
       networkMonitorInFlight = false
     }
-
-    if (consecutiveNetworkFailures >= 2) {
-      showOfflineOverlay()
-    }
+    if (offlineLobbyReloadScheduled || isPageUnloading) return
+    if (requestSeq === healthRequestSeq) handleHealthResult(ok)
+    scheduleHealthCheck(getHealthPollDelayMs(client.isConnected()))
   }
 
-  function hardReload(): void {
+  function hardReload(via: OfflineReloadVia): void {
     if (isSvaraReconnectContext()) {
       if (!lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
       shouldReloadLobbyOnReconnect = false
@@ -10382,14 +10594,38 @@ void loadGuestTrialStatus().finally(() => {
       scheduleServerReconnect()
       return
     }
-    forceOfflineLobbyReload()
+    forceOfflineLobbyReload(via)
     // Изчисти navigation кеша на SW за да се вземе свеж index.html от мрежата
   }
 
+  // 'offline': в лоби контекст — тихият път (лента; цял екран след 15 s);
+  // иначе досегашният цял екран.
+  function handleBrowserOffline(): void {
+    if (lobbySoftReconnect.isOutageActive()) {
+      updateOfflineOverlayText()
+      return
+    }
+    if (isLobbySoftReconnectEligible() && client.isConnected()) {
+      client.abandonUnresponsiveSocket('browser_offline')
+      return
+    }
+    showOfflineOverlay()
+  }
+
   // Автоматично възстановяване при 'online' — за активна spectator сесия без
-  // reload (state-ът е ephemeral). Svara чака сървърно потвърждение; за
+  // reload (state-ът е ephemeral). Svara чака сървърно потвърждение; лоби
+  // контекстът с тихо възстановяване — нов опит веднага, без reload; за
   // останалите екрани explicit "Опитай отново" остава hard reload.
   function handleBrowserOnline(): void {
+    if (lobbySoftReconnect.isOutageActive()) {
+      updateOfflineOverlayText()
+      if (!client.isConnected()) {
+        clearReconnectTimer()
+        client.connect()
+      }
+      return
+    }
+    if (overlayEl === null && isLobbySoftReconnectEligible()) return
     if (isSvaraReconnectContext()) {
       if (!lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
       if (client.isConnected()) client.requestSvaraTablesList()
@@ -10400,15 +10636,13 @@ void loadGuestTrialStatus().finally(() => {
       hideOfflineOverlay()
       return
     }
-    hardReload()
+    hardReload('online')
   }
 
   if (!navigator.onLine) showOfflineOverlay()
-  window.addEventListener('offline', showOfflineOverlay)
+  window.addEventListener('offline', handleBrowserOffline)
   window.addEventListener('online', handleBrowserOnline)
-  window.setInterval(() => {
-    void checkNetworkHealth()
-  }, 3000)
+  scheduleHealthCheck(getHealthPollDelayMs(false))
 })()
 // ─── Гласов чат (Етап 3) — минимална техническа интеграция ─────────────────
 // Само контекст и транспорт; визуалният интерфейс е за Етапи 4/5. Тук е

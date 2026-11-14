@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
-import { createServer as createViteServer } from 'vite'
+import { createServer as createViteServer, type PluginOption } from 'vite'
 
 export const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 
@@ -126,15 +126,22 @@ export type GiftBackHarness = {
   sendGiftViaApi: (from: TestProfile, to: TestProfile) => Promise<string>
   openPage: (profile: TestProfile, viewport: { width: number; height: number }, path: string, readySelector: string) => Promise<OpenedPage>
   serverOutput: () => string
+  /** Рестарт на backend процеса (нов процес, същият порт и същата база). */
+  restartServer: () => Promise<void>
   close: () => Promise<void>
 }
 
-export async function startGiftBackHarness(): Promise<GiftBackHarness> {
+export type GiftBackHarnessOptions = {
+  /** Допълнителни Vite plugins (напр. тестова подмяна на модул). */
+  vitePlugins?: PluginOption[]
+}
+
+export async function startGiftBackHarness(options: GiftBackHarnessOptions = {}): Promise<GiftBackHarness> {
   const isolated = await createIsolatedServerRoot()
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const browser = await chromium.launch({ headless: true })
   const backendPort = await freePort()
-  const server = startServer(isolated.serverDir, backendPort)
+  let server = startServer(isolated.serverDir, backendPort)
   let vite: Awaited<ReturnType<typeof createViteServer>> | null = null
   let db: DatabaseSync | null = null
 
@@ -164,7 +171,7 @@ export async function startGiftBackHarness(): Promise<GiftBackHarness> {
           if (!id.includes('/src/') && !id.includes('\\src\\')) return null
           return code.includes(':3001') ? code.replaceAll(':3001', `:${backendPort}`) : null
         },
-      }],
+      }, ...(options.vitePlugins ?? [])],
     })
     await vite.listen()
   } catch (error) {
@@ -298,6 +305,13 @@ export async function startGiftBackHarness(): Promise<GiftBackHarness> {
     sendGiftViaApi,
     openPage,
     serverOutput: () => server.output(),
+    async restartServer() {
+      const exited = new Promise<void>((done) => server.child.once('exit', () => done()))
+      server.child.kill()
+      await exited
+      server = startServer(isolated.serverDir, backendPort)
+      if (!(await waitForHealth(backendPort))) { console.error(server.output()); throw new Error('server did not restart') }
+    },
     close,
   }
 }

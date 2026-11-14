@@ -780,9 +780,13 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
   return `
     <section data-private-room-waiting-screen="1" class="prw-screen"${light ? ' data-private-room-light="1"' : ''}>
       <style>
+        /* Екранът е собственият си вертикален scroll container: #app (style.css)
+           е с фиксирана височина и overflow:hidden, затова при min-height
+           съдържанието (лента за гласов чат, известие, чат) излизаше под
+           ръба без скрол. */
         .prw-screen {
-          min-height:100vh;
-          min-height:100dvh;
+          height:100vh;
+          height:100dvh;
           width:100%;
           box-sizing:border-box;
           display:flex;

@@ -84,3 +84,111 @@ export function decideSocketOpenAction(input: {
 export function shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive: boolean, hasActiveSvaraMatch = false): boolean {
   return !isBelotSpectatorSessionActive && !hasActiveSvaraMatch
 }
+
+// ─── Тихо възстановяване в лобито/чакалнята (без презареждане) ─────────────
+//
+// Кратко прекъсване на игровия WS в лоби контекст (не активна игра, не Svara,
+// не зрител) се възстановява без reload, САМО ако: прекъсването е под
+// SOFT_RECONNECT_MAX_OUTAGE_MS, backend процесът е същият (serverInstanceId),
+// сесията е същата и синхронизацията е успешна. Всичко останало -> досегашният
+// безопасен reload (forceOfflineLobbyReload).
+
+/** Максимална продължителност на прекъсване за тихо възстановяване. */
+export const SOFT_RECONNECT_MAX_OUTAGE_MS = 120_000
+/** След толкова продължаващо прекъсване компактната лента става цял екран. */
+export const OFFLINE_FULL_SCREEN_DELAY_MS = 15_000
+/** Срок за синхронизацията след повторно свързване (сесия + членство). */
+export const SOFT_RECONNECT_SYNC_TIMEOUT_MS = 10_000
+
+/**
+ * Причина за принудително презареждане — фиксиран списък, без лични данни.
+ * Попада в адреса (/lobby?offlineReload=...&via=...) и така в nginx лога.
+ */
+export type OfflineReloadVia =
+  | 'ws' // досегашният път (активна игра и др.) след прекъсване на WS
+  | 'health' // възстановен /health след показан екран (не-лоби контекст)
+  | 'online' // събитие online без активно тихо възстановяване
+  | 'retry' // бутонът „Опитай отново“
+  | 'restart' // друг backend процес (рестарт/deploy) или стар сървър без идентификатор
+  | 'stale' // прекъсване над SOFT_RECONNECT_MAX_OUTAGE_MS
+  | 'session' // сесията е изтекла/сменена по време на прекъсването
+  | 'sync' // неуспешна или просрочена синхронизация
+  | 'offline_page' // public/offline.html (SW fallback) — там стойността е записана директно
+
+export function buildOfflineReloadUrl(now: number, via: OfflineReloadVia): string {
+  return `/lobby?offlineReload=${now}&via=${via}`
+}
+
+export type SoftReconnectAfterConnected =
+  | { kind: 'sync' }
+  | { kind: 'reload'; via: Extract<OfflineReloadVia, 'restart' | 'stale'> }
+
+/** Решение при пристигане на 'connected' по време на тихо възстановяване. */
+export function decideSoftReconnectAfterConnected(input: {
+  outageStartedAt: number
+  now: number
+  knownServerInstanceId: string | null
+  serverInstanceId: string | null | undefined
+}): SoftReconnectAfterConnected {
+  if (input.now - input.outageStartedAt > SOFT_RECONNECT_MAX_OUTAGE_MS) return { kind: 'reload', via: 'stale' }
+  if (
+    typeof input.serverInstanceId !== 'string' || input.serverInstanceId.length === 0
+    || input.knownServerInstanceId === null || input.serverInstanceId !== input.knownServerInstanceId
+  ) {
+    return { kind: 'reload', via: 'restart' }
+  }
+  return { kind: 'sync' }
+}
+
+export type AuthSessionIdentity = { sessionId: string; profileId: string | null } | null
+
+/** Същата сесия: и двете гостови (null), или същият sessionId и профил. */
+export function isSameAuthSessionIdentity(before: AuthSessionIdentity, after: AuthSessionIdentity): boolean {
+  if (before === null || after === null) return before === after
+  return before.sessionId === after.sessionId && before.profileId === after.profileId
+}
+
+/** Резултат от синхронизацията -> възстановено или безопасно презареждане. */
+export function decideSoftReconnectOutcome(input: {
+  outageStartedAt: number
+  now: number
+  session: 'same' | 'changed' | 'error'
+  lobbySynced: boolean
+}): { kind: 'recovered' } | { kind: 'reload'; via: Extract<OfflineReloadVia, 'session' | 'sync' | 'stale'> } {
+  if (input.session === 'changed') return { kind: 'reload', via: 'session' }
+  if (input.session === 'error' || !input.lobbySynced) return { kind: 'reload', via: 'sync' }
+  if (input.now - input.outageStartedAt > SOFT_RECONNECT_MAX_OUTAGE_MS) return { kind: 'reload', via: 'stale' }
+  return { kind: 'recovered' }
+}
+
+/**
+ * Изчакване преди следващия опит за свързване: досегашната линейна стъпка
+ * (base * (attempt + 1), до max) с ±25% jitter — клиентите след рестарт не
+ * се свързват в една и съща секунда. random() ∈ [0, 1).
+ */
+export function getReconnectDelayMs(attempt: number, baseMs: number, maxMs: number, random: () => number = Math.random): number {
+  const linear = Math.min(baseMs + attempt * baseMs, maxMs)
+  const factor = 0.75 + Math.min(Math.max(random(), 0), 1) * 0.5
+  return Math.max(250, Math.round(linear * factor))
+}
+
+/** Health polling: 30 s при отворен WS, 3 s при прекъснат. */
+export const HEALTH_POLL_CONNECTED_MS = 30_000
+export const HEALTH_POLL_DISCONNECTED_MS = 3_000
+/** Една health заявка се прекъсва след толкова (броене като неуспех). */
+export const HEALTH_REQUEST_TIMEOUT_MS = 8_000
+
+export function getHealthPollDelayMs(isSocketOpen: boolean): number {
+  return isSocketOpen ? HEALTH_POLL_CONNECTED_MS : HEALTH_POLL_DISCONNECTED_MS
+}
+
+/**
+ * Вид на целия екран. Само navigator.onLine === false доказва липса на мрежа;
+ * мрежова грешка при /health НЕ доказва липса на интернет (може да е
+ * сървърът/пътят до него) -> „Връзката със сървъра е прекъсната“.
+ */
+export type OfflineScreenKind = 'internet' | 'server'
+
+export function classifyOfflineScreen(navigatorOnLine: boolean): OfflineScreenKind {
+  return navigatorOnLine === false ? 'internet' : 'server'
+}

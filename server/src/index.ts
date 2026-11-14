@@ -25588,6 +25588,12 @@ const wsServer = new WebSocketServer({
   path: '/ws',
 })
 
+// Непрозрачен идентификатор на ТОЗИ backend процес (нов при всеки старт) —
+// в 'connected'. Клиентът го сравнява при повторно свързване: различен =
+// рестарт (паметта на сървъра е загубена) -> безопасно презареждане.
+// Не съдържа данни за хоста/процеса.
+const SERVER_INSTANCE_ID = randomUUID()
+
 // ─── WS close diagnostics (disconnect-lifecycle observability, no new policy) ─
 // Компактен, structured log за ВСЕКИ WS close, за да различаваме explicit
 // client-initiated disconnects (auth_refresh/bid_watchdog/page_unload — виж
@@ -25743,6 +25749,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     type: 'connected',
     clientId: connection.id,
     message: 'Connected to Belot V2 server.',
+    serverInstanceId: SERVER_INSTANCE_ID,
   })
 
   // Фаза 10 — bootstrap flush на всяко ново connection (login/reconnect/

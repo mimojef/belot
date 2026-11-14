@@ -886,6 +886,8 @@ export type ConnectedMessage = {
   type: 'connected'
   clientId: string
   message: string
+  /** Непрозрачен идентификатор на backend процеса (нов при всеки старт). */
+  serverInstanceId: string
 }
 
 export type PongMessage = {
