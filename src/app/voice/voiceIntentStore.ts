@@ -1,15 +1,19 @@
 // Гласов чат — намерение за участие след презареждане (етап В).
 //
-// Само в sessionStorage на ТОЗИ таб (не се споделя с други табове/устройства)
-// и само за същия профил и същата гласова маса. Използва се единствено при
-// истинско презареждане на страницата (navigation type 'reload') или връщане
-// от bfcache — „Duplicate tab“/нов таб не наследяват гласа. Срок: 15 минути.
-// Никакви токени, identity-та или имена — само id на масата и профила.
+// Само в sessionStorage на ТОЗИ таб и само за същия профил и същата гласова
+// маса. Използва се единствено при истинско презареждане (navigation type
+// 'reload') или връщане от bfcache. Срок: 15 минути. Никакви токени,
+// identity-та или имена — само id на масата и профила.
+//
+// „Duplicate tab“ копира sessionStorage. Затова възстановяване има само ако
+// записът е маркиран leftAt при pagehide на страница с активен глас:
+// при дублиране оригиналът е жив (без pagehide) -> копието е без leftAt ->
+// дубликатът не включва нищо. Всяко ново записване маха маркировката.
 
 const STORAGE_KEY = 'pika.voice.intent.v1'
 const MAX_AGE_MS = 15 * 60_000
 
-export type StoredVoiceIntent = { voiceTableId: string; profileId: string; mic: boolean; savedAt: number }
+export type StoredVoiceIntent = { voiceTableId: string; profileId: string; mic: boolean; savedAt: number; leftAt?: number }
 
 function storage(): Storage | null {
   try {
@@ -23,6 +27,13 @@ export function saveVoiceIntent(intent: { voiceTableId: string; profileId: strin
   try { storage()?.setItem(STORAGE_KEY, JSON.stringify({ ...intent, savedAt: now })) } catch { /* без памет — без възстановяване */ }
 }
 
+/** pagehide на страница с активен глас: записът става годен за възстановяване (само той). */
+export function markVoiceIntentLeaving(now: number = Date.now()): void {
+  const current = readVoiceIntent(now)
+  if (current === null) return
+  try { storage()?.setItem(STORAGE_KEY, JSON.stringify({ ...current, savedAt: now, leftAt: now })) } catch { /* нищо */ }
+}
+
 export function clearVoiceIntent(): void {
   try { storage()?.removeItem(STORAGE_KEY) } catch { /* нищо */ }
 }
@@ -34,7 +45,8 @@ export function readVoiceIntent(now: number = Date.now()): StoredVoiceIntent | n
     const value = JSON.parse(raw) as Partial<StoredVoiceIntent>
     if (typeof value.voiceTableId !== 'string' || typeof value.profileId !== 'string' || typeof value.mic !== 'boolean' || typeof value.savedAt !== 'number') return null
     if (now - value.savedAt > MAX_AGE_MS || value.savedAt > now + 60_000) return null
-    return { voiceTableId: value.voiceTableId, profileId: value.profileId, mic: value.mic, savedAt: value.savedAt }
+    const leftAt = typeof value.leftAt === 'number' ? value.leftAt : undefined
+    return { voiceTableId: value.voiceTableId, profileId: value.profileId, mic: value.mic, savedAt: value.savedAt, ...(leftAt !== undefined ? { leftAt } : {}) }
   } catch {
     return null
   }

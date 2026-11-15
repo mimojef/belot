@@ -1012,7 +1012,12 @@ await check('[W1] Интеграция: основният bundle — само �
   //     controller-а, runtime-а, адаптера, sink-а, протокола, lazy панела
   //     или livekit-client — те са само в lazy chunk-ове;
   //   * lazy панелът (renderVoicePanel) се зарежда само с import().
-  const MAIN_BUNDLE_VOICE_MODULES = new Set(['voiceFacade', 'voiceIntentStore', 'ui/createVoiceMobileUi', 'ui/voiceSpeakingIndicator', 'ui/voiceUiIcons', 'ui/voiceUiStatus'])
+  // Леки модули без импорти, умишлено в основния bundle:
+  //   voiceOwnVipStatus / voiceSpeakPreview / ui/voiceJoinOffer (12a5c41 —
+  //   подсказка за прозореца преди включване; voiceJoinOffer е чиста функция
+  //   само с type импорти), voiceIntentStore (етап В — намерение след презареждане).
+  //   Транзитивната проверка по-долу гарантира, че не водят до lazy модулите.
+  const MAIN_BUNDLE_VOICE_MODULES = new Set(['voiceFacade', 'voiceIntentStore', 'voiceOwnVipStatus', 'voiceSpeakPreview', 'ui/voiceJoinOffer', 'ui/createVoiceMobileUi', 'ui/voiceSpeakingIndicator', 'ui/voiceUiIcons', 'ui/voiceUiStatus'])
   const LAZY_ONLY_VOICE_MODULES = new Set(['createVoiceController', 'voiceRuntime', 'liveKitVoiceAdapter', 'voiceAdapter', 'voiceAudioSink', 'voiceProtocol', 'voiceTransportStats', 'ui/renderVoicePanel'])
   /** Статични импорти: { spec, typeOnly }. `import { a, type B }` е runtime импорт. */
   const staticImports = (source: string): Array<{ spec: string; typeOnly: boolean }> =>
@@ -1044,12 +1049,31 @@ await check('[W1] Интеграция: основният bundle — само �
   const mobileUi = await readFile('src/app/voice/ui/createVoiceMobileUi.ts', 'utf8')
   assert(/import\('\.\/renderVoicePanel'\)/.test(mobileUi), 'lazy панелът се зарежда с import()')
   // Посредникът: без runtime импорти; единственият път към runtime-а е import().
-  assert(facade.split('\n').filter((line) => /^import /.test(line)).every((line) => /^import type /.test(line)), 'facade: само import type')
+  // Изключение: voiceIntentStore (етап В) — без импорти (проверено по-долу).
+  const FACADE_RUNTIME_IMPORTS = new Set(['./voiceIntentStore'])
+  for (const entry of staticImports(facade)) {
+    assert(entry.typeOnly || FACADE_RUNTIME_IMPORTS.has(entry.spec), `facade: само import type (runtime импорт на ${entry.spec})`)
+  }
+  for (const spec of FACADE_RUNTIME_IMPORTS) {
+    const source = await readFile(`src/app/voice/${spec.slice(2)}.ts`, 'utf8')
+    assert(staticImports(source).length === 0, `facade: ${spec} трябва да е без импорти`)
+  }
   assert(/import\('\.\/voiceRuntime'\)/.test(facade), 'dynamic import на runtime-а')
+  // Кодът без коментарите (коментар, който споменава voiceIntentStore, не е достъп до storage).
+  const codeOnly = (source: string): string => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1')
   for (const [name, source] of Object.entries(sources)) {
     assert(!/from 'livekit-client'/.test(source), `${name}: без livekit-client (само liveKitVoiceAdapter.ts)`)
-    assert(!/localStorage|sessionStorage|indexedDB/.test(source), `${name}: без storage`)
+    assert(!/localStorage|sessionStorage|indexedDB/.test(codeOnly(source)), `${name}: без storage`)
     assert(!/console\.(log|info|debug)/.test(source), `${name}: без логове`)
+  }
+  // voiceIntentStore — единственото място със storage: само id на масата/профила,
+  // флаг за микрофона и времена; без токени, identity, URL-и.
+  const intentStoreSource = codeOnly(await readFile('src/app/voice/voiceIntentStore.ts', 'utf8'))
+  assert(!/localStorage|indexedDB/.test(intentStoreSource), 'voiceIntentStore: само sessionStorage')
+  assert(!/token|identity|url|jwt/i.test(intentStoreSource.replace(/sessionStorage/g, '')), 'voiceIntentStore: без токени/identity/URL')
+  for (const match of intentStoreSource.matchAll(/JSON\.stringify\(\{([^}]*)\}/g)) {
+    const keys = match[1]!.split(',').map((part) => part.trim().replace(/^\.\.\./, '').split(':')[0]!.trim()).filter(Boolean)
+    for (const key of keys) assert(['intent', 'current', 'savedAt', 'leftAt'].includes(key), `voiceIntentStore: неочаквано поле ${key}`)
   }
   assert(!/from 'livekit-client'/.test(main), 'main.ts без livekit-client')
   assert(vite.includes("'assets/voice-*'") && vite.includes('assets/voice-[name]-[hash].js') && vite.includes('(?!voiceFacade'), 'voice chunk извън precache; посредникът е изключен от префикса')

@@ -12,7 +12,7 @@
  *   SC7  доброволно изключен микрофон -> не се включва сам (ротация, загуба, презареждане)
  *   SC8  потвърдена загуба на права -> спиране и изчистено намерение, без нови заявки
  *   SC9  едновременни прекъсване + ротация -> едно свързване, един микрофон
- *   SC10 временно липсваща маса в контекста -> затворена връзка; връщане в срока -> възстановяване
+ *   SC10 активна стая без snapshot -> затворена връзка, намерението чака авторитетното състояние без срок
  *   SC11 последователни временни откази на токена -> backoff по подсказката, после свързан
  *   SC12 административен mute по време на прекъсване -> без микрофон и без автоматично включване след края
  *
@@ -287,27 +287,56 @@ await check('[SC9] Едновременни прекъсване и ротаци
   invariants(h, 'race')
 })
 
-await check('[SC10] Масата временно липсва в контекста -> връзката се затваря веднага; връщане до 10 s -> възстановяване; след срока -> нищо', async () => {
-  for (const delayMs of [3_000, 12_000]) {
+await check('[SC10] Активна стая без snapshot (awaitingSnapshot): връзката се затваря веднага, намерението чака авторитетното състояние БЕЗ срок и без заявки; същата маса -> възстановяване; друга маса / окончателно „без маса“ -> изчистване', async () => {
+  // (а) същата маса след произволно дълго чакане -> възстановяване (вкл. микрофона)
+  for (const delayMs of [3_000, 600_000]) {
     const memory = createMemoryIntent()
     const h = createHarness({ intent: memory })
     h.fake.state.permissionGranted = true
     await speaking(h)
-    h.voice.setContext({ kind: 'none' })
+    h.voice.setContext({ kind: 'none', awaitingSnapshot: true })
     await flush(20)
-    assertEqual(h.fake.state.activeRooms(), 0, `${delayMs}: веднага без звук извън масата`)
+    assertEqual(h.fake.state.activeRooms(), 0, `${delayMs}: веднага без звук без потвърдено членство`)
     assert(h.presence.some((p) => !p.onTableScreen && p.reason === 'context_changed'), `${delayMs}: сървърът е уведомен`)
+    const before = { presence: h.presence.length, tokens: tokens(h) }
     await h.clock.advance(delayMs)
+    assertEqual(h.presence.length, before.presence, `${delayMs}: без присъствие докато чака`)
+    assertEqual(tokens(h), before.tokens, `${delayMs}: без токени докато чака`)
+    assertEqual(h.voice.debugCounters().pendingTimers, 0, `${delayMs}: без таймери докато чака`)
+    assertEqual(memory.value?.mic, true, `${delayMs}: намерението е запазено`)
     h.voice.setContext(h.ctx('game'))
     await flush(60)
-    if (delayMs < 10_000) {
-      assertEqual(snap(h).status, 'connected_speaking', 'същата маса в срока -> говори отново')
-    } else {
-      assertEqual(snap(h).status, 'idle', 'след срока -> без автоматично връщане')
-      assertEqual(memory.value, null, 'намерението е изчистено')
-    }
+    assertEqual(snap(h).status, 'connected_speaking', `${delayMs}: авторитетно същата маса -> говори отново`)
+    assert(h.events.filter((e) => e.startsWith('presence:on')).length > 0, 'присъствие преди новия токен')
     invariants(h, String(delayMs))
   }
+  // (б) авторитетно друго състояние -> изчистване, без автоматично включване
+  for (const outcome of ['none', 'other-table', 'off_table'] as const) {
+    const memory = createMemoryIntent()
+    const h = createHarness({ intent: memory })
+    h.fake.state.permissionGranted = true
+    await speaking(h)
+    h.voice.setContext({ kind: 'none', awaitingSnapshot: true })
+    await flush(20)
+    h.voice.setContext(outcome === 'none' ? { kind: 'none' } : outcome === 'other-table' ? h.ctx('game', undefined, TABLE_B) : h.ctx('off_table'))
+    await flush(30)
+    assertEqual(memory.value, null, `${outcome}: намерението е изчистено`)
+    h.voice.setContext(h.ctx('game'))
+    await flush(60)
+    assertEqual(snap(h).status, 'idle', `${outcome}: без автоматично връщане по-късно`)
+    assertEqual(h.fake.state.activeRooms(), 0, `${outcome}: без връзка`)
+  }
+  // (в) окончателно „без маса“ (реално напускане) -> веднага край и изчистване
+  const memory = createMemoryIntent()
+  const h = createHarness({ intent: memory })
+  await speaking(h)
+  h.voice.setContext({ kind: 'none' })
+  await flush(20)
+  assertEqual(h.fake.state.activeRooms(), 0, 'веднага без връзка')
+  assertEqual(memory.value, null, 'намерението е изчистено')
+  h.voice.setContext(h.ctx('game'))
+  await flush(60)
+  assertEqual(snap(h).status, 'idle', 'без автоматично връщане след реално напускане')
 })
 
 await check('[SC11] Последователни временни откази на токена (503 voice_rotation_pending) -> паузи 1/2/4/8 s, после свързан; без „недостъпен“', async () => {
@@ -366,6 +395,35 @@ await check('[SC13] LiveKit затваря стаята при напускан�
   await h2.clock.advance(1_000)
   await flush(30)
   assertEqual(snap(h2).status, 'connected_speaking', 'страницата остана -> отново говори')
+})
+
+await check('[SC14] „Duplicate tab“: копие на sessionStorage от ЖИВ таб (без pagehide) -> нищо не се включва, дори ако дубликатът се отчита като reload; оригиналът не е засегнат', async () => {
+  const memory = createMemoryIntent()
+  const original = createHarness({ facade: true, intent: memory })
+  original.fake.state.permissionGranted = true
+  await speaking(original)
+  // Дублиране: копие на sessionStorage, оригиналът продължава (без pagehide).
+  const copy = createMemoryIntent()
+  copy.value = memory.value === null ? null : { ...memory.value }
+  copy.reload = true // най-лошият случай: браузърът отчита дубликата като презареждане
+  const duplicate = createHarness({ facade: true, intent: copy })
+  duplicate.fake.state.permissionGranted = true
+  duplicate.voice.setContext(duplicate.ctx('waiting'))
+  await flush(60)
+  assertEqual(duplicate.lazyLoads(), 0, 'дубликатът не зарежда гласа')
+  assertEqual(duplicate.presence.length, 0, 'без присъствие')
+  assertEqual(duplicate.fake.state.getUserMediaCalls, 0, 'без микрофон')
+  assertEqual(snap(original).status, 'connected_speaking', 'оригиналът продължава')
+  // Истинско презареждане на оригинала (pagehide) продължава да възстановява.
+  original.voice.onPageHide()
+  assert(memory.value?.leftAt !== undefined, 'pagehide маркира записа')
+  memory.reload = true
+  const reloaded = createHarness({ facade: true, intent: memory })
+  reloaded.fake.state.permissionGranted = true
+  reloaded.voice.setContext(reloaded.ctx('waiting'))
+  await flush(60)
+  assertEqual(snap(reloaded).status, 'connected_speaking', 'презаредената страница говори')
+  assertEqual(memory.value?.leftAt, undefined, 'новият запис е без маркировка (копие от него не се възстановява)')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

@@ -52,7 +52,7 @@ import {
   type VoiceRetainedMicrophone,
   type VoiceSessionEndReason,
 } from './voiceAdapter'
-import { clearVoiceIntent, saveVoiceIntent } from './voiceIntentStore'
+import { clearVoiceIntent, markVoiceIntentLeaving, saveVoiceIntent } from './voiceIntentStore'
 import {
   VOICE_SPEAK_ACCESS_PATH,
   VOICE_TOKEN_PATH,
@@ -73,7 +73,11 @@ export type VoiceTableScreen = 'waiting' | 'game' | 'off_table'
 export type VoiceSeatInfo = { profileId: string | null; isBot: boolean }
 
 export type VoiceContext =
-  | { kind: 'none' }
+  /**
+   * awaitingSnapshot: има активна стая, но нейният авторитетен snapshot още не
+   * е пристигнал (членството не е нито потвърдено, нито отречено).
+   */
+  | { kind: 'none'; awaitingSnapshot?: boolean }
   | {
       kind: 'table'
       voiceTableId: string
@@ -209,7 +213,7 @@ export type VoiceControllerDeps = {
   now?: () => number
   log?: (line: string) => void
   /** Запис на намерението за презареждане (по подразбиране sessionStorage на таба). */
-  intentStore?: { save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => void; clear: () => void }
+  intentStore?: { save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => void; clear: () => void; markLeaving?: () => void }
   timing?: {
     speakingHoldMs?: number
     presenceAckTimeoutMs?: number
@@ -220,8 +224,6 @@ export type VoiceControllerDeps = {
     backoffMs?: readonly number[]
     /** Последователни опити при неясно членство (not_seat_connection, invalid_session…). */
     uncertainMaxAttempts?: number
-    /** Колко дълго временна липса на контекст (snapshot) не прекратява гласа. */
-    contextGraceMs?: number
     /** Остарели (етап Б) — игнорират се. */
     disconnectGraceMs?: number
     tokenMaxAttempts?: number
@@ -272,20 +274,23 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   const retainMicMaxMs = deps.timing?.retainMicMaxMs ?? 20_000
   const backoffMs = deps.timing?.backoffMs ?? [1_000, 2_000, 4_000, 8_000, 15_000, 30_000]
   const uncertainMaxAttempts = deps.timing?.uncertainMaxAttempts ?? 5
-  const contextGraceMs = deps.timing?.contextGraceMs ?? 10_000
-  const intentStore = deps.intentStore ?? { save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => saveVoiceIntent(intent), clear: () => clearVoiceIntent() }
+  const intentStore = deps.intentStore ?? {
+    save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => saveVoiceIntent(intent),
+    clear: () => clearVoiceIntent(),
+    markLeaving: () => markVoiceIntentLeaving(),
+  }
   // Една страница = един clientInstanceId (само в паметта; refresh -> нов).
   const clientInstanceId = (deps.createClientInstanceId ?? defaultClientInstanceId)()
 
   // ── контекст и интерфейс ──
   let context: VoiceContext = { kind: 'none' }
   /**
-   * Масата изчезна от контекста при активен глас: връзката е затворена, а
-   * намерението се пази contextGraceMs — ако СЪЩАТА маса се върне (временно
-   * липсващ snapshot), гласът се възстановява сам; иначе се изчиства.
+   * Активната стая временно е без авторитетен snapshot (awaitingSnapshot):
+   * връзката е затворена, а намерението чака авторитетното състояние —
+   * СЪЩАТА маса -> автоматично възстановяване (сървърът пак проверява
+   * членството); друга маса / без маса -> изчистване. Без таймер и без заявки.
    */
   let suspended: { key: string; mic: boolean } | null = null
-  let contextGraceTimer: unknown = null
   let speak: VoiceSpeakState | null = null
   let playbackBlocked = false
   let uiError: VoiceUiError | null = null
@@ -1262,7 +1267,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   function beginJoin(options: { mic: boolean; explicit: boolean; source: VoiceMicRequestSource }): void {
     if (disposed || !onTableScreen()) return
     suspended = null
-    contextGraceTimer = clearTimer(contextGraceTimer)
     if (!wantVoice) {
       wantVoice = true
       sessionSeq += 1
@@ -1512,32 +1516,35 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       if (disposed) return
       const prevTable = tableContext()
       const nextTable = next.kind === 'table' ? next : null
-      if (nextTable === null && prevTable !== null && wantVoice) {
-        // Масата изчезна: връзката се затваря ВЕДНАГА (без звук извън масата —
-        // реално напускане), а намерението се пази кратко за временно липсващ snapshot.
-        const key = tableKey()!
-        const mic = wantMic
-        sendPresence(false, 'context_changed')
-        stopSession({ reason: 'context_changed', notifyServer: false, clearIntent: false, canRestore: false })
-        suspended = { key, mic }
-        contextGraceTimer = clearTimer(contextGraceTimer)
-        contextGraceTimer = timers.setTimeout(() => {
-          contextGraceTimer = null
-          suspended = null
-          intentStore.clear()
-        }, contextGraceMs)
+      if (next.kind === 'none' && next.awaitingSnapshot === true && (suspended !== null || (prevTable !== null && wantVoice))) {
+        // Активна стая без своя авторитетен snapshot: членството още не е
+        // потвърдено. Връзката се затваря ВЕДНАГА (без звук без потвърдено
+        // членство); намерението се пази БЕЗ таймер и без заявки до следващото
+        // авторитетно състояние (същата маса -> възстановяване; друго -> изчистване).
+        if (prevTable !== null && wantVoice) {
+          const key = tableKey()!
+          const mic = wantMic
+          sendPresence(false, 'context_changed')
+          stopSession({ reason: 'context_changed', notifyServer: false, clearIntent: false, canRestore: false })
+          suspended = { key, mic }
+        }
         context = next
         resetTableState(null, true)
         invalidate()
         return
       }
       const resume = suspended
-      if (resume !== null && nextTable !== null) {
+      if (resume !== null) {
         suspended = null
-        contextGraceTimer = clearTimer(contextGraceTimer)
-        if (resume.key !== `${nextTable.voiceTableId}:${nextTable.selfProfileId}`) {
+        const sameTable = nextTable !== null && resume.key === `${nextTable.voiceTableId}:${nextTable.selfProfileId}`
+        if (!sameTable) {
+          // Авторитетно: друга маса или без маса -> намерението не се пренася.
           intentStore.clear()
           locallyMuted.clear()
+          locallyMutedTableId = null
+        } else if (nextTable.screen === 'off_table') {
+          // Същата маса, но в лобито („Изчакай в лоби“): без автоматично връщане.
+          intentStore.clear()
         }
       }
       if (prevTable !== null && nextTable !== null
@@ -1571,7 +1578,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       if (onTableScreen()) void ensureAdapter().catch(() => {})
       invalidate()
       if (resume !== null && resume.key === tableKey() && onTableScreen() && !wantVoice) {
-        // Същата маса се върна в срока: възстановяване без потребителско действие.
+        // Авторитетният snapshot потвърди същата маса: възстановяване без потребителско действие.
         beginJoin({ mic: resume.mic, explicit: false, source: 'initial' })
         return
       }
@@ -1599,7 +1606,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       disableEntirely('disabled')
     },
     onPageHide() {
-      // Затваряне/презареждане: връзката се затваря, намерението остава за същия таб.
+      // Затваряне/презареждане: връзката се затваря, намерението остава за същия
+      // таб и се маркира като годно за възстановяване (само при активен глас).
+      if (wantVoice) intentStore.markLeaving?.()
       if (wantVoice || room !== null || preparedSlot !== null) stopSession({ reason: 'page_hide', notifyServer: true, clearIntent: false, canRestore: true })
     },
     onPageShow(persisted) {
@@ -1704,7 +1713,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     dispose() {
       if (disposed) return
       stopSession({ reason: 'disposed', notifyServer: true, clearIntent: false, canRestore: false })
-      contextGraceTimer = clearTimer(contextGraceTimer)
       const old = room
       room = null
       roomOwner = null
@@ -1723,7 +1731,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       roomsOpen,
       listeners: listeners.size,
       speakingListeners: speakingListeners.size,
-      pendingTimers: [presenceTimer, retryTimer, heldTimer, transportTimer, contextGraceTimer].filter((t) => t !== null).length + speakingHoldTimers.size + (pendingAck === null ? 0 : 1),
+      pendingTimers: [presenceTimer, retryTimer, heldTimer, transportTimer].filter((t) => t !== null).length + speakingHoldTimers.size + (pendingAck === null ? 0 : 1),
       retainedMicrophone: held === null ? 0 : 1,
       driving: driving ? 1 : 0,
     }),

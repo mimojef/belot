@@ -48,13 +48,13 @@ const sameTable = (a: TableContext | null, b: TableContext | null): boolean =>
   a !== null && b !== null && a.voiceTableId === b.voiceTableId && a.selfProfileId === b.selfProfileId
 
 function sameContext(a: VoiceContext, b: VoiceContext): boolean {
-  if (a.kind === 'none' || b.kind === 'none') return a.kind === b.kind
+  if (a.kind === 'none' || b.kind === 'none') return a.kind === b.kind && (a.kind !== 'none' || a.awaitingSnapshot === (b as typeof a).awaitingSnapshot)
   return sameTable(a, b) && a.screen === b.screen && a.seats.length === b.seats.length
     && a.seats.every((seat, index) => seat.profileId === b.seats[index]!.profileId && seat.isBot === b.seats[index]!.isBot)
 }
 
 export type VoiceIntentAccess = {
-  read: () => { voiceTableId: string; profileId: string; mic: boolean } | null
+  read: () => { voiceTableId: string; profileId: string; mic: boolean; leftAt?: number } | null
   clear: () => void
   isReload: () => boolean
 }
@@ -139,7 +139,8 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps & { intent?: Voi
     const current = table()
     if (disposed || !onScreen(current)) return
     const stored = intentAccess.read()
-    if (stored === null) return
+    // Само запис, маркиран при pagehide на страница с глас (не копие от жив таб — „Duplicate tab“).
+    if (stored === null || stored.leftAt === undefined) return
     if (stored.voiceTableId !== current.voiceTableId || stored.profileId !== current.selfProfileId) {
       // Друга маса/профил: намерението не се прехвърля.
       intentAccess.clear()

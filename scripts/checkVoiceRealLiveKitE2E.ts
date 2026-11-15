@@ -22,6 +22,14 @@
  *   [E9] последователни временни откази при издаване на токен (3 × 503);
  *   [E10] доброволно изключен микрофон — остава изключен след презареждане;
  *   [E11] едновременно прекъсване на мрежата и ротация;
+ *   E2E_STAGE_D=1 (след E1, после край):
+ *   [E12] РЕАЛНО прекъсване на WebRTC медията за 15 s: LiveKit обявява медийния
+ *         адрес 127.0.0.2 (node_ip), а слуша на 127.0.0.1; тестово реле на
+ *         127.0.0.2 препраща UDP/TCP медията и при блок изхвърля пакетите в
+ *         двете посоки. Сигнализацията (LiveKit WS) и играта не минават през
+ *         релето -> автоматично възстановяване в двете посоки;
+ *   [E13] истински „Duplicate tab“ (chrome.tabs.duplicate от тестово разширение)
+ *         -> дубликатът не включва глас и не иска микрофон;
  *   след всеки сценарий: ≤1 LiveKit участник на профил (сървърен
  *   ListParticipants), никой не получава собственото си аудио като отделен
  *   поток (ехо), ≤3 audio елемента. E2E_NO_AEC=1 — контролен експеримент без
@@ -36,7 +44,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createSocket as createUdpSocket, type Socket as UdpSocket } from 'node:dgram'
+import { connect as netConnect, createServer as createTcpServer, type Server as TcpServer, type Socket } from 'node:net'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -69,15 +79,17 @@ const lkTcpPort = await freePort()
 const udpStart = 52_000 + Math.floor(Math.random() * 500) * 10
 const apiKey = 'e2ekey'
 const apiSecret = `${randomUUID()}${randomUUID()}`.replace(/-/g, '')
+const STAGE_D = process.env.E2E_STAGE_D === '1'
+const mediaUdpPort = await freePort()
 const lkConfig = [
   `port: ${lkPort}`,
   'bind_addresses: ["127.0.0.1"]',
   'rtc:',
   `  tcp_port: ${lkTcpPort}`,
-  `  port_range_start: ${udpStart}`,
-  `  port_range_end: ${udpStart + 200}`,
-  '  use_external_ip: false',
-  '  node_ip: 127.0.0.1',
+  // E12: един UDP порт (mux) на 127.0.0.1, обявен като 127.0.0.2 -> медията минава през тестовото реле.
+  ...(STAGE_D
+    ? [`  udp_port: ${mediaUdpPort}`, '  use_external_ip: false', '  node_ip: 127.0.0.2', '  enable_loopback_candidate: true', '  ips:', '    includes:', '      - 127.0.0.1/32']
+    : [`  port_range_start: ${udpStart}`, `  port_range_end: ${udpStart + 200}`, '  use_external_ip: false', '  node_ip: 127.0.0.1']),
   'keys:',
   `  ${apiKey}: ${apiSecret}`,
   'room:',
@@ -185,7 +197,8 @@ type Party = {
   label: string
   tone: number
   profile: TestProfile
-  browser: Browser
+  browser: Browser | null
+  close: () => Promise<void>
   page: Page
   received: Frame[]
   tokens: Array<{ at: number; status: number; token: string | null; url: string | null }>
@@ -289,20 +302,98 @@ async function register(tag: string): Promise<TestProfile> {
   }
 }
 
-async function openParty(label: string, profile: TestProfile, tone: number, viewport: { width: number; height: number }): Promise<Party> {
+// ─── [E12] Медийно реле на 127.0.0.2 (UDP + ICE-TCP) ─────────────────────
+// Изхвърля медийните пакети в ДВЕТЕ посоки при блок; сигнализацията не минава оттук.
+const mediaRelay = {
+  blocked: false,
+  packetsIn: 0,
+  packetsOut: 0,
+  dropped: 0,
+  tcpConnects: 0,
+  tcpSockets: new Set<Socket>(),
+  block() {
+    this.blocked = true
+    for (const socket of this.tcpSockets) socket.destroy()
+    this.tcpSockets.clear()
+  },
+  unblock() { this.blocked = false },
+}
+let relayUdp: UdpSocket | null = null
+const relayBack = new Map<string, UdpSocket>()
+let relayTcp: TcpServer | null = null
+async function startMediaRelay(): Promise<void> {
+  const front = createUdpSocket('udp4')
+  front.on('message', (message, remote) => {
+    const key = `${remote.address}:${remote.port}`
+    let back = relayBack.get(key)
+    if (back === undefined) {
+      const socket = createUdpSocket('udp4')
+      socket.bind(0, '127.0.0.1')
+      socket.on('message', (reply) => {
+        if (mediaRelay.blocked) { mediaRelay.dropped += 1; return }
+        mediaRelay.packetsOut += 1
+        front.send(reply, remote.port, remote.address)
+      })
+      relayBack.set(key, socket)
+      back = socket
+    }
+    if (mediaRelay.blocked) { mediaRelay.dropped += 1; return }
+    mediaRelay.packetsIn += 1
+    back.send(message, mediaUdpPort, '127.0.0.1')
+  })
+  await new Promise<void>((resolve, reject) => { front.once('error', reject); front.bind(mediaUdpPort, '127.0.0.2', () => resolve()) })
+  relayUdp = front
+  // ICE-TCP кандидатът (127.0.0.2:tcp_port) — също през релето, иначе би заобиколил блока.
+  const tcp = createTcpServer((client) => {
+    if (mediaRelay.blocked) { client.destroy(); return }
+    mediaRelay.tcpConnects += 1
+    const upstream = netConnect(lkTcpPort, '127.0.0.1')
+    client.pipe(upstream)
+    upstream.pipe(client)
+    mediaRelay.tcpSockets.add(client)
+    const destroy = (): void => { upstream.destroy(); client.destroy(); mediaRelay.tcpSockets.delete(client) }
+    client.on('error', destroy); upstream.on('error', destroy); client.on('close', destroy); upstream.on('close', destroy)
+  })
+  await new Promise<void>((resolve) => {
+    tcp.once('error', () => { console.log('    (ICE-TCP реле не е налично на 127.0.0.2 — само UDP)'); resolve() })
+    tcp.listen(lkTcpPort, '127.0.0.2', () => { relayTcp = tcp; resolve() })
+  })
+}
+
+/** Тестово разширение: chrome.tabs.duplicate (същият път като „Duplicate tab“ в менюто). */
+async function writeDuplicateExtension(): Promise<string> {
+  const dir = join(workDir, 'dup-ext')
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'manifest.json'), JSON.stringify({ manifest_version: 3, name: 'e2e-duplicate-tab', version: '1.0', permissions: ['tabs'], background: { service_worker: 'sw.js' } }))
+  await writeFile(join(dir, 'sw.js'), 'self.addEventListener("install", () => self.skipWaiting())\n')
+  return dir
+}
+
+async function openParty(label: string, profile: TestProfile, tone: number, viewport: { width: number; height: number }, options: { extension?: boolean } = {}): Promise<Party> {
   const wav = join(workDir, `tone-${tone}.wav`)
   await writeToneWav(wav, tone)
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--use-fake-ui-for-media-stream',
-      '--use-fake-device-for-media-stream',
-      `--use-file-for-fake-audio-capture=${wav}`,
-      '--autoplay-policy=no-user-gesture-required',
-      '--disable-features=WebRtcHideLocalIpsWithMdns',
-    ],
-  })
-  const context = await browser.newContext(viewport === MOBILE ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport })
+  const args = [
+    '--use-fake-ui-for-media-stream',
+    '--use-fake-device-for-media-stream',
+    `--use-file-for-fake-audio-capture=${wav}`,
+    '--autoplay-policy=no-user-gesture-required',
+    '--disable-features=WebRtcHideLocalIpsWithMdns',
+  ]
+  const contextOptions = viewport === MOBILE ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport }
+  let browser: Browser | null = null
+  let context: BrowserContext
+  if (options.extension) {
+    const extension = await writeDuplicateExtension()
+    context = await chromium.launchPersistentContext(join(workDir, `profile-${label}`), {
+      channel: 'chromium',
+      headless: true,
+      args: [...args, `--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+      ...contextOptions,
+    })
+  } else {
+    browser = await chromium.launch({ headless: true, args })
+    context = await browser.newContext(contextOptions)
+  }
   await context.grantPermissions(['microphone'], { origin: h.appOrigin })
   await context.addCookies([{ name: 'belot_session', value: profile.cookie, url: h.backendOrigin }])
   await context.addInitScript(`try { localStorage.setItem('pika-consent-v2', JSON.stringify({ version: 2, necessary: true, analytics: false, marketing: false, updatedAt: new Date().toISOString() })) } catch {}`)
@@ -346,12 +437,15 @@ async function openParty(label: string, profile: TestProfile, tone: number, view
     tokens.push({ at: Date.now(), status: response.status(), token: typeof body?.token === 'string' ? body.token : null, url: typeof body?.url === 'string' ? body.url : null })
     await route.fulfill({ response, body: text })
   })
-  const page = await context.newPage()
+  // Брояч на заявките за микрофон (без промяна на поведението) — за E13.
+  await context.addInitScript("(() => { const md = navigator.mediaDevices; if (!md) return; const orig = md.getUserMedia.bind(md); window.__gumCalls = 0; md.getUserMedia = (c) => { window.__gumCalls += 1; return orig(c) } })()")
+  const page = context.pages()[0] ?? await context.newPage()
   page.on('pageerror', (error) => console.error(`    [pageerror ${label}] ${error.message}`))
   await page.goto(`${h.appOrigin}/lobby`)
   await page.locator(LOBBY_READY).first().waitFor({ state: 'attached', timeout: 25_000 })
   await page.waitForTimeout(800)
-  return { label, tone, profile, browser, page, received, tokens, reports, inject: (m) => current?.send(JSON.stringify(m)), context, failTokens }
+  const close = async (): Promise<void> => { if (browser !== null) await browser.close(); else await context.close() }
+  return { label, tone, profile, browser, close, page, received, tokens, reports, inject: (m) => current?.send(JSON.stringify(m)), context, failTokens }
 }
 
 type ToneReport = Record<string, { agoMs: number | null; maxGapMs: number; recentRate: number }>
@@ -553,9 +647,10 @@ try {
     .run(randomUUID(), profiles[0]!.profileId, new Date().toISOString())
 
   const A = await openParty('A', profiles[0]!, TONES[0], DESKTOP)
+  if (STAGE_D) await startMediaRelay()
   const B = await openParty('B', profiles[1]!, TONES[1], MOBILE)
   const C = await openParty('C', profiles[2]!, TONES[2], DESKTOP)
-  const D = await openParty('D', profiles[3]!, TONES[3], MOBILE)
+  const D = await openParty('D', profiles[3]!, TONES[3], MOBILE, { extension: STAGE_D })
   parties.push(A, B, C, D)
 
   // Гласова маса (ръчен старт); всички с микрофон.
@@ -592,6 +687,66 @@ try {
     }
   })
 
+  if (STAGE_D) {
+    // ─── [E12] реално прекъсване на WebRTC медията на B ─────────────────
+    await check('[E12] Реално прекъсване на WebRTC медията за 15 s (пакетите се изхвърлят в двете посоки; сигнализацията и играта остават): аудиото спира и се възстановява автоматично в двете посоки', async () => {
+      try {
+        assert((mediaRelay.packetsIn > 0 && mediaRelay.packetsOut > 0) || mediaRelay.tcpConnects > 0, `медията не минава през релето (UDP ${mediaRelay.packetsIn}/${mediaRelay.packetsOut} пакета, TCP ${mediaRelay.tcpConnects} връзки, реле TCP ${relayTcp === null ? 'няма' : 'да'}) :: ${lkLog.join('').split('\n').filter((l) => /candidate|ICE|ice/.test(l)).slice(-8).join(' || ').slice(0, 1500)}`)
+        const gameFramesBefore = A.received.length
+        const tokensBefore = parties.map((p) => p.tokens.length)
+        mediaRelay.block()
+        const blockedAt = Date.now()
+        await waitUntil('аудиото спира при всички и в двете посоки', async () => {
+          for (const listener of parties) {
+            const report = (await audioReport(listener))!
+            for (const speaker of parties.filter((p) => p !== listener)) {
+              const entry = report[String(speaker.tone)]!
+              if (entry.agoMs === null || entry.agoMs < 2_500) return false
+            }
+          }
+          return true
+        }, 20_000, 250)
+        console.log(`    медията е спряна навсякъде ${Date.now() - blockedAt} ms след блока; състояния: ${JSON.stringify(await Promise.all(parties.map((p) => voiceState(p))))}`)
+        await sleep(Math.max(0, 15_000 - (Date.now() - blockedAt)))
+        console.log(`    по време на блока: изхвърлени пакети ${mediaRelay.dropped}; игрови съобщения към A ${A.received.length - gameFramesBefore}; нови токени ${parties.map((p, i) => p.tokens.length - tokensBefore[i]!).join('/')}`)
+        mediaRelay.unblock()
+        const unblockedAt = Date.now()
+        await waitMutualAudio(parties, 120_000, 1_500)
+        console.log(`    всички отново се чуват (двете посоки) ${Date.now() - unblockedAt} ms след възстановяването на медията; нови токени общо ${parties.map((p, i) => p.tokens.length - tokensBefore[i]!).join('/')}`)
+        for (const p of parties) console.log(`    ${p.label} отчети: ${p.reports.filter((r) => r.at >= blockedAt && r.body?.event !== 'transport').map((r) => `${r.body?.event}${r.body?.reason ? ':' + r.body.reason : ''}`).join(',') || '—'} ${JSON.stringify(await voiceState(p))}`)
+        await assertNoDuplicatesNoEcho('E12', voiceTableId, parties)
+      } catch (error) {
+        mediaRelay.unblock()
+        throw new Error(`${error instanceof Error ? error.message : String(error)} :: ${await describeAudio(parties)}`)
+      }
+    })
+
+    // ─── [E13] истински „Duplicate tab“ ─────────────────────────────────
+    await check('[E13] „Duplicate tab“ на D (chrome.tabs.duplicate): копираното sessionStorage не включва глас и не иска микрофон в дубликата', async () => {
+      const worker = D.context.serviceWorkers()[0] ?? await D.context.waitForEvent('serviceworker', { timeout: 15_000 })
+      const before = await D.page.evaluate("({ intent: sessionStorage.getItem('pika.voice.intent.v1'), gum: window.__gumCalls })") as { intent: string | null; gum: number }
+      assert(before.intent !== null, 'оригиналът има записано намерение (иначе тестът не доказва нищо)')
+      const pagePromise = D.context.waitForEvent('page', { timeout: 20_000 })
+      const duplicatedTabId = await worker.evaluate(async () => {
+        const c = (globalThis as any).chrome
+        const tabs = await c.tabs.query({})
+        const tab = tabs.find((t: any) => typeof t.url === 'string' && t.url.includes('/lobby')) ?? tabs[0]
+        const dup = await c.tabs.duplicate(tab.id)
+        return dup?.id ?? null
+      })
+      const dup = await pagePromise
+      await dup.waitForLoadState('domcontentloaded')
+      await sleep(10_000)
+      const state = await dup.evaluate("(async () => { const v = window.__pikaVoice; const s = v ? v.getSnapshot() : null; return { nav: (performance.getEntriesByType('navigation')[0] || {}).type || null, intent: sessionStorage.getItem('pika.voice.intent.v1'), gum: window.__gumCalls, status: s ? s.status : null, microphone: s ? s.microphone : null, controllerLoaded: v ? v.debugCounters().controllerLoaded : null, audio: document.querySelectorAll('[data-voice-audio-sink] audio').length } })()") as { nav: string | null; intent: string | null; gum: number; status: string | null; microphone: string | null; controllerLoaded: number | null; audio: number }
+      console.log(`    дубликат (tab ${duplicatedTabId}): ${JSON.stringify({ ...state, intent: state.intent === null ? null : JSON.parse(state.intent) })}`)
+      assert(state.gum === 0, `дубликатът поиска микрофон (${state.gum} getUserMedia)`)
+      assert(state.microphone !== 'live' && state.microphone !== 'requesting', `микрофон в дубликата: ${state.microphone}`)
+      assert(state.controllerLoaded === 0 || state.controllerLoaded === null, `дубликатът зареди гласа: ${JSON.stringify(state)}`)
+      assert(state.audio === 0, 'дубликатът няма гласова връзка')
+      console.log(`    оригиналът D след дублирането: ${JSON.stringify(await voiceState(D))}`)
+      await dup.close()
+    })
+  } else {
   // ─── [E2] чакалня -> игра ─────────────────────────────────────────────
   for (const p of parties) await resetGaps(p)
   const generationsBeforeStart = generations(voiceTableId).length
@@ -847,12 +1002,16 @@ try {
     }
   })
   }
+  }
 } catch (error) {
   console.error('  FAIL  неочаквана грешка:', error instanceof Error ? error.stack : error)
   await check('без неочаквани грешки', () => { throw error })
   console.error(lkLog.join('').slice(-2500))
 } finally {
-  for (const p of parties) await p.browser.close().catch(() => undefined)
+  for (const p of parties) await p.close().catch(() => undefined)
+  relayUdp?.close()
+  for (const socket of relayBack.values()) socket.close()
+  relayTcp?.close()
   await h.close()
   liveKit.kill()
   await sleep(500)

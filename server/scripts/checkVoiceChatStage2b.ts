@@ -1746,7 +1746,9 @@ try {
       'voiceChatService.onGameConnectionClosed(connection.id)',
       'voiceChatService.handlePresence(',
       'if (await handleVoiceChatApiRequest(req, res, requestUrl)) {',
-      'onModeChanged: (result) => voiceChatService.onModeChanged(result)',
+      // Смяна на режима -> контролерът на гласа (+ инвалидиране на live-probe на админ панела).
+      'onModeChanged: (result) => {',
+      'voiceChatService.onModeChanged(result)',
       'voiceChatService.boot(',
       "closeStore('voiceChatService', () => voiceChatService.dispose())",
       'voiceChatService.onChatMuteChanged(profileId)',

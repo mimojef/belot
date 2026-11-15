@@ -270,7 +270,7 @@ export type Harness = {
 }
 
 /** Памет на таба (sessionStorage) за намерението + дали страницата е презаредена. */
-export type MemoryIntent = { value: { voiceTableId: string; profileId: string; mic: boolean } | null; reload: boolean; saves: number }
+export type MemoryIntent = { value: { voiceTableId: string; profileId: string; mic: boolean; leftAt?: number } | null; reload: boolean; saves: number }
 export const createMemoryIntent = (): MemoryIntent => ({ value: null, reload: false, saves: 0 })
 
 export function createHarness(options: { facade?: boolean; intent?: MemoryIntent } = {}): Harness {
@@ -321,6 +321,7 @@ export function createHarness(options: { facade?: boolean; intent?: MemoryIntent
       intentStore: {
         save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => { memory.value = { ...intent }; memory.saves += 1 },
         clear: () => { memory.value = null },
+        markLeaving: () => { if (memory.value !== null) memory.value = { ...memory.value, leftAt: clock.now() } },
       },
     }),
   })

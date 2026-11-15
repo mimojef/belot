@@ -11104,7 +11104,11 @@ function resolveVoiceContext(): VoiceContext {
         seats: voiceGameStartTransition.seats,
       }
     }
-    if (snapshot === null || snapshot.roomId !== currentRoomId || snapshot.voiceTableId === null || snapshot.yourSeat === null) {
+    // Активна стая без своя snapshot (напр. след повторно свързване): членството
+    // още не е потвърдено -> гласовата връзка се затваря, намерението чака
+    // авторитетния snapshot (без таймер и без заявки).
+    if (snapshot === null || snapshot.roomId !== currentRoomId) return { kind: 'none', awaitingSnapshot: true }
+    if (snapshot.voiceTableId === null || snapshot.yourSeat === null) {
       return { kind: 'none' }
     }
     return {
