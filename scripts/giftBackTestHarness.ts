@@ -82,10 +82,10 @@ async function createIsolatedServerRoot(patches: ServerSourcePatch[] = []) {
 }
 
 type RunningServer = { child: ChildProcessWithoutNullStreams; output(): string }
-function startServer(serverDir: string, port: number): RunningServer {
+function startServer(serverDir: string, port: number, extraEnv: Record<string, string> = {}): RunningServer {
   const chunks: string[] = []
   const child = spawn(process.execPath, [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')], {
-    cwd: serverDir, env: { ...process.env, PORT: String(port), EMAIL_VERIFICATION_CODE_SECRET: EMAIL_VERIFICATION_SECRET }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: serverDir, env: { ...process.env, ...extraEnv, PORT: String(port), EMAIL_VERIFICATION_CODE_SECRET: EMAIL_VERIFICATION_SECRET }, stdio: ['ignore', 'pipe', 'pipe'],
   })
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
   child.stdout.on('data', (c) => chunks.push(c)); child.stderr.on('data', (c) => chunks.push(c))
@@ -146,6 +146,10 @@ export type GiftBackHarnessOptions = {
   vitePlugins?: PluginOption[]
   /** Fault injection в ИЗОЛИРАНОТО копие на server/src (точно едно съвпадение). */
   patchServerSource?: ServerSourcePatch[]
+  /** Допълнителни env променливи за изолирания сървър (напр. local tournament test mode). */
+  env?: Record<string, string>
+  /** Име на SQLite файла в database/data (по подразбиране belot-v2.sqlite). */
+  databaseFileName?: string
 }
 
 export async function startGiftBackHarness(options: GiftBackHarnessOptions = {}): Promise<GiftBackHarness> {
@@ -153,7 +157,7 @@ export async function startGiftBackHarness(options: GiftBackHarnessOptions = {})
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const browser = await chromium.launch({ headless: true })
   const backendPort = await freePort()
-  let server = startServer(isolated.serverDir, backendPort)
+  let server = startServer(isolated.serverDir, backendPort, options.env)
   let vite: Awaited<ReturnType<typeof createViteServer>> | null = null
   let db: DatabaseSync | null = null
 
@@ -193,7 +197,7 @@ export async function startGiftBackHarness(options: GiftBackHarnessOptions = {})
 
   const appOrigin = `http://127.0.0.1:${(vite.httpServer?.address() as { port: number }).port}`
   const backendOrigin = `http://127.0.0.1:${backendPort}`
-  const dbPath = join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite')
+  const dbPath = join(isolated.serverDir, 'database', 'data', options.databaseFileName ?? 'belot-v2.sqlite')
   db = new DatabaseSync(dbPath)
   db.exec('PRAGMA busy_timeout = 5000;')
   const database = db
@@ -321,7 +325,7 @@ export async function startGiftBackHarness(options: GiftBackHarnessOptions = {})
       const exited = new Promise<void>((done) => server.child.once('exit', () => done()))
       server.child.kill()
       await exited
-      server = startServer(isolated.serverDir, backendPort)
+      server = startServer(isolated.serverDir, backendPort, options.env)
       if (!(await waitForHealth(backendPort))) { console.error(server.output()); throw new Error('server did not restart') }
     },
     close,

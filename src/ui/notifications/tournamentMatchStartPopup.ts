@@ -7,6 +7,9 @@ type TournamentMatchStartPopupController = {
    * main.ts), за да не остане stale countdown/CTA сочещ към вече затворена
    * турнирна стая, без да засяга легитимен по-нов assignment за друг мач. */
   clearAssignmentForRoom: (roomId: string) => void
+  /** Изчиства текущия assignment САМО ако е за tournamentId (напр. турнирът
+   * е отменен или участието в него е приключило). */
+  clearAssignmentForTournament: (tournamentId: string) => void
   tick: () => void
   destroy: () => void
 }
@@ -162,6 +165,13 @@ export function createTournamentMatchStartPopup(options: {
     },
     clearAssignmentForRoom(roomId) {
       if (current === null || current.roomId !== roomId) return
+      current = null
+      minimizedMatchId = null
+      hadConflictForMatchId = null
+      render()
+    },
+    clearAssignmentForTournament(tournamentId) {
+      if (current === null || current.tournamentId !== tournamentId) return
       current = null
       minimizedMatchId = null
       hadConflictForMatchId = null

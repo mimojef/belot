@@ -198,6 +198,10 @@ export type ActiveRoomFlowController = {
   isActiveRoomParticipant: () => boolean
   getActiveNonTournamentRoomInfo: () => { roomId: string; stakeAmount: number } | null
   getCurrentRoomId: () => string | null
+  // Едно Белот участие: скрива „Преиграй“ за стаята (null = изчисти всички).
+  setTournamentReplayBlocked: (roomId: string | null) => void
+  // Текущата стая е в авторитетния край на мача (roomStatus 'finished').
+  isCurrentRoomMatchEnded: () => boolean
   // STATE B silent attach (§ "SILENT ATTACH") — arms a watch for roomId's
   // room_snapshot stream (already flowing on the shared WS connection after
   // resume_room {silent:true} → room_attached_silent) so the controller can

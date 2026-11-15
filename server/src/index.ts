@@ -5787,6 +5787,8 @@ function handlePrivateRoomPartnerInviteResponse(connectionId: ConnectionId, invi
   const otherSeatRoom = privateRoomsStore.getRoomByProfileId(profileId)
   const belotConflictMessage = isProfileInActiveGame(profileId)
     ? BELOT_ACTIVE_MATCH_CONFLICT_MESSAGE
+    : hasActiveTournamentParticipation(profileId)
+      ? BELOT_TOURNAMENT_CONFLICT_MESSAGE
     : findReplayableRoomAttachmentForProfile(profileId) !== null
       ? BELOT_FINISHED_MATCH_CONFLICT_MESSAGE
     : otherSeatRoom !== null && otherSeatRoom.id !== found.room.id
@@ -7686,6 +7688,15 @@ async function tickRoomGameRuntimes(): Promise<void> {
               recordPrivateGameFinishedIfApplicable(room)
             },
           )
+          // Едно Белот участие — участник с текущ турнирен мач: скрит
+          // „Преиграй“ и известие „Започнал турнир“ (само при прехода).
+          runMatchCompletionSideEffect(
+            'send-match-ended-tournament-status',
+            room.id,
+            () => {
+              sendMatchEndedTournamentStatus(room)
+            },
+          )
           const hadAwardedPrizeBeforePayout = room.awardedPrizePerSeat !== undefined
           if (!room.config.isGuestTrial && !isTournamentMatchRoom(room)) {
             runMatchCompletionSideEffect(
@@ -8050,6 +8061,9 @@ function isProfileInActiveGame(profileId: string): boolean {
 function findProfileInGameSession(
   profileId: string,
 ): { roomId: string; reconnectToken: string } | null {
+  // Едно Белот участие: при място и в обикновен мач, и в турнирна стая
+  // връщането е към обикновения — входът в турнира се отказва, докато той тече.
+  let tournamentSession: { roomId: string; reconnectToken: string } | null = null
   for (const room of Object.values(serverState.rooms)) {
     const phase = room.game.phase
     if (phase === null || phase === 'finished') continue
@@ -8062,11 +8076,13 @@ function findProfileInGameSession(
         participantProfileId === profileId &&
         participant.reconnectToken !== null
       ) {
-        return { roomId: room.id, reconnectToken: participant.reconnectToken }
+        const session = { roomId: room.id, reconnectToken: participant.reconnectToken }
+        if (!isTournamentMatchRoom(room)) return session
+        tournamentSession ??= session
       }
     }
   }
-  return null
+  return tournamentSession
 }
 
 // Гласов чат — авторитетното място на профила спрямо гласовата маса:
@@ -8196,6 +8212,122 @@ function findReplayableRoomAttachmentForProfile(profileId: string): ServerRoom |
   return null
 }
 
+// ─── Турнирно участие ────────────────────────────────────────────────────
+// Правото върху турнирно място (човек ИЛИ бот „вместо X“ с незатворено
+// заместване) е отделно от реалното управление на друг активен мач.
+const BELOT_TOURNAMENT_CONFLICT_MESSAGE = 'Имате активен турнирен мач.'
+
+/** Мястото на профила в текущ (неприключил) турнирен мач — само in-memory. */
+function findTournamentSeatForProfile(profileId: string): { room: ServerRoom; seat: Seat } | null {
+  for (const room of Object.values(serverState.rooms)) {
+    if (!isTournamentMatchRoom(room) || room.status === 'finished' || room.game.phase === 'finished') continue
+    for (const seat of SERVER_SEAT_ORDER) {
+      const participant = room.seats[seat].participant
+      if (participant?.kind === 'human') {
+        const participantProfileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+        if (participantProfileId === profileId) return { room, seat }
+      } else if (
+        participant?.kind === 'bot' &&
+        participant.tournamentNoShowReplacement?.assignedProfileId === profileId &&
+        participant.tournamentNoShowReplacement.status !== 'completed'
+      ) {
+        return { room, seat }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Активно турнирно участие = място в текущ турнирен мач (човек или бот
+ * „вместо X“ с незатворено заместване). Между кръговете НЯМА ограничение —
+ * финалистите играят свободно, докато чакат; ако финалът започне, докато са
+ * в друг мач, важи същото правило за неявяване (20 s срок). Регистрацията за
+ * бъдещ турнир и елиминираните не се броят. Само in-memory.
+ */
+function hasActiveTournamentParticipation(profileId: string): boolean {
+  return findTournamentSeatForProfile(profileId) !== null
+}
+
+/**
+ * Друг активен Belot мач, в който профилът има място по profileId (човешки
+ * участник без доброволно напускане), различен от `exceptRoomId`. Важи и
+ * при временно прекъсната връзка и при временно управление от бот
+ * (controlledByBot) — докато играчът има право да се върне. Доброволното
+ * напускане (permanentlyLeftAt) освобождава. Само in-memory.
+ */
+function findOtherActiveBelotMatchSeat(profileId: string, exceptRoomId: string): ServerRoom | null {
+  for (const room of Object.values(serverState.rooms)) {
+    if (room.id === exceptRoomId || room.status !== 'playing') continue
+    for (const seat of SERVER_SEAT_ORDER) {
+      const participant = room.seats[seat].participant
+      if (participant?.kind !== 'human' || participant.permanentlyLeftAt != null) continue
+      const participantProfileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+      if (participantProfileId === profileId) return room
+    }
+  }
+  return null
+}
+
+/**
+ * Профилът участва в друг Belot мач (място в активна стая — вкл. временно
+ * прекъсната връзка / бот контрол — или прикрепена връзка към приключила
+ * стая с възможност за „Преиграй“), различен от `exceptRoomId`. Ползва се за
+ * присъствието в турнира (Вариант Б).
+ */
+function isProfileBusyInOtherBelotMatch(profileId: string, exceptRoomId: string): boolean {
+  if (findOtherActiveBelotMatchSeat(profileId, exceptRoomId) !== null) return true
+  const endedRoom = findReplayableRoomAttachmentForProfile(profileId)
+  return endedRoom !== null && endedRoom.id !== exceptRoomId
+}
+
+/**
+ * Вход в турнирна стая (вкл. поемане от бот) се отказва, докато профилът
+ * участва в друг активен Belot мач — по profileId, независимо от връзката
+ * (второ устройство, временно прекъсване, временен бот контрол). Отказът е
+ * преди затваряне/пренасочване на връзката.
+ */
+function findOtherActiveBelotControl(profileId: string, targetRoomId: string): ServerRoom | null {
+  return findOtherActiveBelotMatchSeat(profileId, targetRoomId)
+}
+
+/** Турнирната стая е построена — турнирът има предимство пред опашката и чакащите частни маси. */
+function releaseBelotCommitmentsForTournamentRoom(room: ServerRoom): void {
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind !== 'human') continue
+    const profileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+    if (profileId === null) continue
+    removeProfileFromMatchmakingForConflict(profileId, null)
+    if (privateRoomsStore.releaseMemberForConflict(profileId)) {
+      console.warn(`[belot-participation] released private seat for tournament room=${room.id}`)
+    }
+  }
+}
+
+/**
+ * Край на обикновен мач: участник с текущ турнирен мач, получава
+ * блокиран „Преиграй“ и (ако турнирният му мач тече) известие „Започнал
+ * турнир“. Извиква се веднъж при прехода към match-ended и при връщане
+ * в такава стая.
+ */
+function sendMatchEndedTournamentStatus(room: ServerRoom, onlyConnectionId: ConnectionId | null = null): void {
+  if (!isReplayableMatchEndedRoom(room) || tournamentCoordinator === null) return
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind !== 'human' || participant.connectionId === null || participant.permanentlyLeftAt != null) continue
+    if (onlyConnectionId !== null && participant.connectionId !== onlyConnectionId) continue
+    const profileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+    if (profileId === null || !hasActiveTournamentParticipation(profileId)) continue
+    safeSendToConnection(participant.connectionId, {
+      type: 'belot_match_ended_tournament_status',
+      roomId: room.id,
+      replayBlocked: true,
+      assignment: tournamentCoordinator.getAssignmentForProfile(profileId),
+    })
+  }
+}
+
 /**
  * Непосредствено преди старт на повторен мач: човешките места, чиито профили
  * междувременно имат друго Белот участие (активен мач другаде, място на
@@ -8210,6 +8342,7 @@ function findReplayConflictSeats(room: ServerRoom): Seat[] {
     if (profileId === null) continue
     if (
       isProfileInActiveBelotMatch(profileId) ||
+      hasActiveTournamentParticipation(profileId) ||
       privateRoomsStore.getRoomByProfileId(profileId) !== null ||
       matchmakingState.queueEntries.some((entry) => entry.profileId === profileId)
     ) {
@@ -8238,6 +8371,9 @@ function sendBelotParticipationBlockedIfNeeded(
     return true
   }
   if (isProfileInActiveGame(profileId)) return reject(BELOT_ACTIVE_MATCH_CONFLICT_MESSAGE, 'belot_active_match_conflict')
+  // Профилът има място в текущ турнирен мач (вкл. бот „вместо X“) — нов
+  // обикновен мач не се започва. Между кръговете няма ограничение.
+  if (hasActiveTournamentParticipation(profileId)) return reject(BELOT_TOURNAMENT_CONFLICT_MESSAGE, 'belot_tournament_conflict')
   // Край на мача с възможност за „Преиграй“ — докато е прикрепен към стаята.
   if (findReplayableRoomAttachmentForProfile(profileId) !== null) {
     return reject(BELOT_FINISHED_MATCH_CONFLICT_MESSAGE, 'belot_finished_match_conflict')
@@ -8258,13 +8394,16 @@ function sendBelotParticipationBlockedIfNeeded(
 }
 
 /** Маха всички записи на профила от опашката (с връщане на платен залог). */
-function removeProfileFromMatchmakingForConflict(profileId: string, notice: string | null): void {
+function removeProfileFromMatchmakingForConflict(
+  profileId: string,
+  notice: { message: string; code: 'belot_private_seat_conflict' | 'belot_tournament_conflict' } | null,
+): void {
   const entries = matchmakingState.queueEntries.filter((entry) => entry.profileId === profileId)
   for (const entry of entries) {
     if (!removeConnectionFromMatchmaking(entry.connectionId)) continue
-    console.warn(`[belot-participation] removed from matchmaking stake=${entry.stake}: ${notice === null ? 'active_match' : 'private_seat'}`)
+    console.warn(`[belot-participation] removed from matchmaking stake=${entry.stake}: ${notice?.code ?? 'active_match'}`)
     safeSendToConnection(entry.connectionId, { type: 'matchmaking_left', removed: true })
-    if (notice !== null) safeSendToConnection(entry.connectionId, { type: 'error', message: notice, code: 'belot_private_seat_conflict' })
+    if (notice !== null) safeSendToConnection(entry.connectionId, { type: 'error', message: notice.message, code: notice.code })
   }
 }
 
@@ -8278,7 +8417,7 @@ function resolvePrivateRoomStartConflicts(room: PrivateRoom): PrivateRoomHumanOc
   for (const slot of room.slots) {
     const occupant = slot.occupant
     if (occupant?.kind !== 'human' || occupant.profileId === null) continue
-    if (isProfileInActiveBelotMatch(occupant.profileId)) {
+    if (isProfileInActiveBelotMatch(occupant.profileId) || hasActiveTournamentParticipation(occupant.profileId)) {
       busy.push(occupant)
     } else {
       removeProfileFromMatchmakingForConflict(occupant.profileId, null)
@@ -9112,16 +9251,23 @@ function processMatchmakingUnsafe(): void {
     const conflictedEntries = result.group.matchedHumans.filter((entry) => {
       if (getConnectionById(serverState, entry.connectionId)?.currentRoomId != null) return true
       if (entry.profileId === null) return false
-      return isProfileInActiveBelotMatch(entry.profileId) || privateRoomsStore.getRoomByProfileId(entry.profileId) !== null
+      return isProfileInActiveBelotMatch(entry.profileId) ||
+        privateRoomsStore.getRoomByProfileId(entry.profileId) !== null ||
+        hasActiveTournamentParticipation(entry.profileId)
     })
     if (conflictedEntries.length > 0) {
       cleanupTempBotsFromRoom(result.room)
       for (const entry of conflictedEntries) {
-        const hasPrivateSeat = entry.profileId !== null
-          && privateRoomsStore.getRoomByProfileId(entry.profileId) !== null
-          && !isProfileInActiveBelotMatch(entry.profileId)
         if (entry.profileId !== null) {
-          removeProfileFromMatchmakingForConflict(entry.profileId, hasPrivateSeat ? BELOT_PRIVATE_SEAT_CONFLICT_MESSAGE : null)
+          const inActiveMatch = isProfileInActiveBelotMatch(entry.profileId)
+          const notice = inActiveMatch
+            ? null
+            : hasActiveTournamentParticipation(entry.profileId)
+              ? { message: BELOT_TOURNAMENT_CONFLICT_MESSAGE, code: 'belot_tournament_conflict' as const }
+              : privateRoomsStore.getRoomByProfileId(entry.profileId) !== null
+                ? { message: BELOT_PRIVATE_SEAT_CONFLICT_MESSAGE, code: 'belot_private_seat_conflict' as const }
+                : null
+          removeProfileFromMatchmakingForConflict(entry.profileId, notice)
         }
         // Запис без профил или все още там (напр. само currentRoomId) — по връзка.
         if (removeConnectionFromMatchmaking(entry.connectionId)) {
@@ -19085,6 +19231,14 @@ async function handleAdminTournamentsRequest(
       })
       return true
     }
+    // Едно Белот участие: отворените турнирни известия на записаните се
+    // затварят веднага (еднократно, само при реална отмяна — без polling).
+    if (!result.alreadyCancelled) {
+      const cancelledProfileIds = new Set(tournamentStore.getEntriesForTournament(tournamentId).map((entry) => entry.profileId))
+      for (const profileId of cancelledProfileIds) {
+        sendToOpenProfileConnections(profileId, { type: 'tournament_participation_ended', tournamentId })
+      }
+    }
     sendJsonResponse(res, 200, {
       ok: true,
       alreadyCancelled: result.alreadyCancelled,
@@ -26630,6 +26784,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // хванал прехода само от worker-tick страна).
         if (shouldRunMatchCompletionSideEffects(room, result.room)) {
           recordPrivateGameFinishedIfApplicable(result.room)
+          sendMatchEndedTournamentStatus(result.room)
         } else {
           notifyPrivateGameScoreProgress(result.room)
         }
@@ -26741,6 +26896,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // practice, but the same guard is reused for consistency.
         if (shouldRunMatchCompletionSideEffects(room, result.room)) {
           recordPrivateGameFinishedIfApplicable(result.room)
+          sendMatchEndedTournamentStatus(result.room)
         } else {
           notifyPrivateGameScoreProgress(result.room)
         }
@@ -27003,6 +27159,17 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
 
         const authState = replayRoom.game.authoritativeState
         if (!authState || 'kind' in authState || authState.phase !== 'match-ended') {
+          return
+        }
+
+        // Едно Белот участие: участник с текущ турнирен мач, не може да
+        // започне повторен мач (гласът не се записва, залог не се удържа).
+        if (replayConnection?.profileId != null && hasActiveTournamentParticipation(replayConnection.profileId)) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: BELOT_TOURNAMENT_CONFLICT_MESSAGE,
+            code: 'belot_tournament_conflict',
+          })
           return
         }
 
@@ -27435,6 +27602,24 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           }
         }
 
+        // Едно Белот участие: вход в турнирна стая (вкл. поемане от бот),
+        // докато профилът управлява друг активен Belot мач (от това или друго
+        // устройство) — отказ ПРЕДИ изместване/пренасочване на връзката.
+        // Връщането към същия мач не се засяга (target === текущата стая).
+        if (
+          connection.profileId !== null &&
+          targetRoomForResume !== null &&
+          isTournamentMatchRoom(targetRoomForResume) &&
+          findOtherActiveBelotControl(connection.profileId, targetRoomForResume.id) !== null
+        ) {
+          safeSendToConnection(connection.id, {
+            type: 'room_resume_failed',
+            roomId: message.roomId,
+            message: BELOT_ACTIVE_MATCH_CONFLICT_MESSAGE,
+          })
+          return
+        }
+
         if (connection.profileId !== null) {
           displaceProfileConnections(connection.profileId, connection.id)
         }
@@ -27476,6 +27661,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             })
 
         broadcastRoomSnapshots(result.room, socketRegistry)
+        // Връщане в приключил мач, докато турнирът тече — „Преиграй“ остава
+        // скрит и известието „Започнал турнир“ се показва отново.
+        sendMatchEndedTournamentStatus(result.room, connection.id)
         // Viewer-indicator: участникът получава ВЕДНАГА текущия списък (вкл.
         // празен — изчиства stale state отпреди disconnect-а), без да чака
         // следваща spectator membership промяна.
@@ -30984,6 +31172,17 @@ try {
         }
       }
       return false
+    },
+    // Едно Белот участие (Вариант Б) — зает в друг Belot мач = неявил се.
+    isProfileBusyInOtherBelotMatch: (profileId, tournamentRoomId) =>
+      isProfileBusyInOtherBelotMatch(profileId, tournamentRoomId),
+    onMatchRoomCreated: (room) => {
+      releaseBelotCommitmentsForTournamentRoom(room)
+    },
+    notifyParticipationEnded: (profileIds, tournamentId) => {
+      for (const profileId of new Set(profileIds)) {
+        sendToOpenProfileConnections(profileId, { type: 'tournament_participation_ended', tournamentId })
+      }
     },
     notifyAssignment: (profileId, assignment) => {
       sendTournamentMatchAssignment(profileId, assignment)

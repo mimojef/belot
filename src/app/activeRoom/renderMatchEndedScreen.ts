@@ -92,6 +92,8 @@ type RenderMatchEndedScreenOptions = {
   partnerRatingStatus?: 'idle' | 'submitting' | 'submitted'
   countdownSeconds: number
   isPrivateTableOrigin?: boolean
+  // Едно Белот участие: участникът има текущ турнирен мач -> без „Преиграй“ и „Нова игра“.
+  newMatchButtonsHidden?: boolean
   onReturnToLobby: () => void
   onStartNewGame?: () => void
   onSubmitPartnerRating?: (ratingValue: number) => void
@@ -1180,6 +1182,22 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
       }
       requestAnimationFrame(tick)
     }
+  }
+
+  // Едно Белот участие: участник с текущ турнирен мач не вижда „Преиграй“ и
+  // „Нова игра“ (и двата започват нов обикновен мач; сървърът ги отказва).
+  // „Към лобито“ остава.
+  if (options.newMatchButtonsHidden === true) {
+    root
+      .querySelectorAll<HTMLElement>('[data-match-ended-replay-button="1"], [data-match-ended-new-game-button="1"]')
+      .forEach((button) => {
+        const parent = button.parentElement
+        button.remove()
+        if (parent === null || parent.style.gridTemplateColumns === '') return
+        // Мобилната решетка: празна -> махната; с един бутон -> цяла ширина.
+        if (parent.children.length === 0) parent.remove()
+        else parent.style.gridTemplateColumns = '1fr'
+      })
   }
 
   root

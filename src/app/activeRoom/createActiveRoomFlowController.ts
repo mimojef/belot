@@ -300,6 +300,8 @@ export function createActiveRoomFlowController(
   let lastLeaveWarningHtml: string | null = null
   const playedScoringPresentationKeys = new Set<string>()
   let reactionCountdownAudioIntervalId: number | null = null
+  // Едно Белот участие — виж setTournamentReplayBlocked.
+  const tournamentReplayBlockedRoomIds = new Set<string>()
   let matchEndedSoundPlayed = false
   // Absolute Unix-ms timestamp на ПЪРВИЯ match-ended render с награда — виж
   // renderMatchEndedScreen.ts::RenderMatchEndedScreenOptions.prizeAnimationStartedAt
@@ -4833,6 +4835,7 @@ export function createActiveRoomFlowController(
         countdownSeconds: matchEndedCountdownSeconds,
         isPrivateTableOrigin:
           activeRoomState.isPrivateTableOrigin || activeRoomState.isTournamentMatchOrigin,
+        newMatchButtonsHidden: tournamentReplayBlockedRoomIds.has(activeRoomState.roomId),
         onReturnToLobby: returnToLobbyFromMatchEnded,
         onStartNewGame: startNewGameFromMatchEnded,
         onSubmitPartnerRating: (ratingValue) => {
@@ -7403,6 +7406,24 @@ export function createActiveRoomFlowController(
     return activeRoomState !== null
   }
 
+  // Едно Белот участие: стаите (приключил обикновен мач), в които локалният
+  // участник има текущ турнирен мач -> „Преиграй“ е скрит. Сървърът изпраща
+  // belot_match_ended_tournament_status; изчиства се при край на участието.
+  function setTournamentReplayBlocked(roomId: string | null): void {
+    if (roomId === null) {
+      if (tournamentReplayBlockedRoomIds.size === 0) return
+      tournamentReplayBlockedRoomIds.clear()
+    } else {
+      if (tournamentReplayBlockedRoomIds.has(roomId)) return
+      tournamentReplayBlockedRoomIds.add(roomId)
+    }
+    if (activeRoomState !== null && isMatchEndedState()) renderActiveRoomScreen()
+  }
+
+  function isCurrentRoomMatchEnded(): boolean {
+    return activeRoomState !== null && activeRoomState.roomStatus === 'finished'
+  }
+
   function getActiveNonTournamentRoomInfo(): { roomId: string; stakeAmount: number } | null {
     if (activeRoomState === null || activeRoomState.isTournamentMatchOrigin) {
       return null
@@ -7528,6 +7549,8 @@ export function createActiveRoomFlowController(
     isActiveRoomParticipant,
     getActiveNonTournamentRoomInfo,
     getCurrentRoomId,
+    setTournamentReplayBlocked,
+    isCurrentRoomMatchEnded,
     armPendingTournamentSilentEntry,
     clearPendingTournamentSilentEntry,
   }

@@ -226,6 +226,18 @@ type TournamentCoordinatorDeps = {
   // — играч се брои "явил се", ако е логнат някъде, независимо дали в
   // момента гледа точно tournament detail/waiting екрана.
   isProfileOnline: (profileId: ProfileId) => boolean
+  // Едно Белот участие (Вариант Б): профилът реално управлява друг Belot мач
+  // (прикрепена връзка към активна стая или към приключила с „Преиграй“),
+  // различен от тази турнирна стая. Такъв играч се брои за неявил се, докато
+  // се освободи — сроковете (3 мин / 20 s) и ботът „вместо X“ са същите.
+  isProfileBusyInOtherBelotMatch?: (profileId: ProfileId, tournamentRoomId: string) => boolean
+  // Извиква се веднъж, когато runtime стаята на турнирен мач бъде построена
+  // (създадена или възстановена) — турнирът има предимство пред опашката и
+  // чакащите частни маси. Никога не влияе на турнирната логика.
+  onMatchRoomCreated?: (room: ServerRoom) => void
+  // Участието на профилите в турнира приключи (отборът им е елиминиран или
+  // финалът е изигран). Само известие към клиента.
+  notifyParticipationEnded?: (profileIds: ProfileId[], tournamentId: TournamentId) => void
   intervalMs?: number
   batchSize?: number
   setInterval?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setInterval>
@@ -1350,6 +1362,7 @@ export async function createTournamentCoordinator(
     for (const assignment of getSeatAssignments(match)) {
       if (
         deps.isProfileOnline(assignment.profileId) &&
+        deps.isProfileBusyInOtherBelotMatch?.(assignment.profileId, room.id) !== true &&
         !hasUnresolvedBotReplacement(match.tournament_id as TournamentId, assignment.profileId)
       ) {
         present.add(assignment.seat)
@@ -1633,6 +1646,11 @@ export async function createTournamentCoordinator(
       throw new Error(`No runtime capacity for tournament room=${room.id}: ${ensureResult.reason}`)
     }
     commitRoom(room)
+    try {
+      deps.onMatchRoomCreated?.(room)
+    } catch (error) {
+      logError('[tournament-coordinator] onMatchRoomCreated failed', error)
+    }
     notifyAssignments(match, room)
     appendEvent(match.tournament_id, createdByThisTick ? 'tournament_match_room_created' : 'tournament_match_room_recovered', {
       matchId: match.match_id,
@@ -2061,11 +2079,23 @@ export async function createTournamentCoordinator(
     return { final, newlyCreated }
   }
 
+  // Само известие (никога не влияе на турнирната логика) — грешките се поглъщат.
+  function notifyParticipationEnded(tournamentId: TournamentId, teamIds: TournamentTeamId[]): void {
+    if (deps.notifyParticipationEnded === undefined) return
+    try {
+      const profileIds = teamIds.flatMap((teamId) => getTeamEntries(tournamentId, teamId).map((entry) => entry.profile_id))
+      if (profileIds.length > 0) deps.notifyParticipationEnded(profileIds, tournamentId)
+    } catch (error) {
+      logError('[tournament-coordinator] notifyParticipationEnded failed', error)
+    }
+  }
+
   function completeFinalSideEffects(match: MatchRow, winnerTeamId: TournamentTeamId): void {
     const runnerUpTeamId = winnerTeamId === match.team_a_id ? match.team_b_id : match.team_a_id
     updateChampionTeamStatement.run(match.tournament_id, winnerTeamId)
     updateRunnerUpTeamStatement.run(match.tournament_id, runnerUpTeamId)
     updateChampionEntriesStatement.run(match.tournament_id, winnerTeamId)
+    notifyParticipationEnded(match.tournament_id as TournamentId, [winnerTeamId, runnerUpTeamId])
     appendEvent(match.tournament_id, 'tournament_final_completed', {
       matchId: match.match_id,
       roomId: match.room_id,
@@ -2114,6 +2144,7 @@ export async function createTournamentCoordinator(
     const loserTeamId = match.winner_team_id === match.team_a_id ? match.team_b_id : match.team_a_id
     updateRoundLosersEliminatedTeamsStatement.run(match.tournament_id, loserTeamId)
     updateRoundLosersEliminatedEntriesStatement.run(match.tournament_id, loserTeamId)
+    notifyParticipationEnded(match.tournament_id as TournamentId, [loserTeamId])
     // Всеки не-final round type (round_of_16/quarterfinal/semifinal) следва
     // общата ladder логика — не само 'semifinal' както преди. Всеки
     // новосъздаден match (включително финала, ако е точно той) получава

@@ -330,6 +330,10 @@ export type PrivateRoomsStore = {
   listRooms: () => PrivateRoom[]
   getRoomByConnectionId: (connectionId: string) => PrivateRoom | null
   getRoomByProfileId: (profileId: string) => PrivateRoom | null
+  // Едно Белот участие (турнир с предимство): освобождава мястото на профила
+  // на чакаща частна маса през същия leaveRoom път; известията — през
+  // onMemberReleasedForConflict. false = профилът няма място.
+  releaseMemberForConflict: (profileId: string) => boolean
   reconnectMember: (newConnectionId: string, profileId: string) => PrivateRoom | null
   removeConnection: (connectionId: string) => void
 }
@@ -1705,7 +1709,22 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     connectionToRoom.delete(connectionId)
   }
 
+  function releaseMemberForConflict(profileId: string): boolean {
+    const before = getRoomByProfileId(profileId)
+    if (before === null) return false
+    const occupant = before.slots.find(
+      (s) => s.occupant?.kind === 'human' && s.occupant.profileId === profileId,
+    )?.occupant
+    if (occupant?.kind !== 'human') return false
+    // Мъртва връзка вече не е в connectionToRoom — leaveRoom търси по нея.
+    connectionToRoom.set(occupant.connectionId, before.id)
+    const after = leaveRoom(occupant.connectionId)
+    callbacks.onMemberReleasedForConflict?.(after, before, occupant)
+    return true
+  }
+
   return {
+    releaseMemberForConflict,
     createRoom,
     joinTeam,
     leaveRoom,

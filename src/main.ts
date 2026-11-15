@@ -130,6 +130,7 @@ import { createTournamentEconomyNotification } from './ui/notifications/tourname
 import type { TournamentEconomyNoticeReason } from './ui/notifications/tournamentEconomyNotificationQueue'
 import { createTournamentPartnerInvitePopup } from './ui/notifications/tournamentPartnerInvitePopup'
 import { createTournamentMatchStartPopup } from './ui/notifications/tournamentMatchStartPopup'
+import { createTournamentJoinPromptPopup } from './ui/notifications/tournamentJoinPromptPopup'
 import { createTournamentReclaimModal } from './ui/notifications/tournamentReclaimModal'
 import { isTournamentForceReturnRequired, resolveTournamentReturnDestination } from './app/lobby/resolveTournamentReturnDestination'
 import { createTournamentFeederWaitingStrip, type TournamentFeederWaitingState } from './ui/notifications/tournamentFeederWaitingStrip'
@@ -7960,6 +7961,15 @@ const activeRoom = createActiveRoomFlowController({
     if (leftRoomId !== null) {
       tournamentMatchStartPopup.clearAssignmentForRoom(leftRoomId)
     }
+    // Отложената (по време на другата игра) проверка за връщане в турнира —
+    // освен ако играчът вече влиза в турнира през известие.
+    if (deferredTournamentReturnId !== null) {
+      const deferredId = deferredTournamentReturnId
+      deferredTournamentReturnId = null
+      if (pendingTournamentJoinAfterLeave === null && pendingTournamentEntryAfterLeave === null) {
+        void resolveAndRouteTournamentReturn(deferredId)
+      }
+    }
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()
     lobby.setErrorText(errorText)
@@ -8044,17 +8054,135 @@ const tournamentMatchStartPopup = createTournamentMatchStartPopup({
   },
   onLeaveAndEnterTournamentMatch: (assignment, conflictRoomId) => {
     pendingTournamentEntryAfterLeave = assignment
+    deferredTournamentReturnId = null
+    tournamentAutoResumeBlockedRoomId = null
     client.leaveActiveRoom(conflictRoomId, true)
   },
 })
 
 window.setInterval(() => tournamentMatchStartPopup.tick(), 1000)
 
+// ─── Едно Белот участие: известие „Започнал турнир“ ─────────────────────────
+// Показва се при край на обикновен мач (belot_match_ended_tournament_status),
+// докато турнирният мач на играча тече. Стои до приемане/отказ или до края
+// на участието (tournament_participation_ended). Отказът е за конкретния
+// турнирен мач (sessionStorage — и след презареждане).
+const tournamentJoinPromptContainer = document.createElement('div')
+tournamentJoinPromptContainer.id = 'global-tournament-join-prompt'
+document.body.appendChild(tournamentJoinPromptContainer)
+
+const TOURNAMENT_JOIN_PROMPT_DISMISSED_STORAGE_KEY = 'belot-tournament-join-prompt-dismissed'
+let tournamentJoinPromptTarget: { tournamentId: string; matchId: string; roomId: string } | null = null
+// Приел е: първо се напуска приключилата стая, после се влиза в турнира.
+let pendingTournamentJoinAfterLeave: string | null = null
+// Последното известие от съществуващия popup по време на друга игра (за
+// изчистване при край на турнирния мач/участието).
+let otherGameTournamentPopupTarget: { tournamentId: string; matchId: string; roomId: string } | null = null
+// Блокиращият modal не се показва, докато играчът е в друга игра — отлага
+// се до връщането в лобито.
+let deferredTournamentReturnId: string | null = null
+// Турнирна стая, чийто вход сървърът отказа заради друг активен мач (друго
+// устройство) — без автоматични повторни resume_room опити за нея.
+let tournamentAutoResumeBlockedRoomId: string | null = null
+
+function readDismissedTournamentJoinPromptMatchIds(): Set<string> {
+  try {
+    const raw = window.sessionStorage.getItem(TOURNAMENT_JOIN_PROMPT_DISMISSED_STORAGE_KEY)
+    const parsed: unknown = raw === null ? [] : JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function markTournamentJoinPromptDismissed(matchId: string): void {
+  const ids = readDismissedTournamentJoinPromptMatchIds()
+  ids.add(matchId)
+  try {
+    window.sessionStorage.setItem(TOURNAMENT_JOIN_PROMPT_DISMISSED_STORAGE_KEY, JSON.stringify([...ids].slice(-20)))
+  } catch {
+    // sessionStorage недостъпен — отказът важи до края на страницата
+  }
+}
+
+const tournamentJoinPrompt = createTournamentJoinPromptPopup({
+  container: tournamentJoinPromptContainer,
+  onAccept: () => {
+    void acceptTournamentJoinPrompt()
+  },
+  onDismiss: () => {
+    if (tournamentJoinPromptTarget !== null) markTournamentJoinPromptDismissed(tournamentJoinPromptTarget.matchId)
+    closeTournamentJoinPrompt()
+  },
+})
+
+function showTournamentJoinPrompt(assignment: TournamentMatchAssignmentSnapshot): void {
+  if (readDismissedTournamentJoinPromptMatchIds().has(assignment.matchId)) return
+  tournamentMatchStartPopup.setAssignment(null)
+  otherGameTournamentPopupTarget = null
+  tournamentJoinPromptTarget = { tournamentId: assignment.tournamentId, matchId: assignment.matchId, roomId: assignment.roomId }
+  tournamentJoinPrompt.show()
+}
+
+// Полуфинал -> финал: известието остава и води към актуалния мач.
+function updateTournamentJoinPromptAssignment(assignment: TournamentMatchAssignmentSnapshot): void {
+  if (tournamentJoinPromptTarget === null || tournamentJoinPromptTarget.tournamentId !== assignment.tournamentId) return
+  tournamentJoinPromptTarget = { tournamentId: assignment.tournamentId, matchId: assignment.matchId, roomId: assignment.roomId }
+}
+
+function closeTournamentJoinPrompt(): void {
+  tournamentJoinPromptTarget = null
+  tournamentJoinPrompt.hide()
+}
+
+// Влизане по актуалното назначение (съществуващите resume_room/takeover и
+// STATE A/B пътища), след като приключилата стая вече е напусната.
+async function routeTournamentJoin(tournamentId: string): Promise<void> {
+  const result = await loadTournamentDetail(tournamentId)
+  if (!result.ok) return
+  const destination = resolveTournamentReturnDestination(result.tournament)
+  if (destination === null) return
+  if (!('assignment' in destination)) {
+    if (isTournamentForceReturnRequired(result.tournament)) {
+      const ack = await acknowledgeTournamentBotReturn(tournamentId)
+      if (!ack.ok) return
+    }
+    lobby.navigateToTournamentDetail(destination.tournamentId)
+    return
+  }
+  const { assignment } = destination
+  if (assignment.reconnectToken === null) return
+  tournamentAutoResumeBlockedRoomId = null
+  client.resumeRoom(assignment.roomId, assignment.reconnectToken)
+}
+
+async function acceptTournamentJoinPrompt(): Promise<void> {
+  const target = tournamentJoinPromptTarget
+  if (target === null) return
+  // Актуалното назначение — ако участието вече е приключило, само затваря.
+  const result = await loadTournamentDetail(target.tournamentId)
+  if (!result.ok) return
+  if (resolveTournamentReturnDestination(result.tournament) === null) {
+    closeTournamentJoinPrompt()
+    return
+  }
+  closeTournamentJoinPrompt()
+  deferredTournamentReturnId = null
+  const otherGame = activeRoom.getActiveNonTournamentRoomInfo()
+  if (otherGame !== null) {
+    // Приключилата стая — без глоба (сървърът не начислява при край на мача).
+    pendingTournamentJoinAfterLeave = target.tournamentId
+    client.leaveActiveRoom(otherGame.roomId, false)
+    return
+  }
+  await routeTournamentJoin(target.tournamentId)
+}
+
 // Телефон: турнирните известия под светлия хедър / над долната навигация,
 // без застъпване помежду им (desktop — без промяна).
 installMobileNoticeLayout({
   appRoot: rootElement,
-  topContainers: [tournamentEconomyNotifContainer, tournamentPartnerInviteNotifContainer, tournamentMatchStartNotifContainer],
+  topContainers: [tournamentEconomyNotifContainer, tournamentPartnerInviteNotifContainer, tournamentMatchStartNotifContainer, tournamentJoinPromptContainer],
   bottomContainers: [tournamentFeederWaitingStripContainer],
 })
 
@@ -8092,7 +8220,17 @@ async function resolveAndRouteTournamentReturn(
   options: { fromButtonClick: boolean } = { fromButtonClick: false },
 ): Promise<void> {
   if (tournamentId === null) return
+  // Едно Белот участие: докато играчът е в друга Belot игра — без блокиращ
+  // modal (и без HTTP заявка); проверката се прави при връщане в лобито.
+  if (!options.fromButtonClick && activeRoom.getActiveNonTournamentRoomInfo() !== null) {
+    deferredTournamentReturnId = tournamentId
+    return
+  }
   const result = await loadTournamentDetail(tournamentId)
+  if (!options.fromButtonClick && activeRoom.getActiveNonTournamentRoomInfo() !== null) {
+    deferredTournamentReturnId = tournamentId
+    return
+  }
   if (!result.ok) {
     // Detail fetch неуспешен (напр. временна мрежова грешка) — не затваряй
     // modal-а спекулативно на base на нищо, задръж текущото видимо
@@ -8114,6 +8252,20 @@ async function resolveAndRouteTournamentReturn(
     return
   }
   const destination = resolveTournamentReturnDestination(result.tournament)
+  // Едно Белот участие: отказано „Започнал турнир“ за същия мач -> без
+  // автоматичен блокиращ modal (ръчният вход остава; бутонът пак работи).
+  if (
+    !options.fromButtonClick &&
+    destination !== null &&
+    'assignment' in destination &&
+    readDismissedTournamentJoinPromptMatchIds().has(destination.assignment.matchId)
+  ) {
+    if (currentTournamentReclaimTournamentId === tournamentId) {
+      currentTournamentReclaimTournamentId = null
+      tournamentReclaimModal.hide()
+    }
+    return
+  }
   if (destination === null) {
     // Force-return е бил TRUE, но вече няма active destination — team-ът е
     // елиминиран/турнирът е приключил за профила. Authoritative "no active
@@ -9342,6 +9494,27 @@ client = createGameServerClient({
     }
 
     if (message.type === 'tournament_match_assigned') {
+      updateTournamentJoinPromptAssignment(message.assignment)
+      // Едно Белот участие: играчът е в друга (обикновена) Belot игра. Сървърът
+      // отказва вход в турнира, докато е прикрепен там — затова без HTTP detail
+      // заявки и resume_room опити на всеки tick; само съществуващото известие.
+      // В края на обикновения мач — само „Започнал турнир“ (виж
+      // belot_match_ended_tournament_status).
+      if (
+        activeRoom.getActiveNonTournamentRoomInfo() !== null &&
+        activeRoom.getCurrentRoomId() !== message.assignment.roomId
+      ) {
+        if (tournamentJoinPromptTarget !== null || activeRoom.isCurrentRoomMatchEnded()) return
+        if (message.assignment.reconnectToken !== null) {
+          otherGameTournamentPopupTarget = {
+            tournamentId: message.assignment.tournamentId,
+            matchId: message.assignment.matchId,
+            roomId: message.assignment.roomId,
+          }
+          tournamentMatchStartPopup.setAssignment(message.assignment)
+        }
+        return
+      }
       activeRoom.completePendingTournamentRoundResultTransition()
       lobby.handleServerMessage(message)
       currentFeederWaitingState = null
@@ -9406,6 +9579,19 @@ client = createGameServerClient({
       // а не чрез blocking UI.
       if (activeRoom.getCurrentRoomId() !== message.assignment.roomId) {
         tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
+        // Без повтаряне на всеки tick: блокиращият modal вече е видим за този
+        // турнир (бутонът му прави свежа проверка), или сървърът отказа входа
+        // заради друг активен мач на профила (друго устройство).
+        // Също: играчът е отказал „Започнал турнир“ за ТОЗИ мач — без
+        // автоматичен блокиращ modal и автоматичен вход; ръчно влизане
+        // остава през екрана на турнира („Продължи играта“).
+        if (
+          (tournamentReclaimModal.isVisible() && currentTournamentReclaimTournamentId === message.assignment.tournamentId) ||
+          tournamentAutoResumeBlockedRoomId === message.assignment.roomId ||
+          readDismissedTournamentJoinPromptMatchIds().has(message.assignment.matchId)
+        ) {
+          return
+        }
         void resolveAndRouteTournamentReturn(message.assignment.tournamentId).then(() => {
           // Ако force-return НЕ е бил TRUE (нормален участник, все още преди
           // bot insertion — §"ATTENDANCE LOGIN ПРЕДИ DEADLINE"/"COUNTDOWN
@@ -9418,7 +9604,11 @@ client = createGameServerClient({
           // resume — за разлика от STATE B silent attach, тук няма нужда от
           // armPendingTournamentSilentEntry watch, room_resumed вече рендира
           // правилния attendance/countdown екран directno.
-          if (!tournamentReclaimModal.isVisible() && message.assignment.reconnectToken !== null) {
+          if (
+            !tournamentReclaimModal.isVisible() &&
+            message.assignment.reconnectToken !== null &&
+            activeRoom.getActiveNonTournamentRoomInfo() === null
+          ) {
             client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)
           }
         })
@@ -9443,7 +9633,39 @@ client = createGameServerClient({
       return
     }
 
+    // Едно Белот участие — край на обикновен мач на участник, който продължава
+    // в турнир: скрит „Преиграй“; ако турнирният му мач тече — „Започнал
+    // турнир“ вместо съществуващото известие за друга игра.
+    if (message.type === 'belot_match_ended_tournament_status') {
+      activeRoom.setTournamentReplayBlocked(message.roomId)
+      tournamentMatchStartPopup.setAssignment(null)
+      otherGameTournamentPopupTarget = null
+      if (message.assignment !== null && pendingTournamentEntryAfterLeave === null) {
+        showTournamentJoinPrompt(message.assignment)
+      }
+      return
+    }
+
+    // Участието в турнира приключи (елиминиран отбор / изигран финал /
+    // административна отмяна) — отворените турнирни известия се затварят.
+    if (message.type === 'tournament_participation_ended') {
+      if (tournamentJoinPromptTarget?.tournamentId === message.tournamentId) closeTournamentJoinPrompt()
+      tournamentMatchStartPopup.clearAssignmentForTournament(message.tournamentId)
+      if (otherGameTournamentPopupTarget?.tournamentId === message.tournamentId) otherGameTournamentPopupTarget = null
+      if (deferredTournamentReturnId === message.tournamentId) deferredTournamentReturnId = null
+      activeRoom.setTournamentReplayBlocked(null)
+      if (currentTournamentReclaimTournamentId === message.tournamentId) {
+        void resolveAndRouteTournamentReturn(message.tournamentId)
+      }
+      return
+    }
+
     if (message.type === 'tournament_feeder_match_completed') {
+      // Известието по време на друга игра сочи към вече приключилия мач.
+      if (otherGameTournamentPopupTarget?.matchId === message.matchId) {
+        tournamentMatchStartPopup.clearAssignmentForRoom(otherGameTournamentPopupTarget.roomId)
+        otherGameTournamentPopupTarget = null
+      }
       lobby.handleServerMessage(message)
       // §"CORRECT MATCH-COMPLETION HANDLING" в допълнението — КРИТИЧНА
       // поправка: match completion сам по себе си НЕ доказва elimination
@@ -9537,6 +9759,10 @@ client = createGameServerClient({
         reason: message.reason,
         amount: message.amount,
       })
+      // Таксата е върната (отмяна/изключване) — евентуално отворено турнирно
+      // известие за този турнир вече не важи.
+      if (tournamentJoinPromptTarget?.tournamentId === message.tournamentId) closeTournamentJoinPrompt()
+      tournamentMatchStartPopup.clearAssignmentForTournament(message.tournamentId)
       // Auto-release realtime update (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
       // ако играчът в момента гледа точно този турнир, освежи detail-а веднага
       // (roster/team state), за да не остане phantom teammate/stale "Чакаме
@@ -9581,6 +9807,11 @@ client = createGameServerClient({
     // guard-ва с "if (!activeRoomState) return false" и никога не вижда това
     // съобщение). Идемпотентно — no-op ако popup-ът не сочи към тази стая.
     if (message.type === 'room_resume_failed') {
+      // Едно Белот участие: входът в турнира е отказан, защото профилът
+      // управлява друг активен мач (друго устройство) — без авто-повторения.
+      if (message.message === 'Вече участвате в активна игра.') {
+        tournamentAutoResumeBlockedRoomId = message.roomId
+      }
       tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
       // Silent attach failure (§ "SILENT ATTACH FAILURE / RETRY") — without
       // this, silentAttachedRoundTransitionRoomId would stay set forever for
@@ -9603,6 +9834,7 @@ client = createGameServerClient({
     // call in onTournamentRoundTransitionAssignment above) picks up the
     // resulting room_snapshot stream and decides when to actually enter.
     if (message.type === 'room_attached_silent') {
+      if (tournamentJoinPromptTarget?.roomId === message.roomId) closeTournamentJoinPrompt()
       tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
       // Same as room_resumed below — silent attach also means the profile is
       // now seated in its own STATE B match, so the blocking requirement no
@@ -9614,6 +9846,13 @@ client = createGameServerClient({
     }
 
     if (message.type === 'room_resumed' && !activeRoom.hasActiveRoom()) {
+      // Влязъл е в турнирния си мач (по който и да е път) — известието
+      // „Започнал турнир“ вече не е нужно.
+      if (tournamentJoinPromptTarget?.roomId === message.roomId) closeTournamentJoinPrompt()
+      tournamentAutoResumeBlockedRoomId = null
+      // Ако modal-ът е бил за друга стая (обикновен мач след reconnect),
+      // проверката се повтаря при връщане в лобито.
+      if (currentTournamentReclaimTournamentId !== null) deferredTournamentReturnId = currentTournamentReclaimTournamentId
       removeLandingOverlay()
       lobby.suspendLobbyChatForActiveRoom()
       activeRoom.enterActiveRoomFromResume(message.roomId, message.seat, 5000)
@@ -9684,6 +9923,14 @@ client = createGameServerClient({
       if (assignment.reconnectToken !== null) {
         client.resumeRoom(assignment.roomId, assignment.reconnectToken)
       }
+    }
+
+    // „Включи се в турнира“: приключилата стая е напусната -> актуалното
+    // назначение (resume_room / takeover / STATE A/B).
+    if (message.type === 'left_active_room' && pendingTournamentJoinAfterLeave !== null) {
+      const tournamentId = pendingTournamentJoinAfterLeave
+      pendingTournamentJoinAfterLeave = null
+      void routeTournamentJoin(tournamentId)
     }
 
     // Ludo wallet realtime update — server-push authoritative balance, виж

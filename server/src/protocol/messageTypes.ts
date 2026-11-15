@@ -40,6 +40,25 @@ export type TournamentActiveParticipationMessage = {
   tournamentId: string
 }
 
+// Едно Белот участие: участието на профила в турнира приключи (отборът е
+// елиминиран или финалът е изигран) — клиентът затваря известието
+// „Започнал турнир“, ако е за този турнир.
+export type TournamentParticipationEndedMessage = {
+  type: 'tournament_participation_ended'
+  tournamentId: string
+}
+
+// Едно Белот участие: изпраща се веднъж при край на обикновен мач на
+// участник с текущ турнирен мач — „Преиграй“ е блокиран за него;
+// assignment != null, ако турнирният му мач тече в момента (известие
+// „Започнал турнир“).
+export type BelotMatchEndedTournamentStatusMessage = {
+  type: 'belot_match_ended_tournament_status'
+  roomId: string
+  replayBlocked: true
+  assignment: TournamentMatchAssignment | null
+}
+
 export type TournamentFeederMatchCompletedMessage = {
   type: 'tournament_feeder_match_completed'
   tournamentId: string
@@ -923,6 +942,8 @@ export type PrivateRoomActionErrorCode =
   | 'belot_matchmaking_conflict'
   // Още е прикрепен към приключил мач с възможност за „Преиграй“.
   | 'belot_finished_match_conflict'
+  // Профилът има място в текущ турнирен мач (вкл. бот „вместо X“).
+  | 'belot_tournament_conflict'
   | 'private_room_member_in_active_game'
   // Гласов чат (Етап 2б) — масата НЕ е създадена; клиентът пита изрично дали
   // да я създаде без гласов чат (никога автоматично).
@@ -2006,6 +2027,8 @@ export type ServerMessage =
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
   | TournamentActiveParticipationMessage
+  | TournamentParticipationEndedMessage
+  | BelotMatchEndedTournamentStatusMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
   | TournamentMatchLiveScoreMessage

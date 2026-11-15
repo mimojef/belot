@@ -2915,6 +2915,22 @@ export type TournamentMatchAssignedMessage = {
   assignment: TournamentMatchAssignmentSnapshot
 }
 
+// Едно Белот участие: участието в турнира приключи (елиминиран отбор или
+// изигран финал) — затваря известието „Започнал турнир“ за този турнир.
+export type TournamentParticipationEndedMessage = {
+  type: 'tournament_participation_ended'
+  tournamentId: string
+}
+
+// Едно Белот участие: край на обикновен мач на участник с текущ турнирен
+// мач — „Преиграй“ е скрит; assignment != null -> известие „Започнал турнир“.
+export type BelotMatchEndedTournamentStatusMessage = {
+  type: 'belot_match_ended_tournament_status'
+  roomId: string
+  replayBlocked: true
+  assignment: TournamentMatchAssignmentSnapshot | null
+}
+
 // Realtime notice за team composition промяна извън partner-invite lifecycle
 // (в момента: solo auto-pair, §A/§B "auto-pair solo players") — LEK payload,
 // самото известие е само тригер за authoritative refetch (виж
@@ -3569,6 +3585,8 @@ export type ServerMessage =
   | TournamentScheduleUpdatedMessage
   | TournamentMatchAssignedMessage
   | TournamentActiveParticipationMessage
+  | TournamentParticipationEndedMessage
+  | BelotMatchEndedTournamentStatusMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
   | TournamentMatchLiveScoreMessage
