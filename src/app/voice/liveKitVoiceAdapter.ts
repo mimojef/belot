@@ -53,6 +53,7 @@ import {
   type VoiceRetainedMicrophone,
 } from './voiceAdapter'
 import { classifyPublishError } from './voicePublishErrors'
+import { isMicrophonePermissionGranted } from './voiceIntentStore'
 import type { VoiceAudioSink } from './voiceAudioSink'
 import { summarizeTransportStats } from './voiceTransportStats'
 
@@ -65,6 +66,9 @@ const AUDIO_CAPTURE = {
   autoGainControl: true,
   channelCount: 1,
 } as const
+
+/** Колко се чака Disconnected след сървърно премахване на микрофона (изтриване на стаята при ротация). */
+const SERVER_UNPUBLISH_GRACE_MS = 2_000
 
 function mapDisconnectReason(reason: DisconnectReason | undefined, clientInitiated: boolean): VoiceDisconnectCause {
   if (clientInitiated || reason === DisconnectReason.CLIENT_INITIATED) return 'client'
@@ -139,6 +143,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
   let activeRoom: Room | null = null
 
   return {
+    microphonePermissionGranted: () => isMicrophonePermissionGranted(),
     // Само придобиване (getUserMedia) — независимо от стаята; публикуването е
     // отделно (enableMicrophone(reuse) в текущата стая). release() спира track-а.
     async acquireMicrophone() {
@@ -170,6 +175,24 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       activeRoom = room
       let clientDisconnect = false
       let disposed = false
+      // Напускане на страницата: LiveKit (disconnectOnPageLeave) затваря стаята
+      // при beforeunload/pagehide и отписва микрофона — това НЕ е сървърно
+      // отнемане и не бива да изтрива намерението за говорене (то е нужно за
+      // възстановяването след презареждане). Слушателите се регистрират тук,
+      // ПРЕДИ тези на LiveKit (при connect), за да се изпълнят първи.
+      let pageLeaving = false
+      let serverUnpublishTimer: ReturnType<typeof setTimeout> | null = null
+      const clearServerUnpublish = (): void => {
+        if (serverUnpublishTimer !== null) clearTimeout(serverUnpublishTimer)
+        serverUnpublishTimer = null
+      }
+      const markPageLeaving = (): void => { pageLeaving = true }
+      const unwatchPageLeave = (): void => {
+        window.removeEventListener('beforeunload', markPageLeaving)
+        window.removeEventListener('pagehide', markPageLeaving)
+      }
+      window.addEventListener('beforeunload', markPageLeaving)
+      window.addEventListener('pagehide', markPageLeaving)
       // Брояч на reconnect-ите на SDK-то — за разпознаване на публикуване,
       // прекъснато от reconnect (пълният reconnect отменя незавършеното addTrack).
       let reconnectEpoch = 0
@@ -304,18 +327,22 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
 
       room
         .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+          unwatchPageLeave()
+          clearServerUnpublish()
           releaseAllAudio()
           if (activeRoom === room) activeRoom = null
           const cause = mapDisconnectReason(reason, clientDisconnect)
           const detail = describeDisconnectReason(reason, clientDisconnect)
-          // ROOM_DELETED може да пристигне ПРЕДИ voice_table_updated (ротация):
-          // живият capture не се спира, а се предава на контролера, който го
-          // публикува в новата генерация или го освобождава (≤20 s). Всяка
-          // друга причина (мрежа, премахване, page leave…) -> спиране.
+          // Техническо прекъсване (ROOM_DELETED при ротация — може да пристигне
+          // ПРЕДИ voice_table_updated; окончателно загубена мрежа; отстраняване
+          // от сървъра): живият capture не се спира, а се предава на контролера,
+          // който го публикува в следващата връзка или го освобождава (≤20 s).
+          // Собствено затваряне (вкл. page leave) и duplicate identity -> спиране.
           const capture = micCapture
           micCapture = null
           unwatchMicrophone()
-          const held = cause === 'room_deleted' && !disposed && capture !== null && capture.readyState === 'live' ? retainCapture(capture) : null
+          const technical = cause === 'room_deleted' || cause === 'connection_lost' || cause === 'removed'
+          const held = technical && !disposed && capture !== null && capture.readyState === 'live' ? retainCapture(capture) : null
           if (held === null) stopCapture(capture)
           if (disposed) {
             held?.release()
@@ -359,16 +386,29 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           if (publication.source !== Track.Source.Microphone) return
           events.onParticipantsChanged()
           // Нашите unpublish/detach първо нулират micCapture -> тук не стигат.
-          // Сървърно премахване (напр. отнето право) при свързана стая и без
-          // повторна публикация на същия capture -> спиране (без нов capture).
-          if (micCapture === null || room.state !== ConnectionState.Connected) return
+          // Сървърно премахване при свързана стая. При ИЗТРИВАНЕ на стаята
+          // (ротация) LiveKit първо премахва публикацията и чак после изпраща
+          // Disconnected(ROOM_DELETED) — тогава живият capture трябва да се
+          // предаде (техническо прекъсване), а не да се спре. Затова решението
+          // се отлага: ако до SERVER_UNPUBLISH_GRACE_MS стаята не е прекъсната и
+          // същият capture не е публикуван наново -> отнето право -> спиране.
+          if (pageLeaving || micCapture === null || room.state !== ConnectionState.Connected) return
           if (micTrack()?.mediaStreamTrack === micCapture) return
-          loseMicrophone('server_unpublished')
+          const capture = micCapture
+          if (serverUnpublishTimer !== null) clearTimeout(serverUnpublishTimer)
+          serverUnpublishTimer = setTimeout(() => {
+            serverUnpublishTimer = null
+            if (disposed || micCapture !== capture || room.state !== ConnectionState.Connected) return
+            if (micTrack()?.mediaStreamTrack === capture) return
+            loseMicrophone('server_unpublished')
+          }, SERVER_UNPUBLISH_GRACE_MS)
         })
 
       const connected: VoiceConnectedRoom = {
         async disconnect() {
           if (disposed) return
+          unwatchPageLeave()
+          clearServerUnpublish()
           clientDisconnect = true
           await stopLocalMicrophone()
           releaseAllAudio()
@@ -390,8 +430,11 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
             // stop=false: публикуването спира, capture-ът остава за новата стая.
             await room.localParticipant.unpublishTrack(track, false)
           } catch {
-            stopCapture(capture)
-            return null
+            // SDK-то първо премахва публикацията и ЧАК ТОГАВА договаря наново;
+            // ако стаята бъде изтрита междувременно (ротация), договарянето
+            // пропада, но публикацията вече я няма. Живият capture е наш —
+            // не се губи (реален тест: изгубен микрофон при ротация).
+            if (capture.readyState !== 'live') return null
           }
           return retainCapture(capture)
         },

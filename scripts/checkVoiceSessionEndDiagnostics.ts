@@ -128,15 +128,21 @@ await check('[SE5] Чакалня -> игра (същата маса): НЯМА 
 
 // ═══ failConnection — на кой етап ═════════════════════════════════════════
 
-await check('[SE6] Отказано присъствие (not_seat_connection) -> fail_connection / presence; сървърът получава причината', async () => {
+await check('[SE6] Отказано присъствие (not_seat_connection = неясно членство) -> 5 ограничени опита -> fail_connection / presence; сървърът получава причината', async () => {
   const h = createHarness()
   h.backend.presenceFailure = 'not_seat_connection'
   h.voice.setContext(h.ctx('waiting'))
   await flush()
   h.voice.joinAsListener()
   await flush(30)
+  assertEqual(sessionEnds(h).length, 0, 'първият отказ не спира веднага')
+  await h.clock.advance(1_000 + 2_000 + 4_000 + 8_000)
+  await flush(30)
+  assertEqual(h.presence.filter((p) => p.onTableScreen).length, 5, 'точно 5 опита')
   assertEqual(snap(h).status, 'unavailable', '„недостъпен“')
   assertEnded(h, 'fail_connection', 'presence', 'fail_connection')
+  await h.clock.advance(300_000)
+  assertEqual(h.presence.filter((p) => p.onTableScreen).length, 5, 'без нови опити след спирането')
 })
 
 await check('[SE7] Без отговор на присъствието (5 s) -> fail_connection / presence', async () => {
@@ -146,45 +152,63 @@ await check('[SE7] Без отговор на присъствието (5 s) -> 
   await flush()
   h.voice.joinAsListener()
   await flush(10)
-  await h.clock.advance(5_100)
-  await flush(20)
+  // 5 опита × (5 s без отговор) + паузи 1/2/4/8 s.
+  for (let index = 0; index < 12; index += 1) {
+    await h.clock.advance(5_100)
+    await flush(20)
+  }
   const ends = sessionEnds(h)
   assert(ends.length === 1 && ends[0]!.reason === 'fail_connection' && ends[0]!.stage === 'presence', JSON.stringify(ends))
+  assertEqual(h.presence.filter((p) => p.onTableScreen).length, 5, 'точно 5 опита')
 })
 
-await check('[SE8] Токенът отказан 6 пъти (503) -> fail_connection / token', async () => {
+await check('[SE8] Етап В: временно недостъпен токен (503) 6 пъти при валидно членство -> без прекратяване, нарастващи паузи, после свързан', async () => {
   const h = createHarness()
   h.backend.tokenFailures = Array.from({ length: 6 }, () => ({ status: 503, code: 'voice_unavailable' }))
   h.voice.setContext(h.ctx('waiting'))
   await flush()
   h.voice.joinAsListener()
   await flush(20)
-  await h.clock.advance(30_000)
+  await h.clock.advance(1_000 + 2_000 + 4_000 + 8_000 + 15_000 + 30_000)
   await flush(20)
-  assertEnded(h, 'fail_connection', 'token', 'fail_connection')
+  assertEqual(sessionEnds(h).length, 0, 'без session_end')
+  assertEqual(leaves(h).length, 0, 'без onTableScreen:false')
+  assertEqual(snap(h).status, 'connected_listening', 'свързан след временните откази')
+  const connectFailed = h.reports.filter((r) => r.event === 'connect_failed')
+  assertEqual(connectFailed.length, 1, 'един диагностичен отчет за серията')
 })
 
-await check('[SE9] Загубена връзка + неуспешно възстановяване -> fail_connection / reconnect_exhausted', async () => {
+await check('[SE9] Етап В: загубена връзка + продължително недостъпен LiveKit -> опитите продължават (≤30 s пауза), без прекратяване; възстановяване щом услугата се върне', async () => {
   const h = createHarness()
   await connected(h)
-  h.backend.tokenFailures = Array.from({ length: 30 }, () => ({ status: 503, code: 'voice_unavailable' }))
+  h.backend.tokenFailures = Array.from({ length: 10 }, () => ({ status: 503, code: 'voice_unavailable' }))
   serverDisconnect(h.fake.state.last(), 'connection_lost')
   await flush(20)
   await h.clock.advance(120_000)
   await flush(20)
-  assertEnded(h, 'fail_connection', 'reconnect_exhausted', 'fail_connection')
+  assertEqual(sessionEnds(h).length, 0, 'без session_end')
+  assertEqual(snap(h).status, 'reconnecting', 'продължава да опитва')
+  const tokensAt2min = h.events.filter((e) => e.startsWith('token@')).length
+  assert(tokensAt2min <= 10, `ограничена честота (${tokensAt2min} заявки за 2 min)`)
+  await h.clock.advance(300_000)
+  await flush(20)
+  // Fixture-ът не предава capture-а; без разрешение „без прозорец“ -> слушане + молба за изрично включване.
+  assertEqual(snap(h).status, 'connected_listening', 'възстановен')
+  assertEqual(snap(h).uiError?.code, 'mic_not_enabled', '„Микрофонът не беше включен“')
 })
 
-await check('[SE10] Ротация + неуспешен токен за новата стая -> fail_connection / rotation_resume', async () => {
+await check('[SE10] Етап В: ротация + 6 последователни 503 voice_rotation_pending -> без прекратяване, новата генерация с микрофона', async () => {
   const h = createHarness()
   await connected(h)
   h.backend.tokenFailures = Array.from({ length: 6 }, () => ({ status: 503, code: 'voice_rotation_pending' }))
   h.backend.generation = 2
   h.voice.handleServerMessage({ type: 'voice_table_updated', voiceTableId: TABLE, generation: 2, ready: false } as never)
   await flush(20)
-  await h.clock.advance(30_000)
+  await h.clock.advance(60_000)
   await flush(20)
-  assertEnded(h, 'fail_connection', 'rotation_resume', 'fail_connection')
+  assertEqual(sessionEnds(h).length, 0, 'без session_end')
+  assertEqual(snap(h).generation, 2, 'нова генерация')
+  assertEqual(snap(h).status, 'connected_listening', 'свързан (fixture-ът не предава capture-а, а разрешението не е налично)')
 })
 
 // ═══ Прекратяване от сървъра — без излишен onTableScreen:false ════════════
@@ -197,21 +221,28 @@ await check('[SE11] voice_access_ended (изтекъл lease) -> session_end acc
   assertEnded(h, 'access_ended', 'none', null)
 })
 
-await check('[SE12] Отстранен в LiveKit (RemoveParticipant) -> session_end removed, без onTableScreen:false', async () => {
+await check('[SE12] Етап В: отстранен в LiveKit (RemoveParticipant) -> диагностика participant_removed, ново присъствие + токен, без onTableScreen:false', async () => {
   const h = createHarness()
   await connected(h)
+  const presenceBefore = h.presence.filter((p) => p.onTableScreen).length
   serverDisconnect(h.fake.state.last(), 'removed')
-  await flush(20)
-  assertEnded(h, 'removed', 'none', null)
+  await flush(30)
+  assert(h.reports.some((r) => r.event === 'livekit_disconnect'), 'livekit_disconnect')
+  assertEqual(leaves(h).length, 0, 'без onTableScreen:false')
+  assertEqual(sessionEnds(h).length, 0, 'не е край на сесията')
+  assert(h.presence.filter((p) => p.onTableScreen).length > presenceBefore, 'присъствие преди новия токен')
+  assertEqual(snap(h).status, 'connected_listening', 'свързан отново')
 })
 
-await check('[SE13] 120 s без игрова връзка -> session_end game_connection_timeout, без onTableScreen:false', async () => {
+await check('[SE13] Етап В: 120 s без игрова връзка -> клиентът не прекратява (сървърът решава), без onTableScreen:false', async () => {
   const h = createHarness()
   await connected(h)
   h.voice.setGameConnection(false)
   await h.clock.advance(120_100)
   await flush(20)
-  assertEnded(h, 'game_connection_timeout', 'none', null)
+  assertEqual(sessionEnds(h).length, 0, 'без session_end')
+  assertEqual(leaves(h).length, 0, 'без onTableScreen:false')
+  assertEqual(snap(h).status, 'connected_speaking', 'LiveKit връзката остава')
 })
 
 await check('[SE14] Повторно спиране на вече спряна сесия не дублира отчета', async () => {

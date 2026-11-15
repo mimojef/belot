@@ -80,12 +80,16 @@ export function createFakeAdapter() {
     rooms,
     captures,
     getUserMediaCalls: 0,
+    /** Браузърът вече разрешава микрофона (permissions.query = granted) -> нов capture без прозорец. */
+    permissionGranted: false,
     /** Разрешението „чака“, докато gate-ът не се освободи. */
     micGate: null as Promise<void> | null,
     micBehavior: 'ok' as 'ok' | VoiceMicrophoneFailure,
     /** Сценарий за следващите публикувания (по ред); празно -> 'ok'. */
     publishSteps: [] as PublishStep[],
     connectGate: null as Promise<void> | null,
+    /** Опити за втора стая, докато предишната не е изключена. */
+    prepareRejected: 0,
     activeRooms: () => rooms.filter((r) => r.connected && !r.disconnected).length,
     liveCaptures: () => captures.filter((c) => !c.stopped).length,
     /** Публикувани микрофони във всички неизключени стаи (дублирани audio tracks). */
@@ -101,7 +105,9 @@ export function createFakeAdapter() {
     retained.set(handle, capture)
     return handle
   }
+  fakeRetain = retainHandle
   const adapter: VoiceAdapter = {
+    microphonePermissionGranted: async () => state.permissionGranted,
     async acquireMicrophone() {
       state.getUserMediaCalls += 1
       const capture: FakeCapture = { id: captures.length + 1, stopped: false, ended: false }
@@ -114,7 +120,11 @@ export function createFakeAdapter() {
       return retainHandle(capture)
     },
     prepare(events) {
-      if (rooms.some((r) => !r.disconnected)) throw new Error('voice_room_already_active')
+      if (rooms.some((r) => !r.disconnected)) {
+        // Като реалния адаптер; броим опитите — инвариантът „≤1 стая“ е нарушен.
+        state.prepareRejected += 1
+        throw new Error('voice_room_already_active')
+      }
       const room: FakeRoom = {
         events,
         connected: false,
@@ -199,16 +209,22 @@ export function createFakeAdapter() {
   return { adapter, state }
 }
 
-/** LiveKit прекъсва стаята сам (като реалния адаптер). */
-export function serverDisconnect(room: FakeRoom, cause: VoiceDisconnectCause): void {
+/**
+ * LiveKit прекъсва стаята сам. handOver=true -> като реалния адаптер от етап В:
+ * при техническа причина живият capture се предава на контролера.
+ */
+export function serverDisconnect(room: FakeRoom, cause: VoiceDisconnectCause, handOver = false): void {
   room.disconnected = true
   const capture = room.capture
   const wasLive = room.micLive
   room.micLive = false
   room.capture = null
-  if (capture !== null && !(cause === 'room_deleted' && wasLive)) capture.stopped = true
-  room.events.onDisconnected(cause, null, cause === 'room_deleted' ? 'room_deleted' : 'network')
+  const technical = cause === 'room_deleted' || cause === 'connection_lost' || cause === 'removed'
+  const held = handOver && technical && wasLive && capture !== null && !capture.stopped ? fakeRetain(capture) : null
+  if (held === null && capture !== null && !(cause === 'room_deleted' && wasLive)) capture.stopped = true
+  room.events.onDisconnected(cause, held, cause === 'room_deleted' ? 'room_deleted' : cause === 'removed' ? 'participant_removed' : 'network')
 }
+let fakeRetain: (capture: FakeCapture) => VoiceRetainedMicrophone = () => { throw new Error('no adapter') }
 
 // ─── Fake backend ─────────────────────────────────────────────────────────
 export const TABLE = '11111111-2222-4333-8444-555555555555'
@@ -253,7 +269,12 @@ export type Harness = {
   lazyLoads: () => number
 }
 
-export function createHarness(options: { facade?: boolean } = {}): Harness {
+/** Памет на таба (sessionStorage) за намерението + дали страницата е презаредена. */
+export type MemoryIntent = { value: { voiceTableId: string; profileId: string; mic: boolean } | null; reload: boolean; saves: number }
+export const createMemoryIntent = (): MemoryIntent => ({ value: null, reload: false, saves: 0 })
+
+export function createHarness(options: { facade?: boolean; intent?: MemoryIntent } = {}): Harness {
+  const memory = options.intent ?? null
   const clock = createClock()
   const fake = createFakeAdapter()
   const reports: VoiceDiagnosticReport[] = []
@@ -296,12 +317,21 @@ export function createHarness(options: { facade?: boolean } = {}): Harness {
     now: clock.now,
     log: () => {},
     reportDiagnostic: (report: VoiceDiagnosticReport) => { reports.push(report) },
+    ...(memory === null ? { intentStore: { save: () => {}, clear: () => {} } } : {
+      intentStore: {
+        save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => { memory.value = { ...intent }; memory.saves += 1 },
+        clear: () => { memory.value = null },
+      },
+    }),
   })
   if (options.facade) {
     // Cold start: нова страница — controller-ът и адаптерът се зареждат lazy.
     voice = createLazyVoiceController({
       sendPresence,
       apiBaseUrl: () => 'https://api.test',
+      intent: memory === null
+        ? { read: () => null, clear: () => {}, isReload: () => false }
+        : { read: () => memory.value, clear: () => { memory.value = null }, isReload: () => memory.reload },
       loadController: async () => {
         lazyLoads += 1
         await flush(2)

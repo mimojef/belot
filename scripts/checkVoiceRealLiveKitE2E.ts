@@ -14,7 +14,18 @@
  *   [E3] игра -> край -> преиграване: без прекъсване, без ротация;
  *   [E4] презареждане на участник (ротацията при изместване е ЗАПАЗЕНА):
  *        останалите отново се чуват автоматично; презареденият се връща
- *        с изрично включване; старият му токен не дава достъп;
+ *        АВТОМАТИЧНО (етап В) с микрофона; старият му токен не дава достъп;
+ *   [E6] N поредни презареждания с ротация (E2E_RELOAD_RUNS, по подразбиране
+ *        20) — всеки път всички четирима се чуват отново автоматично;
+ *   [E7] временно прекъсване на мрежата (offline 6 s);
+ *   [E8] рестарт на LiveKit (процесът е спрян и пуснат наново);
+ *   [E9] последователни временни откази при издаване на токен (3 × 503);
+ *   [E10] доброволно изключен микрофон — остава изключен след презареждане;
+ *   [E11] едновременно прекъсване на мрежата и ротация;
+ *   след всеки сценарий: ≤1 LiveKit участник на профил (сървърен
+ *   ListParticipants), никой не получава собственото си аудио като отделен
+ *   поток (ехо), ≤3 audio елемента. E2E_NO_AEC=1 — контролен експеримент без
+ *   echoCancellation (AEC3 примесва чужди синтетични тонове в изходящия поток);
  *   [E5] край на мача, двама напускат: ЕДНА ротация; останалите се чуват
  *        автоматично; старите токени на напусналите не дават достъп.
  *
@@ -29,7 +40,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { chromium, type Browser, type Page, type WebSocketRoute } from 'playwright'
+import { chromium, type Browser, type BrowserContext, type Page, type WebSocketRoute } from 'playwright'
 import { assert, check, finishAndExit, sleep, startGiftBackHarness, type TestProfile } from './giftBackTestHarness'
 
 console.log('\ncheckVoiceRealLiveKitE2E\n')
@@ -80,12 +91,27 @@ const lkConfig = [
 const lkConfigPath = join(workDir, 'livekit.yaml')
 await writeFile(lkConfigPath, lkConfig)
 const lkLog: string[] = []
-const liveKit: ChildProcess = spawn(LIVEKIT_BIN, ['--config', lkConfigPath], { stdio: ['ignore', 'pipe', 'pipe'] })
-liveKit.stdout?.setEncoding('utf8')
-liveKit.stderr?.setEncoding('utf8')
 const keepLog = (chunk: string) => { lkLog.push(chunk); if (lkLog.length > 400) lkLog.shift() }
-liveKit.stdout?.on('data', keepLog)
-liveKit.stderr?.on('data', keepLog)
+function spawnLiveKit(): ChildProcess {
+  const child = spawn(LIVEKIT_BIN, ['--config', lkConfigPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+  child.stdout?.setEncoding('utf8')
+  child.stderr?.setEncoding('utf8')
+  child.stdout?.on('data', keepLog)
+  child.stderr?.on('data', keepLog)
+  return child
+}
+async function waitLiveKitReady(): Promise<boolean> {
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${lkPort}/`)
+      if (response.ok) return true
+    } catch { /* още стартира */ }
+    await sleep(250)
+  }
+  return false
+}
+let liveKit: ChildProcess = spawnLiveKit()
 {
   const deadline = Date.now() + 20_000
   let ready = false
@@ -166,6 +192,9 @@ type Party = {
   /** Анонимните клиентски отчети (session_end, mic_*, reconnecting…) — за диагностика при провал. */
   reports: Array<{ at: number; body: any }>
   inject: (m: unknown) => void
+  context: BrowserContext
+  /** Следващите N заявки за токен получават 503 (симулиран временен отказ). */
+  failTokens: { remaining: number }
 }
 
 // Анализ на получения звук: по един анализатор на всеки отдалечен audio
@@ -174,7 +203,7 @@ type Party = {
 const AUDIO_PROBE = `(() => {
   const TONES = ${JSON.stringify(TONES)}
   const THRESHOLD_DB = -62
-  const st = { last: {}, maxGap: {} }
+  const st = { last: {}, maxGap: {}, recent: {}, tickTimes: [] }
   let ctx = null
   const analysers = new Map()
   function tick() {
@@ -191,7 +220,10 @@ const AUDIO_PROBE = `(() => {
         analysers.set(el, analyser)
       }
       const now = performance.now()
+      st.tickTimes.push(now)
+      while (st.tickTimes.length > 0 && now - st.tickTimes[0] > 10000) st.tickTimes.shift()
       const heard = new Set()
+      st.perEl = st.perEl || new Map()
       for (const [el, analyser] of analysers) {
         if (!el.isConnected) { analysers.delete(el); continue }
         const data = new Float32Array(analyser.frequencyBinCount)
@@ -201,13 +233,24 @@ const AUDIO_PROBE = `(() => {
           const bin = Math.round(f / binHz)
           let peak = -Infinity
           for (let i = bin - 2; i <= bin + 2; i += 1) peak = Math.max(peak, data[i])
-          if (peak > THRESHOLD_DB) heard.add(f)
+          if (peak > THRESHOLD_DB) {
+            heard.add(f)
+            const key = el.getAttribute("data-voice-track") || "?"
+            const rec = st.perEl.get(key) || {}
+            const list = (rec[f] = rec[f] || [])
+            list.push(now)
+            while (list.length > 0 && now - list[0] > 10000) list.shift()
+            st.perEl.set(key, rec)
+          }
         }
       }
       for (const f of heard) {
         const prev = st.last[f]
         if (prev !== undefined && now - prev > (st.maxGap[f] ?? 0)) st.maxGap[f] = now - prev
         st.last[f] = now
+        const list = (st.recent[f] = st.recent[f] || [])
+        list.push(now)
+        while (list.length > 0 && now - list[0] > 10000) list.shift()
       }
     } catch (error) { st.error = String(error) }
   }
@@ -215,7 +258,18 @@ const AUDIO_PROBE = `(() => {
   window.__audioProbe = {
     report: () => {
       const now = performance.now()
-      return Object.fromEntries(TONES.map((f) => [f, { agoMs: st.last[f] === undefined ? null : Math.round(now - st.last[f]), maxGapMs: Math.round(st.maxGap[f] ?? 0) }]))
+      return Object.fromEntries(TONES.map((f) => [f, { agoMs: st.last[f] === undefined ? null : Math.round(now - st.last[f]), maxGapMs: Math.round(st.maxGap[f] ?? 0), recentRate: st.tickTimes.length === 0 ? 0 : Math.round(100 * (st.recent[f] || []).filter((t) => now - t <= 10000).length / st.tickTimes.length) / 100 }]))
+    },
+    perElement: () => {
+      const now = performance.now()
+      const ticks = Math.max(1, st.tickTimes.length)
+      const out = {}
+      const live = new Set([...document.querySelectorAll("[data-voice-audio-sink] audio")].map((el) => el.getAttribute("data-voice-track")))
+      for (const [key, rec] of (st.perEl || new Map())) {
+        if (!live.has(key)) continue
+        out[key] = Object.fromEntries(Object.entries(rec).map(([tone, list]) => [tone, Math.round(100 * list.filter((t) => now - t <= 10000).length / ticks) / 100]).filter(([, r]) => r > 0))
+      }
+      return out
     },
     reset: () => { st.maxGap = {} },
     error: () => st.error ?? null,
@@ -253,6 +307,10 @@ async function openParty(label: string, profile: TestProfile, tone: number, view
   await context.addCookies([{ name: 'belot_session', value: profile.cookie, url: h.backendOrigin }])
   await context.addInitScript(`try { localStorage.setItem('pika-consent-v2', JSON.stringify({ version: 2, necessary: true, analytics: false, marketing: false, updatedAt: new Date().toISOString() })) } catch {}`)
   await context.addInitScript(AUDIO_PROBE)
+  if (process.env.E2E_NO_AEC === '1') {
+    // Само контролен експеримент: capture без echoCancellation (продуктът не се променя).
+    await context.addInitScript("(() => { const md = navigator.mediaDevices; const orig = md.getUserMedia.bind(md); md.getUserMedia = (c) => orig(c && c.audio ? { ...c, audio: { ...(typeof c.audio === 'object' ? c.audio : {}), echoCancellation: false } } : c) })()")
+  }
   const received: Frame[] = []
   const tokens: Party['tokens'] = []
   const reports: Party['reports'] = []
@@ -273,7 +331,14 @@ async function openParty(label: string, profile: TestProfile, tone: number, view
     current = server
   })
   // Само в тестовата среда: запис на издадените токени (за проверката „стар токен“).
+  const failTokens = { remaining: 0 }
   await context.route(`${h.backendOrigin}/api/voice/token`, async (route) => {
+    if (failTokens.remaining > 0) {
+      failTokens.remaining -= 1
+      tokens.push({ at: Date.now(), status: 503, token: null, url: null })
+      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ ok: false, code: 'voice_unavailable', retryAfterMs: 1000 }) })
+      return
+    }
     const response = await route.fetch()
     const text = await response.text()
     let body: any = null
@@ -286,10 +351,10 @@ async function openParty(label: string, profile: TestProfile, tone: number, view
   await page.goto(`${h.appOrigin}/lobby`)
   await page.locator(LOBBY_READY).first().waitFor({ state: 'attached', timeout: 25_000 })
   await page.waitForTimeout(800)
-  return { label, tone, profile, browser, page, received, tokens, reports, inject: (m) => current?.send(JSON.stringify(m)) }
+  return { label, tone, profile, browser, page, received, tokens, reports, inject: (m) => current?.send(JSON.stringify(m)), context, failTokens }
 }
 
-type ToneReport = Record<string, { agoMs: number | null; maxGapMs: number }>
+type ToneReport = Record<string, { agoMs: number | null; maxGapMs: number; recentRate: number }>
 const audioReport = (p: Party) => p.page.evaluate(`window.__audioProbe ? window.__audioProbe.report() : null`) as Promise<ToneReport | null>
 const resetGaps = (p: Party) => p.page.evaluate(`window.__audioProbe && window.__audioProbe.reset()`)
 const voiceState = (p: Party) => p.page.evaluate(`(() => { const v = window.__pikaVoice; const s = v ? v.getSnapshot() : null; return s ? { status: s.status, microphone: s.microphone } : null })()`) as Promise<{ status: string; microphone: string } | null>
@@ -386,6 +451,95 @@ async function probeToken(token: string, url: string): Promise<{ joined: boolean
     await probeBrowser.close()
   }
 }
+
+// ─── Сървърна проверка: ≤1 LiveKit участник на профил (без дублирани връзки) ──
+const { RoomServiceClient } = await import('../server/node_modules/livekit-server-sdk/dist/index.js' as string) as typeof import('livekit-server-sdk')
+const roomService = new RoomServiceClient(`http://127.0.0.1:${lkPort}`, apiKey, apiSecret)
+
+async function liveParticipants(voiceTableId: string): Promise<{ room: string; identities: string[] }> {
+  const active = generations(voiceTableId).filter((g) => g.status === 'active' || g.retire_reason === null).at(-1)
+  if (active === undefined) return { room: '', identities: [] }
+  try {
+    const list = await roomService.listParticipants(active.livekit_room_name)
+    return { room: active.livekit_room_name, identities: list.map((p) => p.identity) }
+  } catch {
+    return { room: active.livekit_room_name, identities: [] }
+  }
+}
+
+/** Всички LiveKit стаи и участниците им (диагностика при провал). */
+async function allLiveKitParticipants(): Promise<string> {
+  try {
+    const rooms = await roomService.listRooms()
+    const parts: string[] = []
+    for (const r of rooms) {
+      const list = await roomService.listParticipants(r.name).catch(() => [])
+      parts.push(`${r.name.slice(-12)}=[${list.map((p) => `${p.identity.slice(0, 10)}…${p.identity.slice(-3)}:${p.tracks.map((t) => t.sid).join('+')}`).join(",")}]`)
+    }
+    return parts.join(" ")
+  } catch (error) {
+    return `listRooms: ${String(error)}`
+  }
+}
+
+/** Потоци, които носят повече от един тон (>5% за 10 s) — диагностика на източника на „собствен тон“. */
+async function mixedStreams(present: Party[]): Promise<string[]> {
+  const lines: string[] = []
+  for (const q of present) {
+    const perElement = await q.page.evaluate('window.__audioProbe.perElement()') as Record<string, Record<string, number>>
+    for (const [track, rates] of Object.entries(perElement)) {
+      const tones = Object.entries(rates).filter(([, r]) => r > 0.05)
+      if (tones.length > 1) lines.push(`${q.label}(${q.tone}) поток ${track.slice(-6)}: ${JSON.stringify(Object.fromEntries(tones))}`)
+    }
+  }
+  return lines
+}
+
+/** Без дублирани LiveKit връзки, без собствено ехо, без натрупани audio елементи. */
+async function assertNoDuplicatesNoEcho(label: string, voiceTableId: string, present: Party[]): Promise<void> {
+  const { room, identities } = await liveParticipants(voiceTableId)
+  const byProfile = new Map<string, number>()
+  for (const identity of identities) {
+    const match = /^p_(.+)_\d+$/.exec(identity)
+    const key = match?.[1] ?? identity
+    byProfile.set(key, (byProfile.get(key) ?? 0) + 1)
+  }
+  const duplicates = [...byProfile].filter(([, n]) => n > 1)
+  assert(duplicates.length === 0, `${label}: дублирани LiveKit участници в ${room}: ${JSON.stringify(identities)}`)
+  assert(identities.length <= present.length, `${label}: повече участници от играчите: ${JSON.stringify(identities)}`)
+  for (const p of present) {
+    // Собствено ехо = поток, в който ДОМИНИРА собственият тон (моето аудио ми се
+    // връща като отделен поток: дублирана/остаряла връзка). Собственият тон,
+    // примесен в поток на ДРУГ участник, е изтичане в неговата обработка на
+    // capture-а (AEC3 на Chromium при синтетични тонове без акустичен път —
+    // доказано: с echoCancellation:false не се появява) -> само диагностика.
+    const perElement = await p.page.evaluate('window.__audioProbe.perElement()') as Record<string, Record<string, number>>
+    for (const [track, rates] of Object.entries(perElement)) {
+      const ownRate = rates[String(p.tone)] ?? 0
+      if (ownRate <= 0.1) continue
+      const dominant = Object.entries(rates).sort((x, y) => y[1] - x[1])[0]!
+      const sender = present.find((q) => String(q.tone) === dominant[0])?.label ?? '?'
+      if (dominant[0] === String(p.tone)) {
+        throw new Error(`${label}: ${p.label} получава собственото си аудио като отделен поток ${track}: ${JSON.stringify(rates)} :: LiveKit: ${await allLiveKitParticipants()}`)
+      }
+      console.log(`    ${label}: изтичане (AEC) — тонът на ${p.label} е примесен в потока на ${sender} (${track.slice(-6)}): ${JSON.stringify(rates)}`)
+    }
+    const elements = await p.page.evaluate(`document.querySelectorAll('[data-voice-audio-sink] audio').length`) as number
+    assert(elements <= present.length - 1, `${label}: ${p.label} има ${elements} audio елемента`)
+  }
+}
+
+/** Презареждане в същия таб -> „Върни ме в играта“ -> гласът се връща САМ (без извикване на join). */
+async function reloadAndRejoin(p: Party): Promise<void> {
+  await p.page.reload()
+  const rejoin = p.page.locator('[data-session-rejoin="1"]').first()
+  await rejoin.waitFor({ state: 'visible', timeout: 30_000 }).then(() => rejoin.click({ timeout: 5_000 })).catch(() => undefined)
+}
+
+const voiceSettled = (p: Party, microphone: 'live' | 'off') => waitUntil(`глас на ${p.label} (${microphone})`, async () => {
+  const state = await voiceState(p)
+  return state !== null && state.microphone === microphone && (state.status === 'connected_speaking' || state.status === 'connected_listening')
+}, 60_000, 250)
 
 const parties: Party[] = []
 try {
@@ -490,23 +644,28 @@ try {
 
   // ─── [E4] презареждане на D (ротацията при изместване е запазена) ─────
   const dOldToken = [...D.tokens].reverse().find((t) => t.token !== null)!
+  const intentOf = (p: Party) => p.page.evaluate("(async () => ({ intent: sessionStorage.getItem('pika.voice.intent.v1'), nav: (performance.getEntriesByType('navigation')[0] || {}).type || null, permission: await navigator.permissions.query({ name: 'microphone' }).then((x) => x.state, () => 'error') }))()")
+  console.log(`    D преди презареждането: ${JSON.stringify(await intentOf(D))}`)
   for (const p of parties) await resetGaps(p)
   const reloadAt = Date.now()
   await D.page.reload()
   // След презареждане по време на игра: изричен избор „Върни ме в играта“ (съществуващо поведение).
   await D.page.locator('[data-session-rejoin="1"]').first().click({ timeout: 30_000 }).catch(() => undefined)
-  await waitUntil('гласов контекст на D след връщането', () => D.page.evaluate(`(() => { const v = window.__pikaVoice; const s = v ? v.getSnapshot() : null; return !!s && s.voiceTableId !== null && s.status === 'idle' })()`), 30_000)
+  await waitUntil('гласов контекст на D след връщането', () => D.page.evaluate(`(() => { const v = window.__pikaVoice; const s = v ? v.getSnapshot() : null; return !!s && s.voiceTableId !== null })()`), 30_000)
   const rejoinAt = Date.now()
-  // Етап Б: гласът след презареждане се включва изрично (автоматичното връщане е етап В).
-  await D.page.evaluate(`window.__pikaVoice.joinWithMicrophone()`)
-  await check('[E4] Презареждане на участник: ротация session_displaced (запазена); останалите отново се чуват автоматично; D се връща с изрично включване; старият токен на D не дава достъп', async () => {
+  await sleep(1_500)
+  console.log(`    D след връщането: ${JSON.stringify(await intentOf(D))} ${JSON.stringify(await voiceState(D))}`)
+  console.log(`    D гласови съобщения след презареждането: ${JSON.stringify(D.received.filter((fr) => fr.at >= reloadAt && fr.type.startsWith('voice_')).map((fr) => ({ t: fr.at - reloadAt, type: fr.type, ok: fr.data.ok, on: fr.data.onTableScreen, code: fr.data.code, reason: fr.data.reason, ready: fr.data.ready, gen: fr.data.generation, speak: fr.data.speak ? [fr.data.speak.canSpeak, fr.data.speak.blockedReason] : undefined })))}`)
+  // Етап В: без извикване на join — гласът и микрофонът се връщат сами.
+  await check('[E4] Презареждане на участник: ротация session_displaced (запазена); останалите отново се чуват автоматично; D се връща АВТОМАТИЧНО с микрофона; старият токен на D не дава достъп', async () => {
     try {
       // Ротацията (session_replaced) започва, когато новата страница на D включи гласа.
       await sleep(300)
       await waitMutualAudio([A, B, C], 30_000, 400)
       console.log(`    A, B и C отново се чуват ${Date.now() - rejoinAt} ms след включването на D (ротацията); ${Date.now() - reloadAt} ms след презареждането`)
       await waitMutualAudio(parties, 30_000)
-      console.log(`    D отново е в разговора ${Date.now() - rejoinAt} ms след изричното включване`)
+      console.log(`    D отново е в разговора ${Date.now() - rejoinAt} ms след връщането в играта (автоматично)`)
+      await assertNoDuplicatesNoEcho('E4', voiceTableId, parties)
     } catch (error) {
       throw new Error(`${error instanceof Error ? error.message : String(error)} :: ${await describeAudio(parties)}`)
     }
@@ -516,6 +675,133 @@ try {
     assert(!probe.joined || probe.packets === 0, `старият токен дава достъп: ${JSON.stringify(probe)}`)
     console.log(`    стар токен на D: ${JSON.stringify(probe)}`)
   })
+
+  if (process.env.E2E_STOP_AFTER !== 'E4') {
+  // ─── Общо за E6–E11: autopilot (без поемане от робот) и преиграване при край ──
+  let scenarioStops = parties.map((p) => startAutopilot(p, gameRoomId, p === A))
+  async function keepMatchRunning(): Promise<void> {
+    const snapNow = lastSnapshot(A, gameRoomId)
+    if (snapNow === null || (snapNow.roomStatus !== 'finished' && snapNow.game?.matchEnded == null)) return
+    const from = A.received.length
+    for (const p of parties) await p.page.locator('[data-match-ended-replay-button="1"]').first().click({ timeout: 15_000 }).catch(() => undefined)
+    await waitUntil('преиграване (поддръжка)', () => A.received.slice(from).some((f) => f.type === 'room_snapshot' && f.data.roomId === gameRoomId && f.data.roomStatus !== 'finished' && f.data.game?.matchEnded == null), 40_000).catch(() => undefined)
+  }
+  async function allHearAll(label: string, timeoutMs = 45_000): Promise<number> {
+    try {
+      const ms = await waitMutualAudio(parties, timeoutMs, 1_500)
+      await assertNoDuplicatesNoEcho(label, voiceTableId, parties)
+      return ms
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)} :: ${await describeAudio(parties)}`)
+    }
+  }
+
+  // ─── [E6] N поредни презареждания с ротация ───────────────────────────
+  const reloadRuns = Number(process.env.E2E_RELOAD_RUNS ?? '20')
+  const reloadResults: string[] = []
+  let reloadFailures = 0
+  for (let run = 1; run <= reloadRuns; run += 1) {
+    const target = parties[run % parties.length]!
+    await keepMatchRunning()
+    const gensBefore = generations(voiceTableId).length
+    const started = Date.now()
+    await check(`[E6.${run}] Презареждане на ${target.label} с ротация: всички четирима отново се чуват автоматично (вкл. микрофона на ${target.label})`, async () => {
+      try {
+        await reloadAndRejoin(target)
+        await voiceSettled(target, 'live')
+        const ms = await allHearAll(`E6.${run}`)
+        const added = generations(voiceTableId).slice(gensBefore).map((g) => g.generation)
+        reloadResults.push(`${target.label}:${Date.now() - started}ms/+${added.length}gen`)
+        const mixed = await mixedStreams(parties)
+        if (mixed.length > 0) console.log(`    E6.${run} смесени потоци: ${mixed.join(" ; ")}`)
+        assert(added.length <= 1, `повече от една ротация: ${JSON.stringify(generations(voiceTableId).slice(gensBefore))}`)
+        void ms
+      } catch (error) {
+        reloadFailures += 1
+        reloadResults.push(`${target.label}:FAIL`)
+        throw error
+      }
+    })
+  }
+  console.log(`    E6: ${reloadRuns - reloadFailures}/${reloadRuns} успешни; ${reloadResults.join(', ')}`)
+
+  // ─── [E7] временно прекъсване на мрежата ──────────────────────────────
+  await keepMatchRunning()
+  await check('[E7] Временно прекъсване на мрежата на B (offline 6 s): B и останалите отново се чуват автоматично', async () => {
+    await B.context.setOffline(true)
+    await sleep(6_000)
+    await B.context.setOffline(false)
+    const back = Date.now()
+    // Играта може да покаже „Върни ме в играта“ след прекъсването.
+    await B.page.locator('[data-session-rejoin="1"]').first().click({ timeout: 3_000 }).catch(() => undefined)
+    const ms = await allHearAll('E7', 90_000)
+    console.log(`    всички отново се чуват ${Date.now() - back} ms след връщането на мрежата (${ms} ms чакане)`)
+  })
+
+  // ─── [E8] рестарт на LiveKit ──────────────────────────────────────────
+  await keepMatchRunning()
+  await check('[E8] Рестарт на LiveKit: всички четирима се връщат автоматично (вкл. микрофоните)', async () => {
+    liveKit.kill()
+    await new Promise<void>((resolve) => { liveKit.once('exit', () => resolve()); setTimeout(resolve, 5_000) })
+    await sleep(3_000)
+    liveKit = spawnLiveKit()
+    assert(await waitLiveKitReady(), 'LiveKit не стартира отново')
+    const up = Date.now()
+    const ms = await allHearAll('E8', 120_000)
+    console.log(`    всички отново се чуват ${Date.now() - up} ms след рестарта (${ms} ms чакане)`)
+  })
+
+  // ─── [E9] последователни временни откази при токен ────────────────────
+  await keepMatchRunning()
+  await check('[E9] 3 последователни временни отказа (503) при токена на C след презареждане: C се връща сам след отказите', async () => {
+    const from = C.tokens.length
+    C.failTokens.remaining = 3
+    await reloadAndRejoin(C)
+    await voiceSettled(C, 'live')
+    await allHearAll('E9')
+    const seq = C.tokens.slice(from).map((t) => t.status)
+    console.log(`    токени на C: ${seq.join(', ')}`)
+    assert(seq.filter((x) => x === 503).length === 3 && seq.at(-1) === 200, `очаквани 3×503 и после 200: ${seq.join(',')}`)
+  })
+
+  // ─── [E10] доброволно изключен микрофон ───────────────────────────────
+  await keepMatchRunning()
+  await check('[E10] Доброволно изключен микрофон на B: остава изключен след ротация и след презареждане; B продължава да чува; изрично включване връща звука', async () => {
+    await B.page.evaluate(`window.__pikaVoice.disableMicrophone()`)
+    await voiceSettled(B, 'off')
+    await reloadAndRejoin(D) // ротация заради друг участник
+    await voiceSettled(D, 'live')
+    await reloadAndRejoin(B)
+    await voiceSettled(B, 'off')
+    await sleep(4_000)
+    const others = parties.filter((p) => p !== B)
+    await waitMutualAudio(others, 45_000, 1_500)
+    assert(await hearsAll(B, others), 'B чува останалите')
+    for (const listener of others) {
+      const entry = (await audioReport(listener))![String(B.tone)]!
+      assert(entry.agoMs === null || entry.agoMs > 3_000, `${listener.label} чува B, въпреки изключения микрофон: ${JSON.stringify(entry)}`)
+    }
+    await assertNoDuplicatesNoEcho('E10', voiceTableId, parties)
+    await B.page.evaluate(`window.__pikaVoice.enableMicrophone()`)
+    await voiceSettled(B, 'live')
+    await allHearAll('E10/вкл')
+  })
+
+  // ─── [E11] едновременно прекъсване и ротация ──────────────────────────
+  await keepMatchRunning()
+  await check('[E11] Едновременно: A губи мрежата за 4 s, докато D презарежда (ротация) -> всички се връщат автоматично', async () => {
+    await A.context.setOffline(true)
+    const reload = reloadAndRejoin(D)
+    await sleep(4_000)
+    await A.context.setOffline(false)
+    await reload
+    await A.page.locator('[data-session-rejoin="1"]').first().click({ timeout: 3_000 }).catch(() => undefined)
+    await voiceSettled(D, 'live')
+    const ms = await allHearAll('E11', 90_000)
+    console.log(`    всички отново се чуват след ${ms} ms`)
+  })
+  for (const stop of scenarioStops) stop()
+  scenarioStops = []
 
   // ─── [E5] край на мача, C и D напускат ────────────────────────────────
   const stops2 = parties.map((p) => startAutopilot(p, gameRoomId, p === A))
@@ -560,6 +846,7 @@ try {
       console.log(`    стар токен на напуснал: ${JSON.stringify(probe)}`)
     }
   })
+  }
 } catch (error) {
   console.error('  FAIL  неочаквана грешка:', error instanceof Error ? error.stack : error)
   await check('без неочаквани грешки', () => { throw error })

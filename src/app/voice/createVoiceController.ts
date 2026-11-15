@@ -1,39 +1,37 @@
-// Гласов чат — общ frontend controller (Етап 3; мобилна и desktop версия).
+// Гласов чат — общ frontend controller (етап В: опростен жизнен цикъл).
 //
 // Един instance за цялото приложение. Живее в lazy chunk-а (voiceRuntime.ts)
-// и се създава от посредника voiceFacade.ts при първото изрично включване.
-// Не зависи от DOM-а на екраните: получава КОНТЕКСТ (setContext) и сървърни
-// съобщения, а LiveKit е зад VoiceAdapter. Визуалният интерфейс (Етапи 4/5)
-// само чете snapshot-а и вика действията (чрез посредника).
+// и се създава от посредника voiceFacade.ts при първото включване. Не зависи
+// от DOM-а на екраните: получава КОНТЕКСТ (setContext) и сървърни съобщения,
+// а LiveKit е зад VoiceAdapter. Интерфейсът само чете snapshot-а.
 //
-// Инварианти:
-//   * най-много една LiveKit стая и един локален микрофонен поток;
-//   * никакво автоматично включване в гласа (сядане, VIP, край на mute,
-//     refresh, връщане от лоби/магазин) — само изрично действие;
-//   * getUserMedia само при право за говорене (backend проверка) И изрично
-//     действие; никога при „Само слушай“, без VIP или при mute;
-//   * JWT само в локална променлива до connect — не в state, storage, логове,
-//     WS или грешки;
-//   * всяка асинхронна операция носи operation generation (sessionSeq /
-//     micSeq) и след всяко await проверява дали още е актуална — остаряла
-//     операция никога не включва микрофон;
-//   * таймерите са само докато гласът е в употреба и се чистят при край.
+// Устройство (етап В):
+//   * ЖЕЛАНО състояние (намерение): wantVoice (участие) и wantMic (говорене).
+//     Променя се САМО от изрични действия на потребителя и от потвърдена
+//     загуба на права. Техническо прекъсване (мрежа, рестарт на LiveKit,
+//     ротация, отказан токен, изтрита стая) НЕ го променя.
+//   * ДЕЙСТВИТЕЛНО състояние: LiveKit стаята (room), състоянието на връзката
+//     (link), публикуваният микрофон (microphone) и задържаният capture (held).
+//   * ЕДИН ДВИГАТЕЛ (drive -> step) привежда действителното към желаното.
+//     Само той създава и затваря LiveKit стаи и публикува микрофона, по една
+//     операция наведнъж — две едновременни LiveKit връзки са невъзможни.
+//     Събитията (сървър, LiveKit, контекст) само сменят състояние и викат kick().
+//   * Докато LiveKit SDK само възстановява връзката (Reconnecting), двигателят
+//     НЕ започва своя операция; нова връзка — само след окончателно
+//     Disconnected, ротация или изтекъл достъп.
+//   * Временни грешки -> backoff (1-2-4-8-15-30 s) без край, докато
+//     членството е валидно; неясно членство (not_seat_connection,
+//     invalid_session) -> най-много 5 последователни опита, после спиране с
+//     „Опитай отново“; потвърдена загуба на права -> спиране и изчистване.
+//   * Микрофонът: getUserMedia е ОТДЕЛНО от стаята (разрешението не блокира
+//     възстановяването); придобитият capture чака (≤20 s) свързана стая.
+//     Нов capture БЕЗ изрично действие — само ако браузърът вече го разрешава
+//     (без прозорец); иначе „Микрофонът не беше включен“ и изрично включване.
+//   * Намерението се пази в sessionStorage на ТОЗИ таб (voiceIntentStore) —
+//     след презареждане гласът се възстановява сам (facade).
 //
-// Състояния (status):
-//   disabled            — няма гласова маса / функцията е изключена / не е играч
-//   idle                — гласова маса, гласът не е включен (може да се включи)
-//   connecting          — presence -> token (HTTPS) -> LiveKit connect
-//   connected_listening — свързан, без публикуван микрофон
-//   connected_speaking  — свързан, микрофонът е включен
-//   connected_muted     — свързан, говоренето е блокирано от административен mute
-//   reconnecting        — официалният LiveKit reconnect
-//   rotating            — нова генерация на стаята (старата е прекъсната)
-//   disconnecting       — изрично напускане на гласа
-//   unavailable         — гласовият сървър/мрежата временно не отговарят (има „Опитай отново“)
-//   error               — неочаквана вътрешна грешка (има „Опитай отново“)
-// Отделно от status: speak (право/наказание от backend), wantsToSpeak
-// (желание на потребителя), microphone (реално състояние на capture-а),
-// locallyMutedProfileIds (индивидуално заглушени), playbackBlocked (autoplay).
+// Инварианти: JWT само в локална променлива до connect; без polling и без
+// автоматично повторно свързване по липса на аудиопакети.
 
 import {
   VoiceMicrophoneError,
@@ -43,6 +41,7 @@ import {
   type VoiceConnectedRoom,
   type VoiceDiagnosticReport,
   type VoiceDisconnectCause,
+  type VoiceFailStage,
   type VoiceLiveKitDisconnectReason,
   type VoiceMicAttemptFailure,
   type VoiceMicAttemptResult,
@@ -52,8 +51,8 @@ import {
   type VoicePublishErrorKind,
   type VoiceRetainedMicrophone,
   type VoiceSessionEndReason,
-  type VoiceFailStage,
 } from './voiceAdapter'
+import { clearVoiceIntent, saveVoiceIntent } from './voiceIntentStore'
 import {
   VOICE_SPEAK_ACCESS_PATH,
   VOICE_TOKEN_PATH,
@@ -106,7 +105,7 @@ export type VoiceUiErrorCode =
   | 'mic_blocked'
   | 'vip_required'
   | 'service_unavailable'
-  /** Заявеното включване не завърши заради прекъсване/ротация на гласовата връзка. */
+  /** Микрофонът не можа да бъде включен/възстановен без изрично действие. */
   | 'mic_not_enabled'
 
 /** Безопасно за показване: никога не съдържа токени, URL-и или сурови грешки. */
@@ -144,7 +143,7 @@ export type VoiceSnapshot = {
   microphone: VoiceMicrophoneState
   playbackBlocked: boolean
   uiError: VoiceUiError | null
-  /** „Възстанови гласовия чат“ — гласът е бил прекъснат (лоби, 120 s, lease), без автоматично връщане. */
+  /** „Възстанови гласовия чат“ — гласът е бил спрян изрично (лоби/магазин), без автоматично връщане. */
   canRestore: boolean
   offerDismissed: boolean
   /** Ново аудио устройство след грешка — интерфейсът може да предложи „Опитай отново“. */
@@ -162,13 +161,15 @@ export type VoiceController = {
   setGameConnection: (connected: boolean) => void
   /** Изместена сесия, бан, изтрит профил, logout — незабавен пълен cleanup. */
   endSession: (reason: 'displaced' | 'banned' | 'deleted' | 'logout') => void
-  /** pagehide: страницата се скрива/затваря — гласът се прекратява (без автоматично връщане). */
+  /** pagehide: страницата се скрива/затваря — връзката се затваря; намерението остава за презареждането. */
   onPageHide: () => void
-  /** pageshow от bfcache: старата връзка е мъртва. */
+  /** pageshow от bfcache: старата връзка е мъртва — възстановяване по запазеното намерение. */
   onPageShow: (persisted: boolean) => void
   // действия (от потребителски жест)
   joinAsListener: () => void
   joinWithMicrophone: () => void
+  /** След презареждане в същия таб: участието и (ако е разрешено без прозорец) микрофонът. */
+  resumeFromReload: (withMicrophone: boolean) => void
   notNow: () => void
   requestVip: () => void
   leaveVoice: () => void
@@ -200,28 +201,33 @@ export type VoiceControllerDeps = {
   /** HTTPS POST със съществуващата cookie сесия; хвърля при мрежова грешка. */
   postJson: (path: string, body: unknown) => Promise<{ status: number; body: unknown }>
   onRequestVip?: () => void
-  /**
-   * Етап 6 (по избор): анонимна диагностика за админ статистиката —
-   * best-effort, никога не влияе на гласа. Липсваща -> нищо не се изпраща и
-   * не се планират таймери.
-   */
+  /** Анонимна диагностика (best-effort); липсваща -> нищо не се изпраща. */
   reportDiagnostic?: (report: VoiceDiagnosticReport) => void
   createClientInstanceId?: () => string
   timers?: VoiceTimers
   /** Часовник за продължителността на getUserMedia (диагностика); по подразбиране Date.now. */
   now?: () => number
   log?: (line: string) => void
+  /** Запис на намерението за презареждане (по подразбиране sessionStorage на таба). */
+  intentStore?: { save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => void; clear: () => void }
   timing?: {
-    disconnectGraceMs?: number
     speakingHoldMs?: number
     presenceAckTimeoutMs?: number
     defaultRenewMs?: number
+    /** Максимално задържане на непубликуван capture (ротация/прекъсване). */
+    retainMicMaxMs?: number
+    /** Паузи между опитите за свързване при временни грешки (последната се повтаря). */
+    backoffMs?: readonly number[]
+    /** Последователни опити при неясно членство (not_seat_connection, invalid_session…). */
+    uncertainMaxAttempts?: number
+    /** Колко дълго временна липса на контекст (snapshot) не прекратява гласа. */
+    contextGraceMs?: number
+    /** Остарели (етап Б) — игнорират се. */
+    disconnectGraceMs?: number
     tokenMaxAttempts?: number
     tokenBaseDelayMs?: number
     tokenMaxDelayMs?: number
     reconnectDelaysMs?: readonly number[]
-    /** Максимално задържане на непубликуван capture по време на ротация. */
-    retainMicMaxMs?: number
   }
 }
 
@@ -240,33 +246,47 @@ const defaultTimers: VoiceTimers = {
   clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
 }
 
-const DISABLING_PRESENCE_CODES = new Set(['voice_off', 'not_authenticated', 'table_not_found', 'table_released', 'not_a_player', 'banned'])
-const DISABLING_HTTP_CODES = new Set(['voice_off', 'not_authenticated', 'table_not_found', 'table_released', 'spectator', 'bot', 'not_a_player', 'wrong_table', 'permanently_left', 'banned', 'forbidden_origin'])
+/** Потвърдена загуба на права — без повторни опити. */
+const TERMINAL_PRESENCE_CODES = new Set(['voice_off', 'not_authenticated', 'table_not_found', 'table_released', 'not_a_player', 'banned'])
+const TERMINAL_TOKEN_CODES = new Set(['voice_off', 'not_authenticated', 'table_not_found', 'table_released', 'spectator', 'bot', 'not_a_player', 'wrong_table', 'permanently_left', 'banned', 'forbidden_origin'])
+/** Неясно/остаряло членство — ограничен брой опити. */
+const UNCERTAIN_PRESENCE_CODES = new Set(['not_seat_connection', 'client_instance_conflict'])
+const UNCERTAIN_TOKEN_CODES = new Set(['invalid_session'])
+/** Окончателен край на гласовия достъп от сървъра. */
+const PERMANENT_ACCESS_END = new Set(['banned', 'session_displaced', 'voice_off', 'table_released', 'kicked'])
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+type Connector = { connect: (url: string, token: string) => Promise<VoiceConnectedRoom>; abort: () => Promise<void> }
+type MicRequest = { source: VoiceMicRequestSource; startedAt: number; interruption: VoiceMicInterruption; gum: VoiceMicGumBucket }
+
 export function createVoiceController(deps: VoiceControllerDeps): VoiceController {
   const timers = deps.timers ?? defaultTimers
   const log = deps.log ?? (() => {})
-  const disconnectGraceMs = deps.timing?.disconnectGraceMs ?? 120_000
+  const nowMs = deps.now ?? (() => Date.now())
   const speakingHoldMs = deps.timing?.speakingHoldMs ?? 400
   const presenceAckTimeoutMs = deps.timing?.presenceAckTimeoutMs ?? 5_000
   const defaultRenewMs = deps.timing?.defaultRenewMs ?? 20_000
-  const tokenMaxAttempts = deps.timing?.tokenMaxAttempts ?? 6
-  const tokenBaseDelayMs = deps.timing?.tokenBaseDelayMs ?? 1_000
-  const tokenMaxDelayMs = deps.timing?.tokenMaxDelayMs ?? 8_000
-  const reconnectDelaysMs = deps.timing?.reconnectDelaysMs ?? [2_000, 5_000, 10_000]
   const retainMicMaxMs = deps.timing?.retainMicMaxMs ?? 20_000
+  const backoffMs = deps.timing?.backoffMs ?? [1_000, 2_000, 4_000, 8_000, 15_000, 30_000]
+  const uncertainMaxAttempts = deps.timing?.uncertainMaxAttempts ?? 5
+  const contextGraceMs = deps.timing?.contextGraceMs ?? 10_000
+  const intentStore = deps.intentStore ?? { save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => saveVoiceIntent(intent), clear: () => clearVoiceIntent() }
   // Една страница = един clientInstanceId (само в паметта; refresh -> нов).
   const clientInstanceId = (deps.createClientInstanceId ?? defaultClientInstanceId)()
 
+  // ── контекст и интерфейс ──
   let context: VoiceContext = { kind: 'none' }
-  let status: VoiceStatus = 'disabled'
+  /**
+   * Масата изчезна от контекста при активен глас: връзката е затворена, а
+   * намерението се пази contextGraceMs — ако СЪЩАТА маса се върне (временно
+   * липсващ snapshot), гласът се възстановява сам; иначе се изчиства.
+   */
+  let suspended: { key: string; mic: boolean } | null = null
+  let contextGraceTimer: unknown = null
   let speak: VoiceSpeakState | null = null
-  let wantsToSpeak = false
-  let microphone: VoiceMicrophoneState = 'off'
   let playbackBlocked = false
   let uiError: VoiceUiError | null = null
   let canRestore = false
@@ -275,87 +295,74 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   let generation: number | null = null
   let gameConnected = true
   let disposed = false
+  /** Сървърът е изключил гласа за тази маса (без опити до ново изрично включване). */
+  let serverDisabled = false
 
-  /** Гласът е „в употреба“: потребителят го е включил (presence/lease се подновява). */
-  let inUse = false
-  let sessionSeq = 0
-  let micSeq = 0
+  // ── желано състояние ──
+  let wantVoice = false
+  let wantMic = false
+  /** Текущото желание за микрофон идва от изрично действие — разрешение може да се поиска. */
+  let micExplicit = false
+  /** Спрян след изчерпани опити (неясно членство) — „Опитай отново“. */
+  let failed = false
+
+  // ── действително състояние (само двигателят създава/затваря стаи) ──
   let adapter: VoiceAdapter | null = null
   let adapterPromise: Promise<VoiceAdapter> | null = null
   let room: VoiceConnectedRoom | null = null
-  let prepared: { connect: (url: string, token: string) => Promise<VoiceConnectedRoom>; abort: () => Promise<void> } | null = null
-  /**
-   * Микрофон след прекъсване/нов токен:
-   *   'reuse' — контролирана ротация: същият (запазен) capture се публикува в
-   *             новата стая, без нов getUserMedia; ако не е жив -> слушане;
-   *   'fresh' — само след изрично „Включи микрофона“ (request_new_token);
-   *   'none'  — слушане. Прекратен/изгубен capture НИКОГА не води до
-   *             автоматичен нов capture (connection_lost, room_deleted, mute…).
-   */
-  let restoreMic: 'none' | 'reuse' | 'fresh' = 'none'
-  let retained: VoiceRetainedMicrophone | null = null
-  let retainTimer: unknown = null
-  /**
-   * Изрично заявено включване на микрофона, докато то не е завършено
-   * (getUserMedia/разрешението чака или придобитият capture чака стая).
-   * Обвързано с членството в гласовата маса (маса + профил), НЕ с временната
-   * LiveKit сесия: прекъсване/ротация не го изтриват; изрично изключване,
-   * напускане, отстраняване, mute, изключен глас или друг екран — да.
-   */
-  type MicAttempt = {
-    id: number
-    tableKey: string
-    source: VoiceMicRequestSource
-    startedAt: number
-    interruption: VoiceMicInterruption
-    gum: VoiceMicGumBucket
-    /** getUserMedia е приключил успешно (capture-ът чака публикуване). */
-    acquired: boolean
-    /** Повторни публикувания след прекъснато от SDK reconnect публикуване (≤ MAX_PUBLISH_RETRIES). */
-    publishRetries: number
-  }
-  const MAX_PUBLISH_RETRIES = 2
-  let micAttempt: MicAttempt | null = null
-  /**
-   * Общ срок за придобит, но непубликуван микрофон: retainMicMaxMs (20 s) от
-   * придобиването за ЦЕЛИЯ опит — прекъсванията и повторните публикувания не
-   * го рестартират. След изтичането: спиране на capture-а + съобщение.
-   */
-  let micAttemptTimer: unknown = null
-  let micAttemptSeq = 0
-  /** Откъде е последната изрична заявка: първоначалният прозорец или панелът. */
-  let micRequestSource: VoiceMicRequestSource = 'initial'
-  const nowMs = deps.now ?? (() => Date.now())
-  /** Етап 6: еднократно отчитане на вида връзка (TURN/директна) след свързване. */
-  let transportTimer: unknown = null
-  /** Изключващи се стари стаи — новата се подготвя едва след тях (≤1 активна). */
-  let teardown: Promise<void> = Promise.resolve()
-  let teardownCount = 0
+  let link: 'none' | 'connected' | 'reconnecting' = 'none'
+  /** Идентичност на текущата стая за събитията от адаптера (остарели се игнорират). */
+  let roomOwner: object | null = null
+  /** Подготвена в потребителския жест (autoplay) стая — ползва се от двигателя. */
+  let preparedSlot: { owner: object; connector: Connector } | null = null
+  let closing: Promise<void> = Promise.resolve()
+  /** Затваряния в ход — докато има такива, нова стая не се подготвя. */
+  let closingJobs = 0
+  let everConnected = false
+  let rotating = false
+  /** Двигателят трябва да затвори текущата стая и да се свърже наново. */
+  let closeRequested: 'rotate' | 'renew' | null = null
+  let sessionSeq = 0
+  let driving = false
+  let driveAgain = false
+  let attempts = 0
+  let uncertainAttempts = 0
+  let retryTimer: unknown = null
 
+  // ── микрофон ──
+  let microphone: VoiceMicrophoneState = 'off'
+  let held: VoiceRetainedMicrophone | null = null
+  let heldTimer: unknown = null
+  let acquiring = false
+  let acquireSeq = 0
+  /** Придобиване на текущия (още непубликуван) първи опит — за общия 20 s срок. */
+  let micStartedAt: number | null = null
+  /** Микрофонът е бил публикуван при текущото желание (след това прекъсванията са технически). */
+  let everLive = false
+  let publishHandbacks = 0
+  let micRequest: MicRequest | null = null
+  let micRequestSource: VoiceMicRequestSource = 'initial'
+
+  // ── присъствие ──
   let renewMs = defaultRenewMs
   let presenceTimer: unknown = null
-  let disconnectTimer: unknown = null
-  let retryTimer: unknown = null
-  let retryKick: (() => void) | null = null
   let pendingAck: { resolve: (result: VoicePresenceResultMessage | null) => void; timer: unknown } | null = null
-  /** Чакащото потвърждение се СПОДЕЛЯ: втори handshake не отменя първия (иначе първият вижда null). */
   let pendingAckPromise: Promise<VoicePresenceResultMessage | null> | null = null
-  /** Сесията, за която тече възстановяване след ротация/изтрита стая (без втори паралелен опит). */
-  let resumeInFlightSeq: number | null = null
 
+  // ── говорещи, заглушени, слушатели ──
   const locallyMuted = new Set<string>()
   let locallyMutedTableId: string | null = null
-  const activeIdentities = new Set<string>()
   const speakingProfiles = new Set<string>()
   const speakingHoldTimers = new Map<string, unknown>()
-
   const listeners = new Set<(snapshot: VoiceSnapshot) => void>()
   const speakingListeners = new Set<(profileIds: readonly string[]) => void>()
   let cachedSnapshot: VoiceSnapshot | null = null
+  let transportTimer: unknown = null
   const counters: Record<string, number> = {
     adapterLoads: 0,
     roomsCreated: 0,
     roomsDisconnected: 0,
+    roomsOpenMax: 0,
     tokenRequests: 0,
     micEnableAttempts: 0,
     micEnabled: 0,
@@ -364,7 +371,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     rotations: 0,
     micReused: 0,
     retainedReleased: 0,
+    connectAttempts: 0,
   }
+  let roomsOpen = 0
 
   // ─── Помощни ──────────────────────────────────────────────────────────
 
@@ -373,20 +382,28 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     const table = tableContext()
     return table !== null && (table.screen === 'waiting' || table.screen === 'game')
   }
-  const isConnectedStatus = (value: VoiceStatus): boolean =>
-    value === 'connected_listening' || value === 'connected_speaking' || value === 'connected_muted'
+  const tableKey = (): string | null => {
+    const table = tableContext()
+    return table === null ? null : `${table.voiceTableId}:${table.selfProfileId}`
+  }
+  const isConnected = (): boolean => room !== null && link === 'connected'
 
   function setUiError(code: VoiceUiErrorCode | null): void {
     uiError = code === null ? null : { code, ...VOICE_UI_MESSAGES[code] }
   }
 
-  function connectedStatus(): VoiceStatus {
-    if (speak?.blockedReason === 'muted') return 'connected_muted'
-    return microphone === 'live' ? 'connected_speaking' : 'connected_listening'
-  }
-
-  function refreshConnectedStatus(): void {
-    if (isConnectedStatus(status)) status = connectedStatus()
+  function computeStatus(): VoiceStatus {
+    if (tableContext() === null) return 'disabled'
+    if (serverDisabled) return 'disabled'
+    if (!wantVoice) return 'idle'
+    if (failed) return 'unavailable'
+    if (room !== null && link === 'connected') {
+      if (speak?.blockedReason === 'muted') return 'connected_muted'
+      return microphone === 'live' ? 'connected_speaking' : 'connected_listening'
+    }
+    if (room !== null && link === 'reconnecting') return 'reconnecting'
+    if (rotating) return 'rotating'
+    return everConnected ? 'reconnecting' : 'connecting'
   }
 
   function invalidate(): void {
@@ -411,29 +428,15 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     return null
   }
 
-  // ─── Етап 6: анонимна диагностика (best-effort) ───────────────────────
-
   function report(event: VoiceDiagnosticReport): void {
     if (deps.reportDiagnostic === undefined) return
     try { deps.reportDiagnostic(event) } catch { /* никога не влияе на гласа */ }
   }
 
-  /** Веднъж на връзка: вид на ICE двойката (relay = TURN) и мрежови показатели. */
-  function scheduleTransportReport(seq: number, connected: VoiceConnectedRoom): void {
-    transportTimer = clearTimer(transportTimer)
-    if (deps.reportDiagnostic === undefined || connected.getTransportInfo === undefined) return
-    const attempt = (delayMs: number, retriesLeft: number): void => {
-      transportTimer = timers.setTimeout(() => {
-        transportTimer = null
-        if (seq !== sessionSeq || room !== connected || disposed) return
-        void connected.getTransportInfo!().then((transport) => {
-          if (seq !== sessionSeq || room !== connected || disposed) return
-          if (transport !== null) report({ event: 'transport', transport })
-          else if (retriesLeft > 0) attempt(15_000, retriesLeft - 1)
-        }).catch(() => {})
-      }, delayMs)
-    }
-    attempt(5_000, 1)
+  function saveIntent(): void {
+    const table = tableContext()
+    if (table === null || !wantVoice) return
+    intentStore.save({ voiceTableId: table.voiceTableId, profileId: table.selfProfileId, mic: wantMic })
   }
 
   function ensureAdapter(): Promise<VoiceAdapter> {
@@ -457,7 +460,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   function clearSpeaking(): void {
     for (const handle of speakingHoldTimers.values()) timers.clearTimeout(handle)
     speakingHoldTimers.clear()
-    activeIdentities.clear()
     if (speakingProfiles.size > 0) {
       speakingProfiles.clear()
       emitSpeaking()
@@ -484,7 +486,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
     for (const profileId of [...speakingProfiles]) {
       if (nowSpeaking.has(profileId) || speakingHoldTimers.has(profileId)) continue
-      // ~400 ms задържане — без трептене при кратки паузи.
       speakingHoldTimers.set(profileId, timers.setTimeout(() => {
         speakingHoldTimers.delete(profileId)
         if (speakingProfiles.delete(profileId)) emitSpeaking()
@@ -493,9 +494,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     if (changed) emitSpeaking()
   }
 
-  // ─── Заявка за микрофон (намерение за говорене) ───────────────────────
-
-  const tableKeyOf = (table: Extract<VoiceContext, { kind: 'table' }>): string => `${table.voiceTableId}:${table.selfProfileId}`
+  // ─── Диагностика на изричното включване на микрофона ─────────────────
 
   function gumBucket(ms: number): VoiceMicGumBucket {
     if (ms < 1_000) return 'lt1s'
@@ -504,53 +503,16 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     return 'gt15s'
   }
 
-  function reportMicAttempt(attempt: MicAttempt, result: VoiceMicAttemptResult, failure: VoiceMicAttemptFailure = 'none'): void {
-    report({ event: 'mic_attempt', source: attempt.source, result, interruption: attempt.interruption, gum: attempt.gum, failure })
-  }
-
   function noteMicInterruption(kind: VoiceMicInterruption): void {
-    if (micAttempt !== null && micAttempt.interruption === 'none') micAttempt.interruption = kind
+    if (micRequest !== null && micRequest.interruption === 'none') micRequest.interruption = kind
   }
 
-  /** Край на заявката (успех/неуспех/отказ) — и на общия ѝ срок. */
-  function endMicAttempt(): void {
-    micAttempt = null
-    micAttemptTimer = clearTimer(micAttemptTimer)
-  }
-
-  function startMicAttemptDeadline(attempt: MicAttempt): void {
-    micAttemptTimer = clearTimer(micAttemptTimer)
-    micAttemptTimer = timers.setTimeout(() => {
-      micAttemptTimer = null
-      if (micAttempt !== attempt) return
-      // Незавършено публикуване в ход става остаряло -> адаптерът/startMicrophone
-      // спират capture-а; задържаният capture се освобождава от loseMicAttempt.
-      micSeq += 1
-      loseMicAttempt('acquired_not_published')
-    }, retainMicMaxMs)
-  }
-
-  /** Отказ/напускане/mute/друг екран: без грешка; закъснелият capture се спира. */
-  function cancelMicAttempt(): void {
-    const attempt = micAttempt
-    if (attempt === null) return
-    endMicAttempt()
-    reportMicAttempt(attempt, 'cancelled')
-  }
-
-  /** Окончателно изгубено намерение след прекъсване/ротация -> съобщение. */
-  function loseMicAttempt(failure: VoiceMicAttemptFailure): void {
-    const attempt = micAttempt
-    if (attempt === null) return
-    endMicAttempt()
-    wantsToSpeak = false
-    restoreMic = 'none'
-    releaseRetained()
-    microphone = 'off'
-    setUiError('mic_not_enabled')
-    reportMicAttempt(attempt, 'lost', failure)
-    refreshConnectedStatus()
-    invalidate()
+  function finishMicRequest(result: VoiceMicAttemptResult, failure: VoiceMicAttemptFailure = 'none'): void {
+    const request = micRequest
+    if (request === null) return
+    micRequest = null
+    const finalResult: VoiceMicAttemptResult = result === 'enabled' && request.interruption !== 'none' ? 'recovered' : result
+    report({ event: 'mic_attempt', source: request.source, result: finalResult, interruption: request.interruption, gum: request.gum, failure })
   }
 
   function publishFailureOf(kind: VoicePublishErrorKind | null): VoiceMicAttemptFailure {
@@ -570,50 +532,146 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     return 'network'
   }
 
-  /**
-   * Придобит микрофон за текущата заявка: публикуване в АКТУАЛНАТА свързана
-   * стая след потвърдено право за говорене; ако в момента няма свързана стая
-   * (reconnect/ротация/свързване) — задържане ≤20 s до новата стая.
-   */
-  function deliverAcquired(held: VoiceRetainedMicrophone): void {
-    if (micAttempt === null) {
-      held.release()
-      return
+  // ─── Задържан capture (непубликуван) ─────────────────────────────────
+
+  function releaseHeld(): void {
+    heldTimer = clearTimer(heldTimer)
+    const capture = held
+    held = null
+    if (capture !== null) {
+      counters.retainedReleased! += 1
+      capture.release()
     }
-    if (room !== null && isConnectedStatus(status)) {
-      if (speak?.canSpeak !== true) {
-        held.release()
-        denyMicAttempt()
+  }
+
+  /** Първото изрично включване не е стигнало до публикуване (и няма да чака безкрайно). */
+  function failInitialAttempt(failure: VoiceMicAttemptFailure = 'acquired_not_published'): void {
+    releaseHeld()
+    micStartedAt = null
+    publishHandbacks = 0
+    wantMic = false
+    if (microphone === 'requesting') microphone = 'off'
+    setUiError('mic_not_enabled')
+    finishMicRequest('lost', failure)
+    saveIntent()
+    invalidate()
+  }
+
+  /**
+   * Capture, който чака свързана стая. Две правила:
+   *  - първо включване (още непубликувано): ОБЩ срок retainMicMaxMs от
+   *    придобиването — прекъсванията не го рестартират; след него — край на
+   *    опита с „Микрофонът не беше включен“;
+   *  - вече говорил (техническо прекъсване): capture-ът се освобождава след
+   *    retainMicMaxMs, но НАМЕРЕНИЕТО остава — при свързване нов capture само
+   *    ако браузърът го разрешава без прозорец.
+   */
+  function setHeld(capture: VoiceRetainedMicrophone, restartWindow = true): void {
+    const keepTimer = !restartWindow && heldTimer !== null
+    if (held !== null && held !== capture) {
+      counters.retainedReleased! += 1
+      held.release()
+    }
+    held = capture
+    if (keepTimer) return
+    heldTimer = clearTimer(heldTimer)
+    const delay = micStartedAt !== null ? Math.max(0, micStartedAt + retainMicMaxMs - nowMs()) : retainMicMaxMs
+    heldTimer = timers.setTimeout(() => {
+      heldTimer = null
+      if (held !== capture) return
+      if (micStartedAt !== null) {
+        failInitialAttempt()
         return
       }
-      // Както след собствен capture (iOS AudioSession): възпроизвеждането продължава.
-      void room.startAudio().catch(() => {})
-      void startMicrophone(sessionSeq, { checkWithBackend: false, reuse: held })
-      return
-    }
-    adoptRetained(held)
-    restoreMic = 'reuse'
-    wantsToSpeak = true
+      releaseHeld()
+      if (microphone === 'requesting' && !acquiring) microphone = 'off'
+      invalidate()
+      kick()
+    }, delay)
+  }
+
+  /** Изрично спиране на микрофона (без грешка): отменя придобиване, освобождава capture. */
+  function dropMicrophone(): void {
+    acquireSeq += 1
+    acquiring = false
+    micExplicit = false
+    releaseHeld()
+    micStartedAt = null
+    publishHandbacks = 0
+    everLive = false
+    const current = room
+    if (microphone !== 'off' && current !== null) counters.micDisabled! += 1
+    if (current !== null) void current.disableMicrophone().catch(() => {})
+    microphone = 'off'
+  }
+
+  /** Отказано право за говорене: без микрофон и с познатото съобщение. */
+  function denySpeaking(): void {
+    wantMic = false
+    dropMicrophone()
+    setUiError(speak?.blockedReason === 'muted' ? 'mic_blocked' : 'vip_required')
+    finishMicRequest('failed', 'not_permitted')
+    saveIntent()
+  }
+
+  // ─── Придобиване (getUserMedia) — извън двигателя ────────────────────
+
+  function startAcquire(): void {
+    if (acquiring || held !== null || adapter === null || adapter.acquireMicrophone === undefined) return
+    const loaded = adapter
+    acquiring = true
+    acquireSeq += 1
+    const seq = acquireSeq
+    const key = tableKey()
+    const startedAt = nowMs()
+    counters.micEnableAttempts! += 1
     microphone = 'requesting'
     invalidate()
+    loaded.acquireMicrophone!().then(
+      (capture) => {
+        if (seq !== acquireSeq) {
+          capture.release() // отменено междувременно (изключване/напускане/друга маса)
+          return
+        }
+        acquiring = false
+        micExplicit = false
+        if (micRequest !== null) micRequest.gum = gumBucket(nowMs() - startedAt)
+        if (!everLive) micStartedAt = nowMs()
+        if (disposed || !wantMic || !wantVoice || tableKey() !== key) {
+          capture.release()
+          finishMicRequest('cancelled')
+          if (microphone === 'requesting') microphone = 'off'
+          invalidate()
+          return
+        }
+        setHeld(capture)
+        kick()
+      },
+      (error: unknown) => {
+        if (seq !== acquireSeq) return
+        acquiring = false
+        micExplicit = false
+        if (micRequest !== null) micRequest.gum = gumBucket(nowMs() - startedAt)
+        const failure = error instanceof VoiceMicrophoneError ? error.failure : 'unavailable'
+        wantMic = false
+        microphone = 'off'
+        report({
+          event: 'mic_failed',
+          reason: failure === 'not_found' ? 'mic_not_found' : failure === 'permission_denied' ? 'mic_permission_denied' : 'mic_unavailable',
+        })
+        finishMicRequest('failed',
+          failure === 'permission_denied' ? 'permission_denied'
+            : failure === 'not_found' ? 'not_found'
+              : failure === 'busy' ? 'device_busy'
+                : 'gum_failed')
+        setUiError(failure === 'not_found' ? 'mic_not_found' : failure === 'permission_denied' ? 'mic_permission_denied' : 'mic_unavailable')
+        saveIntent()
+        invalidate()
+      },
+    )
   }
 
-  /** Правото за говорене не е потвърдено в текущата стая — без публикуване. */
-  function denyMicAttempt(): void {
-    const attempt = micAttempt
-    if (attempt === null) return
-    endMicAttempt()
-    wantsToSpeak = false
-    restoreMic = 'none'
-    releaseRetained()
-    microphone = 'off'
-    setUiError(speak?.blockedReason === 'muted' ? 'mic_blocked' : 'vip_required')
-    reportMicAttempt(attempt, 'failed', 'not_permitted')
-    refreshConnectedStatus()
-    invalidate()
-  }
-
-  // ─── Presence / lease ─────────────────────────────────────────────────
+  // ─── Присъствие / lease ───────────────────────────────────────────────
 
   function sendPresence(onScreen: boolean, reason?: VoicePresenceLeaveReason): boolean {
     const table = tableContext()
@@ -623,20 +681,18 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       ...(!onScreen && reason !== undefined ? { reason } : {}),
     })
     if (sent) counters.presenceSent! += 1
-    // Подновяването се отброява от ПОСЛЕДНОТО изпратено присъствие — никога
-    // от свързване/ротация (иначе паузата между две присъствия расте и
-    // lease-ът може да изтече веднага след издаден токен).
+    // Подновяването се отброява от последното изпратено присъствие.
     if (sent && onScreen) scheduleRenewal()
     return sent
   }
 
   function scheduleRenewal(): void {
     presenceTimer = clearTimer(presenceTimer)
-    if (!inUse || !onTableScreen() || !gameConnected || disposed) return
+    if (!wantVoice || !onTableScreen() || !gameConnected || disposed) return
     presenceTimer = timers.setTimeout(() => {
       presenceTimer = null
-      if (!inUse || !onTableScreen() || !gameConnected) return
-      sendPresence(true) // самото изпращане насрочва следващото подновяване
+      if (!wantVoice || !onTableScreen() || !gameConnected) return
+      sendPresence(true)
     }, renewMs)
   }
 
@@ -649,129 +705,508 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     ack.resolve(result)
   }
 
-  function presenceHandshake(): Promise<VoicePresenceResultMessage | null> {
+  /** Едно споделено потвърждение (втори опит не отменя първия). */
+  function presenceHandshake(): Promise<VoicePresenceResultMessage | null | 'unsent'> {
     if (pendingAck !== null && pendingAckPromise !== null) return pendingAckPromise
-    if (!sendPresence(true)) return Promise.resolve(null)
+    if (!sendPresence(true)) return Promise.resolve('unsent')
     pendingAckPromise = new Promise((resolve) => {
-      pendingAck = {
-        resolve,
-        timer: timers.setTimeout(() => settleAck(null), presenceAckTimeoutMs),
-      }
+      pendingAck = { resolve, timer: timers.setTimeout(() => settleAck(null), presenceAckTimeoutMs) }
     })
     return pendingAckPromise
   }
 
-  function waitKickable(delayMs: number): Promise<void> {
-    retryTimer = clearTimer(retryTimer)
-    return new Promise((resolve) => {
-      retryKick = () => {
-        retryKick = null
-        retryTimer = clearTimer(retryTimer)
-        resolve()
-      }
-      retryTimer = timers.setTimeout(() => {
-        retryTimer = null
-        retryKick = null
-        resolve()
-      }, delayMs)
-    })
-  }
+  // ─── Събития от адаптера (само за текущата стая) ─────────────────────
 
-  // ─── Стари стаи и запазен capture ─────────────────────────────────────
-
-  function releaseRetained(): void {
-    retainTimer = clearTimer(retainTimer)
-    const held = retained
-    retained = null
-    if (held !== null) {
-      counters.retainedReleased! += 1
-      held.release()
+  function adapterEvents(owner: object): VoiceAdapterEvents {
+    const current = (): boolean => roomOwner === owner && !disposed
+    return {
+      onDisconnected: (cause, retained, reason) => {
+        if (!current()) {
+          retained?.release()
+          return
+        }
+        if (cause !== 'client') report({ event: 'livekit_disconnect', reason: reason ?? livekitReasonOf(cause) })
+        // Стаята е мъртва (LiveKit вече я е затворил) — двигателят решава какво следва.
+        room = null
+        link = 'none'
+        roomOwner = null
+        roomsOpen = Math.max(0, roomsOpen - 1)
+        clearSpeaking()
+        if (microphone === 'live') {
+          if (retained !== null) setHeld(retained)
+          else report({ event: 'mic_lost', reason: cause === 'room_deleted' ? 'rotation' : 'connection_lost' })
+          microphone = held !== null || wantMic ? 'requesting' : 'off'
+        } else {
+          retained?.release()
+        }
+        if (cause === 'room_deleted') {
+          if (!rotating) counters.rotations! += 1
+          rotating = true
+          noteMicInterruption('room_deleted')
+        } else if (cause === 'connection_lost') {
+          // SDK-то вече е опитало само и се е отказало: нов опит след първата пауза.
+          report({ event: 'connection_lost' })
+          noteMicInterruption('connection_lost')
+          if (wantVoice) scheduleRetry(null)
+        } else if (cause === 'client') {
+          // Не сме я затворили ние (наш disconnect не стига дотук): LiveKit я е
+          // затворил при напускане на страницата. Ако страницата остане (отменено
+          // напускане) — нов опит след първата пауза, без бързане при unload.
+          if (wantVoice) scheduleRetry(null)
+        } else if (cause === 'duplicate_identity') {
+          // Същият участник влезе отново от друго място — тук не се връщаме.
+          stopSession({ reason: 'duplicate_identity', notifyServer: false, clearIntent: true, canRestore: false })
+          return
+        }
+        // 'removed' (изтекъл lease, 120 s) и останалите: при запазено желание — ново свързване.
+        invalidate()
+        kick()
+      },
+      onReconnecting: () => {
+        if (!current() || room === null) return
+        link = 'reconnecting'
+        noteMicInterruption('sdk_reconnect')
+        report({ event: 'reconnecting' })
+        invalidate()
+      },
+      onReconnected: () => {
+        if (!current() || room === null) return
+        link = 'connected'
+        report({ event: 'reconnected' })
+        invalidate()
+        kick() // микрофонът (напр. отменено по време на reconnect публикуване)
+      },
+      onActiveSpeakersChanged: (identities) => { if (current()) applyActiveSpeakers(identities) },
+      onParticipantsChanged: () => { if (current()) invalidate() },
+      onPlaybackStatusChanged: (canPlayback) => {
+        if (!current() || room === null) return
+        playbackBlocked = !canPlayback
+        invalidate()
+      },
+      onLocalMicrophoneLost: (reason) => {
+        if (!current()) return
+        if (microphone === 'live') report({ event: 'mic_lost', reason: reason ?? 'track_ended' })
+        microphone = 'off'
+        if (reason === 'republish_failed') {
+          // Техническо (неуспешно републикуване след reconnect): желанието остава.
+          invalidate()
+          kick()
+          return
+        }
+        // Изключено устройство / OS прекъсване / сървърно премахване:
+        // без автоматично записване от друго устройство.
+        wantMic = false
+        dropMicrophone()
+        setUiError(speak?.blockedReason === 'muted' ? 'mic_blocked' : 'mic_unavailable')
+        saveIntent()
+        invalidate()
+      },
+      onDevicesChanged: () => {
+        if (!current()) return
+        if (uiError !== null && (uiError.code === 'mic_not_found' || uiError.code === 'mic_unavailable')) {
+          microphoneDevicesChanged = true
+          invalidate()
+        }
+      },
     }
   }
 
-  function adoptRetained(held: VoiceRetainedMicrophone): void {
-    releaseRetained()
-    retained = held
-    // Ограничено задържане: ротацията не завършва навреме -> освобождаване и слушане.
-    retainTimer = timers.setTimeout(() => {
-      retainTimer = null
-      releaseRetained()
-      // Заявеният микрофон не стигна до свързана стая в срока -> съобщение.
-      if (micAttempt !== null && micAttempt.acquired) {
-        loseMicAttempt('acquired_not_published')
-        return
-      }
-      if (restoreMic === 'reuse') {
-        restoreMic = 'none'
-        wantsToSpeak = false
-        invalidate()
-      }
-    }, retainMicMaxMs)
+  function prepareRoom(loaded: VoiceAdapter): { owner: object; connector: Connector } | null {
+    const owner = {}
+    try {
+      const connector = loaded.prepare(adapterEvents(owner), (identity) => {
+        const profileId = profileIdFromVoiceIdentity(identity)
+        return profileId !== null && locallyMuted.has(profileId)
+      })
+      counters.roomsCreated! += 1
+      return { owner, connector }
+    } catch {
+      return null
+    }
   }
 
-  /**
-   * Асинхронно изключване на стара стая. retainForSeq: контролирана ротация —
-   * живият capture се откача преди disconnect и се пази САМО ако ротацията
-   * още е актуална и микрофонът още е желан и позволен; иначе веднага се спира.
-   */
-  function teardownRoom(oldRoom: VoiceConnectedRoom | null, oldPrepared: typeof prepared, retainForSeq: number | null): void {
-    if (oldRoom === null && oldPrepared === null) return
-    if (oldRoom !== null) counters.roomsDisconnected! += 1
-    teardownCount += 1
+  /** Подготвя стаята синхронно в потребителския жест (отключване на аудиото), ако адаптерът е зареден. */
+  function prepareInGesture(): void {
+    if (adapter === null || room !== null || roomOwner !== null || preparedSlot !== null || closingJobs > 0) return
+    preparedSlot = prepareRoom(adapter)
+  }
+
+  function scheduleTransportReport(connected: VoiceConnectedRoom): void {
+    transportTimer = clearTimer(transportTimer)
+    if (deps.reportDiagnostic === undefined || connected.getTransportInfo === undefined) return
+    const attempt = (delayMs: number, retriesLeft: number): void => {
+      transportTimer = timers.setTimeout(() => {
+        transportTimer = null
+        if (room !== connected || disposed) return
+        void connected.getTransportInfo!().then((transport) => {
+          if (room !== connected || disposed) return
+          if (transport !== null) report({ event: 'transport', transport })
+          else if (retriesLeft > 0) attempt(15_000, retriesLeft - 1)
+        }).catch(() => {})
+      }, delayMs)
+    }
+    attempt(5_000, 1)
+  }
+
+  // ─── ДВИГАТЕЛЯТ ───────────────────────────────────────────────────────
+
+  function shouldConnect(): boolean {
+    return !disposed && wantVoice && !failed && !serverDisabled && onTableScreen()
+  }
+
+  function kick(): void {
+    if (disposed) return
+    if (driving) {
+      driveAgain = true
+      return
+    }
+    void drive()
+  }
+
+  async function drive(): Promise<void> {
+    driving = true
+    try {
+      do {
+        driveAgain = false
+        await step()
+      } while (driveAgain && !disposed)
+    } catch (error) {
+      log(`[voice] drive: ${error instanceof Error ? error.name : 'error'}`)
+    } finally {
+      driving = false
+      invalidate()
+    }
+  }
+
+  async function step(): Promise<void> {
+    if (!shouldConnect()) {
+      if (room !== null || preparedSlot !== null) await closeRoom(false)
+      releaseHeld()
+      return
+    }
+    // Пауза: временно липсващ контекст или игрова връзка — без нови опити;
+    // съществуващата връзка остава (сървърът сам прекратява след 120 s).
+    if (!gameConnected) return
+    if (closeRequested !== null) {
+      const reason = closeRequested
+      closeRequested = null
+      if (room !== null) await closeRoom(reason === 'rotate' && wantMic)
+    }
+    if (room !== null) {
+      // Докато SDK-то само възстановява връзката — без наша операция.
+      if (link === 'connected') await ensureMicrophone()
+      return
+    }
+    if (retryTimer !== null) return // чака паузата (ready/игрова връзка я съкращават)
+    await connectOnce()
+  }
+
+  function trackClosing(job: Promise<void>): void {
+    closingJobs += 1
+    const done = job.then(() => { closingJobs -= 1 })
+    closing = closing.then(() => done)
+  }
+
+  /** Затваряне на текущата стая; keepMic -> живият capture се задържа за следващата. */
+  async function closeRoom(keepMic: boolean): Promise<void> {
+    const old = room
+    const slot = preparedSlot
+    room = null
+    link = 'none'
+    roomOwner = null
+    preparedSlot = null
+    clearSpeaking()
+    transportTimer = clearTimer(transportTimer)
+    invalidate()
     const job = (async () => {
-      if (oldRoom !== null) {
-        if (retainForSeq !== null) {
-          const held = await oldRoom.detachMicrophoneForReuse().catch(() => null)
-          if (held !== null) {
-            if (!disposed && retainForSeq === sessionSeq && restoreMic === 'reuse' && wantsToSpeak) adoptRetained(held)
-            else held.release()
+      if (old !== null) {
+        counters.roomsDisconnected! += 1
+        if (keepMic && microphone === 'live') {
+          const seq = sessionSeq
+          const capture = await old.detachMicrophoneForReuse().catch(() => null)
+          if (capture !== null) {
+            // Напускане/изключване по време на откачането -> capture-ът се спира.
+            if (seq !== sessionSeq || !wantVoice || !wantMic) capture.release()
+            else {
+              counters.micReused! += 1
+              setHeld(capture)
+            }
           }
         }
-        await oldRoom.disconnect().catch(() => {})
-      } else if (oldPrepared !== null) {
-        await oldPrepared.abort().catch(() => {})
+        await old.disconnect().catch(() => {})
+        roomsOpen = Math.max(0, roomsOpen - 1)
       }
-    })().finally(() => { teardownCount -= 1 })
-    teardown = Promise.all([teardown, job]).then(() => undefined)
-  }
-
-  // ─── Край на сесия / cleanup ──────────────────────────────────────────
-
-  /**
-   * Спира гласа на тази страница (връзка, микрофон, аудио, таймери, токени).
-   * notifyServer -> voice_presence{onTableScreen:false} (лоби/магазин/напускане).
-   */
-  function stopSession(next: VoiceStatus, options: { canRestore: boolean; notifyServer: boolean; reason: VoiceSessionEndReason }): void {
-    // Диагностика: само реално прекратена сесия (не повторно извикване).
-    if (inUse || room !== null || prepared !== null) report({ event: 'session_end', reason: options.reason, stage: 'none' })
-    // Напускане/отстраняване/друг екран/изключен глас: намерението се изчиства.
-    cancelMicAttempt()
-    sessionSeq += 1
-    micSeq += 1
-    presenceTimer = clearTimer(presenceTimer)
-    disconnectTimer = clearTimer(disconnectTimer)
-    retryTimer = clearTimer(retryTimer)
-    transportTimer = clearTimer(transportTimer)
-    retryKick = null
-    settleAck(null)
-    if (options.notifyServer && inUse) sendPresence(false, presenceReasonOf(options.reason))
-    teardownRoom(room, prepared, null)
-    room = null
-    prepared = null
-    inUse = false
-    wantsToSpeak = false
-    restoreMic = 'none'
-    releaseRetained()
-    microphone = 'off'
-    playbackBlocked = false
-    generation = null
-    canRestore = options.canRestore
-    status = next
-    clearSpeaking()
+      if (slot !== null) await slot.connector.abort().catch(() => {})
+    })()
+    trackClosing(job)
+    await job
+    microphone = held !== null && wantMic ? 'requesting' : 'off'
     invalidate()
   }
 
-  /** Причина за сървъра (само тези, които изпращат onTableScreen:false). */
+  function scheduleRetry(hintMs: number | null): void {
+    attempts += 1
+    const delay = hintMs ?? backoffMs[Math.min(attempts - 1, backoffMs.length - 1)]!
+    retryTimer = clearTimer(retryTimer)
+    retryTimer = timers.setTimeout(() => {
+      retryTimer = null
+      kick()
+    }, delay)
+  }
+
+  function kickRetryNow(): void {
+    if (retryTimer === null) return
+    retryTimer = clearTimer(retryTimer)
+    kick()
+  }
+
+  /** Неясно членство: ограничени опити, после спиране с „Опитай отново“. */
+  function uncertainFailure(stage: VoiceFailStage, hintMs: number | null): void {
+    uncertainAttempts += 1
+    if (uncertainAttempts >= uncertainMaxAttempts) {
+      failConnection(stage)
+      return
+    }
+    scheduleRetry(hintMs)
+  }
+
+  function failConnection(stage: VoiceFailStage): void {
+    report({ event: 'session_end', reason: 'fail_connection', stage })
+    failed = true
+    retryTimer = clearTimer(retryTimer)
+    setUiError('service_unavailable')
+    if (wantVoice) sendPresence(false, 'fail_connection')
+    presenceTimer = clearTimer(presenceTimer)
+    invalidate()
+    kick() // затваря евентуална стая
+  }
+
+  async function connectOnce(): Promise<void> {
+    const seq = sessionSeq
+    const stale = (): boolean => seq !== sessionSeq || !shouldConnect() || !gameConnected
+    counters.connectAttempts! += 1
+    let loaded: VoiceAdapter
+    try {
+      loaded = await ensureAdapter()
+    } catch {
+      if (seq !== sessionSeq) return
+      if (attempts === 0) report({ event: 'connect_failed', reason: 'sdk_load_failed' })
+      uncertainFailure('sdk_load', null)
+      return
+    }
+    if (stale()) return
+    const ack = await presenceHandshake()
+    if (stale()) return
+    if (ack === 'unsent') {
+      // Игровият WS не е отворен: връщането му ще задейства нов опит.
+      scheduleRetry(null)
+      return
+    }
+    if (ack === null) {
+      // Сървърът не потвърди присъствието (5 s): неясно състояние — ограничени опити.
+      if (attempts === 0) report({ event: 'connect_failed', reason: 'presence_failed' })
+      uncertainFailure('presence', null)
+      return
+    }
+    if (!ack.ok) {
+      if (TERMINAL_PRESENCE_CODES.has(ack.code)) {
+        disableEntirely('disabled')
+        return
+      }
+      if (attempts === 0) report({ event: 'connect_failed', reason: 'presence_failed' })
+      if (UNCERTAIN_PRESENCE_CODES.has(ack.code)) uncertainFailure('presence', null)
+      else scheduleRetry(null)
+      return
+    }
+    const table = tableContext()
+    if (table === null) return
+    counters.tokenRequests! += 1
+    let response: { status: number; body: unknown } | null = null
+    try {
+      response = await deps.postJson(VOICE_TOKEN_PATH, { voiceTableId: table.voiceTableId, clientInstanceId })
+    } catch {
+      response = null
+    }
+    if (stale()) return
+    const body = response !== null && isObject(response.body) ? response.body : null
+    if (response === null || response.status !== 200 || body === null || body.ok !== true || typeof body.token !== 'string') {
+      const code = body !== null && typeof body.code === 'string' ? body.code : 'network'
+      if (TERMINAL_TOKEN_CODES.has(code)) {
+        disableEntirely('disabled')
+        return
+      }
+      if (attempts === 0) report({ event: 'connect_failed', reason: 'token_unavailable' })
+      const hinted = body !== null && typeof body.retryAfterMs === 'number' ? Math.max(200, body.retryAfterMs) : null
+      if (UNCERTAIN_TOKEN_CODES.has(code)) uncertainFailure('token', hinted)
+      else scheduleRetry(hinted)
+      return
+    }
+    const token = body as unknown as VoiceTokenSuccess
+    // Старата стая е напълно затворена преди новата (≤1 LiveKit връзка).
+    await closing
+    if (stale()) return
+    const slot = preparedSlot ?? prepareRoom(loaded)
+    preparedSlot = null
+    if (slot === null) {
+      scheduleRetry(null)
+      return
+    }
+    roomOwner = slot.owner
+    roomsOpen += 1
+    counters.roomsOpenMax = Math.max(counters.roomsOpenMax!, roomsOpen)
+    let connected: VoiceConnectedRoom
+    try {
+      // Токенът се подава директно и не се пази никъде след това.
+      connected = await slot.connector.connect(token.url, token.token)
+    } catch {
+      if (roomOwner === slot.owner) roomOwner = null
+      roomsOpen = Math.max(0, roomsOpen - 1)
+      void slot.connector.abort().catch(() => {})
+      if (seq !== sessionSeq) return
+      if (attempts === 0) report({ event: 'connect_failed', reason: 'livekit_connect_failed' })
+      scheduleRetry(null)
+      return
+    }
+    if (stale() || roomOwner !== slot.owner) {
+      if (roomOwner === slot.owner) roomOwner = null
+      const job = connected.disconnect().catch(() => {}).then(() => { roomsOpen = Math.max(0, roomsOpen - 1) })
+      trackClosing(job)
+      return
+    }
+    room = connected
+    link = 'connected'
+    everConnected = true
+    rotating = false
+    attempts = 0
+    uncertainAttempts = 0
+    generation = token.generation
+    speak = token.speak
+    playbackBlocked = !connected.canPlaybackAudio()
+    if (uiError?.code === 'service_unavailable') setUiError(null)
+    for (const participant of connected.listRemoteParticipants()) {
+      const profileId = profileIdFromVoiceIdentity(participant.identity)
+      if (profileId !== null && locallyMuted.has(profileId)) connected.setRemoteIdentityVolume(participant.identity, 0)
+    }
+    report({ event: 'connected' })
+    scheduleTransportReport(connected)
+    invalidate()
+    await ensureMicrophone()
+  }
+
+  /** Публикуване в свързаната стая (capture === undefined -> адаптерът сам придобива). */
+  async function publish(current: VoiceConnectedRoom, capture: VoiceRetainedMicrophone | undefined): Promise<void> {
+    microphone = 'requesting'
+    invalidate()
+    // Както след собствен capture (iOS AudioSession): възпроизвеждането продължава.
+    if (capture !== undefined) void current.startAudio().catch(() => {})
+    try {
+      await current.enableMicrophone(capture)
+    } catch (error) {
+      const handedBack = error instanceof VoiceMicrophoneError ? error.retained : null
+      if (handedBack !== null) {
+        // Прекъснато от SDK reconnect: публикуване след Reconnected (kick); общият срок тече.
+        noteMicInterruption('sdk_reconnect')
+        publishHandbacks += 1
+        if (micStartedAt !== null && publishHandbacks > 2) {
+          held = handedBack
+          failInitialAttempt('publish_cancelled')
+          return
+        }
+        setHeld(handedBack, false)
+        return
+      }
+      if (room !== current) return // стаята е сменена; следващият цикъл решава
+      microphone = 'off'
+      const failure = error instanceof VoiceMicrophoneError ? error.failure : 'unavailable'
+      const publishError = error instanceof VoiceMicrophoneError ? error.publishError : null
+      if (failure === 'not_permitted') {
+        report({ event: 'mic_failed', reason: 'mic_not_permitted' })
+        denySpeaking()
+        return
+      }
+      const code: VoiceUiErrorCode = failure === 'not_found' ? 'mic_not_found' : failure === 'permission_denied' ? 'mic_permission_denied' : 'mic_unavailable'
+      report({ event: 'mic_failed', reason: code === 'mic_not_found' ? 'mic_not_found' : code === 'mic_permission_denied' ? 'mic_permission_denied' : 'mic_unavailable' })
+      finishMicRequest('failed', capture === undefined
+        ? (failure === 'permission_denied' ? 'permission_denied' : failure === 'not_found' ? 'not_found' : failure === 'busy' ? 'device_busy' : 'gum_failed')
+        : publishFailureOf(publishError))
+      // Неуспешно публикуване (не прекъсване): без автоматични повторения.
+      wantMic = false
+      setUiError(code)
+      saveIntent()
+      invalidate()
+      return
+    }
+    if (room !== current || !wantMic) {
+      void current.disableMicrophone().catch(() => {})
+      if (microphone === 'requesting') microphone = 'off'
+      return
+    }
+    counters.micEnabled! += 1
+    microphone = 'live'
+    everLive = true
+    micStartedAt = null
+    publishHandbacks = 0
+    heldTimer = clearTimer(heldTimer)
+    if (uiError !== null && (uiError.code === 'mic_not_enabled' || uiError.code === 'mic_unavailable')) setUiError(null)
+    finishMicRequest('enabled')
+    saveIntent()
+    invalidate()
+  }
+
+  /** Микрофонът в свързаната стая — според желанието и правото (вътре в двигателя). */
+  async function ensureMicrophone(): Promise<void> {
+    const current = room
+    if (current === null || link !== 'connected') return
+    if (!wantMic) {
+      if (microphone !== 'off' || held !== null) dropMicrophone()
+      return
+    }
+    if (speak?.canSpeak !== true) {
+      denySpeaking()
+      return
+    }
+    if (microphone === 'live' && current.isMicrophoneLive()) return
+    if (held !== null) {
+      const capture = held
+      heldTimer = clearTimer(heldTimer)
+      held = null
+      await publish(current, capture)
+      return
+    }
+    if (adapter !== null && adapter.acquireMicrophone === undefined) {
+      // Адаптер без отделно придобиване: capture и публикуване в една стъпка.
+      if (micExplicit || (adapter.microphonePermissionGranted !== undefined && await adapter.microphonePermissionGranted().catch(() => false))) {
+        micExplicit = false
+        counters.micEnableAttempts! += 1
+        await publish(current, undefined)
+        return
+      }
+    }
+    if (acquiring) {
+      microphone = 'requesting'
+      return
+    }
+    if (micExplicit) {
+      startAcquire() // изрично действие — прозорецът за разрешение е позволен
+      return
+    }
+    // Възстановяване без изрично действие: нов capture само без прозорец.
+    const granted = adapter?.microphonePermissionGranted === undefined ? false : await adapter.microphonePermissionGranted().catch(() => false)
+    if (room !== current || !wantMic || acquiring || held !== null) return
+    if (granted) {
+      startAcquire()
+      return
+    }
+    wantMic = false
+    microphone = 'off'
+    setUiError('mic_not_enabled')
+    finishMicRequest('lost', 'acquired_not_published')
+    saveIntent()
+    invalidate()
+  }
+
+  // ─── Край на сесията ──────────────────────────────────────────────────
+
   function presenceReasonOf(reason: VoiceSessionEndReason): VoicePresenceLeaveReason | undefined {
     switch (reason) {
       case 'leave_voice':
@@ -787,728 +1222,150 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
   }
 
-  function disableEntirely(reason: VoiceSessionEndReason = 'disabled'): void {
-    stopSession('disabled', { canRestore: false, notifyServer: false, reason })
+  function stopSession(options: { reason: VoiceSessionEndReason; notifyServer: boolean; clearIntent: boolean; canRestore: boolean }): void {
+    if (wantVoice || room !== null || preparedSlot !== null) report({ event: 'session_end', reason: options.reason, stage: 'none' })
+    if (options.notifyServer && wantVoice) sendPresence(false, presenceReasonOf(options.reason))
+    sessionSeq += 1
+    finishMicRequest('cancelled')
+    wantVoice = false
+    wantMic = false
+    failed = false
+    rotating = false
+    everConnected = false
+    closeRequested = null
+    attempts = 0
+    uncertainAttempts = 0
+    presenceTimer = clearTimer(presenceTimer)
+    retryTimer = clearTimer(retryTimer)
+    transportTimer = clearTimer(transportTimer)
+    settleAck(null)
+    dropMicrophone()
+    playbackBlocked = false
+    generation = null
+    canRestore = options.canRestore
+    if (options.clearIntent) intentStore.clear()
+    // Затварянето минава през двигателя (единственият собственик на стаята).
+    invalidate()
+    kick()
+  }
+
+  function disableEntirely(reason: VoiceSessionEndReason): void {
+    stopSession({ reason, notifyServer: false, clearIntent: true, canRestore: false })
+    serverDisabled = true
     speak = null
     setUiError(null)
     invalidate()
   }
 
-  // ─── Свързване ────────────────────────────────────────────────────────
+  // ─── Действия ─────────────────────────────────────────────────────────
 
-  function adapterEvents(seq: number): VoiceAdapterEvents {
-    const current = (): boolean => seq === sessionSeq && !disposed
-    return {
-      onDisconnected: (cause, retained, reason) => {
-        // Остаряло събитие (напр. ROOM_DELETED на старата стая СЛЕД като
-        // ротацията вече е започнала от voice_table_updated) -> само освобождаване.
-        if (current()) {
-          if (cause !== 'client') report({ event: 'livekit_disconnect', reason: reason ?? livekitReasonOf(cause) })
-          handleRoomDisconnected(cause, retained)
-        } else retained?.release()
-      },
-      onReconnecting: () => {
-        if (!current() || room === null) return
-        status = 'reconnecting'
-        noteMicInterruption('sdk_reconnect')
-        report({ event: 'reconnecting' })
-        invalidate()
-      },
-      onReconnected: () => {
-        if (!current() || room === null) return
-        status = connectedStatus()
-        report({ event: 'reconnected' })
-        invalidate()
-        // Придобитият по време на reconnect микрофон чака — публикуване сега.
-        if (micAttempt !== null && micAttempt.acquired && retained !== null && restoreMic === 'reuse') {
-          const held = retained
-          retained = null
-          retainTimer = clearTimer(retainTimer)
-          restoreMic = 'none'
-          deliverAcquired(held)
-        }
-      },
-      onActiveSpeakersChanged: (identities) => { if (current()) applyActiveSpeakers(identities) },
-      onParticipantsChanged: () => { if (current()) invalidate() },
-      onPlaybackStatusChanged: (canPlayback) => {
-        // Само за свързана стая: при първо (lazy) включване startAudio() се
-        // вика извън жеста и може да откаже още при подготовката — тогава
-        // стойността се взима при connect (canPlaybackAudio) и от това събитие.
-        if (!current() || room === null) return
-        playbackBlocked = !canPlayback
-        invalidate()
-      },
-      onLocalMicrophoneLost: (reason) => {
-        if (!current()) return
-        if (microphone === 'live') report({ event: 'mic_lost', reason: reason ?? 'track_ended' })
-        // Изключено устройство / OS прекъсване: слушането продължава, без
-        // автоматично записване от друго устройство.
-        micSeq += 1
-        wantsToSpeak = false
-        restoreMic = 'none'
-        releaseRetained()
-        microphone = 'off'
-        // Сървърно отнета публикация при mute -> текстът за наказание.
-        setUiError(speak?.blockedReason === 'muted' ? 'mic_blocked' : 'mic_unavailable')
-        refreshConnectedStatus()
-        invalidate()
-      },
-      onDevicesChanged: () => {
-        if (!current()) return
-        if (uiError !== null && (uiError.code === 'mic_not_found' || uiError.code === 'mic_unavailable')) {
-          microphoneDevicesChanged = true
-          invalidate()
-        }
-      },
-    }
-  }
-
-  function prepareRoomNow(seq: number): void {
-    if (adapter === null || prepared !== null || room !== null || teardownCount > 0) return
-    try {
-      prepared = adapter.prepare(adapterEvents(seq), (identity) => {
-        const profileId = profileIdFromVoiceIdentity(identity)
-        return profileId !== null && locallyMuted.has(profileId)
-      })
-      counters.roomsCreated! += 1
-    } catch {
-      prepared = null
-    }
-  }
-
-  type TokenOutcome = { kind: 'token'; token: VoiceTokenSuccess } | { kind: 'disabled' } | { kind: 'unavailable' } | { kind: 'stale' }
-
-  async function fetchToken(seq: number): Promise<TokenOutcome> {
-    const table = tableContext()
-    if (table === null) return { kind: 'stale' }
-    for (let attempt = 1; attempt <= tokenMaxAttempts; attempt += 1) {
-      if (seq !== sessionSeq) return { kind: 'stale' }
-      counters.tokenRequests! += 1
-      let response: { status: number; body: unknown } | null = null
-      try {
-        response = await deps.postJson(VOICE_TOKEN_PATH, { voiceTableId: table.voiceTableId, clientInstanceId })
-      } catch {
-        response = null
-      }
-      if (seq !== sessionSeq) return { kind: 'stale' }
-      const body = response !== null && isObject(response.body) ? response.body : null
-      if (response !== null && response.status === 200 && body !== null && body.ok === true && typeof body.token === 'string') {
-        return { kind: 'token', token: body as unknown as VoiceTokenSuccess }
-      }
-      const code = body !== null && typeof body.code === 'string' ? body.code : 'network'
-      if (DISABLING_HTTP_CODES.has(code)) return { kind: 'disabled' }
-      if (code === 'presence_required' || code === 'invalid_session') {
-        await presenceHandshake()
-        if (seq !== sessionSeq) return { kind: 'stale' }
-      }
-      if (attempt === tokenMaxAttempts) break
-      const hinted = body !== null && typeof body.retryAfterMs === 'number' ? body.retryAfterMs : 0
-      const delay = Math.min(tokenMaxDelayMs, Math.max(hinted, tokenBaseDelayMs * 2 ** (attempt - 1)))
-      await waitKickable(delay)
-    }
-    return { kind: 'unavailable' }
-  }
-
-  /** presence -> token -> connect за текущата сесия. */
-  async function connectSession(seq: number, options: { enableMicAfter: boolean }): Promise<void> {
-    let loaded: VoiceAdapter
-    try {
-      loaded = await ensureAdapter()
-    } catch {
-      if (seq !== sessionSeq) return
-      report({ event: 'connect_failed', reason: 'sdk_load_failed' })
-      failConnection('service_unavailable', 'sdk_load')
-      return
-    }
-    if (seq !== sessionSeq) return
-    void loaded
-    const ack = await presenceHandshake()
-    if (seq !== sessionSeq) return
-    if (ack === null) {
-      report({ event: 'connect_failed', reason: 'presence_failed' })
-      failConnection('service_unavailable', 'presence')
-      return
-    }
-    if (!ack.ok) {
-      if (DISABLING_PRESENCE_CODES.has(ack.code)) disableEntirely()
-      else {
-        report({ event: 'connect_failed', reason: 'presence_failed' })
-        failConnection('service_unavailable', 'presence')
-      }
-      return
-    }
-    const outcome = await fetchToken(seq)
-    if (seq !== sessionSeq) return
-    if (outcome.kind === 'disabled') {
-      disableEntirely()
-      return
-    }
-    if (outcome.kind !== 'token') {
-      if (outcome.kind === 'unavailable') {
-        report({ event: 'connect_failed', reason: 'token_unavailable' })
-        failConnection('service_unavailable', 'token')
-      }
-      return
-    }
-    await teardown // старата стая е напълно изключена преди новата
-    if (seq !== sessionSeq) return
-    prepareRoomNow(seq)
-    const connector = prepared
-    if (connector === null) {
-      failConnection('service_unavailable', 'connect')
-      return
-    }
-    let connected: VoiceConnectedRoom
-    try {
-      // Токенът се подава директно и не се пази никъде след това.
-      connected = await connector.connect(outcome.token.url, outcome.token.token)
-    } catch {
-      if (seq !== sessionSeq) return
-      prepared = null
-      void connector.abort().catch(() => {})
-      report({ event: 'connect_failed', reason: 'livekit_connect_failed' })
-      failConnection('service_unavailable', 'connect')
-      return
-    }
-    if (seq !== sessionSeq) {
-      void connected.disconnect().catch(() => {})
-      return
-    }
-    prepared = null
-    room = connected
-    generation = outcome.token.generation
-    speak = outcome.token.speak
-    playbackBlocked = !connected.canPlaybackAudio()
-    microphone = 'off'
-    status = connectedStatus()
-    // Индивидуалните заглушавания важат и в новата стая.
-    for (const participant of connected.listRemoteParticipants()) {
-      const profileId = profileIdFromVoiceIdentity(participant.identity)
-      if (profileId !== null && locallyMuted.has(profileId)) connected.setRemoteIdentityVolume(participant.identity, 0)
-    }
-    report({ event: 'connected' })
-    scheduleTransportReport(seq, connected)
-    invalidate()
-    if (options.enableMicAfter) {
-      if (speak.canSpeak) {
-        void startMicrophone(seq, { checkWithBackend: false })
-      } else {
-        wantsToSpeak = false
-        setUiError(speak.blockedReason === 'muted' ? 'mic_blocked' : 'vip_required')
-        invalidate()
-      }
-    }
-  }
-
-  function failConnection(code: VoiceUiErrorCode, stage: VoiceFailStage): void {
-    report({ event: 'session_end', reason: 'fail_connection', stage })
-    // Гласът е недостъпен: заявеното включване е окончателно изгубено (съобщението е за услугата).
-    const attempt = micAttempt
-    endMicAttempt()
-    if (attempt !== null) reportMicAttempt(attempt, 'lost', 'session_failed')
-    teardownRoom(room, prepared, null)
-    room = null
-    prepared = null
-    presenceTimer = clearTimer(presenceTimer)
-    transportTimer = clearTimer(transportTimer)
-    if (inUse) sendPresence(false, 'fail_connection')
-    inUse = false
-    microphone = 'off'
-    wantsToSpeak = false
-    restoreMic = 'none'
-    releaseRetained()
-    clearSpeaking()
-    status = 'unavailable'
-    setUiError(code)
-    invalidate()
-  }
-
-  function beginJoin(withMicrophone: boolean): void {
+  function beginJoin(options: { mic: boolean; explicit: boolean; source: VoiceMicRequestSource }): void {
     if (disposed || !onTableScreen()) return
-    if (inUse || status === 'connecting' || status === 'disconnecting') return
-    sessionSeq += 1
-    const seq = sessionSeq
-    inUse = true
-    wantsToSpeak = withMicrophone
+    suspended = null
+    contextGraceTimer = clearTimer(contextGraceTimer)
+    if (!wantVoice) {
+      wantVoice = true
+      sessionSeq += 1
+      attempts = 0
+      uncertainAttempts = 0
+      everConnected = false
+    }
+    failed = false
+    serverDisabled = false
     canRestore = false
     offerDismissed = true
     microphoneDevicesChanged = false
     setUiError(null)
-    status = 'connecting'
-    // Ако SDK-то вече е заредено: стаята и отключването на аудиото са в
-    // СЪЩИЯ потребителски жест (autoplay на iOS/Android).
-    prepareRoomNow(seq)
+    if (options.mic) {
+      wantMic = true
+      micExplicit = options.explicit
+      if (options.explicit) micRequest ??= { source: options.source, startedAt: nowMs(), interruption: 'none', gum: 'none' }
+    }
+    retryTimer = clearTimer(retryTimer)
+    // Ако SDK-то вече е заредено: стаята и отключването на аудиото са в СЪЩИЯ жест.
+    prepareInGesture()
+    saveIntent()
     invalidate()
-    void connectSession(seq, { enableMicAfter: withMicrophone })
+    kick()
   }
 
-  // ─── Прекъсвания на стаята, ротация, reconnect ────────────────────────
-
-  function handleRoomDisconnected(cause: VoiceDisconnectCause, held: VoiceRetainedMicrophone | null): void {
-    if (cause === 'client') {
-      held?.release()
+  async function enableMicrophoneExplicit(): Promise<void> {
+    if (disposed) return
+    micRequestSource = 'panel'
+    if (!wantVoice) {
+      beginJoin({ mic: true, explicit: true, source: 'panel' })
       return
     }
-    if (cause === 'room_deleted') {
-      // Ротация, при която LiveKit е изтрил стаята ПРЕДИ voice_table_updated:
-      // адаптерът е предал живия capture — същите правила като при
-      // контролирана ротация (beginRotation решава дали да го задържи).
-      beginRotation({ held })
-      return
-    }
-    held?.release()
-    room = null
-    prepared = null
-    if (micAttempt !== null && cause === 'connection_lost') {
-      // Заявеното включване още не е завършено (разрешението/getUserMedia чака
-      // или придобитият capture чака стая): намерението остава за новата стая;
-      // НЯМА нов getUserMedia — ползва се заявеният.
-      noteMicInterruption('connection_lost')
-      microphone = 'requesting'
-      restoreMic = retained !== null ? 'reuse' : 'none'
-    } else {
-      // Адаптерът вече е спрял локалния capture — прекратен capture не води до
-      // автоматичен нов: само слушане след връщане.
-      if (microphone === 'live' && cause === 'connection_lost') report({ event: 'mic_lost', reason: 'connection_lost' })
-      microphone = 'off'
-      wantsToSpeak = false
-      restoreMic = 'none'
-    }
-    clearSpeaking()
-    if (cause === 'removed') {
-      // Сървърът е прекратил достъпа (lease, напуснат екран, 120 s) —
-      // voice_access_ended носи причината; без автоматично връщане.
-      stopSession('idle', { canRestore: true, notifyServer: false, reason: 'removed' })
-      return
-    }
-    if (cause === 'duplicate_identity') {
-      stopSession('idle', { canRestore: false, notifyServer: false, reason: 'duplicate_identity' })
-      return
-    }
-    // connection_lost: официалният reconnect на LiveKit не е успял —
-    // ограничени нови опити с нов токен (без втори паралелен цикъл).
-    report({ event: 'connection_lost' })
-    void reconnectWithBackoff()
-  }
-
-  /**
-   * Ротация — и по двата реда на събитията:
-   *   * voice_table_updated{ready:false} първо: стаята е жива -> capture-ът се
-   *     откача преди нашия disconnect (teardownRoom);
-   *   * ROOM_DELETED първо (`deleted`): стаята вече е изключена от сървъра,
-   *     адаптерът е предал живия capture (`deleted.held`).
-   * Последващото другото събитие не започва втора ротация (status 'rotating'
-   * / остаряло събитие на старата стая -> само освобождаване).
-   */
-  function beginRotation(deleted?: { held: VoiceRetainedMicrophone | null }): void {
-    if (!inUse) {
-      deleted?.held?.release()
-      return
-    }
-    counters.rotations! += 1
-    sessionSeq += 1
-    micSeq += 1
-    const seq = sessionSeq
-    // Незасегнат говорещ (жив capture, желан и позволен) запазва същия capture;
-    // доброволно изключен или наказан -> слушане. Заявено, но още незавършено
-    // включване (разрешението чака / capture-ът чака стая) пази намерението.
-    const pendingIntent = micAttempt !== null
-    if (pendingIntent) noteMicInterruption(deleted !== undefined ? 'room_deleted' : 'rotation')
-    const micAllowed = microphone === 'live' && wantsToSpeak && speak?.canSpeak === true
-    const keepMic = micAllowed && (deleted !== undefined ? deleted.held !== null : room !== null)
-    if (microphone === 'live' && !keepMic) report({ event: 'mic_lost', reason: 'rotation' })
-    restoreMic = keepMic ? 'reuse' : pendingIntent && retained !== null ? 'reuse' : 'none'
-    if (!keepMic && !pendingIntent) wantsToSpeak = false
-    if (deleted === undefined) {
-      teardownRoom(room, prepared, keepMic ? seq : null)
-    } else if (keepMic) {
-      adoptRetained(deleted.held!)
-    } else {
-      deleted.held?.release()
-    }
-    room = null
-    prepared = null
-    microphone = pendingIntent ? 'requesting' : 'off'
-    clearSpeaking()
-    status = 'rotating'
-    invalidate()
-    void resumeAfterInterruption(seq)
-  }
-
-  async function reconnectWithBackoff(): Promise<void> {
-    if (!inUse) return
-    sessionSeq += 1
-    micSeq += 1
-    const seq = sessionSeq
-    status = 'reconnecting'
-    invalidate()
-    for (const delay of reconnectDelaysMs) {
-      await waitKickable(delay)
-      if (seq !== sessionSeq) return
-      if (!onTableScreen()) return
-      const resumed = await tryResume(seq)
-      if (resumed !== 'retry') return
-    }
-    if (seq === sessionSeq) {
-      report({ event: 'reconnect_failed' })
-      failConnection('service_unavailable', 'reconnect_exhausted')
-    }
-  }
-
-  async function resumeAfterInterruption(seq: number): Promise<void> {
-    // ROOM_DELETED и voice_table_updated{ready} идват почти едновременно: един опит на сесия.
-    if (resumeInFlightSeq === seq) return
-    resumeInFlightSeq = seq
-    try {
-      const outcome = await tryResume(seq)
-      if (outcome === 'retry' && seq === sessionSeq) failConnection('service_unavailable', 'rotation_resume')
-    } finally {
-      if (resumeInFlightSeq === seq) resumeInFlightSeq = null
-    }
-  }
-
-  /** Нов токен за текущата генерация и свързване; запазва режима (слушане/микрофон). */
-  async function tryResume(seq: number): Promise<'done' | 'retry'> {
-    // Присъствието се потвърждава ПРЕДИ токена (и при възстановяване/ротация):
-    // сървърът издава токен само при достатъчно оставащ lease.
-    const ack = await presenceHandshake()
-    if (seq !== sessionSeq) return 'done'
-    if (ack === null) return 'retry'
-    if (!ack.ok) {
-      if (DISABLING_PRESENCE_CODES.has(ack.code)) {
-        disableEntirely()
-        return 'done'
-      }
-      return 'retry'
-    }
-    const outcome = await fetchToken(seq)
-    if (seq !== sessionSeq) return 'done'
-    if (outcome.kind === 'disabled') {
-      disableEntirely()
-      return 'done'
-    }
-    if (outcome.kind !== 'token') return outcome.kind === 'stale' ? 'done' : 'retry'
-    await teardown // старата стая (и откачването на capture-а) е приключила
-    if (seq !== sessionSeq) return 'done'
-    prepareRoomNow(seq)
-    const connector = prepared
-    if (connector === null) return 'retry'
-    try {
-      const connected = await connector.connect(outcome.token.url, outcome.token.token)
-      if (seq !== sessionSeq) {
-        void connected.disconnect().catch(() => {})
-        return 'done'
-      }
-      prepared = null
-      room = connected
-      generation = outcome.token.generation
-      speak = outcome.token.speak
-      playbackBlocked = !connected.canPlaybackAudio()
-      for (const participant of connected.listRemoteParticipants()) {
-        const profileId = profileIdFromVoiceIdentity(participant.identity)
-        if (profileId !== null && locallyMuted.has(profileId)) connected.setRemoteIdentityVolume(participant.identity, 0)
-      }
-      status = connectedStatus()
-      report({ event: 'connected' })
-      scheduleTransportReport(seq, connected)
-      invalidate()
-      // Микрофонът в новата стая: само при валидно право и запазено желание.
-      //   reuse — същият жив capture (без getUserMedia); не е жив -> слушане;
-      //   fresh — изрично „Включи микрофона“, изискало нов токен;
-      //   none  — слушане (никога автоматичен нов capture).
-      // Заявено включване, чието getUserMedia (разрешението) още чака: то само
-      // ще публикува в тази стая при завършване (deliverAcquired).
-      if (micAttempt !== null && !micAttempt.acquired) {
-        restoreMic = 'none'
-        microphone = 'requesting'
-        invalidate()
-        return 'done'
-      }
-      const mode = restoreMic
-      restoreMic = 'none'
-      const held = retained
-      retained = null
-      retainTimer = clearTimer(retainTimer)
-      if (mode !== 'none' && wantsToSpeak && speak.canSpeak) {
-        if (mode === 'fresh') {
-          void startMicrophone(seq, { checkWithBackend: false })
-        } else if (held !== null && held.isLive()) {
-          void startMicrophone(seq, { checkWithBackend: false, reuse: held })
-        } else {
-          held?.release()
-          if (micAttempt !== null) {
-            loseMicAttempt('acquired_not_published')
-          } else {
-            wantsToSpeak = false
-            setUiError('mic_unavailable')
-            invalidate()
-          }
-        }
-      } else {
-        if (held !== null) {
-          counters.retainedReleased! += 1
-          held.release()
-        }
-        // Заявено включване без право за говорене в новата стая -> познатото съобщение.
-        if (micAttempt !== null && mode !== 'none' && wantsToSpeak) denyMicAttempt()
-        else if (micAttempt !== null) loseMicAttempt('acquired_not_published')
-        wantsToSpeak = false
-      }
-      return 'done'
-    } catch {
-      prepared = null
-      void connector.abort().catch(() => {})
-      return 'retry'
-    }
-  }
-
-  // ─── Микрофон ─────────────────────────────────────────────────────────
-
-  async function startMicrophone(seq: number, options: { checkWithBackend: boolean; reuse?: VoiceRetainedMicrophone }): Promise<void> {
-    micSeq += 1
-    const mSeq = micSeq
-    const stale = (): boolean => seq !== sessionSeq || mSeq !== micSeq || disposed
-    const table = tableContext()
-    if (room === null || table === null) {
-      options.reuse?.release()
-      if (options.reuse !== undefined && micAttempt !== null && micAttempt.acquired) loseMicAttempt('acquired_not_published')
-      return
-    }
-    wantsToSpeak = true
-    microphone = 'requesting'
+    if (microphone === 'live' || acquiring) return
+    wantMic = true
+    micExplicit = true
+    micRequest ??= { source: micRequestSource, startedAt: nowMs(), interruption: 'none', gum: 'none' }
     microphoneDevicesChanged = false
     setUiError(null)
+    if (failed) {
+      failed = false
+      attempts = 0
+      uncertainAttempts = 0
+    }
+    saveIntent()
+    const table = tableContext()
+    if (!isConnected() || table === null) {
+      invalidate()
+      kick() // ще се включи след свързването
+      return
+    }
+    microphone = 'requesting'
     invalidate()
-    if (options.checkWithBackend) {
-      // Авторитетна backend проверка — не се доверяваме на стар клиентски VIP статус.
-      let response: { status: number; body: unknown } | null = null
-      try {
-        response = await deps.postJson(VOICE_SPEAK_ACCESS_PATH, { voiceTableId: table.voiceTableId, clientInstanceId })
-      } catch {
-        response = null
-      }
-      if (stale()) return
-      const body = response !== null && isObject(response.body) ? (response.body as VoiceSpeakAccessResult & Record<string, unknown>) : null
-      if (response === null || response.status !== 200 || body === null || body.ok !== true) {
-        microphone = 'off'
-        wantsToSpeak = false
-        setUiError('service_unavailable')
-        refreshConnectedStatus()
-        invalidate()
-        return
-      }
-      if (body.canSpeak === false) {
-        microphone = 'off'
-        wantsToSpeak = false
-        if (body.speak !== undefined) speak = body.speak
-        setUiError(body.code === 'muted' ? 'mic_blocked' : 'vip_required')
-        refreshConnectedStatus()
-        invalidate()
-        return
-      }
-      if (speak !== null) speak = { ...speak, canSpeak: true, blockedReason: null }
-      if (body.upgrade === 'request_new_token') {
-        // Правата в LiveKit не са повишени на място -> нов токен (кратък реконект).
-        await reconnectForPermissions(seq)
-        return
-      }
-    }
-    const currentRoom = room
-    if (currentRoom === null || stale()) {
-      options.reuse?.release()
-      return
-    }
-    // Придобиване отделно от публикуването: getUserMedia не зависи от
-    // временната LiveKit сесия (виж acquireAndPublish/deliverAcquired).
-    if (options.reuse === undefined && adapter !== null && adapter.acquireMicrophone !== undefined) {
-      await acquireAndPublish(table, adapter)
-      return
-    }
-    const publishingAttempt = options.reuse !== undefined && micAttempt !== null && micAttempt.acquired ? micAttempt : null
-    if (options.reuse !== undefined) counters.micReused! += 1
-    else counters.micEnableAttempts! += 1
+    // Авторитетна backend проверка — не се доверяваме на стар клиентски VIP статус.
+    const seq = sessionSeq
+    let response: { status: number; body: unknown } | null = null
     try {
-      await currentRoom.enableMicrophone(options.reuse)
-    } catch (error) {
-      const handedBack = error instanceof VoiceMicrophoneError ? error.retained : null
-      const publishError = error instanceof VoiceMicrophoneError ? error.publishError : null
-      if (handedBack !== null) {
-        // Публикуването е прекъснато от reconnect на LiveKit SDK (типично при
-        // първото публикуване в нова стая) — заявката остава, а същият capture
-        // се публикува в актуалната стая (веднага или след Reconnected; ≤20 s).
-        const attempt = publishingAttempt !== null && micAttempt === publishingAttempt ? publishingAttempt : null
-        if (attempt !== null && !disposed && attempt.publishRetries < MAX_PUBLISH_RETRIES) {
-          attempt.publishRetries += 1
-          noteMicInterruption('sdk_reconnect')
-          deliverAcquired(handedBack)
-          return
-        }
-        handedBack.release()
-        if (attempt !== null) {
-          loseMicAttempt(publishFailureOf(publishError))
-          return
-        }
-      }
-      if (stale()) {
-        // Ново прекъсване по време на публикуването — заявеният capture е изразходван.
-        if (publishingAttempt !== null && micAttempt === publishingAttempt) loseMicAttempt('acquired_not_published')
-        return
-      }
-      microphone = 'off'
-      wantsToSpeak = false
-      const failure = error instanceof VoiceMicrophoneError ? error.failure : 'unavailable'
-      if (publishingAttempt !== null && micAttempt === publishingAttempt) {
-        endMicAttempt()
-        reportMicAttempt(publishingAttempt, 'failed', failure === 'not_permitted' ? 'not_permitted' : publishFailureOf(publishError))
-      } else if (options.reuse !== undefined) {
-        report({ event: 'mic_lost', reason: 'rotation' })
-      }
-      report({
-        event: 'mic_failed',
-        reason: failure === 'not_found' ? 'mic_not_found'
-          : failure === 'permission_denied' ? 'mic_permission_denied'
-            : failure === 'not_permitted' ? 'mic_not_permitted'
-              : 'mic_unavailable',
-      })
-      setUiError(
-        failure === 'not_found' ? 'mic_not_found'
-          : failure === 'permission_denied' ? 'mic_permission_denied'
-            : failure === 'not_permitted' ? (speak?.blockedReason === 'muted' ? 'mic_blocked' : 'vip_required')
-              : 'mic_unavailable',
-      )
-      refreshConnectedStatus()
+      response = await deps.postJson(VOICE_SPEAK_ACCESS_PATH, { voiceTableId: table.voiceTableId, clientInstanceId })
+    } catch {
+      response = null
+    }
+    if (seq !== sessionSeq || !wantMic) return
+    const body = response !== null && isObject(response.body) ? (response.body as VoiceSpeakAccessResult & Record<string, unknown>) : null
+    if (response === null || response.status !== 200 || body === null || body.ok !== true) {
+      wantMic = false
+      dropMicrophone()
+      finishMicRequest('failed', 'session_failed')
+      setUiError('service_unavailable')
+      saveIntent()
       invalidate()
       return
     }
-    if (stale() || room !== currentRoom) {
-      // Остаряла операция (изключване, напускане, mute) — никога не оставяме микрофона включен.
-      void currentRoom.disableMicrophone().catch(() => {})
-      if (publishingAttempt !== null && micAttempt === publishingAttempt) loseMicAttempt('acquired_not_published')
-      return
-    }
-    counters.micEnabled! += 1
-    microphone = 'live'
-    if (publishingAttempt !== null && micAttempt === publishingAttempt) {
-      endMicAttempt()
-      reportMicAttempt(publishingAttempt, publishingAttempt.interruption === 'none' ? 'enabled' : 'recovered')
-    }
-    refreshConnectedStatus()
-    invalidate()
-  }
-
-  /**
-   * Изрично заявено включване: getUserMedia (разрешението) отделно от
-   * стаята. Ако междувременно връзката се възстанови/прекъсне или стаята се
-   * ротира — намерението остава и придобитият capture се публикува в
-   * актуалната стая (deliverAcquired). Ако заявката е отменена (изключване,
-   * напускане, mute, друга маса/екран) — получения track се спира.
-   */
-  async function acquireAndPublish(table: Extract<VoiceContext, { kind: 'table' }>, loaded: VoiceAdapter): Promise<void> {
-    if (loaded.acquireMicrophone === undefined) return
-    if (micAttempt !== null) cancelMicAttempt()
-    micAttemptSeq += 1
-    const attempt: MicAttempt = {
-      id: micAttemptSeq,
-      tableKey: tableKeyOf(table),
-      source: micRequestSource,
-      startedAt: nowMs(),
-      interruption: 'none',
-      gum: 'none',
-      acquired: false,
-      publishRetries: 0,
-    }
-    micAttempt = attempt
-    counters.micEnableAttempts! += 1
-    let held: VoiceRetainedMicrophone
-    try {
-      held = await loaded.acquireMicrophone()
-    } catch (error) {
-      if (micAttempt !== attempt) return // отменена междувременно — без грешка
-      attempt.gum = gumBucket(nowMs() - attempt.startedAt)
-      endMicAttempt()
-      microphone = 'off'
-      wantsToSpeak = false
-      restoreMic = 'none'
-      const failure = error instanceof VoiceMicrophoneError ? error.failure : 'unavailable'
-      report({
-        event: 'mic_failed',
-        reason: failure === 'not_found' ? 'mic_not_found' : failure === 'permission_denied' ? 'mic_permission_denied' : 'mic_unavailable',
-      })
-      reportMicAttempt(attempt, 'failed',
-        failure === 'permission_denied' ? 'permission_denied'
-          : failure === 'not_found' ? 'not_found'
-            : failure === 'busy' ? 'device_busy'
-              : 'gum_failed')
-      setUiError(failure === 'not_found' ? 'mic_not_found' : failure === 'permission_denied' ? 'mic_permission_denied' : 'mic_unavailable')
-      refreshConnectedStatus()
+    if (body.canSpeak === false) {
+      if (body.speak !== undefined) speak = body.speak
+      denySpeaking()
       invalidate()
       return
     }
-    attempt.gum = gumBucket(nowMs() - attempt.startedAt)
-    const current = tableContext()
-    if (disposed || micAttempt !== attempt || current === null || tableKeyOf(current) !== attempt.tableKey || !onTableScreen()) {
-      // Заявката е отменена (или друга маса/екран): track-ът се спира, не се публикува.
-      held.release()
-      if (micAttempt === attempt) cancelMicAttempt()
-      return
-    }
-    attempt.acquired = true
-    startMicAttemptDeadline(attempt)
-    deliverAcquired(held)
-  }
-
-  async function reconnectForPermissions(seq: number): Promise<void> {
-    if (seq !== sessionSeq) return
-    sessionSeq += 1
-    const nextSeq = sessionSeq
-    teardownRoom(room, prepared, null)
-    room = null
-    prepared = null
-    await teardown
-    if (nextSeq !== sessionSeq) return
-    // Изрично „Включи микрофона“ (правото е потвърдено от backend-а) —
-    // единственият случай на capture след нов токен.
-    restoreMic = 'fresh'
-    wantsToSpeak = true
-    microphone = 'off'
-    status = 'connecting'
+    if (speak !== null) speak = { ...speak, canSpeak: true, blockedReason: null }
+    // Правата в LiveKit не са повишени на място -> нов токен (двигателят).
+    if (body.upgrade === 'request_new_token') closeRequested = 'renew'
     invalidate()
-    const outcome = await tryResume(nextSeq)
-    if (outcome === 'retry' && nextSeq === sessionSeq) failConnection('service_unavailable', 'permissions_reconnect')
+    kick()
   }
-
-  function stopMicrophone(): void {
-    // Доброволно изключване / mute: незавършената заявка се отменя (без грешка).
-    cancelMicAttempt()
-    micSeq += 1
-    wantsToSpeak = false
-    restoreMic = 'none'
-    releaseRetained()
-    const currentRoom = room
-    if (microphone !== 'off' && currentRoom !== null) counters.micDisabled! += 1
-    microphone = 'off'
-    if (currentRoom !== null) void currentRoom.disableMicrophone().catch(() => {})
-    refreshConnectedStatus()
-    invalidate()
-  }
-
-  // ─── Сървърни съобщения ───────────────────────────────────────────────
 
   function applySpeakState(next: VoiceSpeakState): void {
     speak = next
     if (!next.canSpeak && next.blockedReason === 'muted') {
-      // Административен mute: незабавно спиране и освобождаване на
-      // микрофона; слушането остава. Без автоматично включване след края му.
-      if (microphone !== 'off' || wantsToSpeak) stopMicrophone()
-      restoreMic = 'none'
-      releaseRetained() // и запазеният capture по време на ротация
+      // Административен mute: веднага без микрофон; без автоматично включване след края му.
+      if (wantMic || microphone !== 'off' || held !== null) {
+        wantMic = false
+        dropMicrophone()
+        finishMicRequest('cancelled')
+        saveIntent()
+      }
       setUiError('mic_blocked')
     } else if (next.canSpeak && uiError !== null && (uiError.code === 'mic_blocked' || uiError.code === 'vip_required')) {
       setUiError(null)
     }
-    refreshConnectedStatus()
     invalidate()
   }
+
+  // ─── Сървърни съобщения ───────────────────────────────────────────────
 
   function handleServerMessage(message: { type: string }): boolean {
     if (!isVoiceServerMessage(message)) return false
@@ -1519,32 +1376,41 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         if (message.ok) {
           renewMs = Math.max(5_000, Math.min(message.renewAfterMs, message.leaseTtlMs / 2))
           if (message.onTableScreen) applySpeakState(message.speak)
-        } else if (DISABLING_PRESENCE_CODES.has(message.code) && pendingAck === null) {
-          disableEntirely()
+        } else if (TERMINAL_PRESENCE_CODES.has(message.code) && pendingAck === null && wantVoice) {
+          disableEntirely('disabled')
         }
         settleAck(message)
         return true
       }
       case 'voice_table_updated': {
-        if (!inUse) return true
+        if (!wantVoice) return true
         if (!message.ready) {
-          // Закъсняло съобщение за генерацията, в която вече сме -> без втора ротация.
+          // Закъсняло съобщение за генерацията, в която вече сме -> без ротация.
           if (generation !== null && message.generation === generation && room !== null) return true
-          if (status !== 'rotating' && (room !== null || isConnectedStatus(status) || status === 'reconnecting')) {
-            beginRotation()
-          }
-        } else if (retryKick !== null) {
-          retryKick() // готово -> веднага нов токен
-        } else if (status === 'rotating' && room === null) {
-          void resumeAfterInterruption(sessionSeq)
+          if (!rotating) counters.rotations! += 1
+          rotating = true
+          noteMicInterruption('rotation')
+          if (room !== null) closeRequested = 'rotate'
+          invalidate()
+          kick()
+        } else {
+          kickRetryNow()
+          kick()
         }
         return true
       }
       case 'voice_access_ended': {
-        const permanent = message.reason === 'banned' || message.reason === 'session_displaced' || message.reason === 'voice_off'
-          || message.reason === 'table_released' || message.reason === 'kicked'
-        if (permanent) disableEntirely('access_ended')
-        else stopSession('idle', { canRestore: message.reason !== 'session_replaced', notifyServer: false, reason: 'access_ended' })
+        if (PERMANENT_ACCESS_END.has(message.reason)) {
+          disableEntirely('access_ended')
+        } else if (message.reason === 'session_replaced') {
+          // Друга страница на същия играч пое гласа — тази не се връща.
+          stopSession({ reason: 'access_ended', notifyServer: false, clearIntent: true, canRestore: false })
+        } else if (wantVoice) {
+          // Технически край (lease, игрова връзка): ново свързване с потвърдено присъствие.
+          report({ event: 'session_end', reason: 'access_ended', stage: 'none' })
+          if (room !== null) closeRequested = 'renew'
+          kick()
+        }
         return true
       }
       case 'voice_speak_access_updated': {
@@ -1557,10 +1423,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
 
   // ─── Snapshot ─────────────────────────────────────────────────────────
 
-  function computeParticipants(): VoiceSeatParticipant[] {
+  function computeParticipants(status: VoiceStatus): VoiceSeatParticipant[] {
     const table = tableContext()
     if (table === null) return []
-    const connectedNow = room !== null && (isConnectedStatus(status) || status === 'reconnecting')
+    const connectedNow = room !== null && (status === 'connected_listening' || status === 'connected_speaking' || status === 'connected_muted' || status === 'reconnecting')
     const remote = new Map<string, boolean>()
     if (connectedNow && room !== null) {
       for (const participant of room.listRemoteParticipants()) {
@@ -1570,7 +1436,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
     const result: VoiceSeatParticipant[] = []
     for (const seat of table.seats) {
-      if (seat.isBot || seat.profileId === null) continue // ботовете не участват
+      if (seat.isBot || seat.profileId === null) continue
       const isSelf = seat.profileId === table.selfProfileId
       const locallyMutedSeat = locallyMuted.has(seat.profileId)
       if (!connectedNow) {
@@ -1602,12 +1468,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   function getSnapshot(): VoiceSnapshot {
     if (cachedSnapshot !== null) return cachedSnapshot
     const table = tableContext()
+    const status = computeStatus()
     cachedSnapshot = {
       status,
       voiceTableId: table?.voiceTableId ?? null,
       screen: table?.screen ?? null,
       speak,
-      wantsToSpeak,
+      wantsToSpeak: wantMic,
       microphone,
       playbackBlocked,
       uiError,
@@ -1616,7 +1483,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       microphoneDevicesChanged,
       generation,
       locallyMutedProfileIds: [...locallyMuted].sort(),
-      participants: computeParticipants(),
+      participants: computeParticipants(status),
       speakingProfileIds: [...speakingProfiles].sort(),
     }
     return cachedSnapshot
@@ -1628,91 +1495,125 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     return a.length === b.length && a.every((seat, index) => seat.profileId === b[index]!.profileId && seat.isBot === b[index]!.isBot)
   }
 
+  function resetTableState(nextTable: Extract<VoiceContext, { kind: 'table' }> | null, keepMutes = false): void {
+    speak = null
+    setUiError(null)
+    offerDismissed = false
+    serverDisabled = false
+    canRestore = false
+    if (!keepMutes && locallyMutedTableId !== (nextTable?.voiceTableId ?? null)) {
+      locallyMuted.clear()
+      locallyMutedTableId = nextTable?.voiceTableId ?? null
+    }
+  }
+
   const controller: VoiceController = {
     setContext(next) {
       if (disposed) return
-      const previous = context
-      const prevTable = previous.kind === 'table' ? previous : null
+      const prevTable = tableContext()
       const nextTable = next.kind === 'table' ? next : null
+      if (nextTable === null && prevTable !== null && wantVoice) {
+        // Масата изчезна: връзката се затваря ВЕДНАГА (без звук извън масата —
+        // реално напускане), а намерението се пази кратко за временно липсващ snapshot.
+        const key = tableKey()!
+        const mic = wantMic
+        sendPresence(false, 'context_changed')
+        stopSession({ reason: 'context_changed', notifyServer: false, clearIntent: false, canRestore: false })
+        suspended = { key, mic }
+        contextGraceTimer = clearTimer(contextGraceTimer)
+        contextGraceTimer = timers.setTimeout(() => {
+          contextGraceTimer = null
+          suspended = null
+          intentStore.clear()
+        }, contextGraceMs)
+        context = next
+        resetTableState(null, true)
+        invalidate()
+        return
+      }
+      const resume = suspended
+      if (resume !== null && nextTable !== null) {
+        suspended = null
+        contextGraceTimer = clearTimer(contextGraceTimer)
+        if (resume.key !== `${nextTable.voiceTableId}:${nextTable.selfProfileId}`) {
+          intentStore.clear()
+          locallyMuted.clear()
+        }
+      }
       if (prevTable !== null && nextTable !== null
         && prevTable.voiceTableId === nextTable.voiceTableId
         && prevTable.selfProfileId === nextTable.selfProfileId
         && prevTable.screen === nextTable.screen
         && sameSeats(prevTable.seats, nextTable.seats)) {
+        kick()
         return
       }
       const tableChanged = prevTable === null || nextTable === null
         || prevTable.voiceTableId !== nextTable.voiceTableId || prevTable.selfProfileId !== nextTable.selfProfileId
       if (tableChanged) {
-        // Друга маса / край на масата / logout: пълно прекратяване; локалните
-        // заглушавания важат само за същата маса.
-        if (inUse && prevTable !== null) sendPresence(false, 'context_changed')
-        context = next
-        stopSession(nextTable === null ? 'disabled' : 'idle', { canRestore: false, notifyServer: false, reason: 'context_changed' })
-        speak = null
-        setUiError(null)
-        offerDismissed = false
-        if (locallyMutedTableId !== (nextTable?.voiceTableId ?? null)) {
-          locallyMuted.clear()
-          locallyMutedTableId = nextTable?.voiceTableId ?? null
+        // Друга маса / край на масата / logout: пълно прекратяване.
+        if (wantVoice && prevTable !== null) {
+          sendPresence(false, 'context_changed')
+          stopSession({ reason: 'context_changed', notifyServer: false, clearIntent: true, canRestore: false })
         }
+        context = next
+        resetTableState(nextTable)
       } else {
         const wasOnScreen = prevTable!.screen === 'waiting' || prevTable!.screen === 'game'
-        context = next
         const nowOnScreen = nextTable!.screen === 'waiting' || nextTable!.screen === 'game'
-        if (wasOnScreen && !nowOnScreen && inUse) {
-          // „Изчакай в лоби“, магазин, „Към лобито“: прекратяване (сървърно
-          // съобщение), мястото и правото за говорене се пазят.
-          stopSession('idle', { canRestore: true, notifyServer: true, reason: 'off_table' })
-        } else if (!wasOnScreen && nowOnScreen && status === 'disabled') {
-          status = 'idle'
+        if (wasOnScreen && !nowOnScreen && wantVoice) {
+          // „Изчакай в лоби“, магазин: изрично прекратяване; мястото и правото се пазят.
+          stopSession({ reason: 'off_table', notifyServer: true, clearIntent: true, canRestore: true })
         }
-        // чакалня -> игра: гласът продължава без прекъсване (същата маса).
+        context = next
       }
-      if (nextTable !== null && status === 'disabled' && !tableChanged) status = 'idle'
-      if (nextTable !== null && (nextTable.screen === 'waiting' || nextTable.screen === 'game')) {
-        // Адаптерът вече е в паметта (същият lazy chunk) — без мрежа; така
-        // следващите включвания подготвят стаята синхронно в жеста (autoplay).
-        void ensureAdapter().catch(() => {})
-      }
+      // Адаптерът е в същия lazy chunk (без мрежа): следващото включване подготвя стаята синхронно в жеста (autoplay).
+      if (onTableScreen()) void ensureAdapter().catch(() => {})
       invalidate()
+      if (resume !== null && resume.key === tableKey() && onTableScreen() && !wantVoice) {
+        // Същата маса се върна в срока: възстановяване без потребителско действие.
+        beginJoin({ mic: resume.mic, explicit: false, source: 'initial' })
+        return
+      }
+      kick()
     },
     handleServerMessage,
     setGameConnection(connected) {
       if (disposed || connected === gameConnected) return
       gameConnected = connected
       if (!connected) {
+        // Без опити, докато игровата връзка липсва; LiveKit връзката остава.
         presenceTimer = clearTimer(presenceTimer)
-        // Един таймер за целия период без игрова връзка (не се рестартира при неуспешни опити).
-        if (inUse && disconnectTimer === null) {
-          disconnectTimer = timers.setTimeout(() => {
-            disconnectTimer = null
-            stopSession('idle', { canRestore: true, notifyServer: false, reason: 'game_connection_timeout' })
-          }, disconnectGraceMs)
-        }
+        invalidate()
         return
       }
-      disconnectTimer = clearTimer(disconnectTimer)
-      if (inUse && onTableScreen()) {
+      if (wantVoice && onTableScreen()) {
         sendPresence(true)
-        if (retryKick !== null) retryKick()
+        kickRetryNow()
       }
+      kick()
     },
     endSession() {
       locallyMuted.clear()
       locallyMutedTableId = null
-      disableEntirely()
+      disableEntirely('disabled')
     },
     onPageHide() {
-      if (inUse || room !== null || prepared !== null) stopSession('idle', { canRestore: true, notifyServer: true, reason: 'page_hide' })
+      // Затваряне/презареждане: връзката се затваря, намерението остава за същия таб.
+      if (wantVoice || room !== null || preparedSlot !== null) stopSession({ reason: 'page_hide', notifyServer: true, clearIntent: false, canRestore: true })
     },
     onPageShow(persisted) {
-      if (persisted && (inUse || room !== null)) stopSession('idle', { canRestore: true, notifyServer: true, reason: 'page_restored' })
+      if (!persisted) return
+      if (wantVoice || room !== null) stopSession({ reason: 'page_restored', notifyServer: true, clearIntent: false, canRestore: true })
     },
-    joinAsListener: () => beginJoin(false),
+    joinAsListener: () => beginJoin({ mic: false, explicit: false, source: 'initial' }),
     joinWithMicrophone: () => {
       micRequestSource = 'initial'
-      beginJoin(true)
+      beginJoin({ mic: true, explicit: true, source: 'initial' })
+    },
+    resumeFromReload(withMicrophone) {
+      // Без прозорец за разрешение: микрофонът — само ако браузърът вече го разрешава.
+      beginJoin({ mic: withMicrophone, explicit: false, source: 'initial' })
     },
     notNow() {
       offerDismissed = true
@@ -1722,46 +1623,53 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       deps.onRequestVip?.()
     },
     leaveVoice() {
-      if (!inUse && room === null && prepared === null) return
-      status = 'disconnecting'
-      invalidate()
+      if (!wantVoice && room === null && preparedSlot === null) return
       // Напускането на гласа НЕ напуска масата.
-      stopSession('idle', { canRestore: false, notifyServer: true, reason: 'leave_voice' })
+      stopSession({ reason: 'leave_voice', notifyServer: true, clearIntent: true, canRestore: false })
     },
     enableMicrophone() {
-      if (disposed) return
-      micRequestSource = 'panel'
-      if (room === null) {
-        if (!inUse) beginJoin(true)
-        return
-      }
-      if (microphone === 'requesting' || microphone === 'live') return
-      void startMicrophone(sessionSeq, { checkWithBackend: true })
+      void enableMicrophoneExplicit()
     },
     disableMicrophone() {
       if (disposed) return
-      stopMicrophone()
+      wantMic = false
+      finishMicRequest('cancelled')
+      dropMicrophone()
+      saveIntent()
+      invalidate()
     },
     retryMicrophone() {
       controller.enableMicrophone()
     },
     unlockAudio() {
-      const currentRoom = room
-      if (currentRoom === null) return
-      void currentRoom.startAudio().then(
+      const current = room
+      if (current === null) return
+      void current.startAudio().then(
         () => {
-          if (room !== currentRoom) return
-          playbackBlocked = !currentRoom.canPlaybackAudio()
+          if (room !== current) return
+          playbackBlocked = !current.canPlaybackAudio()
           invalidate()
         },
         () => {},
       )
     },
     retryConnection() {
-      if (status === 'unavailable' || status === 'error') {
-        status = 'idle'
-        beginJoin(wantsToSpeak)
+      if (failed) {
+        failed = false
+        attempts = 0
+        uncertainAttempts = 0
+        setUiError(null)
+        invalidate()
+        kick()
+        return
       }
+      if (!wantVoice) {
+        beginJoin({ mic: false, explicit: false, source: 'initial' })
+        return
+      }
+      // Изрично „Опитай отново“ по време на пауза: веднага, без да чака backoff-а.
+      attempts = 0
+      kickRetryNow()
     },
     muteRemoteParticipant(profileId) {
       const table = tableContext()
@@ -1795,7 +1703,14 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     },
     dispose() {
       if (disposed) return
-      stopSession('disabled', { canRestore: false, notifyServer: true, reason: 'disposed' })
+      stopSession({ reason: 'disposed', notifyServer: true, clearIntent: false, canRestore: false })
+      contextGraceTimer = clearTimer(contextGraceTimer)
+      const old = room
+      room = null
+      roomOwner = null
+      if (old !== null) void old.disconnect().catch(() => {})
+      if (preparedSlot !== null) void preparedSlot.connector.abort().catch(() => {})
+      preparedSlot = null
       disposed = true
       listeners.clear()
       speakingListeners.clear()
@@ -1805,10 +1720,12 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     },
     debugCounters: () => ({
       ...counters,
+      roomsOpen,
       listeners: listeners.size,
       speakingListeners: speakingListeners.size,
-      pendingTimers: [presenceTimer, disconnectTimer, retryTimer, retainTimer, transportTimer].filter((t) => t !== null).length + speakingHoldTimers.size + (pendingAck === null ? 0 : 1),
-      retainedMicrophone: retained === null ? 0 : 1,
+      pendingTimers: [presenceTimer, retryTimer, heldTimer, transportTimer, contextGraceTimer].filter((t) => t !== null).length + speakingHoldTimers.size + (pendingAck === null ? 0 : 1),
+      retainedMicrophone: held === null ? 0 : 1,
+      driving: driving ? 1 : 0,
     }),
   }
 

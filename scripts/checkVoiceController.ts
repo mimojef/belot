@@ -20,6 +20,7 @@ import type { VoicePresenceClientMessage, VoiceSpeakState } from '../src/app/voi
 let passed = 0
 let failed = 0
 async function check(label: string, fn: () => Promise<void> | void): Promise<void> {
+  if (process.env.VOICE_ONLY !== undefined && !process.env.VOICE_ONLY.split(',').some((key) => label.includes(key))) return
   try {
     await fn()
     passed += 1
@@ -251,7 +252,7 @@ function serverDisconnect(room: FakeRoom, cause: VoiceDisconnectCause): void {
   room.micLive = false
   room.capture = null
   const live = capture !== null && !capture.stopped && !capture.ended
-  const held = cause === 'room_deleted' && wasLive && live ? room.retain(capture) : null
+  const held = (cause === 'room_deleted' || cause === 'connection_lost' || cause === 'removed') && wasLive && live ? room.retain(capture) : null
   if (held === null && capture !== null) capture.stopped = true
   room.events.onDisconnected(cause, held)
 }
@@ -742,22 +743,29 @@ await check('[Z2] Игровият WS пада: гласът продължав�
   assertEqual(s(h).status, 'connected_speaking', 'таймерът е отменен; микрофонът е запазен')
 })
 
-await check('[Z3] 120 s без игрова връзка: прекъсване, освободен микрофон, без автоматично връщане', async () => {
+await check('[Z3] Етап В: без игрова връзка — без клиентски 120 s таймер и без опити; сървърното отстраняване -> пауза; връзката се върне -> автоматично възстановяване (вкл. микрофона)', async () => {
   const h = createHarness()
   await h.connect(true)
+  const room = h.fake.state.last()
+  const capture = room.capture
   h.backend.wsOpen = false
   h.voice.setGameConnection(false)
-  await h.clock.advance(119_999)
-  assertEqual(s(h).status, 'connected_speaking', 'преди срока')
-  await h.clock.advance(1)
-  const room = h.fake.state.last()
-  assert(room.disconnected && room.captureReleased, 'изключен, микрофонът освободен')
-  assertEqual(s(h).status, 'idle', 'idle')
-  assertEqual(s(h).canRestore, true, '„Възстанови гласовия чат“')
+  await h.clock.advance(130_000)
+  assertEqual(s(h).status, 'connected_speaking', 'LiveKit връзката не се пипа от клиента')
+  const tokens = h.posts.filter((p) => p.path === '/api/voice/token').length
+  // Сървърът прекратява сесията след 120 s (RemoveParticipant).
+  serverDisconnect(room, 'removed')
+  await h.clock.advance(10_000) // < 20 s задържане на capture-а
+  assertEqual(h.posts.filter((p) => p.path === '/api/voice/token').length, tokens, 'без опити докато няма игрова връзка')
+  assertEqual(s(h).status, 'reconnecting', 'пауза')
+  assertEqual(s(h).wantsToSpeak, true, 'намерението за говорене остава')
   h.backend.wsOpen = true
   h.voice.setGameConnection(true)
-  await flush()
-  assertEqual(h.fake.state.activeRooms(), 0, 'без автоматично връщане')
+  await flush(30)
+  assertEqual(h.fake.state.activeRooms(), 1, 'автоматично ново свързване')
+  assertEqual(s(h).status, 'connected_speaking', 'говори отново')
+  assert(h.fake.state.last().capture === capture, 'същият capture (без нов getUserMedia)')
+  assertEqual(h.fake.state.getUserMediaCalls, 1, 'getUserMedia веднъж')
 })
 
 await check('[R1] Официален LiveKit reconnect: reconnecting -> connected, без нова стая; изгубена връзка -> ограничени нови опити', async () => {
@@ -769,22 +777,35 @@ await check('[R1] Официален LiveKit reconnect: reconnecting -> connecte
   room.events.onReconnected()
   assertEqual(s(h).status, 'connected_speaking', 'обратно')
   assertEqual(h.fake.state.rooms.length, 1, 'без нова стая')
+  const capture = room.capture
   serverDisconnect(room, 'connection_lost')
-  await h.clock.advance(2_000)
+  await flush(20)
+  assertEqual(s(h).status, 'reconnecting', 'пауза преди новия опит')
+  await h.clock.advance(1_000)
   await flush(20)
   assertEqual(h.fake.state.activeRooms(), 1, 'нов опит с нов токен')
-  // LiveKit е прекратил capture-а -> без автоматичен нов getUserMedia (само слушане).
-  assertEqual(s(h).status, 'connected_listening', 'след окончателна загуба: слушане')
-  assertEqual(h.fake.state.getUserMediaCalls, 1, 'без автоматичен нов capture')
-  assertEqual(h.fake.state.liveCaptures(), 0, 'няма активен capture')
+  // Етап В: живият capture е предаден -> говори отново без нов getUserMedia.
+  assertEqual(s(h).status, 'connected_speaking', 'след окончателна загуба: говори отново')
+  assert(h.fake.state.last().capture === capture, 'същият capture')
+  assertEqual(h.fake.state.getUserMediaCalls, 1, 'без нов capture')
+  // Временни грешки на LiveKit при валидно членство: опитите продължават с нарастваща пауза (≤30 s), без „недостъпен“.
   const h2 = createHarness()
   await h2.connect(false)
   h2.fake.state.connectFails = true
   serverDisconnect(h2.fake.state.last(), 'connection_lost')
-  await h2.clock.advance(20_000)
+  await h2.clock.advance(1_000 + 2_000 + 4_000 + 8_000)
   await flush(20)
-  assertEqual(s(h2).status, 'unavailable', 'след ограничените опити')
-  assertEqual(s(h2).uiError?.message, 'Гласовият чат временно е недостъпен.', 'съобщение')
+  const tokensAfter15s = h2.posts.filter((p) => p.path === '/api/voice/token').length
+  assertEqual(tokensAfter15s, 1 + 4, 'опити на 1, 2, 4, 8 s')
+  assertEqual(s(h2).status, 'reconnecting', 'продължава да опитва')
+  await h2.clock.advance(15_000 + 30_000 + 30_000)
+  await flush(20)
+  assertEqual(h2.posts.filter((p) => p.path === '/api/voice/token').length, tokensAfter15s + 3, 'пауза до 30 s')
+  h2.fake.state.connectFails = false
+  await h2.clock.advance(30_000)
+  await flush(20)
+  assertEqual(s(h2).status, 'connected_listening', 'LiveKit се върна -> свързан')
+  assertEqual(h2.fake.state.violations, 0, '≤1 стая')
 })
 
 await check('[R2] Ротация: старата стая се прекъсва преди новата (≤1 активна), изчакване на ready, нов токен, режимът се пази', async () => {
@@ -920,7 +941,14 @@ await check('[C2] Stale async: изключване/mute/напускане/ро
     await flush(20)
     assertEqual(room.micLive, false, `${interrupt}: микрофонът не е включен`)
     assertEqual(room.captureReleased, true, `${interrupt}: capture освободен`)
-    assert(s(h).microphone !== 'live', `${interrupt}: state`)
+    if (interrupt === 'rotation') {
+      // Етап В: ротацията е техническа — намерението остава, микрофонът е в НОВАТА стая.
+      assert(h.fake.state.last() !== room && h.fake.state.last().micLive, `${interrupt}: микрофонът е в новата стая`)
+      assertEqual(h.fake.state.liveCaptures(), 1, `${interrupt}: един capture`)
+      assertEqual(h.fake.state.violations, 0, `${interrupt}: ≤1 стая`)
+    } else {
+      assert(s(h).microphone !== 'live', `${interrupt}: state`)
+    }
   }
 })
 
@@ -984,7 +1012,7 @@ await check('[W1] Интеграция: основният bundle — само �
   //     controller-а, runtime-а, адаптера, sink-а, протокола, lazy панела
   //     или livekit-client — те са само в lazy chunk-ове;
   //   * lazy панелът (renderVoicePanel) се зарежда само с import().
-  const MAIN_BUNDLE_VOICE_MODULES = new Set(['voiceFacade', 'ui/createVoiceMobileUi', 'ui/voiceSpeakingIndicator', 'ui/voiceUiIcons', 'ui/voiceUiStatus'])
+  const MAIN_BUNDLE_VOICE_MODULES = new Set(['voiceFacade', 'voiceIntentStore', 'ui/createVoiceMobileUi', 'ui/voiceSpeakingIndicator', 'ui/voiceUiIcons', 'ui/voiceUiStatus'])
   const LAZY_ONLY_VOICE_MODULES = new Set(['createVoiceController', 'voiceRuntime', 'liveKitVoiceAdapter', 'voiceAdapter', 'voiceAudioSink', 'voiceProtocol', 'voiceTransportStats', 'ui/renderVoicePanel'])
   /** Статични импорти: { spec, typeOnly }. `import { a, type B }` е runtime импорт. */
   const staticImports = (source: string): Array<{ spec: string; typeOnly: boolean }> =>
@@ -1185,8 +1213,13 @@ await check('[LZ5] По време на зареждането: изключва
   h3.voice.setGameConnection(false)
   h3.voice.joinAsListener()
   await flush(30)
-  assertEqual(s(h3).status, 'unavailable', 'без игрова връзка')
-  assertEqual(h3.clock.pending(), 0, 'без 120 s таймер (гласът не е в употреба)')
+  // Етап В: пауза до връщането на игровата връзка — без опити и без таймери.
+  assertEqual(s(h3).status, 'connecting', 'без игрова връзка: чака')
+  assertEqual(h3.clock.pending(), 0, 'без таймери и без опити')
+  h3.backend.wsOpen = true
+  h3.voice.setGameConnection(true)
+  await flush(30)
+  assertEqual(s(h3).status, 'connected_listening', 'връзката се върна -> свързан')
 })
 
 await check('[LZ6] Неуспешно зареждане на chunk-а: „Гласовият чат временно е недостъпен.“; „Опитай отново“ зарежда наново; отказ междувременно -> без грешка', async () => {
@@ -1347,12 +1380,17 @@ await check('[RM4] Прекратен capture по време на ротаци�
 await check('[RM5] Ограничено задържане: ротацията продължава > 20 s -> capture-ът се освобождава, след това само слушане', async () => {
   const h = createHarness()
   await h.connect(true)
-  await rotate(h, 2, { pendingToken: 5 })
+  h.backend.generation = 2
+  for (let index = 0; index < 5; index += 1) h.backend.tokenQueue.push({ status: 503, body: { ok: false, code: 'voice_rotation_pending', retryAfterMs: 5_000 } })
+  h.voice.handleServerMessage({ type: 'voice_table_updated', voiceTableId: TABLE, generation: 2, ready: false } as never)
+  await flush(30)
   await h.clock.advance(20_000)
   assertEqual(h.fake.state.liveCaptures(), 0, 'освободен след 20 s')
   await h.clock.advance(30_000)
   await flush(30)
+  // Без разрешение „без прозорец“ (този адаптер не го поддържа) -> слушане + молба за изрично включване.
   assertEqual(s(h).status, 'connected_listening', 'новата стая — слушане')
+  assertEqual(s(h).uiError?.code, 'mic_not_enabled', '„Микрофонът не беше включен“')
   assertEqual(h.fake.state.getUserMediaCalls, 1, 'без нов capture')
 })
 
@@ -1377,7 +1415,7 @@ await check('[RM7] connection_lost / room_deleted с прекратен capture 
     const h = createHarness()
     await h.connect(true)
     h.backend.generation = 2
-    if (cause === 'room_deleted') h.fake.state.last().capture!.ended = true // устройството е спряло
+    h.fake.state.last().capture!.ended = true // устройството е спряло (иначе етап В предава живия capture)
     serverDisconnect(h.fake.state.last(), cause)
     if (cause === 'room_deleted') h.voice.handleServerMessage({ type: 'voice_table_updated', voiceTableId: TABLE, generation: 2, ready: true } as never)
     await h.clock.advance(5_000)

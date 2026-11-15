@@ -14,10 +14,17 @@
 // напускане/смяна на масата/лоби/бан/изместена сесия/voice_access_ended
 // междувременно го отменя. Оттам нататък всичко се предава 1:1.
 //
-// Тук има само `import type` — runtime кодът на гласа не влиза в основния bundle.
+// Етап В: след ПРЕЗАРЕЖДАНЕ в същия таб (или връщане от bfcache) гласът се
+// възстановява сам по намерението в sessionStorage (voiceIntentStore) — само за
+// същата маса и същия профил; членството се проверява от сървъра при
+// присъствието/токена. Нов таб, „Duplicate tab“ и навигация не възстановяват.
+//
+// Тук има само `import type` за controller-а — runtime кодът на гласа не влиза
+// в основния bundle (voiceIntentStore е малък и без зависимости).
 
 import type { VoiceContext, VoiceController, VoiceSnapshot } from './createVoiceController'
 import type { VoiceRuntimeDeps } from './voiceRuntime'
+import { clearVoiceIntent, isReloadNavigation, readVoiceIntent } from './voiceIntentStore'
 
 export type VoiceControllerFactory = (deps: VoiceRuntimeDeps) => VoiceController
 
@@ -27,7 +34,7 @@ export type VoiceFacadeDeps = VoiceRuntimeDeps & {
 }
 
 type TableContext = Extract<VoiceContext, { kind: 'table' }>
-type PendingJoin = { withMic: boolean; table: TableContext } | null
+type PendingJoin = { withMic: boolean; table: TableContext; resume: boolean } | null
 
 const VOICE_SERVER_TYPES = new Set(['voice_presence_result', 'voice_table_updated', 'voice_access_ended', 'voice_speak_access_updated'])
 
@@ -46,8 +53,19 @@ function sameContext(a: VoiceContext, b: VoiceContext): boolean {
     && a.seats.every((seat, index) => seat.profileId === b.seats[index]!.profileId && seat.isBot === b.seats[index]!.isBot)
 }
 
-export function createLazyVoiceController(deps: VoiceFacadeDeps): VoiceController {
+export type VoiceIntentAccess = {
+  read: () => { voiceTableId: string; profileId: string; mic: boolean } | null
+  clear: () => void
+  isReload: () => boolean
+}
+
+const defaultIntentAccess: VoiceIntentAccess = { read: () => readVoiceIntent(), clear: () => clearVoiceIntent(), isReload: () => isReloadNavigation() }
+
+export function createLazyVoiceController(deps: VoiceFacadeDeps & { intent?: VoiceIntentAccess }): VoiceController {
   const load = deps.loadController ?? (() => import('./voiceRuntime').then((module) => module.createVoiceRuntime))
+  const intentAccess = deps.intent ?? defaultIntentAccess
+  /** Възстановяване след презареждане — най-много веднъж за зареждане на страницата. */
+  let reloadResumeArmed = intentAccess.isReload()
   let context: VoiceContext = { kind: 'none' }
   let real: VoiceController | null = null
   let gameConnected = true
@@ -112,15 +130,35 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps): VoiceControlle
     const intent = pending
     pending = null
     const current = table()
-    if (intent !== null && onScreen(current) && sameTable(current, intent.table)) join(intent.withMic)
+    if (intent !== null && onScreen(current) && sameTable(current, intent.table)) join(intent.withMic, intent.resume)
     else emit(listeners, controller.getSnapshot())
   }
 
-  function join(withMic: boolean): void {
+  /** Запазено намерение за ТАЗИ маса и ТОЗИ профил -> автоматично възстановяване. */
+  function resumeFromStoredIntent(): void {
+    const current = table()
+    if (disposed || !onScreen(current)) return
+    const stored = intentAccess.read()
+    if (stored === null) return
+    if (stored.voiceTableId !== current.voiceTableId || stored.profileId !== current.selfProfileId) {
+      // Друга маса/профил: намерението не се прехвърля.
+      intentAccess.clear()
+      return
+    }
+    if (real !== null) {
+      const status = real.getSnapshot().status
+      if (status === 'idle' || status === 'unavailable') real.resumeFromReload(stored.mic)
+      return
+    }
+    join(stored.mic, true)
+  }
+
+  function join(withMic: boolean, resume = false): void {
     if (disposed) return
     if (real !== null) {
+      if (resume) real.resumeFromReload(withMic)
       // Вече зареден: синхронно, в същия потребителски жест (autoplay).
-      if (withMic) real.joinWithMicrophone()
+      else if (withMic) real.joinWithMicrophone()
       else real.joinAsListener()
       return
     }
@@ -130,7 +168,7 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps): VoiceControlle
     loadFailed = false
     offerDismissed = true
     cached = null
-    setPending({ withMic, table: current })
+    setPending({ withMic, table: current, resume })
     if (loading) return // двойно натискане -> едно зареждане
     loading = true
     load().then(
@@ -153,15 +191,22 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps): VoiceControlle
       if (disposed || sameContext(context, next)) return
       const previous = table()
       context = next
-      if (real !== null) return real.setContext(next)
-      if (!sameTable(previous, table())) {
-        offerDismissed = false
-        loadFailed = false
-        pending = null
-      } else if (!onScreen(table())) {
-        pending = null
+      if (real !== null) {
+        real.setContext(next)
+      } else {
+        if (!sameTable(previous, table())) {
+          offerDismissed = false
+          loadFailed = false
+          pending = null
+        } else if (!onScreen(table())) {
+          pending = null
+        }
+        changed()
       }
-      changed()
+      if (reloadResumeArmed && onScreen(table())) {
+        reloadResumeArmed = false
+        resumeFromStoredIntent()
+      }
     },
     handleServerMessage(message) {
       if (!VOICE_SERVER_TYPES.has(message.type)) return false
@@ -174,22 +219,33 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps): VoiceControlle
       real?.setGameConnection(connected)
     },
     endSession(reason) {
+      reloadResumeArmed = false
+      intentAccess.clear()
       if (real !== null) return real.endSession(reason)
       loadFailed = false
       pending = null
       changed()
     },
     onPageHide: () => (real !== null ? real.onPageHide() : setPending(null)),
-    onPageShow: (persisted) => real?.onPageShow(persisted),
+    onPageShow(persisted) {
+      real?.onPageShow(persisted)
+      // Връщане от bfcache: старата връзка е мъртва -> възстановяване като при презареждане.
+      if (persisted) resumeFromStoredIntent()
+    },
     joinAsListener: () => join(false),
     joinWithMicrophone: () => join(true),
+    resumeFromReload: (withMic) => join(withMic, true),
     notNow() {
       if (real !== null) return real.notNow()
       offerDismissed = true
       changed()
     },
     requestVip: () => (real !== null ? real.requestVip() : deps.onRequestVip?.()),
-    leaveVoice: () => (real !== null ? real.leaveVoice() : setPending(null)),
+    leaveVoice() {
+      intentAccess.clear()
+      if (real !== null) real.leaveVoice()
+      else setPending(null)
+    },
     enableMicrophone: () => (real !== null ? real.enableMicrophone() : join(true)),
     // Изключване по време на зареждането: включването продължава само като слушане.
     disableMicrophone: () => (real !== null ? real.disableMicrophone() : setPending(pending?.withMic ? { ...pending, withMic: false } : pending)),
