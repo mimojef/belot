@@ -202,6 +202,10 @@ export type ActiveRoomFlowController = {
   setTournamentReplayBlocked: (roomId: string | null) => void
   // Текущата стая е в авторитетния край на мача (roomStatus 'finished').
   isCurrentRoomMatchEnded: () => boolean
+  // Етап 2: цел на тихото възстановяване (участник в реален мач) или null.
+  getSilentResumeTarget: () => { roomId: string; reconnectToken: string } | null
+  // Етап 2: състояние „връзката се възстановява“ (масата видима, действията заключени).
+  prepareForSilentReconnect: () => void
   // STATE B silent attach (§ "SILENT ATTACH") — arms a watch for roomId's
   // room_snapshot stream (already flowing on the shared WS connection after
   // resume_room {silent:true} → room_attached_silent) so the controller can

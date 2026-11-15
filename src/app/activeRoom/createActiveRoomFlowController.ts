@@ -223,6 +223,9 @@ export function createActiveRoomFlowController(
   // авторитетното състояние СЛЕД прекъсването). Дотогава показаният ход е
   // отпреди прекъсването — карта/обява не се изпращат, банерът остава.
   let awaitingResumeSnapshot = false
+  // Етап 2: room_resumed за ТАЗИ стая след загубената връзка — едва след
+  // него snapshot-ът се приема за авторитетен (отключва действията).
+  let resumeAcknowledged = true
   // In-game/private-room seat popup denial state — mount-натo self-contained
   // на document.body (виж renderProfileAccessBlockPopup.ts), тъй като active
   // room-ът няма lobby root DOM да вгради inline HTML в него. Общ path с
@@ -1788,8 +1791,10 @@ export function createActiveRoomFlowController(
         return
       }
 
-      if (!options.isConnected()) {
-        activeRoomState.errorText = 'Няма връзка със сървъра.'
+      if (!options.isConnected() || awaitingResumeSnapshot) {
+        activeRoomState.errorText = awaitingResumeSnapshot
+          ? 'Изчаква се актуалното състояние на играта.'
+          : 'Няма връзка със сървъра.'
         scheduleActiveRoomRender()
         return
       }
@@ -4916,7 +4921,14 @@ export function createActiveRoomFlowController(
         scaledStageWidth,
         scaledStageHeight,
         submitPlayCard: submitPlayCardFromUi,
-        submitSweepDecision: options.submitSweepDecision,
+        // Етап 2: и решението „Долу картите“ е заключено до авторитетния
+        // snapshot след възстановяване на връзката.
+        submitSweepDecision: options.submitSweepDecision === undefined
+          ? undefined
+          : (roomId: string, decision: 'accept' | 'decline') => {
+              if (!options.isConnected() || awaitingResumeSnapshot) return
+              options.submitSweepDecision?.(roomId, decision)
+            },
         onDeclarationBubbleShown: (seat, lines) => {
           options.gameAudio?.playDeclarationBubble(lines, getSeatGender(seat))
         },
@@ -5313,8 +5325,10 @@ export function createActiveRoomFlowController(
             return
           }
 
-          if (!options.isConnected()) {
-            activeRoomState.errorText = 'Няма връзка със сървъра.'
+          if (!options.isConnected() || awaitingResumeSnapshot) {
+            activeRoomState.errorText = awaitingResumeSnapshot
+              ? 'Изчаква се актуалното състояние на играта.'
+              : 'Няма връзка със сървъра.'
             scheduleActiveRoomRender()
             return
           }
@@ -6361,7 +6375,7 @@ export function createActiveRoomFlowController(
 
     // Изоставеният socket е игнориран в транспорта, затова snapshot при жива
     // връзка идва от новата — след resume_room, т.е. авторитетен.
-    if (awaitingResumeSnapshot && options.isConnected()) {
+    if (awaitingResumeSnapshot && options.isConnected() && resumeAcknowledged) {
       awaitingResumeSnapshot = false
       syncConnectionBanner()
     }
@@ -7037,6 +7051,7 @@ export function createActiveRoomFlowController(
       // Отговор на resync заявка: сървърът е обработил всичко изпратено преди
       // нея; следващият room_snapshot (изпратен синхронно веднага след това)
       // е авторитетен за изпратената обява/карта.
+      resumeAcknowledged = true
       if (bidWatchdog.resyncRequested) bidWatchdog.resyncAnswered = true
       if (playWatchdog.resyncRequested) playWatchdog.resyncAnswered = true
       activeRoomState.isConnected = true
@@ -7235,6 +7250,7 @@ export function createActiveRoomFlowController(
       clearPendingBidSubmission()
       releasePendingPlayCard()
       awaitingResumeSnapshot = true
+      resumeAcknowledged = false
       // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
       belotSpectatorViewersHydrated = false
     }
@@ -7313,7 +7329,10 @@ export function createActiveRoomFlowController(
     // само през setConnectionState). Ако картата е приложена преди close-а,
     // resume snapshot-ът я показва; втори tap би бил отхвърлен от сървъра.
     if (!isConnected) releasePendingPlayCard()
-    if (!isConnected) awaitingResumeSnapshot = true
+    if (!isConnected) {
+      awaitingResumeSnapshot = true
+      resumeAcknowledged = false
+    }
     // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
     if (!isConnected) belotSpectatorViewersHydrated = false
 
@@ -7418,6 +7437,30 @@ export function createActiveRoomFlowController(
       tournamentReplayBlockedRoomIds.add(roomId)
     }
     if (activeRoomState !== null && isMatchEndedState()) renderActiveRoomScreen()
+  }
+
+  // Етап 2: целта на тихото възстановяване — само участник в реален Belot
+  // мач (случаен, частен, турнирен) с reconnectToken; не зрител, не пробна игра.
+  function getSilentResumeTarget(): { roomId: string; reconnectToken: string } | null {
+    if (
+      activeRoomState === null ||
+      activeRoomState.viewerRole !== 'participant' ||
+      activeRoomState.isGuestTrial ||
+      !activeRoomState.reconnectToken
+    ) {
+      return null
+    }
+    return { roomId: activeRoomState.roomId, reconnectToken: activeRoomState.reconnectToken }
+  }
+
+  // Етап 2: прекъсване при тихо възстановяване — масата остава видима със
+  // съобщението „Връзката със сървъра се възстановява...“, действията са
+  // заключени до room_resumed + авторитетния snapshot; пропуснатите
+  // балончета на обявите не се показват.
+  function prepareForSilentReconnect(): void {
+    if (activeRoomState === null) return
+    shouldSilenceNextBiddingSnapshot = true
+    setConnectionState(false, null)
   }
 
   function isCurrentRoomMatchEnded(): boolean {
@@ -7551,6 +7594,8 @@ export function createActiveRoomFlowController(
     getCurrentRoomId,
     setTournamentReplayBlocked,
     isCurrentRoomMatchEnded,
+    getSilentResumeTarget,
+    prepareForSilentReconnect,
     armPendingTournamentSilentEntry,
     clearPendingTournamentSilentEntry,
   }

@@ -7796,6 +7796,75 @@ async function tickRoomGameRuntimes(): Promise<void> {
   }
 }
 
+// ─── Етап 2: тихо възстановяване на активна игра (reconnectOf) ────────────
+// Наскоро затворените връзки, които са били прикрепени към стая — само за
+// валидиране на reconnectOf (същият профил, същата стая). In-memory, с
+// изтичане малко над клиентския лимит от 120 s; почиства се при запис
+// (Map пази реда на вмъкване = реда на затваряне). Без SQL, без таймери.
+const RECENTLY_CLOSED_ROOM_CONNECTION_TTL_MS = 150_000
+const recentlyClosedRoomConnections = new Map<ConnectionId, { profileId: string; roomId: string; closedAt: number }>()
+
+function rememberClosedRoomConnection(connectionId: ConnectionId, profileId: string, roomId: string): void {
+  const now = Date.now()
+  for (const [id, entry] of recentlyClosedRoomConnections) {
+    if (now - entry.closedAt <= RECENTLY_CLOSED_ROOM_CONNECTION_TTL_MS) break
+    recentlyClosedRoomConnections.delete(id)
+  }
+  recentlyClosedRoomConnections.delete(connectionId)
+  recentlyClosedRoomConnections.set(connectionId, { profileId, roomId, closedAt: now })
+}
+
+/**
+ * Валидира тихо възстановяване: reconnectOf е предишната връзка на същия
+ * профил към същата стая, token-ът е на човешкото място на този профил,
+ * мястото е свободно или още на предишната връзка, и профилът няма друга
+ * жива сесия. null = позволено; иначе причината за отказ (без странични
+ * ефекти — извиква се ПРЕДИ всяко изместване или промяна на мястото).
+ */
+function validateSilentActiveRoomReconnect(input: {
+  connectionId: ConnectionId
+  profileId: string | null
+  reconnectOf: string
+  room: ServerRoom | null
+  reconnectToken: string
+}): 'other_session_active' | 'reconnect_unavailable' | null {
+  const { connectionId, profileId, reconnectOf, room, reconnectToken } = input
+  if (profileId === null || room === null || reconnectOf === connectionId) return 'reconnect_unavailable'
+  if (room.config.isGuestTrial === true) return 'reconnect_unavailable'
+  const seatMatch = findHumanParticipantByReconnectToken(room, reconnectToken)
+  if (seatMatch === null) return 'reconnect_unavailable'
+  const ownerProfileId = seatMatch.participant.identity.profileId ?? seatMatch.participant.publicProfile?.profileId ?? null
+  if (ownerProfileId !== profileId || seatMatch.participant.permanentlyLeftAt != null) return 'reconnect_unavailable'
+
+  // Предишната връзка: още „жива“ (полуотворена) или наскоро затворена.
+  const previousLive = serverState.connections[reconnectOf as ConnectionId] ?? null
+  if (previousLive !== null) {
+    if (previousLive.profileId !== profileId || previousLive.currentRoomId !== room.id) return 'reconnect_unavailable'
+  } else {
+    const closed = recentlyClosedRoomConnections.get(reconnectOf as ConnectionId)
+    if (
+      closed === undefined ||
+      closed.profileId !== profileId ||
+      closed.roomId !== room.id ||
+      Date.now() - closed.closedAt > RECENTLY_CLOSED_ROOM_CONNECTION_TTL_MS
+    ) {
+      return 'reconnect_unavailable'
+    }
+  }
+
+  // Мястото е заето от друга връзка (друго устройство вече е в играта).
+  if (seatMatch.participant.connectionId !== null && seatMatch.participant.connectionId !== reconnectOf) {
+    return 'other_session_active'
+  }
+  // Друга жива сесия на профила (устройство/таб) — никога не се измества.
+  for (const other of Object.values(serverState.connections)) {
+    if (other.profileId !== profileId || other.status !== 'connected') continue
+    if (other.id === connectionId || other.id === reconnectOf) continue
+    return 'other_session_active'
+  }
+  return null
+}
+
 function tryResumeRoomForConnection(
   connectionId: ConnectionId,
   roomId: string,
@@ -27620,6 +27689,30 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           return
         }
 
+        // Етап 2 — тихо възстановяване (reconnectOf): всички проверки са тук,
+        // ПРЕДИ изместване на връзки или промяна на мястото. При съмнение —
+        // отказ с code и клиентът минава към изричния избор.
+        if (message.reconnectOf !== undefined) {
+          const silentReconnectFailure = validateSilentActiveRoomReconnect({
+            connectionId: connection.id,
+            profileId: connection.profileId,
+            reconnectOf: message.reconnectOf,
+            room: targetRoomForResume,
+            reconnectToken: message.reconnectToken,
+          })
+          if (silentReconnectFailure !== null) {
+            safeSendToConnection(connection.id, {
+              type: 'room_resume_failed',
+              roomId: message.roomId,
+              message: silentReconnectFailure === 'other_session_active'
+                ? 'Играта е отворена от друго устройство.'
+                : 'Играта не може да бъде възстановена автоматично.',
+              code: silentReconnectFailure,
+            })
+            return
+          }
+        }
+
         if (connection.profileId !== null) {
           displaceProfileConnections(connection.profileId, connection.id)
         }
@@ -30748,6 +30841,10 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       : null
     const attachedRoomId = preDisconnectConnection?.currentRoomId ?? null
     const attachedSeat = preDisconnectConnection?.currentSeat ?? null
+    // Етап 2: за валидиране на reconnectOf при тихо възстановяване.
+    if (preDisconnectConnection?.profileId != null && attachedRoomId !== null) {
+      rememberClosedRoomConnection(connection.id, preDisconnectConnection.profileId, attachedRoomId)
+    }
 
     guestIdByConnection.delete(connection.id)
     lobbyChatSubscriberConnectionIds.delete(connection.id)

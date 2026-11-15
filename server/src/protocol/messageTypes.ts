@@ -183,6 +183,11 @@ export type ClientMessage =
       // instructed to navigate to the active-room screen. No lobby UI uses
       // this yet in Phase 1 — this is protocol foundation only.
       silent?: boolean
+      // Етап 2 (тихо възстановяване на активна игра): connectionId на
+      // предишната връзка на ТАЗИ страница. Тогава resume_room никога не
+      // измества друга жива сесия на профила — при съмнение отказва
+      // (room_resume_failed с code) и клиентът минава към изричния избор.
+      reconnectOf?: string
     }
   | {
       type: 'tournament_semifinal_result_acknowledge'
@@ -1042,6 +1047,9 @@ export type RoomResumeFailedMessage = {
   type: 'room_resume_failed'
   roomId: RoomId
   message: string
+  // Само при resume_room с reconnectOf (тихо възстановяване) — клиентът
+  // минава към досегашния безопасен път.
+  code?: 'other_session_active' | 'reconnect_unavailable'
 }
 
 export type ActiveRoomLeftMessage = {

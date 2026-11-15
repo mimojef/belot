@@ -504,6 +504,16 @@ let isZombieBidReconnectInFlight = false
 // сесия; консумира се в onOpen — spectator-ът re-watch-ва същата маса
 // вместо forced lobby reload (виж socketReconnectPolicy.ts).
 let isBelotSpectatorReconnectInFlight = false
+// Етап 2 — тихо възстановяване на активна игра (виж createLobbySoftReconnect,
+// контекст 'active_room'). clientId на последната успешна връзка (от
+// 'connected') — става reconnectOf при следващото прекъсване.
+let lastConnectedClientId: string | null = null
+// Стаята/мястото, което се възстановява, и предишната връзка.
+let activeRoomSoftReconnectTarget: { roomId: string; reconnectToken: string; reconnectOf: string } | null = null
+// Текущият опит за resume_room: done(true) след room_resumed + авторитетен snapshot.
+let activeRoomSoftReconnectSync: { roomId: string; resumed: boolean; done: (ok: boolean) => void } | null = null
+// session_in_game за ДРУГА стая по време на възстановяването -> безопасният път.
+let activeRoomSoftReconnectMismatch = false
 let showOfflineConnectionOverlay: () => void = () => {
   shouldReloadLobbyOnReconnect = true
 }
@@ -8952,17 +8962,72 @@ const lobbySoftReconnect = createLobbySoftReconnect({
     lobby.refreshOpenPersonalChatAfterReconnect()
   },
   syncLobby: (done) => lobby.beginReconnectSync(done),
+  // Етап 2: вика се само след потвърдена същата сесия (/api/auth/me).
+  syncActiveRoom: (done) => {
+    const target = activeRoomSoftReconnectTarget
+    if (
+      target === null ||
+      activeRoomSoftReconnectMismatch ||
+      activeRoom.getCurrentRoomId() !== target.roomId ||
+      !client.isConnected()
+    ) {
+      done(false)
+      return
+    }
+    activeRoomSoftReconnectSync = { roomId: target.roomId, resumed: false, done }
+    client.resumeRoom(target.roomId, target.reconnectToken, undefined, target.reconnectOf)
+  },
   onShowBanner: () => showConnectionRecoveringUi(),
+  onShowActiveRoomOutage: () => activeRoom.prepareForSilentReconnect(),
   onShowFullScreen: () => showConnectionLostFullScreen(),
-  onRecovered: () => {
+  onRecovered: (context) => {
+    if (context === 'active_room') {
+      activeRoomSoftReconnectTarget = null
+      activeRoomSoftReconnectSync = null
+      pwaIsReconnectingActiveRoom = false
+      hideConnectionRecoveryUi()
+      // Гласът: едва след прикрепянето към мястото (сървърът приема presence
+      // само от връзката на мястото); работещата LiveKit връзка не се пипа.
+      voiceController?.setGameConnection(true)
+      requestPwaUpdateApplyAttempt()
+      return
+    }
     hideConnectionRecoveryUi()
     // Гласът: presence от вече пренасочената връзка на мястото (lease/grace
     // непроменени; без ново включване на микрофона).
     voiceController?.setGameConnection(true)
     requestPwaUpdateApplyAttempt()
   },
-  onReload: (via) => forceOfflineLobbyReload(via),
+  onReload: (via) => {
+    activeRoomSoftReconnectTarget = null
+    activeRoomSoftReconnectSync = null
+    forceOfflineLobbyReload(via)
+  },
 })
+
+// Етап 2: допустимост за тихо възстановяване на активна игра — участник в
+// реален Belot мач (не пробна игра, не зрител, не Svara), поне едно успешно
+// свързване, известна предишна връзка, без вече насрочен reload.
+function getActiveRoomSoftReconnectCandidate(): { roomId: string; reconnectToken: string } | null {
+  if (
+    !hasGameServerConnectedOnce ||
+    _isStandaloneDedicatedPath ||
+    shouldReloadLobbyOnReconnect ||
+    offlineLobbyReloadScheduled ||
+    lastConnectedClientId === null ||
+    isBelotSpectatorSessionActive()
+  ) {
+    return null
+  }
+  return activeRoom.getSilentResumeTarget()
+}
+
+function completeActiveRoomSoftReconnectSync(ok: boolean): void {
+  const sync = activeRoomSoftReconnectSync
+  if (sync === null) return
+  activeRoomSoftReconnectSync = null
+  sync.done(ok)
+}
 
 client = createGameServerClient({
   onOpen: () => {
@@ -9126,6 +9191,36 @@ client = createGameServerClient({
       return
     }
 
+    // Етап 2 — тихо възстановяване на активна игра (вкл. мъртва връзка от
+    // watchdog/liveness/health — същите проверки за процес, сесия, срок и
+    // друго устройство). Масата остава видима, действията са заключени.
+    // Пореден кратък срив в същото прекъсване: началото (120 s) се пази.
+    if (lobbySoftReconnect.getOutageContext() === 'active_room') {
+      isZombieBidReconnectInFlight = false
+      // Ако новата връзка вече беше прикрепена към мястото, тя е „предишната“.
+      if (activeRoomSoftReconnectSync?.resumed === true && activeRoomSoftReconnectTarget !== null && lastConnectedClientId !== null) {
+        activeRoomSoftReconnectTarget = { ...activeRoomSoftReconnectTarget, reconnectOf: lastConnectedClientId }
+      }
+      activeRoomSoftReconnectSync = null
+      activeRoom.prepareForSilentReconnect()
+      lobbySoftReconnect.beginOutage('active_room')
+      notifyHealthMonitorSocketState()
+      scheduleServerReconnect()
+      return
+    }
+    const softReconnectCandidate = lobbySoftReconnect.isOutageActive() ? null : getActiveRoomSoftReconnectCandidate()
+    if (softReconnectCandidate !== null && lastConnectedClientId !== null) {
+      isZombieBidReconnectInFlight = false
+      activeRoomSoftReconnectTarget = { ...softReconnectCandidate, reconnectOf: lastConnectedClientId }
+      activeRoomSoftReconnectSync = null
+      activeRoomSoftReconnectMismatch = false
+      pwaIsReconnectingActiveRoom = true
+      lobbySoftReconnect.beginOutage('active_room')
+      notifyHealthMonitorSocketState()
+      scheduleServerReconnect()
+      return
+    }
+
     const closeDecision = decideSocketCloseAction({
       isBelotSpectatorSessionActive: isBelotSpectatorSessionActive(),
       hasActiveSvaraMatch: isSvaraReconnectContext(),
@@ -9240,6 +9335,8 @@ client = createGameServerClient({
     }
 
     if (message.type === 'connected') {
+      // Етап 2: идентификаторът на тази връзка — reconnectOf при следващото прекъсване.
+      if (typeof message.clientId === 'string' && message.clientId.length > 0) lastConnectedClientId = message.clientId
       handleConnectedServerMessage(lobby, message, () => {
         pwaBootstrapServerStateResolved = true
         requestPwaUpdateApplyAttempt()
@@ -9247,6 +9344,36 @@ client = createGameServerClient({
       // Отправна точка за backend процеса / продължение на тихото възстановяване.
       lobbySoftReconnect.noteConnected(message.serverInstanceId)
       return
+    }
+
+    // Етап 2 — тихо възстановяване на активна игра.
+    if (activeRoomSoftReconnectTarget !== null && lobbySoftReconnect.getOutageContext() === 'active_room') {
+      const target = activeRoomSoftReconnectTarget
+      // Сървърът праща session_in_game при всяко свързване, докато профилът е в
+      // игра: за същата стая — поглъща се (възстановяването продължава);
+      // за друга — безопасният път (reload -> изричен избор).
+      if (message.type === 'session_in_game') {
+        if (message.roomId !== target.roomId) {
+          activeRoomSoftReconnectMismatch = true
+          completeActiveRoomSoftReconnectSync(false)
+        }
+        return
+      }
+      const sync = activeRoomSoftReconnectSync
+      if (sync !== null && message.type === 'room_resume_failed' && message.roomId === sync.roomId) {
+        // Отказ (друго устройство, невалидна връзка, изтекла стая) — без
+        // „лоби“ междинно състояние: следва досегашното презареждане.
+        completeActiveRoomSoftReconnectSync(false)
+        return
+      }
+      if (sync !== null && message.type === 'room_resumed' && message.roomId === sync.roomId) {
+        sync.resumed = true
+      } else if (sync !== null && sync.resumed && message.type === 'room_snapshot' && message.roomId === sync.roomId) {
+        // Авторитетният snapshot се прилага синхронно по-долу; успехът — след него.
+        queueMicrotask(() => {
+          if (activeRoomSoftReconnectSync === sync) completeActiveRoomSoftReconnectSync(true)
+        })
+      }
     }
 
     if (message.type === 'session_displaced') {
@@ -10806,7 +10933,7 @@ void loadGuestTrialStatus().finally(() => {
 
     consecutiveNetworkFailures += 1
     if (consecutiveNetworkFailures < 2) return
-    if (isLobbySoftReconnectEligible() || lobbySoftReconnect.isOutageActive()) {
+    if (isLobbySoftReconnectEligible() || lobbySoftReconnect.isOutageActive() || getActiveRoomSoftReconnectCandidate() !== null) {
       // Сървърът не отговаря, а WS изглежда отворен (полуотворена връзка) ->
       // изоставя се и минава по тихия път (лента; цял екран след 15 s).
       if (client.isConnected()) client.abandonUnresponsiveSocket('health_unreachable')
@@ -10861,7 +10988,7 @@ void loadGuestTrialStatus().finally(() => {
       updateOfflineOverlayText()
       return
     }
-    if (isLobbySoftReconnectEligible() && client.isConnected()) {
+    if ((isLobbySoftReconnectEligible() || getActiveRoomSoftReconnectCandidate() !== null) && client.isConnected()) {
       client.abandonUnresponsiveSocket('browser_offline')
       return
     }

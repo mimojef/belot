@@ -287,6 +287,9 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         roomId,
         reconnectToken,
         silent: parsed.silent === true,
+        ...(typeof parsed.reconnectOf === 'string' && parsed.reconnectOf.length > 0 && parsed.reconnectOf.length <= 128
+          ? { reconnectOf: parsed.reconnectOf }
+          : {}),
       }
     }
 

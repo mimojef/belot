@@ -1,13 +1,27 @@
-// Тихо възстановяване на игровия WS в лоби контекст (лоби, чакалня на частна
-// маса) — без презареждане на страницата, само когато е безопасно:
+// Тихо възстановяване на игровия WS без презареждане на страницата, само
+// когато е безопасно. Два контекста:
 //
-//   прекъсване (beginOutage)    -> компактна лента; цял екран след 15 s
-//   отворен WS (handleOpen)     -> чака 'connected'
-//   'connected' (noteConnected) -> същият backend процес? иначе reload
-//                                  -> синхронизация: сесия (/api/auth/me) +
-//                                     лоби (членство в частна маса и пр.)
-//   успех                       -> onRecovered (лентата/екранът се скриват)
-//   неуспех/просрочване/>120 s  -> onReload (досегашният безопасен reload)
+//   'lobby' (Етап 1 — лоби, чакалня на частна маса):
+//     прекъсване (beginOutage)    -> компактна лента; цял екран след 15 s
+//     отворен WS (handleOpen)     -> чака 'connected'
+//     'connected' (noteConnected) -> същият backend процес? иначе reload
+//                                 -> синхронизация (паралелно): сесия
+//                                    (/api/auth/me) + лоби (членство и пр.)
+//
+//   'active_room' (Етап 2 — участник в реален Belot мач):
+//     прекъсване                  -> масата остава видима със съобщението в
+//                                    стаята; БЕЗ цял екран след 15 s (едва
+//                                    след SOFT_RECONNECT_MAX_OUTAGE_MS —
+//                                    досегашният fallback)
+//     'connected'                 -> същият backend процес? иначе reload
+//                                 -> ПОСЛЕДОВАТЕЛНО: първо сесията трябва да
+//                                    е потвърдено същата; едва тогава
+//                                    resume_room (syncActiveRoom) — никакво
+//                                    автоматично прикрепяне при сменена или
+//                                    невалидна сесия
+//
+//   успех                         -> onRecovered(context)
+//   неуспех/просрочване/>120 s    -> onReload (досегашният безопасен reload)
 //
 // Ново прекъсване по време на синхронизацията я анулира (generation) —
 // закъснели резултати от стария опит се игнорират. Нищо не се изпраща
@@ -23,6 +37,7 @@ import {
 } from './socketReconnectPolicy'
 
 export type SoftReconnectSessionCheck = 'same' | 'changed' | 'error'
+export type SoftReconnectContext = 'lobby' | 'active_room'
 
 export type LobbySoftReconnectDeps = {
   now: () => number
@@ -34,24 +49,35 @@ export type LobbySoftReconnectDeps = {
   onResumeLobby: () => void
   /** Изпраща resync заявките; done(true) след авторитетно потвърдено състояние. */
   syncLobby: (done: (ok: boolean) => void) => void
+  /**
+   * Активна стая: resume_room (с reconnectOf); done(true) едва след
+   * room_resumed + авторитетен room_snapshot за същата стая. Вика се само
+   * след потвърдена същата сесия.
+   */
+  syncActiveRoom?: (done: (ok: boolean) => void) => void
   onShowBanner: () => void
+  /** Активна стая: съобщението в стаята (масата остава видима). */
+  onShowActiveRoomOutage?: () => void
   onShowFullScreen: () => void
-  onRecovered: () => void
+  onRecovered: (context: SoftReconnectContext) => void
   onReload: (via: OfflineReloadVia) => void
 }
 
 export type LobbySoftReconnect = {
-  /** WS се затвори в лоби контекст. */
-  beginOutage: () => void
+  /** WS се затвори в лоби контекст ('lobby') или в активна игра ('active_room'). */
+  beginOutage: (context?: SoftReconnectContext) => void
   /** WS се отвори. true = в ход е тихо възстановяване (обичайният onOpen път се пропуска). */
   handleOpen: () => boolean
   /** Всяко 'connected' съобщение (и първото след зареждане). */
   noteConnected: (serverInstanceId: string | undefined) => void
   isOutageActive: () => boolean
+  /** Контекстът на текущото прекъсване (null — няма). */
+  getOutageContext: () => SoftReconnectContext | null
 }
 
 type Outage = {
   startedAt: number
+  context: SoftReconnectContext
   phase: 'down' | 'awaiting_connected' | 'syncing' | 'reloading'
 }
 
@@ -77,7 +103,16 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     deps.onReload(via)
   }
 
-  function startSync(): void {
+  function recovered(): void {
+    if (outage === null) return
+    const context = outage.context
+    outage = null
+    generation += 1
+    clearTimers()
+    deps.onRecovered(context)
+  }
+
+  function startLobbySync(): void {
     if (outage === null) return
     outage.phase = 'syncing'
     generation += 1
@@ -101,10 +136,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
         reload(outcome.via)
         return
       }
-      outage = null
-      generation += 1
-      clearTimers()
-      deps.onRecovered()
+      recovered()
     }
 
     syncTimer = deps.setTimeout(() => {
@@ -120,11 +152,58 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     deps.syncLobby((ok) => { lobbySynced = ok; settle(false) })
   }
 
+  // Активна стая: сесията ПЪРВО; resume_room само след потвърдена същата сесия.
+  function startActiveRoomSync(): void {
+    if (outage === null) return
+    outage.phase = 'syncing'
+    generation += 1
+    const syncGeneration = generation
+    const startedAt = outage.startedAt
+    const isCurrent = (): boolean => syncGeneration === generation && outage !== null && outage.phase === 'syncing'
+
+    const finish = (session: SoftReconnectSessionCheck, synced: boolean): void => {
+      if (!isCurrent()) return
+      const outcome = decideSoftReconnectOutcome({ outageStartedAt: startedAt, now: deps.now(), session, lobbySynced: synced })
+      if (outcome.kind === 'reload') {
+        reload(outcome.via)
+        return
+      }
+      recovered()
+    }
+
+    syncTimer = deps.setTimeout(() => {
+      syncTimer = null
+      finish('error', false)
+    }, SOFT_RECONNECT_SYNC_TIMEOUT_MS)
+
+    deps.verifySession().then(
+      (session) => {
+        if (!isCurrent()) return
+        if (session !== 'same' || deps.syncActiveRoom === undefined) {
+          finish(session, false)
+          return
+        }
+        deps.syncActiveRoom((ok) => finish('same', ok))
+      },
+      () => finish('error', false),
+    )
+  }
+
   return {
-    beginOutage() {
+    beginOutage(context = 'lobby') {
       if (outage === null) {
-        outage = { startedAt: deps.now(), phase: 'down' }
+        outage = { startedAt: deps.now(), context, phase: 'down' }
         generation += 1
+        if (context === 'active_room') {
+          deps.onShowActiveRoomOutage?.()
+          // Без цял екран след 15 s — масата остава видима; при изтичане на
+          // срока за тихо възстановяване — досегашният fallback.
+          fullScreenTimer = deps.setTimeout(() => {
+            fullScreenTimer = null
+            if (outage !== null && outage.phase !== 'reloading') deps.onShowFullScreen()
+          }, SOFT_RECONNECT_MAX_OUTAGE_MS)
+          return
+        }
         deps.onShowBanner()
         fullScreenTimer = deps.setTimeout(() => {
           fullScreenTimer = null
@@ -134,7 +213,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
       }
       if (outage.phase === 'reloading') return
       // Ново прекъсване в същото прекъсване (напр. по време на синхронизацията):
-      // началото се пази — 120 s се броят от първото затваряне.
+      // началото и контекстът се пазят — 120 s се броят от първото затваряне.
       outage.phase = 'down'
       generation += 1
       if (syncTimer !== null) deps.clearTimeout(syncTimer)
@@ -152,7 +231,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     },
     noteConnected(serverInstanceId) {
       if (outage === null) {
-        // Обикновено свързване (първо, след login, извън лоби контекста):
+        // Обикновено свързване (първо, след login, извън тихото възстановяване):
         // текущият процес става отправна точка.
         if (typeof serverInstanceId === 'string' && serverInstanceId.length > 0) knownServerInstanceId = serverInstanceId
         return
@@ -168,10 +247,14 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
         reload(decision.via)
         return
       }
-      startSync()
+      if (outage.context === 'active_room') startActiveRoomSync()
+      else startLobbySync()
     },
     isOutageActive() {
       return outage !== null
+    },
+    getOutageContext() {
+      return outage?.context ?? null
     },
   }
 }
