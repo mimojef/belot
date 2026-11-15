@@ -498,26 +498,17 @@ async function rawConnect(h: GiftBackHarness, profile: TestProfile): Promise<{ w
     await V.page.locator('[data-private-room-manual-start="1"]').click()
     const voiceRoomId = await waitUntil('V game', () => [...V.received].reverse().find((f) => f.type === 'room_snapshot' && f.data.game)?.data.roomId, 30_000)
     await sleep(3000)
-    // При старт на играта гласовата сесия от чакалнята се прекратява (отделна,
-    // вече съществуваща празнина — виж доклада); включване наново в играта.
-    const liveKitAtGameStart = await fakeLiveKit(V.page)
-    console.log(`    (LiveKit при старта на играта: ${JSON.stringify(liveKitAtGameStart)})`)
-    await V.page.locator('[data-voice-game-toggle="1"]').first().click({ timeout: 25_000 }).catch(() => undefined)
-    await V.page.locator('[data-voice-panel-layer="1"] [data-voice-action="join-listen"], [data-voice-prompt-layer="1"] [data-voice-action="join-listen"]').first().click({ timeout: 15_000 }).catch((e) => console.log('    (няма бутон за включване в играта: ' + String(e).slice(0, 120) + ')'))
-    await waitForExpr(V.page, "(() => { const s = window.__fakeLiveKit; return !!s && s.activeRooms === 1 })()", 20_000)
-    await V.page.locator('[data-voice-panel-layer="1"] [data-voice-action="close"]').first().click({ timeout: 3000 }).catch(() => undefined)
+    // Гласът от чакалнята продължава в играта без ново включване.
     const markerV = await setMarker(V.page)
     const liveKitBeforeDrop = await fakeLiveKit(V.page)
-    console.log(`    (гласови съобщения към V: ${JSON.stringify(V.received.filter((f) => f.type.startsWith('voice_')).map((f) => f.type + (f.data.reason ? ':' + f.data.reason : '') + (f.data.code ? ':' + f.data.code : '')))})`)
-    console.log(`    (LiveKit преди прекъсването: ${JSON.stringify(liveKitBeforeDrop)}; глас: ${await V.page.evaluate("(() => { const el = document.querySelector(\"[data-voice-mobile-root], [data-voice-game-strip], [data-voice-waiting-strip] \"); return el ? el.textContent.slice(0, 80) : null })()")})`)
     const r5 = await dropFor(V, 3_000)
     await sleep(1500)
     const liveKit = await fakeLiveKit(V.page)
     await check('[R5] гласова маса в игра: тихо възстановяване, LiveKit не е прекъснат, presence след room_resumed', async () => {
       assert(listening, '(setup) гласът не беше включен')
       assert(r5.roomBannerDuring && !r5.overlayDuring && r5.recovered, JSON.stringify({ banner: r5.roomBannerDuring, overlay: r5.overlayDuring, recovered: r5.recovered }))
-      assert(liveKitBeforeDrop !== null && liveKitBeforeDrop.activeRooms === 1, `(setup) гласът не е активен в играта: ${JSON.stringify(liveKitBeforeDrop)}`)
-      assert(liveKit !== null && liveKit.connects === liveKitBeforeDrop.connects && liveKit.disconnects === liveKitBeforeDrop.disconnects && liveKit.activeRooms === 1, `LiveKit: преди ${JSON.stringify(liveKitBeforeDrop)} след ${JSON.stringify(liveKit)}`)
+      assert(liveKitBeforeDrop !== null && liveKitBeforeDrop.connects === 1 && liveKitBeforeDrop.disconnects === 0 && liveKitBeforeDrop.activeRooms === 1, `гласът от чакалнята не продължи в играта: ${JSON.stringify(liveKitBeforeDrop)}`)
+      assert(liveKit !== null && liveKit.connects === 1 && liveKit.disconnects === 0 && liveKit.activeRooms === 1, `LiveKit: преди ${JSON.stringify(liveKitBeforeDrop)} след ${JSON.stringify(liveKit)}`)
       const resumedIdx = r5.receivedAfter.findIndex((f) => f.type === 'room_resumed' && f.data.roomId === voiceRoomId)
       const presenceAt = r5.sentAfter.find((f) => f.type === 'voice_presence')?.at ?? null
       const resumedAt = resumedIdx >= 0 ? r5.receivedAfter[resumedIdx]!.at : null

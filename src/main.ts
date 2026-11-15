@@ -540,6 +540,16 @@ let isVoiceUiRefreshQueued = false
 const voiceSpeakPreview = createVoiceSpeakPreviewTracker()
 /** Последният room_snapshot на активната маса — само voiceTableId и местата. */
 let voiceRoomSnapshot: { roomId: string; voiceTableId: string | null; yourSeat: string | null; seats: RoomSnapshotMessage['seats'] } | null = null
+/**
+ * Гласова маса, която преминава от чакалнята в играта (private_room_full):
+ * мост до първия room_snapshot на новата стая — виж resolveVoiceContext.
+ */
+let voiceGameStartTransition: {
+  roomId: string
+  voiceTableId: string
+  selfProfileId: string
+  seats: Array<{ profileId: string | null; isBot: boolean }>
+} | null = null
 
 const SESSION_CACHE_KEY = 'pika_session_cache'
 
@@ -9308,7 +9318,22 @@ client = createGameServerClient({
     // Гласов чат (Етап 3): собствените съобщения + проследяване на контекста.
     // Контекстът се преизчислява СЛЕД синхронната обработка (microtask) —
     // лобито/активната маса вече са приложили съобщението.
+    // Чакалня -> игра на гласова маса: членството се пази до първия
+    // room_snapshot на новата стая (лобито още помни масата в този момент).
+    if (message.type === 'private_room_full') {
+      const startingRoom = lobby.getMyPrivateRoom()
+      const selfProfileId = currentAuthSession?.profile.profileId ?? null
+      voiceGameStartTransition = startingRoom !== null && startingRoom.voiceTableId != null && selfProfileId !== null
+        ? {
+            roomId: message.roomId,
+            voiceTableId: startingRoom.voiceTableId,
+            selfProfileId,
+            seats: startingRoom.slots.map((slot) => ({ profileId: slot.occupant?.profileId ?? null, isBot: slot.occupant?.isBot ?? false })),
+          }
+        : null
+    }
     if (message.type === 'room_snapshot') {
+      if (voiceGameStartTransition !== null && voiceGameStartTransition.roomId === message.roomId) voiceGameStartTransition = null
       voiceRoomSnapshot = { roomId: message.roomId, voiceTableId: message.voiceTableId ?? null, yourSeat: message.yourSeat, seats: message.seats }
       // Синхронно, преди activeRoom да рендерира: слотовете „говори“ само на гласова маса.
       setVoiceSpeakingSlotsEnabled((message.voiceTableId ?? null) !== null && message.yourSeat !== null)
@@ -11054,7 +11079,28 @@ function resolveVoiceContext(): VoiceContext {
   if (activeRoom.hasActiveRoom()) {
     if (activeRoom.isSpectatorView()) return { kind: 'none' }
     const snapshot = voiceRoomSnapshot
-    if (snapshot === null || snapshot.roomId !== activeRoom.getCurrentRoomId() || snapshot.voiceTableId === null || snapshot.yourSeat === null) {
+    const currentRoomId = activeRoom.getCurrentRoomId()
+    // Чакалня -> игра: стаята е отворена (private_room_full), а първият ѝ
+    // room_snapshot още не е пристигнал. Членството в СЪЩАТА гласова маса е
+    // запазено (сървърът я премества в играта) — гласът продължава, вместо
+    // временно „none“ да прекрати LiveKit сесията. Важи само за тази стая и
+    // само до първия ѝ snapshot (той е авторитетен: друга маса или без глас ->
+    // обичайното прекратяване).
+    if (
+      voiceGameStartTransition !== null &&
+      voiceGameStartTransition.roomId === currentRoomId &&
+      voiceGameStartTransition.selfProfileId === selfProfileId &&
+      (snapshot === null || snapshot.roomId !== currentRoomId)
+    ) {
+      return {
+        kind: 'table',
+        voiceTableId: voiceGameStartTransition.voiceTableId,
+        screen: 'game',
+        selfProfileId,
+        seats: voiceGameStartTransition.seats,
+      }
+    }
+    if (snapshot === null || snapshot.roomId !== currentRoomId || snapshot.voiceTableId === null || snapshot.yourSeat === null) {
       return { kind: 'none' }
     }
     return {
