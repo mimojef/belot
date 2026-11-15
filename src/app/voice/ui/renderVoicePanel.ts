@@ -71,6 +71,8 @@ const MIC_ERROR_TEXT: Record<string, string> = {
   mic_not_found: 'Не е открит микрофон. Свържете слушалки с микрофон или продължете само да слушате.',
   mic_permission_denied: 'Pika.bg няма достъп до микрофона. Разрешете го от настройките на браузъра (🔒 до адреса → Микрофон) и опитайте пак. Можете да продължите само да слушате.',
   mic_unavailable: 'Микрофонът не е достъпен. Можете да продължите само да слушате.',
+  // Заявеното включване не завърши заради прекъсване/ротация на гласовата връзка.
+  mic_not_enabled: 'Моля, опитайте отново.',
 }
 
 function escapeHtml(value: string): string {
@@ -119,7 +121,7 @@ function renderNotices(options: VoicePanelOptions): string {
     // Нов микрофон след грешката — същото съобщение, същият единствен бутон.
     const title = snapshot.microphoneDevicesChanged
       ? 'Открит е микрофон.'
-      : code === 'mic_not_found' ? 'Няма микрофон' : code === 'mic_permission_denied' ? 'Няма достъп до микрофона' : 'Микрофонът не е достъпен'
+      : code === 'mic_not_found' ? 'Няма микрофон' : code === 'mic_permission_denied' ? 'Няма достъп до микрофона' : code === 'mic_not_enabled' ? 'Микрофонът не беше включен.' : 'Микрофонът не е достъпен'
     const text = snapshot.microphoneDevicesChanged ? 'Натиснете „Опитай отново“, за да го включите.' : MIC_ERROR_TEXT[code]!
     notice('error', title, text, button('data-voice-action="retry-mic"', 'Опитай отново', 'secondary'))
   } else if (code === 'vip_required') {

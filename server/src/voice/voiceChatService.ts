@@ -206,6 +206,8 @@ export type VoiceRuntimeStats = {
   counters: Record<string, number>
   /** Етап 6: отказаните заявки за токен по код (натрупващи се от старта на процеса). */
   tokensDeniedByCode: Record<string, number>
+  /** Ротации по причина (натрупващи се от старта на процеса). */
+  rotationsByReason: Record<string, number>
 }
 
 /** Етап 6 — ред за админ мониторинга: без профили, имена или токени. */
@@ -372,6 +374,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     muteRevocations: 0,
   }
   const tokensDeniedByCode: Record<string, number> = {}
+  const rotationsByReason: Record<string, number> = {}
   const countDenial = (code: string): void => {
     counters.tokensDenied! += 1
     tokensDeniedByCode[code] = (tokensDeniedByCode[code] ?? 0) + 1
@@ -584,6 +587,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     }
     blockedTables.delete(voiceTableId)
     counters.rotations! += 1
+    rotationsByReason[reason] = (rotationsByReason[reason] ?? 0) + 1
     log(`[voice-chat] rotation voiceTable=${voiceTableId} generation=${result.generation} reason=${reason}`)
     notifyTable(voiceTableId, { type: 'voice_table_updated', voiceTableId, generation: result.generation, ready: false })
     reconciler.kick()
@@ -1283,6 +1287,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         reconciler: reconciler.stats(),
         counters: { ...counters },
         tokensDeniedByCode: { ...tokensDeniedByCode },
+        rotationsByReason: { ...rotationsByReason },
       }
     },
 

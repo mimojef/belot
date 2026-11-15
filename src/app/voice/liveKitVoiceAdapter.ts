@@ -18,7 +18,10 @@
 //   * ротация: detachMicrophoneForReuse или ROOM_DELETED -> живият capture се
 //     предава на контролера (VoiceRetainedMicrophone);
 //   * изключено/изгубено устройство, сървърно премахване на публикацията ->
-//     capture-ът се освобождава; НЕ се превключва автоматично към друго устройство.
+//     capture-ът се освобождава; НЕ се превключва автоматично към друго устройство;
+//   * публикуване, прекъснато от reconnect на SDK-то (пълният reconnect отменя
+//     незавършеното addTrack) -> живият capture се връща на контролера
+//     (VoiceMicrophoneError('interrupted')) за публикуване след възстановяването.
 
 import {
   AudioPresets,
@@ -44,9 +47,12 @@ import {
   type VoiceAdapterEvents,
   type VoiceConnectedRoom,
   type VoiceDisconnectCause,
+  type VoiceLiveKitDisconnectReason,
   type VoiceMicrophoneFailure,
+  type VoiceMicrophoneLossReason,
   type VoiceRetainedMicrophone,
 } from './voiceAdapter'
+import { classifyPublishError } from './voicePublishErrors'
 import type { VoiceAudioSink } from './voiceAudioSink'
 import { summarizeTransportStats } from './voiceTransportStats'
 
@@ -68,16 +74,38 @@ function mapDisconnectReason(reason: DisconnectReason | undefined, clientInitiat
   return 'connection_lost'
 }
 
+// Подробна причина — само за анонимната диагностика (затворено изброяване).
+function describeDisconnectReason(reason: DisconnectReason | undefined, clientInitiated: boolean): VoiceLiveKitDisconnectReason {
+  if (clientInitiated || reason === DisconnectReason.CLIENT_INITIATED) return 'client'
+  switch (reason) {
+    case DisconnectReason.ROOM_DELETED: return 'room_deleted'
+    case DisconnectReason.PARTICIPANT_REMOVED: return 'participant_removed'
+    case DisconnectReason.DUPLICATE_IDENTITY: return 'duplicate_identity'
+    case DisconnectReason.SERVER_SHUTDOWN: return 'server_shutdown'
+    case DisconnectReason.JOIN_FAILURE: return 'join_failure'
+    case DisconnectReason.STATE_MISMATCH: return 'state_mismatch'
+    case DisconnectReason.MIGRATION: return 'migration'
+    case DisconnectReason.SIGNAL_CLOSE: return 'signal_close'
+    case DisconnectReason.UNKNOWN_REASON:
+    case undefined: return 'network'
+    default: return 'other'
+  }
+}
+
 function mapMicrophoneError(error: unknown): VoiceMicrophoneFailure {
   const failure = MediaDeviceFailure.getFailure(error)
   if (failure === MediaDeviceFailure.PermissionDenied) return 'permission_denied'
   if (failure === MediaDeviceFailure.NotFound) return 'not_found'
-  if (failure === MediaDeviceFailure.DeviceInUse) return 'unavailable'
+  if (failure === MediaDeviceFailure.DeviceInUse) return 'busy'
   if (failure === MediaDeviceFailure.Other) return 'unavailable'
   // Не е грешка на устройството: сървърът е отказал публикуването (права).
   const message = error instanceof Error ? error.message : String(error)
   if (/permission|not allowed|insufficient|unauthori[sz]ed/i.test(message)) return 'not_permitted'
   return 'unavailable'
+}
+
+function stopTrack(track: MediaStreamTrack): void {
+  try { track.stop() } catch { /* вече спрян */ }
 }
 
 // Запазени capture-и (ротация): handle -> MediaStreamTrack. release() го спира.
@@ -111,6 +139,21 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
   let activeRoom: Room | null = null
 
   return {
+    // Само придобиване (getUserMedia) — независимо от стаята; публикуването е
+    // отделно (enableMicrophone(reuse) в текущата стая). release() спира track-а.
+    async acquireMicrophone() {
+      let capture: MediaStreamTrack | undefined
+      try {
+        if (navigator.mediaDevices?.getUserMedia === undefined) throw new VoiceMicrophoneError('unavailable')
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { ...AUDIO_CAPTURE } })
+        capture = stream.getAudioTracks()[0]
+        for (const other of stream.getTracks()) if (other !== capture) stopTrack(other)
+      } catch (error) {
+        throw error instanceof VoiceMicrophoneError ? error : new VoiceMicrophoneError(mapMicrophoneError(error))
+      }
+      if (capture === undefined) throw new VoiceMicrophoneError('not_found')
+      return retainCapture(capture)
+    },
     prepare(events: VoiceAdapterEvents, isIdentityLocallyMuted: (identity: string) => boolean) {
       if (activeRoom !== null) throw new Error('voice_room_already_active')
       const room = new Room({
@@ -127,6 +170,9 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       activeRoom = room
       let clientDisconnect = false
       let disposed = false
+      // Брояч на reconnect-ите на SDK-то — за разпознаване на публикуване,
+      // прекъснато от reconnect (пълният reconnect отменя незавършеното addTrack).
+      let reconnectEpoch = 0
       const attachedTrackSids = new Set<string>()
 
       // Отключване на аудиото в СЪЩИЯ потребителски жест (преди мрежата).
@@ -178,11 +224,11 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       }
 
       /** Capture-ът е спрял/отнет извън нашия контрол -> спиране и сигнал (без нов capture). */
-      function loseMicrophone(): void {
+      function loseMicrophone(reason: VoiceMicrophoneLossReason): void {
         stopCapture(micCapture)
         micCapture = null
         unwatchMicrophone()
-        events.onLocalMicrophoneLost()
+        events.onLocalMicrophoneLost(reason)
       }
 
       function stopLocalMicrophone(): Promise<void> {
@@ -205,18 +251,33 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           })
       }
 
+      const isReconnectingState = (): boolean =>
+        room.state === ConnectionState.Reconnecting || room.state === ConnectionState.SignalReconnecting
+
       async function publishCapture(capture: MediaStreamTrack): Promise<void> {
+        const epoch = reconnectEpoch
         try {
           await room.localParticipant.publishTrack(capture, { source: Track.Source.Microphone })
         } catch (error) {
+          const publishError = classifyPublishError(error)
+          // Прекъснато от reconnect на SDK-то (не от нас): живият capture НЕ се
+          // спира — връща се на контролера за публикуване след Reconnected.
+          // Потвърден отказ на правата никога не е прекъсване.
+          const interrupted = publishError !== 'not_permitted' && !disposed && !clientDisconnect && capture.readyState === 'live'
+            && (reconnectEpoch !== epoch || isReconnectingState())
+          if (interrupted && micTrack()?.mediaStreamTrack !== capture) {
+            throw new VoiceMicrophoneError('interrupted', { retained: retainCapture(capture), publishError })
+          }
           stopCapture(capture)
           await stopLocalMicrophone()
-          throw new VoiceMicrophoneError(mapMicrophoneError(error))
+          // Липса на право за говорене -> 'not_permitted' (съобщенията за правата);
+          // MediaDeviceFailure.getFailure връща Other за всяка грешка с name.
+          throw new VoiceMicrophoneError(publishError === 'not_permitted' ? 'not_permitted' : mapMicrophoneError(error), { publishError })
         }
         micCapture = capture
         const track = micTrack()
         if (track !== undefined) {
-          const onEnded = () => { void stopLocalMicrophone().then(() => events.onLocalMicrophoneLost()) }
+          const onEnded = () => { void stopLocalMicrophone().then(() => events.onLocalMicrophoneLost('track_ended')) }
           track.on(TrackEvent.Ended, onEnded)
           micWatch = { track, onEnded }
         }
@@ -228,7 +289,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         if (track === undefined) return
         if (track.mediaStreamTrack.readyState === 'ended') {
           await stopLocalMicrophone()
-          events.onLocalMicrophoneLost()
+          events.onLocalMicrophoneLost('track_ended')
           return
         }
         // Без заявка за разрешение: само изброяване на вече разрешените устройства.
@@ -237,7 +298,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         const devices = await Room.getLocalDevices('audioinput', false).catch(() => null)
         if (devices !== null && !devices.some((device) => device.deviceId === deviceId)) {
           await stopLocalMicrophone()
-          events.onLocalMicrophoneLost()
+          events.onLocalMicrophoneLost('device_removed')
         }
       }
 
@@ -246,6 +307,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           releaseAllAudio()
           if (activeRoom === room) activeRoom = null
           const cause = mapDisconnectReason(reason, clientDisconnect)
+          const detail = describeDisconnectReason(reason, clientDisconnect)
           // ROOM_DELETED може да пристигне ПРЕДИ voice_table_updated (ротация):
           // живият capture не се спира, а се предава на контролера, който го
           // публикува в новата генерация или го освобождава (≤20 s). Всяка
@@ -259,14 +321,17 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
             held?.release()
             return
           }
-          events.onDisconnected(cause, held)
+          events.onDisconnected(cause, held, detail)
         })
-        .on(RoomEvent.Reconnecting, () => events.onReconnecting())
+        .on(RoomEvent.Reconnecting, () => {
+          reconnectEpoch += 1
+          events.onReconnecting()
+        })
         .on(RoomEvent.Reconnected, () => {
           events.onReconnected()
           // Официалният пълен reconnect публикува същия track наново; ако не е
           // успял — capture-ът не остава активен без публикация.
-          if (micCapture !== null && micTrack()?.mediaStreamTrack !== micCapture) loseMicrophone()
+          if (micCapture !== null && micTrack()?.mediaStreamTrack !== micCapture) loseMicrophone('republish_failed')
         })
         .on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
           events.onActiveSpeakersChanged(speakers.map((speaker) => speaker.identity))
@@ -298,7 +363,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           // повторна публикация на същия capture -> спиране (без нов capture).
           if (micCapture === null || room.state !== ConnectionState.Connected) return
           if (micTrack()?.mediaStreamTrack === micCapture) return
-          loseMicrophone()
+          loseMicrophone('server_unpublished')
         })
 
       const connected: VoiceConnectedRoom = {

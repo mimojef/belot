@@ -38,6 +38,7 @@ export function createVoiceAdminMonitoring(deps: {
         tokensDeniedByCode: runtime.tokensDeniedByCode,
         tokensDiscardedStale: runtime.counters.tokensDiscardedStale ?? 0,
         rotations: runtime.counters.rotations ?? 0,
+        rotationsByReason: runtime.rotationsByReason ?? {},
         createRoomFailures: runtime.counters.createRoomFailures ?? 0,
         leaseExpired: runtime.counters.leaseExpired ?? 0,
         disconnectTimeouts: runtime.counters.disconnectTimeouts ?? 0,

@@ -18,7 +18,7 @@ const RATE_WINDOW_MS = 60_000
 const MAX_TRACKED_PROFILES = 5_000
 const RECENT_TRANSPORT_LIMIT = 200
 
-export const VOICE_CLIENT_EVENTS = ['connected', 'connect_failed', 'reconnecting', 'reconnected', 'connection_lost', 'reconnect_failed', 'mic_failed', 'transport'] as const
+export const VOICE_CLIENT_EVENTS = ['connected', 'connect_failed', 'reconnecting', 'reconnected', 'connection_lost', 'reconnect_failed', 'mic_failed', 'transport', 'mic_attempt', 'mic_lost', 'livekit_disconnect'] as const
 export type VoiceClientEvent = (typeof VOICE_CLIENT_EVENTS)[number]
 
 export const VOICE_CLIENT_FAILURE_REASONS = [
@@ -28,6 +28,29 @@ export const VOICE_CLIENT_FAILURE_REASONS = [
   'mic_not_found', 'mic_permission_denied', 'mic_unavailable', 'mic_not_permitted',
 ] as const
 export type VoiceClientFailureReason = (typeof VOICE_CLIENT_FAILURE_REASONS)[number]
+
+// Микрофон (затворени изброявания; без устройства, аудио или идентичност).
+export const VOICE_MIC_SOURCES = ['initial', 'panel'] as const
+export const VOICE_MIC_RESULTS = ['enabled', 'recovered', 'lost', 'failed', 'cancelled'] as const
+export const VOICE_MIC_INTERRUPTIONS = ['none', 'sdk_reconnect', 'connection_lost', 'rotation', 'room_deleted'] as const
+export const VOICE_MIC_FAILURES = ['none', 'permission_denied', 'not_found', 'device_busy', 'gum_failed', 'publish_failed', 'publish_cancelled', 'publish_timeout', 'publish_negotiation', 'publish_not_connected', 'not_permitted', 'acquired_not_published', 'session_failed'] as const
+export const VOICE_MIC_GUM_BUCKETS = ['none', 'lt1s', '1to5s', '5to15s', 'gt15s'] as const
+export const VOICE_MIC_LOST_REASONS = ['track_ended', 'republish_failed', 'server_unpublished', 'device_removed', 'rotation', 'connection_lost'] as const
+export const VOICE_LIVEKIT_DISCONNECT_REASONS = ['network', 'server_shutdown', 'room_deleted', 'participant_removed', 'duplicate_identity', 'join_failure', 'signal_close', 'state_mismatch', 'migration', 'client', 'other'] as const
+
+type OneOf<T extends readonly string[]> = T[number]
+
+export type VoiceClientMicAttempt = {
+  source: OneOf<typeof VOICE_MIC_SOURCES>
+  result: OneOf<typeof VOICE_MIC_RESULTS>
+  interruption: OneOf<typeof VOICE_MIC_INTERRUPTIONS>
+  gum: OneOf<typeof VOICE_MIC_GUM_BUCKETS>
+  failure: OneOf<typeof VOICE_MIC_FAILURES>
+}
+
+function pickOne<T extends readonly string[]>(value: unknown, allowed: T): OneOf<T> | null {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as OneOf<T>) : null
+}
 
 const CANDIDATE_TYPES = ['host', 'srflx', 'prflx', 'relay', 'unknown'] as const
 const PROTOCOLS = ['udp', 'tcp', 'tls', 'unknown'] as const
@@ -41,10 +64,15 @@ export type VoiceClientTransport = {
   packetLossPercent: number | null
 }
 
+type DetailedEvent = 'connect_failed' | 'mic_failed' | 'transport' | 'mic_attempt' | 'mic_lost' | 'livekit_disconnect'
+
 export type VoiceClientReport =
-  | { event: Exclude<VoiceClientEvent, 'connect_failed' | 'mic_failed' | 'transport'> }
+  | { event: Exclude<VoiceClientEvent, DetailedEvent> }
   | { event: 'connect_failed' | 'mic_failed'; reason: VoiceClientFailureReason }
   | { event: 'transport'; transport: VoiceClientTransport }
+  | ({ event: 'mic_attempt' } & VoiceClientMicAttempt)
+  | { event: 'mic_lost'; reason: OneOf<typeof VOICE_MIC_LOST_REASONS> }
+  | { event: 'livekit_disconnect'; reason: OneOf<typeof VOICE_LIVEKIT_DISCONNECT_REASONS> }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -68,6 +96,23 @@ export function parseVoiceClientReport(body: unknown): VoiceClientReport | null 
     if (isMic !== (event === 'mic_failed')) return null
     return { event, reason: reason as VoiceClientFailureReason }
   }
+  if (event === 'mic_attempt') {
+    const source = pickOne(body.source, VOICE_MIC_SOURCES)
+    const result = pickOne(body.result, VOICE_MIC_RESULTS)
+    const interruption = pickOne(body.interruption, VOICE_MIC_INTERRUPTIONS)
+    const gum = pickOne(body.gum, VOICE_MIC_GUM_BUCKETS)
+    const failure = pickOne(body.failure, VOICE_MIC_FAILURES)
+    if (source === null || result === null || interruption === null || gum === null || failure === null) return null
+    return { event, source, result, interruption, gum, failure }
+  }
+  if (event === 'mic_lost') {
+    const reason = pickOne(body.reason, VOICE_MIC_LOST_REASONS)
+    return reason === null ? null : { event, reason }
+  }
+  if (event === 'livekit_disconnect') {
+    const reason = pickOne(body.reason, VOICE_LIVEKIT_DISCONNECT_REASONS)
+    return reason === null ? null : { event, reason }
+  }
   if (event === 'transport') {
     const transport = body.transport
     if (!isRecord(transport)) return null
@@ -90,7 +135,7 @@ export function parseVoiceClientReport(body: unknown): VoiceClientReport | null 
       },
     }
   }
-  return { event: event as Exclude<VoiceClientEvent, 'connect_failed' | 'mic_failed' | 'transport'> }
+  return { event: event as Exclude<VoiceClientEvent, DetailedEvent> }
 }
 
 type MeanAccumulator = { sum: number; count: number }
@@ -112,6 +157,20 @@ export type VoiceClientDiagnosticsSnapshot = {
     jitterMs: { mean: number | null; reports: number }
     packetLossPercent: { mean: number | null; reports: number }
   }
+  /** Микрофон: първоначално / от панела; резултати, прекъсвания, грешки, време за разрешение. */
+  mic: {
+    /** source -> result -> брой. */
+    attempts: Record<string, Record<string, number>>
+    /** Прекъсване ДОКАТО включването чака: възстановено / окончателно изгубено / друго. */
+    interruptions: Record<string, { recovered: number; lost: number; other: number }>
+    failures: Record<string, number>
+    /** Продължителност на getUserMedia (диапазони). */
+    gum: Record<string, number>
+    /** Вече включен микрофон, загубен по-късно. */
+    lost: Record<string, number>
+  }
+  /** Причини за прекъсване на LiveKit връзката (клиентски отчети). */
+  liveKitDisconnects: Record<string, number>
   rejectedReports: number
 }
 
@@ -131,6 +190,17 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
   const relayByProtocol: Record<string, number> = {}
   let transportReports = 0
   let rejectedReports = 0
+  const micAttempts: Record<string, Record<string, number>> = Object.fromEntries(
+    VOICE_MIC_SOURCES.map((source) => [source, Object.fromEntries(VOICE_MIC_RESULTS.map((result) => [result, 0]))]),
+  )
+  const micInterruptions: Record<string, { recovered: number; lost: number; other: number }> = {}
+  const micFailures: Record<string, number> = {}
+  const micGum: Record<string, number> = {}
+  const micLost: Record<string, number> = {}
+  const liveKitDisconnects: Record<string, number> = {}
+  const bump = (target: Record<string, number>, key: string): void => {
+    target[key] = (target[key] ?? 0) + 1
+  }
   // Скорошните мрежови показатели (последните N отчета) — средни стойности.
   const recent: Array<{ rttMs: number | null; jitterMs: number | null; packetLossPercent: number | null }> = []
   const windows = new Map<string, { start: number; count: number }>()
@@ -177,6 +247,21 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
       events[report.event] += 1
       if (report.event === 'connect_failed' || report.event === 'mic_failed') {
         failures[report.reason] = (failures[report.reason] ?? 0) + 1
+      } else if (report.event === 'mic_attempt') {
+        bump(micAttempts[report.source]!, report.result)
+        if (report.interruption !== 'none') {
+          const bucket = micInterruptions[report.interruption] ?? { recovered: 0, lost: 0, other: 0 }
+          if (report.result === 'recovered') bucket.recovered += 1
+          else if (report.result === 'lost') bucket.lost += 1
+          else bucket.other += 1
+          micInterruptions[report.interruption] = bucket
+        }
+        if (report.failure !== 'none') bump(micFailures, report.failure)
+        if (report.gum !== 'none') bump(micGum, report.gum)
+      } else if (report.event === 'mic_lost') {
+        bump(micLost, report.reason)
+      } else if (report.event === 'livekit_disconnect') {
+        bump(liveKitDisconnects, report.reason)
       } else if (report.event === 'transport') {
         transportReports += 1
         const { candidateType, protocol, rttMs, jitterMs, packetLossPercent } = report.transport
@@ -202,6 +287,14 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
           jitterMs: mean((entry) => entry.jitterMs),
           packetLossPercent: mean((entry) => entry.packetLossPercent),
         },
+        mic: {
+          attempts: Object.fromEntries(Object.entries(micAttempts).map(([source, results]) => [source, { ...results }])),
+          interruptions: Object.fromEntries(Object.entries(micInterruptions).map(([kind, value]) => [kind, { ...value }])),
+          failures: { ...micFailures },
+          gum: { ...micGum },
+          lost: { ...micLost },
+        },
+        liveKitDisconnects: { ...liveKitDisconnects },
         rejectedReports,
       }
     },

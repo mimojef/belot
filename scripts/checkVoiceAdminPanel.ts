@@ -114,6 +114,15 @@ try {
       await openTab(page, 'stats')
       const stats = await bodyText(page)
       assert(stats.includes('През TURN') && stats.includes('16,3') && stats.includes('Смяна на стаята (изчакване)'), 'TURN % и причини за отказ')
+      // Таблица „Микрофон“: първоначално / от панела, прекъсвания, getUserMedia, LiveKit и ротации.
+      assert((await page.locator('[data-avc-mic="1"]').count()) === 1, 'картата „Микрофон“')
+      const mic = ((await page.locator('[data-avc-mic="1"]').textContent()) ?? '').replace(/\s+/g, ' ')
+      for (const text of ['Първоначално включване', 'Ръчно през панела', 'Възстановен', 'Изгубен', 'Възстановяване на връзката (LiveKit)',
+        'Публикуване — отменено от reconnect', 'под 1 s', '5–15 s', 'Неуспешно републикуване след reconnect', 'Изтрита стая',
+        'Отнето право за слушане (напускане/изгонване/бан)', 'След рестарт на сървъра']) {
+        assert(mic.includes(text), `„Микрофон“: липсва „${text}“`)
+      }
+      await fullShot(page, 'stats-mic')
       await page.context().close()
     })
 

@@ -8,25 +8,41 @@
 // Правила, които всяка имплементация спазва:
 //   * най-много ЕДНА активна стая на адаптер;
 //   * токенът се ползва само за connect и не се пази/логва;
-//   * enableMicrophone е единственото място, което може да поиска достъп до
-//     микрофона (getUserMedia) — контролерът го вика само при право за
-//     говорене и изрично действие;
+//   * acquireMicrophone (и старият път enableMicrophone() без reuse) са
+//     единствените места, които могат да поискат достъп до микрофона
+//     (getUserMedia) — контролерът ги вика само при изрично действие;
+//     публикуването става с enableMicrophone(reuse) след право за говорене;
 //   * disableMicrophone спира публикуването И освобождава capture-а
 //     (MediaStreamTrack.stop) — индикаторът за запис на OS трябва да изгасне;
 //   * единственото изключение е detachMicrophoneForReuse (контролирана
 //     ротация) — capture-ът се предава на контролера, който го публикува в
 //     новата стая или го освобождава.
 
-export type VoiceMicrophoneFailure = 'not_found' | 'permission_denied' | 'unavailable' | 'not_permitted'
+// 'busy' — устройството е заето/недостъпно (NotReadableError); за потребителя
+// същото съобщение като 'unavailable', отделно само в диагностиката.
+// 'interrupted' — публикуването е прекъснато от reconnect на LiveKit SDK;
+// живият capture е върнат в `retained` (за публикуване след възстановяването).
+export type VoiceMicrophoneFailure = 'not_found' | 'permission_denied' | 'unavailable' | 'not_permitted' | 'busy' | 'interrupted'
+
+/** Клас на грешката при публикуване (само за диагностиката; без текст на грешката). */
+export type VoicePublishErrorKind = 'cancelled' | 'timeout' | 'negotiation' | 'not_connected' | 'not_permitted' | 'other'
 
 export class VoiceMicrophoneError extends Error {
   readonly failure: VoiceMicrophoneFailure
-  constructor(failure: VoiceMicrophoneFailure) {
+  /** Само при 'interrupted': непубликуваният жив capture — получателят го публикува или освобождава. */
+  readonly retained: VoiceRetainedMicrophone | null
+  readonly publishError: VoicePublishErrorKind | null
+  constructor(failure: VoiceMicrophoneFailure, extra: { retained?: VoiceRetainedMicrophone; publishError?: VoicePublishErrorKind } = {}) {
     super(`microphone_${failure}`)
     this.name = 'VoiceMicrophoneError'
     this.failure = failure
+    this.retained = extra.retained ?? null
+    this.publishError = extra.publishError ?? null
   }
 }
+
+/** Защо адаптерът е загубил вече публикуван микрофон (само за диагностиката). */
+export type VoiceMicrophoneLossReason = 'track_ended' | 'republish_failed' | 'server_unpublished' | 'device_removed'
 
 export type VoiceDisconnectCause =
   /** Нашият disconnect() — не е грешка. */
@@ -39,6 +55,11 @@ export type VoiceDisconnectCause =
   | 'duplicate_identity'
   /** Официалният reconnect на LiveKit не е успял / мрежа / сървър. */
   | 'connection_lost'
+
+/** Подробна причина за прекъсване на LiveKit (само за анонимната диагностика). */
+export type VoiceLiveKitDisconnectReason =
+  | 'network' | 'server_shutdown' | 'room_deleted' | 'participant_removed' | 'duplicate_identity'
+  | 'join_failure' | 'signal_close' | 'state_mismatch' | 'migration' | 'client' | 'other'
 
 export type VoiceRemoteParticipantInfo = {
   identity: string
@@ -53,7 +74,7 @@ export type VoiceAdapterEvents = {
    * го публикува в новата генерация или го освобождава. Иначе null (capture-ът
    * вече е спрян от адаптера).
    */
-  onDisconnected: (cause: VoiceDisconnectCause, retained: VoiceRetainedMicrophone | null) => void
+  onDisconnected: (cause: VoiceDisconnectCause, retained: VoiceRetainedMicrophone | null, reason?: VoiceLiveKitDisconnectReason) => void
   onReconnecting: () => void
   onReconnected: () => void
   /** Identity-тата на говорещите в момента (вкл. локалния участник). */
@@ -63,7 +84,7 @@ export type VoiceAdapterEvents = {
   /** Възпроизвеждането е блокирано/разблокирано от браузъра (autoplay). */
   onPlaybackStatusChanged: (canPlayback: boolean) => void
   /** Локалният микрофон е спрял сам (изключено устройство, OS прекъсване, track ended). */
-  onLocalMicrophoneLost: () => void
+  onLocalMicrophoneLost: (reason?: VoiceMicrophoneLossReason) => void
   /** Списъкът с аудио устройства се е сменил (само информация — без автоматично включване). */
   onDevicesChanged: () => void
 }
@@ -124,8 +145,41 @@ export type VoiceDiagnosticReport =
   | { event: 'connect_failed'; reason: 'sdk_load_failed' | 'presence_failed' | 'token_unavailable' | 'livekit_connect_failed' }
   | { event: 'mic_failed'; reason: 'mic_not_found' | 'mic_permission_denied' | 'mic_unavailable' | 'mic_not_permitted' }
   | { event: 'transport'; transport: VoiceTransportInfo }
+  | VoiceMicDiagnosticReport
+
+/**
+ * Микрофон — анонимна диагностика на включването (без аудио, токени, IP,
+ * имена на устройства). Затворени изброявания (виж server voiceClientDiagnostics).
+ */
+export type VoiceMicRequestSource = 'initial' | 'panel'
+export type VoiceMicInterruption = 'none' | 'sdk_reconnect' | 'connection_lost' | 'rotation' | 'room_deleted'
+export type VoiceMicAttemptResult = 'enabled' | 'recovered' | 'lost' | 'failed' | 'cancelled'
+export type VoiceMicAttemptFailure =
+  | 'none' | 'permission_denied' | 'not_found' | 'device_busy' | 'gum_failed' | 'publish_failed'
+  | 'publish_cancelled' | 'publish_timeout' | 'publish_negotiation' | 'publish_not_connected'
+  | 'not_permitted' | 'acquired_not_published' | 'session_failed'
+export type VoiceMicGumBucket = 'none' | 'lt1s' | '1to5s' | '5to15s' | 'gt15s'
+export type VoiceMicDiagnosticReport =
+  | {
+      event: 'mic_attempt'
+      source: VoiceMicRequestSource
+      result: VoiceMicAttemptResult
+      interruption: VoiceMicInterruption
+      gum: VoiceMicGumBucket
+      failure: VoiceMicAttemptFailure
+    }
+  /** Вече включен микрофон е загубен (без заявка в ход). */
+  | { event: 'mic_lost'; reason: VoiceMicrophoneLossReason | 'rotation' | 'connection_lost' }
+  | { event: 'livekit_disconnect'; reason: VoiceLiveKitDisconnectReason }
 
 export type VoiceAdapter = {
+  /**
+   * Само придобиване на микрофона (getUserMedia) — независимо от стаята, за да
+   * не зависи от прекъсване/ротация по време на чакане на разрешението.
+   * Резултатът се публикува с enableMicrophone(reuse) в текущата стая или се
+   * освобождава (release спира track-а). Липсва -> старият път (enableMicrophone()).
+   */
+  acquireMicrophone?: () => Promise<VoiceRetainedMicrophone>
   /**
    * Създава (синхронно) обект на стаята и отключва аудиото в същия
    * потребителски жест (startAudio), ПРЕДИ мрежата. Връща функция за

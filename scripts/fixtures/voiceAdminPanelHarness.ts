@@ -136,6 +136,7 @@ function monitoring() {
       tokensDeniedByCode: unconfigured ? {} : { voice_rotation_pending: 4, invalid_session: 2, spectator: 2, voice_unavailable: offline ? 1 : 1 },
       tokensDiscardedStale: 1,
       rotations: unconfigured ? 0 : 5,
+      rotationsByReason: unconfigured ? {} : { listen_revoked: 3, session_displaced: 1, boot_rotation: 1 },
       createRoomFailures: offline ? 3 : 0,
       leaseExpired: unconfigured ? 0 : 2,
       disconnectTimeouts: unconfigured ? 0 : 1,
@@ -152,6 +153,16 @@ function monitoring() {
       transport: unconfigured
         ? { reports: 0, byCandidateType: {}, relayByProtocol: {}, relayPercent: null, rttMs: { mean: null, reports: 0 }, jitterMs: { mean: null, reports: 0 }, packetLossPercent: { mean: null, reports: 0 } }
         : { reports: 49, byCandidateType: { host: 6, srflx: 35, relay: 8 }, relayByProtocol: { udp: 3, tls: 5 }, relayPercent: 16.3, rttMs: { mean: 46, reports: 49 }, jitterMs: { mean: 3.8, reports: 47 }, packetLossPercent: { mean: 0.42, reports: 47 } },
+      mic: unconfigured
+        ? { attempts: { initial: { enabled: 0, recovered: 0, lost: 0, failed: 0, cancelled: 0 }, panel: { enabled: 0, recovered: 0, lost: 0, failed: 0, cancelled: 0 } }, interruptions: {}, failures: {}, gum: {}, lost: {} }
+        : {
+            attempts: { initial: { enabled: 31, recovered: 4, lost: 1, failed: 2, cancelled: 1 }, panel: { enabled: 12, recovered: 1, lost: 0, failed: 1, cancelled: 0 } },
+            interruptions: { sdk_reconnect: { recovered: 3, lost: 1, other: 0 }, connection_lost: { recovered: 1, lost: 0, other: 0 }, rotation: { recovered: 1, lost: 0, other: 0 } },
+            failures: { publish_cancelled: 1, permission_denied: 1, not_found: 1, device_busy: 1 },
+            gum: { lt1s: 38, '1to5s': 9, '5to15s': 3, gt15s: 1 },
+            lost: { track_ended: 1, republish_failed: 1 },
+          },
+      liveKitDisconnects: unconfigured ? {} : { network: 2, room_deleted: 3, participant_removed: 1 },
       rejectedReports: 0,
     },
   }

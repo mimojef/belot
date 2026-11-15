@@ -100,6 +100,8 @@ type ServerStats = {
   tokensDeniedByCode: Record<string, number>
   tokensDiscardedStale: number
   rotations: number
+  /** Липсва при по-стар сървър. */
+  rotationsByReason?: Record<string, number>
   createRoomFailures: number
   leaseExpired: number
   disconnectTimeouts: number
@@ -121,6 +123,15 @@ type ClientStats = {
     jitterMs: { mean: number | null; reports: number }
     packetLossPercent: { mean: number | null; reports: number }
   }
+  /** Липсват при по-стар сървър. */
+  mic?: {
+    attempts: Record<string, Record<string, number>>
+    interruptions: Record<string, { recovered: number; lost: number; other: number }>
+    failures: Record<string, number>
+    gum: Record<string, number>
+    lost: Record<string, number>
+  }
+  liveKitDisconnects?: Record<string, number>
   rejectedReports: number
 }
 
@@ -187,6 +198,72 @@ const CLIENT_FAILURE_LABELS: Record<string, string> = {
   mic_permission_denied: 'Микрофон: отказано разрешение',
   mic_unavailable: 'Микрофон: недостъпен',
   mic_not_permitted: 'Микрофон: няма право за говорене',
+}
+
+const MIC_SOURCE_LABELS: Record<string, string> = {
+  initial: 'Първоначално включване',
+  panel: 'Ръчно през панела',
+}
+
+const MIC_INTERRUPTION_LABELS: Record<string, string> = {
+  sdk_reconnect: 'Възстановяване на връзката (LiveKit)',
+  connection_lost: 'Загубена връзка (нова сесия)',
+  rotation: 'Ротация на стаята',
+  room_deleted: 'Изтрита стая (LiveKit)',
+}
+
+const MIC_FAILURE_LABELS: Record<string, string> = {
+  permission_denied: 'Отказано разрешение',
+  not_found: 'Няма микрофон',
+  device_busy: 'Устройството е заето',
+  gum_failed: 'Друга грешка на устройството',
+  publish_failed: 'Публикуване — друга грешка',
+  publish_cancelled: 'Публикуване — отменено от reconnect',
+  publish_timeout: 'Публикуване — няма отговор (timeout)',
+  publish_negotiation: 'Публикуване — неуспешно договаряне (WebRTC)',
+  publish_not_connected: 'Публикуване — няма връзка',
+  not_permitted: 'Няма право за говорене',
+  acquired_not_published: 'Придобит, но непубликуван (изгубено намерение)',
+  session_failed: 'Гласовата сесия не се възстанови',
+}
+
+const MIC_GUM_LABELS: Record<string, string> = {
+  lt1s: 'под 1 s',
+  '1to5s': '1–5 s',
+  '5to15s': '5–15 s',
+  gt15s: 'над 15 s',
+}
+
+const MIC_LOST_LABELS: Record<string, string> = {
+  track_ended: 'Спрял track (устройство/OS)',
+  republish_failed: 'Неуспешно републикуване след reconnect',
+  server_unpublished: 'Премахнат от сървъра',
+  device_removed: 'Изключено устройство',
+  rotation: 'При ротация',
+  connection_lost: 'При загубена връзка',
+}
+
+const LIVEKIT_DISCONNECT_LABELS: Record<string, string> = {
+  network: 'Мрежа / неизвестна',
+  server_shutdown: 'Спиране на сървъра',
+  room_deleted: 'Изтрита стая',
+  participant_removed: 'Премахнат участник',
+  duplicate_identity: 'Същият участник влезе отново',
+  join_failure: 'Неуспешно влизане',
+  signal_close: 'Затворен сигнален канал',
+  state_mismatch: 'Несъответствие в състоянието',
+  migration: 'Миграция',
+  client: 'Клиентът',
+  other: 'Друга',
+}
+
+const ROTATION_REASON_LABELS: Record<string, string> = {
+  listen_revoked: 'Отнето право за слушане (напускане/изгонване/бан)',
+  speak_revoked: 'Отнето право за говорене',
+  session_displaced: 'Изместена игрова сесия',
+  table_released: 'Освободена маса',
+  mode_off: 'Изключен глас',
+  boot_rotation: 'След рестарт на сървъра',
 }
 
 const SOURCE_REASON_LABELS: Record<string, string> = {
@@ -639,6 +716,30 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
     const successRate = attempts === 0 ? null : (c.events.connected! / attempts) * 100
     const candidate = (key: string) => escapeHtml(String(c.transport.byCandidateType[key] ?? 0))
     const relayProtocols = Object.entries(c.transport.relayByProtocol).map(([protocol, count]) => `${protocol.toUpperCase()}: ${count}`).join(' · ')
+    const countRows = (entries: Record<string, number> | undefined, labels: Record<string, string>, empty: string): string => {
+      const rows = Object.entries(entries ?? {}).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1])
+      return rows.length === 0
+        ? `<div style="font-size:13px;${MUTED}">${escapeHtml(empty)}</div>`
+        : `<table><tbody>${rows.map(([code, count]) => `<tr><td>${escapeHtml(labels[code] ?? code)}</td><td style="text-align:right;font-weight:800;">${count}</td></tr>`).join('')}</tbody></table>`
+    }
+    const mic = c.mic
+    const MIC_RESULT_LABELS: Array<[string, string]> = [
+      ['enabled', 'Включен'], ['recovered', 'Възстановен'], ['lost', 'Изгубен'], ['failed', 'Грешка'], ['cancelled', 'Отказан'],
+    ]
+    const micAttemptsTable = mic === undefined
+      ? `<div style="font-size:13px;${MUTED}">Няма данни (по-стар сървър).</div>`
+      : `<div style="margin-bottom:6px;font-size:12px;${MUTED}">Заявки: ${escapeHtml(MIC_SOURCE_LABELS.initial!)} / ${escapeHtml(MIC_SOURCE_LABELS.panel!)}</div>${
+        kvRows(MIC_RESULT_LABELS.map(([result, label]): [string, string] => [label, `${mic.attempts.initial?.[result] ?? 0} / ${mic.attempts.panel?.[result] ?? 0}`]))
+      }`
+    const interruptionRows = Object.entries(mic?.interruptions ?? {})
+    const micInterruptionTable = interruptionRows.length === 0
+      ? `<div style="font-size:13px;${MUTED}">Няма прекъсвания по време на включване.</div>`
+      : kvRows(interruptionRows.map(([kind, value]): [string, string] => [
+        MIC_INTERRUPTION_LABELS[kind] ?? kind,
+        `${value.recovered} / ${value.lost}${value.other > 0 ? ` / ${value.other}` : ''}`,
+      ]))
+    const gumRows = ['lt1s', '1to5s', '5to15s', 'gt15s'].map((bucket): [string, string] => [MIC_GUM_LABELS[bucket] ?? bucket, escapeHtml(String(mic?.gum[bucket] ?? 0))])
+    const subTitle = (text: string, first = false): string => `<h4 style="margin:${first ? '0' : '10px'} 0 6px;font-size:13px;">${escapeHtml(text)}</h4>`
     const lkNote = lkOk ? '' : `<div style="margin-bottom:8px;">${statusPill(m.vps.liveKit.status === 'not_configured' ? 'muted' : 'bad', m.vps.liveKit.status === 'not_configured' ? 'Метриките на гласовия VPS не са конфигурирани' : `Метриките на LiveKit са недостъпни — ${reasonText(m.vps.liveKit.reason)}`)}</div>`
     return `
       <div style="font-size:12px;margin-bottom:10px;${MUTED}">Броячите са от последния рестарт на игровия сървър (${escapeHtml(formatDate(s.since))}).</div>
@@ -662,6 +763,36 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
             ['Отхвърлени отчети (невалидни/лимит)', escapeHtml(String(c.rejectedReports))],
           ])}</div>
         </div>
+      </div>
+      <div style="${CARD_STYLE}" data-avc-mic="1">
+        <h3 style="${H3}">Микрофон</h3>
+        ${micAttemptsTable}
+        <div style="margin-top:6px;font-size:12px;line-height:1.45;${MUTED}">„Възстановен“ — включен след прекъсване/ротация по време на заявката (не е грешка). „Изгубен“ — окончателно изгубено намерение („Микрофонът не беше включен“). „Отказан“ — доброволно изключване/напускане.</div>
+        <div data-avc-cols="1" style="margin-top:10px;">
+          <div>
+            ${subTitle('Прекъсвания по време на включване (възстановени / изгубени)', true)}
+            ${micInterruptionTable}
+            ${subTitle('Причини за неуспех')}
+            ${countRows(mic?.failures, MIC_FAILURE_LABELS, 'Няма неуспехи.')}
+          </div>
+          <div>
+            ${subTitle('Време за разрешение (getUserMedia)', true)}
+            ${kvRows(gumRows)}
+            ${subTitle('Загубен включен микрофон')}
+            ${countRows(mic?.lost, MIC_LOST_LABELS, 'Няма загубени.')}
+          </div>
+        </div>
+        <div data-avc-cols="1" style="margin-top:10px;">
+          <div>
+            ${subTitle('Прекъсвания на LiveKit (клиенти)', true)}
+            ${countRows(c.liveKitDisconnects, LIVEKIT_DISCONNECT_LABELS, 'Няма прекъсвания.')}
+          </div>
+          <div>
+            ${subTitle('Ротации на стаи по причина (сървър)', true)}
+            ${countRows(s.rotationsByReason, ROTATION_REASON_LABELS, 'Няма ротации.')}
+          </div>
+        </div>
+        <div style="margin-top:6px;font-size:12px;line-height:1.45;${MUTED}">Анонимни броячи от браузърите (без аудио, токени, IP и имена на устройства).</div>
       </div>
       <div data-avc-cols="1">
         <div style="${CARD_STYLE}">
