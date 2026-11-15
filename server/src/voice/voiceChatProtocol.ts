@@ -32,11 +32,22 @@
 export const VOICE_CLIENT_INSTANCE_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
 const VOICE_TABLE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
+/**
+ * Защо страницата прекратява гласа (само при onTableScreen:false; само за
+ * диагностиката — не променя решенията). Затворено изброяване; стари клиенти
+ * не го изпращат, непозната стойност се игнорира.
+ */
+export const VOICE_PRESENCE_LEAVE_REASONS = [
+  'leave_voice', 'off_table', 'page_hide', 'page_restored', 'context_changed', 'fail_connection', 'disposed',
+] as const
+export type VoicePresenceLeaveReason = (typeof VOICE_PRESENCE_LEAVE_REASONS)[number]
+
 export type VoicePresenceClientMessage = {
   type: 'voice_presence'
   voiceTableId: string
   clientInstanceId: string
   onTableScreen: boolean
+  reason?: VoicePresenceLeaveReason
 }
 
 export type VoicePresenceErrorCode =
@@ -151,11 +162,16 @@ export function parseVoicePresenceMessage(parsed: Record<string, unknown>): Voic
   if (!isVoiceTableIdFormat(parsed.voiceTableId)) return null
   if (!isVoiceClientInstanceId(parsed.clientInstanceId)) return null
   if (typeof parsed.onTableScreen !== 'boolean') return null
+  const reason = !parsed.onTableScreen && typeof parsed.reason === 'string'
+    && (VOICE_PRESENCE_LEAVE_REASONS as readonly string[]).includes(parsed.reason)
+    ? (parsed.reason as VoicePresenceLeaveReason)
+    : undefined
   return {
     type: 'voice_presence',
     voiceTableId: parsed.voiceTableId,
     clientInstanceId: parsed.clientInstanceId,
     onTableScreen: parsed.onTableScreen,
+    ...(reason === undefined ? {} : { reason }),
   }
 }
 

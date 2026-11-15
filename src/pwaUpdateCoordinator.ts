@@ -37,6 +37,14 @@ export type PwaUpdateSafetyState = {
   // true само докато текущата маса е в 'in-progress' фаза, не и докато
   // потребителят просто разглежда списъка/чакащата стая.
   hasActiveSvaraMatch: boolean
+  /**
+   * Член на чакаща частна маса (вкл. чакалнята и „Изчакай в лоби“): тихото
+   * презареждане би прекъснало гласа и би сменило страницата (нова гласова
+   * сесия за всички на масата).
+   */
+  hasPrivateRoomMembership: boolean
+  /** Активна или възстановяваща се гласова сесия на тази страница. */
+  hasActiveVoice: boolean
 }
 
 export type PwaApplyFn = () => void | Promise<void>
@@ -63,6 +71,8 @@ function isSafeToApply(state: PwaUpdateSafetyState): boolean {
   if (state.hasActiveRoom) return false
   if (state.hasActiveLudoMatch) return false
   if (state.hasActiveSvaraMatch) return false
+  if (state.hasPrivateRoomMembership) return false
+  if (state.hasActiveVoice) return false
   if (state.isSearching) return false
   if (state.hasPrivateRoomInvite) return false
   if (state.hasQueuedPrivateRoomInvites) return false

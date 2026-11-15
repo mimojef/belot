@@ -208,6 +208,19 @@ export type VoiceRuntimeStats = {
   tokensDeniedByCode: Record<string, number>
   /** Ротации по причина (натрупващи се от старта на процеса). */
   rotationsByReason: Record<string, number>
+  /**
+   * Диагностика (етап А): прекратени активни гласови сесии без ротация
+   * (endVoiceSession) по причина; при напускане на екрана — и причината,
+   * изпратена от клиента (left_table:<reason>, left_table:unspecified за
+   * стари клиенти).
+   */
+  sessionEndsByReason: Record<string, number>
+  /** Край на binding-а (endBinding) по причина и дали е довел до ротация. */
+  bindingEndsByReason: Record<string, number>
+  /** Отказани voice_presence по код. */
+  presenceDeniedByCode: Record<string, number>
+  /** Оставащ lease в момента на издаване на токен (диапазони). */
+  tokenLeaseMargin: Record<string, number>
 }
 
 /** Етап 6 — ред за админ мониторинга: без профили, имена или токени. */
@@ -291,6 +304,9 @@ export type BindingState = {
   issuedCanPublish: boolean
   /** Има издаден и непрекратен от сървъра гласов достъп. */
   voiceActive: boolean
+  /** Диагностика: последно прието voice_presence{onTableScreen:true} и последен издаден токен. */
+  lastPresenceAt: number | null
+  tokenIssuedAt: number | null
 }
 
 export type MembershipState = {
@@ -375,6 +391,17 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
   }
   const tokensDeniedByCode: Record<string, number> = {}
   const rotationsByReason: Record<string, number> = {}
+  const sessionEndsByReason: Record<string, number> = {}
+  const bindingEndsByReason: Record<string, number> = {}
+  const presenceDeniedByCode: Record<string, number> = {}
+  const tokenLeaseMargin: Record<string, number> = {}
+  const bump = (target: Record<string, number>, key: string): void => {
+    target[key] = (target[key] ?? 0) + 1
+  }
+  /** Кратко означение за логовете (без имена): маса, профил (8 знака), епоха. */
+  const who = (binding: BindingState): string =>
+    `voiceTable=${binding.voiceTableId} profile=${binding.profileId.slice(0, 8)} epoch=${binding.epoch}`
+  const ago = (at: number | null): string => (at === null ? 'none' : String(Math.max(0, now() - at)))
   const countDenial = (code: string): void => {
     counters.tokensDenied! += 1
     tokensDeniedByCode[code] = (tokensDeniedByCode[code] ?? 0) + 1
@@ -629,7 +656,12 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
    * напуснат екран, 120 s): отнемане на правата + RemoveParticipant, без
    * ротация. binding-ът остава — ново изрично включване е позволено.
    */
-  function endVoiceSession(binding: BindingState, reason: VoiceAccessEndReason, notify: boolean): void {
+  function endVoiceSession(binding: BindingState, reason: VoiceAccessEndReason, notify: boolean, detail?: string): void {
+    if (binding.voiceActive) {
+      const key = detail === undefined ? reason : `${reason}:${detail}`
+      bump(sessionEndsByReason, key)
+      log(`[voice-chat] session_end ${who(binding)} reason=${key} sinceTokenMs=${ago(binding.tokenIssuedAt)} sincePresenceMs=${ago(binding.lastPresenceAt)} leaseLeftMs=${binding.leaseExpiresAt - now()}`)
+    }
     clearBindingTimers(binding)
     if (binding.voiceActive && binding.issuedRoomName !== null) revokeParticipant(binding.issuedRoomName, binding.identity)
     binding.voiceActive = false
@@ -645,6 +677,9 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     if (bindings.get(binding.key) === binding) bindings.delete(binding.key)
     send(binding.connectionId, { type: 'voice_access_ended', voiceTableId: binding.voiceTableId, reason })
     const live = liveRoomName(binding.voiceTableId)
+    const rotates = binding.issuedRoomName !== null && binding.issuedRoomName === live
+    bump(bindingEndsByReason, `${reason}:${rotates ? 'rotation' : 'no_rotation'}`)
+    log(`[voice-chat] binding_end ${who(binding)} reason=${reason} rotation=${rotates ? 'yes' : 'no'} active=${binding.voiceActive ? 'yes' : 'no'} sinceTokenMs=${ago(binding.tokenIssuedAt)}`)
     if (binding.issuedRoomName !== null && binding.issuedRoomName === live) {
       rotateTable(binding.voiceTableId, retireReason, [{ roomName: live, identity: binding.identity }])
     } else if (binding.voiceActive && binding.issuedRoomName !== null) {
@@ -672,6 +707,8 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       issuedRoomName: null,
       issuedCanPublish: false,
       voiceActive: false,
+      lastPresenceAt: null,
+      tokenIssuedAt: null,
     }
     bindings.set(bindingKey, binding)
     return binding
@@ -1041,8 +1078,11 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     },
 
     handlePresence(connectionId, profileId, message) {
-      const reply = (code: VoicePresenceErrorCode): void =>
+      const reply = (code: VoicePresenceErrorCode): void => {
+        bump(presenceDeniedByCode, code)
+        log(`[voice-chat] presence_denied voiceTable=${message.voiceTableId} profile=${profileId === null ? 'none' : profileId.slice(0, 8)} code=${code} onTableScreen=${message.onTableScreen ? 'yes' : 'no'}`)
         send(connectionId, { type: 'voice_presence_result', voiceTableId: message.voiceTableId, ok: false, code })
+      }
       if (effectiveMode() === 'off') return reply('voice_off')
       if (profileId === null) return reply('not_authenticated')
       const table = store.getVoiceTable(message.voiceTableId)
@@ -1061,7 +1101,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
           binding.connectionId = connectionId
           binding.onTableScreen = false
           binding.leaseExpiresAt = 0
-          endVoiceSession(binding, 'left_table', false)
+          endVoiceSession(binding, 'left_table', false, message.reason ?? 'unspecified')
         }
         send(connectionId, {
           type: 'voice_presence_result',
@@ -1095,6 +1135,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         binding.disconnectTimer = null
       }
       binding.onTableScreen = true
+      binding.lastPresenceAt = now()
       binding.leaseExpiresAt = now() + leaseTtlMs
       armLease(binding)
       if (!memberships.has(bindingKey)) startMembership(table.voiceTableId, profileId)
@@ -1110,7 +1151,15 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       })
     },
 
-    async handleTokenRequest(claim, respond) {
+    async handleTokenRequest(claim, sendResponse) {
+      // Диагностика: всеки отказ -> един ред (без токен/identity).
+      const respond = (result: VoiceHttpResult): void => {
+        if (result.status !== 200) {
+          const code = typeof result.body.code === 'string' ? result.body.code : 'unknown'
+          log(`[voice-chat] token_denied voiceTable=${claim.voiceTableId} profile=${claim.profileId.slice(0, 8)} status=${result.status} code=${code}`)
+        }
+        sendResponse(result)
+      }
       // (1) Проверка преди асинхронните операции.
       const first = evaluateClaim(claim, { createMembership: true })
       if (!first.ok) return respond(failure(first))
@@ -1144,6 +1193,10 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       binding.issuedRoomName = roomName
       binding.issuedCanPublish = permission.canPublish
       binding.voiceActive = true
+      binding.tokenIssuedAt = now()
+      const leaseLeftMs = binding.leaseExpiresAt - now()
+      bump(tokenLeaseMargin, leaseLeftMs < 5_000 ? 'lt5s' : leaseLeftMs < 15_000 ? '5to15s' : leaseLeftMs < 30_000 ? '15to30s' : 'gt30s')
+      if (leaseLeftMs < 5_000) log(`[voice-chat] token_near_lease_expiry ${who(binding)} leaseLeftMs=${leaseLeftMs} sincePresenceMs=${ago(binding.lastPresenceAt)}`)
       armLease(binding)
 
       // (3) Подпис (официален AccessToken, асинхронен) и проверка след него.
@@ -1288,6 +1341,10 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         counters: { ...counters },
         tokensDeniedByCode: { ...tokensDeniedByCode },
         rotationsByReason: { ...rotationsByReason },
+        sessionEndsByReason: { ...sessionEndsByReason },
+        bindingEndsByReason: { ...bindingEndsByReason },
+        presenceDeniedByCode: { ...presenceDeniedByCode },
+        tokenLeaseMargin: { ...tokenLeaseMargin },
       }
     },
 

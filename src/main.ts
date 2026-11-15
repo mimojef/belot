@@ -184,7 +184,7 @@ import { createLazyVoiceController } from './app/voice/voiceFacade'
 import { createVoiceOwnVipStatusSource, type VoiceOwnVipLoadResult, type VoiceOwnVipStatusSource } from './app/voice/voiceOwnVipStatus'
 import { createVoiceSpeakPreviewTracker } from './app/voice/voiceSpeakPreview'
 import { createVoiceMobileUi, type VoiceMobileUi } from './app/voice/ui/createVoiceMobileUi'
-import type { VoiceUiSeat } from './app/voice/ui/voiceUiStatus'
+import { isInVoice, type VoiceUiSeat } from './app/voice/ui/voiceUiStatus'
 import { setVoiceSpeakingSlotsEnabled } from './app/voice/ui/voiceSpeakingIndicator'
 import type { RoomSnapshotMessage } from './app/network/createGameServerClient'
 
@@ -10694,6 +10694,10 @@ function getPwaSafetyState(): PwaUpdateSafetyState {
     isReconnecting: pwaIsReconnectingActiveRoom,
     hasActiveLudoMatch: pwaSnapshot.hasActiveLudoMatch,
     hasActiveSvaraMatch: pwaSnapshot.hasActiveSvaraMatch,
+    // Чакалнята не е екранът „Частни маси“ — без тези две проверки тихото
+    // обновяване презарежда играч в гласова чакалня при всяко съобщение.
+    hasPrivateRoomMembership: lobby.getMyPrivateRoom() !== null,
+    hasActiveVoice: voiceController !== null && isInVoice(voiceController.getSnapshot()),
   }
 }
 

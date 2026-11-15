@@ -28,6 +28,8 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceController {
         method: 'POST',
         credentials: 'include',
         cache: 'no-store',
+        // Доставя се и при pagehide (прекратяване на сесията при затваряне/навигация).
+        keepalive: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(report),
       }).catch(() => {})

@@ -51,6 +51,8 @@ import {
   type VoiceMicRequestSource,
   type VoicePublishErrorKind,
   type VoiceRetainedMicrophone,
+  type VoiceSessionEndReason,
+  type VoiceFailStage,
 } from './voiceAdapter'
 import {
   VOICE_SPEAK_ACCESS_PATH,
@@ -58,6 +60,7 @@ import {
   isVoiceServerMessage,
   profileIdFromVoiceIdentity,
   type VoicePresenceClientMessage,
+  type VoicePresenceLeaveReason,
   type VoicePresenceResultMessage,
   type VoiceSpeakAccessResult,
   type VoiceSpeakState,
@@ -608,10 +611,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
 
   // ─── Presence / lease ─────────────────────────────────────────────────
 
-  function sendPresence(onScreen: boolean): boolean {
+  function sendPresence(onScreen: boolean, reason?: VoicePresenceLeaveReason): boolean {
     const table = tableContext()
     if (table === null) return false
-    const sent = deps.sendPresence({ type: 'voice_presence', voiceTableId: table.voiceTableId, clientInstanceId, onTableScreen: onScreen })
+    const sent = deps.sendPresence({
+      type: 'voice_presence', voiceTableId: table.voiceTableId, clientInstanceId, onTableScreen: onScreen,
+      ...(!onScreen && reason !== undefined ? { reason } : {}),
+    })
     if (sent) counters.presenceSent! += 1
     return sent
   }
@@ -726,7 +732,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
    * Спира гласа на тази страница (връзка, микрофон, аудио, таймери, токени).
    * notifyServer -> voice_presence{onTableScreen:false} (лоби/магазин/напускане).
    */
-  function stopSession(next: VoiceStatus, options: { canRestore: boolean; notifyServer: boolean }): void {
+  function stopSession(next: VoiceStatus, options: { canRestore: boolean; notifyServer: boolean; reason: VoiceSessionEndReason }): void {
+    // Диагностика: само реално прекратена сесия (не повторно извикване).
+    if (inUse || room !== null || prepared !== null) report({ event: 'session_end', reason: options.reason, stage: 'none' })
     // Напускане/отстраняване/друг екран/изключен глас: намерението се изчиства.
     cancelMicAttempt()
     sessionSeq += 1
@@ -737,7 +745,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     transportTimer = clearTimer(transportTimer)
     retryKick = null
     settleAck(null)
-    if (options.notifyServer && inUse) sendPresence(false)
+    if (options.notifyServer && inUse) sendPresence(false, presenceReasonOf(options.reason))
     teardownRoom(room, prepared, null)
     room = null
     prepared = null
@@ -754,8 +762,24 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     invalidate()
   }
 
-  function disableEntirely(): void {
-    stopSession('disabled', { canRestore: false, notifyServer: false })
+  /** Причина за сървъра (само тези, които изпращат onTableScreen:false). */
+  function presenceReasonOf(reason: VoiceSessionEndReason): VoicePresenceLeaveReason | undefined {
+    switch (reason) {
+      case 'leave_voice':
+      case 'off_table':
+      case 'page_hide':
+      case 'page_restored':
+      case 'context_changed':
+      case 'fail_connection':
+      case 'disposed':
+        return reason
+      default:
+        return undefined
+    }
+  }
+
+  function disableEntirely(reason: VoiceSessionEndReason = 'disabled'): void {
+    stopSession('disabled', { canRestore: false, notifyServer: false, reason })
     speak = null
     setUiError(null)
     invalidate()
@@ -884,7 +908,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     } catch {
       if (seq !== sessionSeq) return
       report({ event: 'connect_failed', reason: 'sdk_load_failed' })
-      failConnection('service_unavailable')
+      failConnection('service_unavailable', 'sdk_load')
       return
     }
     if (seq !== sessionSeq) return
@@ -893,14 +917,14 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     if (seq !== sessionSeq) return
     if (ack === null) {
       report({ event: 'connect_failed', reason: 'presence_failed' })
-      failConnection('service_unavailable')
+      failConnection('service_unavailable', 'presence')
       return
     }
     if (!ack.ok) {
       if (DISABLING_PRESENCE_CODES.has(ack.code)) disableEntirely()
       else {
         report({ event: 'connect_failed', reason: 'presence_failed' })
-        failConnection('service_unavailable')
+        failConnection('service_unavailable', 'presence')
       }
       return
     }
@@ -913,7 +937,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     if (outcome.kind !== 'token') {
       if (outcome.kind === 'unavailable') {
         report({ event: 'connect_failed', reason: 'token_unavailable' })
-        failConnection('service_unavailable')
+        failConnection('service_unavailable', 'token')
       }
       return
     }
@@ -922,7 +946,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     prepareRoomNow(seq)
     const connector = prepared
     if (connector === null) {
-      failConnection('service_unavailable')
+      failConnection('service_unavailable', 'connect')
       return
     }
     let connected: VoiceConnectedRoom
@@ -934,7 +958,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       prepared = null
       void connector.abort().catch(() => {})
       report({ event: 'connect_failed', reason: 'livekit_connect_failed' })
-      failConnection('service_unavailable')
+      failConnection('service_unavailable', 'connect')
       return
     }
     if (seq !== sessionSeq) {
@@ -968,7 +992,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
   }
 
-  function failConnection(code: VoiceUiErrorCode): void {
+  function failConnection(code: VoiceUiErrorCode, stage: VoiceFailStage): void {
+    report({ event: 'session_end', reason: 'fail_connection', stage })
     // Гласът е недостъпен: заявеното включване е окончателно изгубено (съобщението е за услугата).
     const attempt = micAttempt
     endMicAttempt()
@@ -978,7 +1003,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     prepared = null
     presenceTimer = clearTimer(presenceTimer)
     transportTimer = clearTimer(transportTimer)
-    if (inUse) sendPresence(false)
+    if (inUse) sendPresence(false, 'fail_connection')
     inUse = false
     microphone = 'off'
     wantsToSpeak = false
@@ -1045,11 +1070,11 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     if (cause === 'removed') {
       // Сървърът е прекратил достъпа (lease, напуснат екран, 120 s) —
       // voice_access_ended носи причината; без автоматично връщане.
-      stopSession('idle', { canRestore: true, notifyServer: false })
+      stopSession('idle', { canRestore: true, notifyServer: false, reason: 'removed' })
       return
     }
     if (cause === 'duplicate_identity') {
-      stopSession('idle', { canRestore: false, notifyServer: false })
+      stopSession('idle', { canRestore: false, notifyServer: false, reason: 'duplicate_identity' })
       return
     }
     // connection_lost: официалният reconnect на LiveKit не е успял —
@@ -1118,13 +1143,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
     if (seq === sessionSeq) {
       report({ event: 'reconnect_failed' })
-      failConnection('service_unavailable')
+      failConnection('service_unavailable', 'reconnect_exhausted')
     }
   }
 
   async function resumeAfterInterruption(seq: number): Promise<void> {
     const outcome = await tryResume(seq)
-    if (outcome === 'retry' && seq === sessionSeq) failConnection('service_unavailable')
+    if (outcome === 'retry' && seq === sessionSeq) failConnection('service_unavailable', 'rotation_resume')
   }
 
   /** Нов токен за текущата генерация и свързване; запазва режима (слушане/микрофон). */
@@ -1423,7 +1448,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     status = 'connecting'
     invalidate()
     const outcome = await tryResume(nextSeq)
-    if (outcome === 'retry' && nextSeq === sessionSeq) failConnection('service_unavailable')
+    if (outcome === 'retry' && nextSeq === sessionSeq) failConnection('service_unavailable', 'permissions_reconnect')
   }
 
   function stopMicrophone(): void {
@@ -1492,8 +1517,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       case 'voice_access_ended': {
         const permanent = message.reason === 'banned' || message.reason === 'session_displaced' || message.reason === 'voice_off'
           || message.reason === 'table_released' || message.reason === 'kicked'
-        if (permanent) disableEntirely()
-        else stopSession('idle', { canRestore: message.reason !== 'session_replaced', notifyServer: false })
+        if (permanent) disableEntirely('access_ended')
+        else stopSession('idle', { canRestore: message.reason !== 'session_replaced', notifyServer: false, reason: 'access_ended' })
         return true
       }
       case 'voice_speak_access_updated': {
@@ -1595,9 +1620,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       if (tableChanged) {
         // Друга маса / край на масата / logout: пълно прекратяване; локалните
         // заглушавания важат само за същата маса.
-        if (inUse && prevTable !== null) sendPresence(false)
+        if (inUse && prevTable !== null) sendPresence(false, 'context_changed')
         context = next
-        stopSession(nextTable === null ? 'disabled' : 'idle', { canRestore: false, notifyServer: false })
+        stopSession(nextTable === null ? 'disabled' : 'idle', { canRestore: false, notifyServer: false, reason: 'context_changed' })
         speak = null
         setUiError(null)
         offerDismissed = false
@@ -1612,7 +1637,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         if (wasOnScreen && !nowOnScreen && inUse) {
           // „Изчакай в лоби“, магазин, „Към лобито“: прекратяване (сървърно
           // съобщение), мястото и правото за говорене се пазят.
-          stopSession('idle', { canRestore: true, notifyServer: true })
+          stopSession('idle', { canRestore: true, notifyServer: true, reason: 'off_table' })
         } else if (!wasOnScreen && nowOnScreen && status === 'disabled') {
           status = 'idle'
         }
@@ -1636,7 +1661,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         if (inUse && disconnectTimer === null) {
           disconnectTimer = timers.setTimeout(() => {
             disconnectTimer = null
-            stopSession('idle', { canRestore: true, notifyServer: false })
+            stopSession('idle', { canRestore: true, notifyServer: false, reason: 'game_connection_timeout' })
           }, disconnectGraceMs)
         }
         return
@@ -1654,10 +1679,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       disableEntirely()
     },
     onPageHide() {
-      if (inUse || room !== null || prepared !== null) stopSession('idle', { canRestore: true, notifyServer: true })
+      if (inUse || room !== null || prepared !== null) stopSession('idle', { canRestore: true, notifyServer: true, reason: 'page_hide' })
     },
     onPageShow(persisted) {
-      if (persisted && (inUse || room !== null)) stopSession('idle', { canRestore: true, notifyServer: true })
+      if (persisted && (inUse || room !== null)) stopSession('idle', { canRestore: true, notifyServer: true, reason: 'page_restored' })
     },
     joinAsListener: () => beginJoin(false),
     joinWithMicrophone: () => {
@@ -1676,7 +1701,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       status = 'disconnecting'
       invalidate()
       // Напускането на гласа НЕ напуска масата.
-      stopSession('idle', { canRestore: false, notifyServer: true })
+      stopSession('idle', { canRestore: false, notifyServer: true, reason: 'leave_voice' })
     },
     enableMicrophone() {
       if (disposed) return
@@ -1745,7 +1770,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     },
     dispose() {
       if (disposed) return
-      stopSession('disabled', { canRestore: false, notifyServer: true })
+      stopSession('disabled', { canRestore: false, notifyServer: true, reason: 'disposed' })
       disposed = true
       listeners.clear()
       speakingListeners.clear()

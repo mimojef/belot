@@ -18,7 +18,7 @@ const RATE_WINDOW_MS = 60_000
 const MAX_TRACKED_PROFILES = 5_000
 const RECENT_TRANSPORT_LIMIT = 200
 
-export const VOICE_CLIENT_EVENTS = ['connected', 'connect_failed', 'reconnecting', 'reconnected', 'connection_lost', 'reconnect_failed', 'mic_failed', 'transport', 'mic_attempt', 'mic_lost', 'livekit_disconnect'] as const
+export const VOICE_CLIENT_EVENTS = ['connected', 'connect_failed', 'reconnecting', 'reconnected', 'connection_lost', 'reconnect_failed', 'mic_failed', 'transport', 'mic_attempt', 'mic_lost', 'livekit_disconnect', 'session_end'] as const
 export type VoiceClientEvent = (typeof VOICE_CLIENT_EVENTS)[number]
 
 export const VOICE_CLIENT_FAILURE_REASONS = [
@@ -36,6 +36,15 @@ export const VOICE_MIC_INTERRUPTIONS = ['none', 'sdk_reconnect', 'connection_los
 export const VOICE_MIC_FAILURES = ['none', 'permission_denied', 'not_found', 'device_busy', 'gum_failed', 'publish_failed', 'publish_cancelled', 'publish_timeout', 'publish_negotiation', 'publish_not_connected', 'not_permitted', 'acquired_not_published', 'session_failed'] as const
 export const VOICE_MIC_GUM_BUCKETS = ['none', 'lt1s', '1to5s', '5to15s', 'gt15s'] as const
 export const VOICE_MIC_LOST_REASONS = ['track_ended', 'republish_failed', 'server_unpublished', 'device_removed', 'rotation', 'connection_lost'] as const
+// Прекратяване на гласовата сесия на страницата (етап А): защо и, при
+// failConnection, на кой етап. Затворени изброявания.
+export const VOICE_SESSION_END_REASONS = [
+  'leave_voice', 'off_table', 'page_hide', 'page_restored', 'context_changed', 'fail_connection',
+  'disabled', 'access_ended', 'removed', 'duplicate_identity', 'game_connection_timeout', 'disposed',
+] as const
+export const VOICE_FAIL_STAGES = [
+  'none', 'sdk_load', 'presence', 'token', 'connect', 'reconnect_exhausted', 'rotation_resume', 'permissions_reconnect',
+] as const
 export const VOICE_LIVEKIT_DISCONNECT_REASONS = ['network', 'server_shutdown', 'room_deleted', 'participant_removed', 'duplicate_identity', 'join_failure', 'signal_close', 'state_mismatch', 'migration', 'client', 'other'] as const
 
 type OneOf<T extends readonly string[]> = T[number]
@@ -64,7 +73,7 @@ export type VoiceClientTransport = {
   packetLossPercent: number | null
 }
 
-type DetailedEvent = 'connect_failed' | 'mic_failed' | 'transport' | 'mic_attempt' | 'mic_lost' | 'livekit_disconnect'
+type DetailedEvent = 'connect_failed' | 'mic_failed' | 'transport' | 'mic_attempt' | 'mic_lost' | 'livekit_disconnect' | 'session_end'
 
 export type VoiceClientReport =
   | { event: Exclude<VoiceClientEvent, DetailedEvent> }
@@ -73,6 +82,7 @@ export type VoiceClientReport =
   | ({ event: 'mic_attempt' } & VoiceClientMicAttempt)
   | { event: 'mic_lost'; reason: OneOf<typeof VOICE_MIC_LOST_REASONS> }
   | { event: 'livekit_disconnect'; reason: OneOf<typeof VOICE_LIVEKIT_DISCONNECT_REASONS> }
+  | { event: 'session_end'; reason: OneOf<typeof VOICE_SESSION_END_REASONS>; stage: OneOf<typeof VOICE_FAIL_STAGES> }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -108,6 +118,12 @@ export function parseVoiceClientReport(body: unknown): VoiceClientReport | null 
   if (event === 'mic_lost') {
     const reason = pickOne(body.reason, VOICE_MIC_LOST_REASONS)
     return reason === null ? null : { event, reason }
+  }
+  if (event === 'session_end') {
+    const reason = pickOne(body.reason, VOICE_SESSION_END_REASONS)
+    const stage = pickOne(body.stage, VOICE_FAIL_STAGES)
+    if (reason === null || stage === null) return null
+    return { event, reason, stage }
   }
   if (event === 'livekit_disconnect') {
     const reason = pickOne(body.reason, VOICE_LIVEKIT_DISCONNECT_REASONS)
@@ -171,6 +187,8 @@ export type VoiceClientDiagnosticsSnapshot = {
   }
   /** Причини за прекъсване на LiveKit връзката (клиентски отчети). */
   liveKitDisconnects: Record<string, number>
+  /** Прекратени гласови сесии по причина; при failConnection — по етап. */
+  sessionEnds: { byReason: Record<string, number>; failStages: Record<string, number> }
   rejectedReports: number
 }
 
@@ -198,6 +216,8 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
   const micGum: Record<string, number> = {}
   const micLost: Record<string, number> = {}
   const liveKitDisconnects: Record<string, number> = {}
+  const sessionEndReasons: Record<string, number> = {}
+  const sessionFailStages: Record<string, number> = {}
   const bump = (target: Record<string, number>, key: string): void => {
     target[key] = (target[key] ?? 0) + 1
   }
@@ -260,6 +280,9 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
         if (report.gum !== 'none') bump(micGum, report.gum)
       } else if (report.event === 'mic_lost') {
         bump(micLost, report.reason)
+      } else if (report.event === 'session_end') {
+        bump(sessionEndReasons, report.reason)
+        if (report.stage !== 'none') bump(sessionFailStages, report.stage)
       } else if (report.event === 'livekit_disconnect') {
         bump(liveKitDisconnects, report.reason)
       } else if (report.event === 'transport') {
@@ -295,6 +318,7 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
           lost: { ...micLost },
         },
         liveKitDisconnects: { ...liveKitDisconnects },
+        sessionEnds: { byReason: { ...sessionEndReasons }, failStages: { ...sessionFailStages } },
         rejectedReports,
       }
     },

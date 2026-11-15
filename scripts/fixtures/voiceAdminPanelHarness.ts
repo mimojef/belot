@@ -137,6 +137,10 @@ function monitoring() {
       tokensDiscardedStale: 1,
       rotations: unconfigured ? 0 : 5,
       rotationsByReason: unconfigured ? {} : { listen_revoked: 3, session_displaced: 1, boot_rotation: 1 },
+      sessionEndsByReason: unconfigured ? {} : { 'left_table:page_hide': 2, 'left_table:context_changed': 1, 'left_table:unspecified': 3, lease_expired: 1, game_connection_lost: 1 },
+      bindingEndsByReason: unconfigured ? {} : { 'left_table:rotation': 4, 'session_replaced:rotation': 1, 'left_table:no_rotation': 2 },
+      presenceDeniedByCode: unconfigured ? {} : { not_seat_connection: 2 },
+      tokenLeaseMargin: unconfigured ? {} : { gt30s: 40, '15to30s': 9, lt5s: 1 },
       createRoomFailures: offline ? 3 : 0,
       leaseExpired: unconfigured ? 0 : 2,
       disconnectTimeouts: unconfigured ? 0 : 1,
@@ -163,6 +167,9 @@ function monitoring() {
             lost: { track_ended: 1, republish_failed: 1 },
           },
       liveKitDisconnects: unconfigured ? {} : { network: 2, room_deleted: 3, participant_removed: 1 },
+      sessionEnds: unconfigured
+        ? { byReason: {}, failStages: {} }
+        : { byReason: { leave_voice: 3, page_hide: 2, fail_connection: 2, access_ended: 1 }, failStages: { presence: 1, rotation_resume: 1 } },
       rejectedReports: 0,
     },
   }

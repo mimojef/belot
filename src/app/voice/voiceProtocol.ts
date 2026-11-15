@@ -75,11 +75,16 @@ export type VoiceServerMessage =
   | VoiceAccessEndedMessage
   | VoiceSpeakAccessUpdatedMessage
 
+/** Защо страницата прекратява гласа (само при onTableScreen:false; само диагностика). */
+export type VoicePresenceLeaveReason =
+  | 'leave_voice' | 'off_table' | 'page_hide' | 'page_restored' | 'context_changed' | 'fail_connection' | 'disposed'
+
 export type VoicePresenceClientMessage = {
   type: 'voice_presence'
   voiceTableId: string
   clientInstanceId: string
   onTableScreen: boolean
+  reason?: VoicePresenceLeaveReason
 }
 
 const VOICE_SERVER_MESSAGE_TYPES: ReadonlySet<string> = new Set([

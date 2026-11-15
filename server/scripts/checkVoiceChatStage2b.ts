@@ -1754,6 +1754,116 @@ try {
     assert(!source.includes('handleTokenRequest') && !source.includes('signToken('), 'без токен в index.ts/WS')
     assert(!/await\s+voiceChatService\./.test(source), 'нито една гласова операция не се await-ва в index.ts')
   })
+  // ═══ [DX] Етап А — диагностика на прекратяванията (само наблюдение) ═════
+  await check('[DX1] Напускане на екрана: причината от клиента се брои и логва (left_table:<причина>); стар клиент -> unspecified; без активен глас -> не се брои', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('dx1')
+    await joinWithToken(h, table, creator, 'c1', inst, fake)
+    h.service.handlePresence('c1', creator, { type: 'voice_presence', voiceTableId: table, clientInstanceId: inst, onTableScreen: false, reason: 'page_hide' })
+    assertEqual(h.service.stats().sessionEndsByReason['left_table:page_hide'], 1, 'брояч page_hide')
+    const line = h.logs.find((l) => l.includes('[voice-chat] session_end') && l.includes('reason=left_table:page_hide'))
+    assert(line !== undefined && line.includes(`voiceTable=${table}`) && /sinceTokenMs=\d+/.test(line) && /sincePresenceMs=\d+/.test(line), `лог: ${line}`)
+    // Без активен глас (вече прекратен) -> нищо ново.
+    h.service.handlePresence('c1', creator, { type: 'voice_presence', voiceTableId: table, clientInstanceId: inst, onTableScreen: false, reason: 'leave_voice' })
+    assertEqual(h.service.stats().sessionEndsByReason['left_table:leave_voice'], undefined, 'неактивна сесия не се брои')
+    // Стар клиент (без причина).
+    h.presence('c1', creator, table, inst, true)
+    await h.token(creator, table, inst)
+    h.presence('c1', creator, table, inst, false)
+    assertEqual(h.service.stats().sessionEndsByReason['left_table:unspecified'], 1, 'стар клиент')
+  })
+
+  await check('[DX2] Lease МОЖЕ да изтече веднага след успешно издаден токен: токен при оставащи 0,5 s -> token_near_lease_expiry; 0,5 s по-късно session_end lease_expired + RemoveParticipant', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('dx2')
+    await joinWithToken(h, table, creator, 'c1', inst, fake)
+    h.clock.advance(59_500) // без подновяване на присъствието
+    const late = await h.token(creator, table, inst)
+    assertEqual(late.status, 200, 'токенът се издава (lease още валиден)')
+    assertEqual(h.service.stats().tokenLeaseMargin.lt5s, 1, 'диапазон „под 5 s“')
+    assert(h.logs.some((l) => l.includes('[voice-chat] token_near_lease_expiry') && /leaseLeftMs=500\b/.test(l)), 'лог за близък край на lease')
+    fake.calls.length = 0
+    h.clock.advance(600)
+    await sleep(100)
+    assertEqual(h.service.stats().sessionEndsByReason.lease_expired, 1, 'lease_expired')
+    const line = h.logs.find((l) => l.includes('[voice-chat] session_end') && l.includes('reason=lease_expired'))
+    // Таймерът на lease изтича точно в края му: 0,5 s след токена, 60 s след присъствието.
+    assert(line !== undefined && /sinceTokenMs=500\b/.test(line) && /sincePresenceMs=60000\b/.test(line), `лог: ${line}`)
+    assert(fake.calls.some((c) => c.method === 'RemoveParticipant'), 'отстранен 0,5 s след токена')
+  })
+
+  await check('[DX3] Изгубена игрова връзка 120 s -> session_end game_connection_lost', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('dx3')
+    await joinWithToken(h, table, creator, 'c1', inst, fake)
+    h.open.delete('c1')
+    h.service.onGameConnectionClosed('c1')
+    h.clock.advance(120_001)
+    assertEqual(h.service.stats().sessionEndsByReason.game_connection_lost, 1, 'брояч')
+    assert(h.logs.some((l) => l.includes('[voice-chat] session_end') && l.includes('reason=game_connection_lost')), 'лог')
+  })
+
+  await check('[DX4] Отказано присъствие и отказан токен: броячи по код + по един ред в лога (без токен)', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('dx4')
+    h.open.add('c9') // друга отворена връзка на същия профил, която НЕ държи мястото
+    const denied = h.presence('c9', creator, table, inst)
+    assert(denied?.type === 'voice_presence_result' && !denied.ok && denied.code === 'not_seat_connection', JSON.stringify(denied))
+    assertEqual(h.service.stats().presenceDeniedByCode.not_seat_connection, 1, 'брояч presence')
+    assert(h.logs.some((l) => l.includes('[voice-chat] presence_denied') && l.includes('code=not_seat_connection')), 'лог presence')
+    const noPresence = await h.token(creator, table, inst)
+    assertEqual(noPresence.body.code, 'invalid_session', 'токен без присъствие')
+    assert(h.logs.some((l) => l.includes('[voice-chat] token_denied') && l.includes('code=invalid_session') && l.includes('status=409')), 'лог токен')
+  })
+
+  await check('[DX5] Край на участието: причина и дали има ротация (напускане -> ротация; нова страница -> ротация session_replaced)', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const guest = h.seedProfile('Guest')
+    const table = h.createTable(creator, 'c1')
+    h.vip.add(guest)
+    h.seat(table, guest, 'c2')
+    await joinWithToken(h, table, creator, 'c1', instanceId('dx5a'), fake)
+    await joinWithToken(h, table, guest, 'c2', instanceId('dx5b'), fake)
+    // Нова страница на домакина: нова игрова връзка, която вече държи мястото.
+    h.seats.set(`${table}|${creator}`, { relation: 'player', permanentlyLeft: false, seatConnectionId: 'c3' })
+    h.open.add('c3')
+    h.presence('c3', creator, table, instanceId('dx5c'))
+    assertEqual(h.service.stats().bindingEndsByReason['session_replaced:rotation'], 1, 'нова страница -> ротация (запазено поведение)')
+    await h.reconcile()
+    h.service.onMemberRemoved(table, guest, 'left_waiting_room')
+    assert(Object.keys(h.service.stats().bindingEndsByReason).some((k) => k.startsWith('left_table:')), 'напускане')
+    assert(h.logs.some((l) => l.includes('[voice-chat] binding_end') && l.includes('reason=session_replaced') && l.includes('rotation=yes')), 'лог binding_end')
+  })
+
+  await check('[DX6] Диагностичните редове не съдържат токени, тайни и пълни identity-та', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('dx6')
+    const joined = await joinWithToken(h, table, creator, 'c1', inst, fake)
+    h.service.handlePresence('c1', creator, { type: 'voice_presence', voiceTableId: table, clientInstanceId: inst, onTableScreen: false, reason: 'leave_voice' })
+    const diagnostic = h.logs.filter((l) => /\[voice-chat\] (session_end|binding_end|presence_denied|token_denied|token_near_lease_expiry)/.test(l))
+    assert(diagnostic.length > 0, 'има диагностика')
+    for (const line of diagnostic) {
+      assert(!line.includes(joined.token) && !line.includes('eyJ') && !line.includes(API_SECRET) && !line.includes(joined.identity) && !line.includes(inst), `чувствителни данни: ${line}`)
+    }
+  })
+
 } finally {
   for (const harness of harnesses) {
     try { harness.dispose() } catch { /* вече */ }

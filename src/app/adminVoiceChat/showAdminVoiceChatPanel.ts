@@ -102,6 +102,11 @@ type ServerStats = {
   rotations: number
   /** Липсва при по-стар сървър. */
   rotationsByReason?: Record<string, number>
+  /** Диагностика на прекратяванията (липсват при по-стар сървър). */
+  sessionEndsByReason?: Record<string, number>
+  bindingEndsByReason?: Record<string, number>
+  presenceDeniedByCode?: Record<string, number>
+  tokenLeaseMargin?: Record<string, number>
   createRoomFailures: number
   leaseExpired: number
   disconnectTimeouts: number
@@ -132,6 +137,7 @@ type ClientStats = {
     lost: Record<string, number>
   }
   liveKitDisconnects?: Record<string, number>
+  sessionEnds?: { byReason: Record<string, number>; failStages: Record<string, number> }
   rejectedReports: number
 }
 
@@ -255,6 +261,75 @@ const LIVEKIT_DISCONNECT_LABELS: Record<string, string> = {
   migration: 'Миграция',
   client: 'Клиентът',
   other: 'Друга',
+}
+
+const SESSION_END_LABELS: Record<string, string> = {
+  leave_voice: '„Напусни гласа“',
+  off_table: 'Извън масата („Изчакай в лоби“ / друг екран)',
+  page_hide: 'Затваряне или скриване на страницата',
+  page_restored: 'Страница от кеша (назад/напред)',
+  context_changed: 'Смяна на масата / контекста',
+  fail_connection: 'Неуспешно свързване („недостъпен“)',
+  disabled: 'Изключен глас',
+  access_ended: 'Прекратен от сървъра',
+  removed: 'Отстранен в LiveKit',
+  duplicate_identity: 'Същият участник влезе отново',
+  game_connection_timeout: '120 s без игрова връзка',
+  disposed: 'Затворен гласов модул',
+  unspecified: 'Без посочена причина (стар клиент)',
+}
+
+const SERVER_SESSION_END_LABELS: Record<string, string> = {
+  lease_expired: 'Изтекло присъствие (lease)',
+  game_connection_lost: '120 s без игрова връзка',
+}
+
+const FAIL_STAGE_LABELS: Record<string, string> = {
+  sdk_load: 'Зареждане на гласовия модул',
+  presence: 'Присъствие (presence)',
+  token: 'Токен',
+  connect: 'Свързване с LiveKit',
+  reconnect_exhausted: 'Изчерпани опити за възстановяване',
+  rotation_resume: 'Свързване след ротация',
+  permissions_reconnect: 'Нов токен за говорене',
+}
+
+const ACCESS_END_LABELS: Record<string, string> = {
+  left_table: 'Напуснал масата',
+  kicked: 'Изгонен',
+  banned: 'Бан',
+  session_replaced: 'Нова страница на същия играч',
+  session_displaced: 'Изместена игрова сесия',
+}
+
+const PRESENCE_DENIAL_LABELS: Record<string, string> = {
+  not_seat_connection: 'Не е връзката на мястото',
+  not_a_player: 'Не е играч на масата',
+  table_not_found: 'Няма такава маса',
+  table_released: 'Освободена маса',
+  voice_off: 'Изключен глас',
+  banned: 'Бан',
+  not_authenticated: 'Без вход',
+  client_instance_conflict: 'Конфликт на страницата',
+}
+
+const LEASE_MARGIN_LABELS: Record<string, string> = {
+  lt5s: 'под 5 s',
+  '5to15s': '5–15 s',
+  '15to30s': '15–30 s',
+  gt30s: 'над 30 s',
+}
+
+/** server: left_table:<причина от клиента> / lease_expired / game_connection_lost */
+function serverSessionEndLabel(key: string): string {
+  if (key.startsWith('left_table:')) return `Напуснал екрана — ${SESSION_END_LABELS[key.slice('left_table:'.length)] ?? key}`
+  return SERVER_SESSION_END_LABELS[key] ?? key
+}
+
+/** <причина>:rotation|no_rotation */
+function bindingEndLabel(key: string): string {
+  const [reason = key, rotation] = key.split(':')
+  return `${ACCESS_END_LABELS[reason] ?? reason}${rotation === 'rotation' ? ' — с ротация' : ''}`
 }
 
 const ROTATION_REASON_LABELS: Record<string, string> = {
@@ -793,6 +868,28 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
           </div>
         </div>
         <div style="margin-top:6px;font-size:12px;line-height:1.45;${MUTED}">Анонимни броячи от браузърите (без аудио, токени, IP и имена на устройства).</div>
+      </div>
+      <div style="${CARD_STYLE}" data-avc-session-ends="1">
+        <h3 style="${H3}">Прекратяване на гласови сесии</h3>
+        <div data-avc-cols="1">
+          <div>
+            ${subTitle('Сървър: прекратени без ротация', true)}
+            ${countRows(Object.fromEntries(Object.entries(s.sessionEndsByReason ?? {}).map(([key, count]) => [serverSessionEndLabel(key), count])), {}, 'Няма прекратени сесии.')}
+            ${subTitle('Сървър: край на участието в гласа')}
+            ${countRows(Object.fromEntries(Object.entries(s.bindingEndsByReason ?? {}).map(([key, count]) => [bindingEndLabel(key), count])), {}, 'Няма.')}
+            ${subTitle('Отказано присъствие (presence)')}
+            ${countRows(s.presenceDeniedByCode, PRESENCE_DENIAL_LABELS, 'Няма откази.')}
+          </div>
+          <div>
+            ${subTitle('Браузъри: защо е прекратена сесията', true)}
+            ${countRows(c.sessionEnds?.byReason, SESSION_END_LABELS, 'Няма отчети.')}
+            ${subTitle('Неуспешно свързване — на кой етап')}
+            ${countRows(c.sessionEnds?.failStages, FAIL_STAGE_LABELS, 'Няма.')}
+            ${subTitle('Оставащо присъствие при издаден токен')}
+            ${countRows(s.tokenLeaseMargin, LEASE_MARGIN_LABELS, 'Няма издадени токени.')}
+          </div>
+        </div>
+        <div style="margin-top:6px;font-size:12px;line-height:1.45;${MUTED}">Без имена, токени и IP. Подробностите (маса, епоха, време от последното присъствие и токен) са в лога на игровия сървър: <code>[voice-chat] session_end</code>, <code>binding_end</code>, <code>presence_denied</code>, <code>token_denied</code>, <code>token_near_lease_expiry</code>.</div>
       </div>
       <div data-avc-cols="1">
         <div style="${CARD_STYLE}">

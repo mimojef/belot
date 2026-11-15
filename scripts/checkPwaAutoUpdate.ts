@@ -112,6 +112,9 @@ function safeState(overrides: Partial<SafetyState> = {}): SafetyState {
     isConnected: true,
     isReconnecting: false,
     hasActiveLudoMatch: false,
+    hasActiveSvaraMatch: false,
+    hasPrivateRoomMembership: false,
+    hasActiveVoice: false,
     ...overrides,
   }
 }
@@ -160,6 +163,22 @@ await check('[A4] private-rooms screen → update stays pending', async () => {
   })
   await tryApplyPendingPwaUpdate(() => safeState({ isInPrivateRoomsScreen: true }), 'build-1')
   assert(applyCalls === 0, 'apply should not be called while on the private-rooms screen')
+})
+
+await check('[A4b] private-table waiting room membership (incl. "wait in lobby") or an active voice session → update stays pending; applies once both end', async () => {
+  resetAll()
+  let applyCalls = 0
+  setPendingPwaUpdate(() => {
+    applyCalls++
+  })
+  await tryApplyPendingPwaUpdate(() => safeState({ hasPrivateRoomMembership: true }), 'build-1')
+  assert(applyCalls === 0, 'apply should not be called while seated at a waiting private table')
+  await tryApplyPendingPwaUpdate(() => safeState({ hasActiveVoice: true }), 'build-1')
+  assert(applyCalls === 0, 'apply should not be called during an active voice session')
+  await tryApplyPendingPwaUpdate(() => safeState({ hasPrivateRoomMembership: true, hasActiveVoice: true }), 'build-1')
+  assert(applyCalls === 0, 'apply should not be called with both')
+  await tryApplyPendingPwaUpdate(() => safeState(), 'build-1')
+  assert(applyCalls === 1, 'apply should run once the membership and the voice session have ended')
 })
 
 await check('[A5] private-room invite or queued invite → update stays pending', async () => {

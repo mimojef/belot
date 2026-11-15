@@ -171,6 +171,16 @@ export type VoiceMicDiagnosticReport =
   /** Вече включен микрофон е загубен (без заявка в ход). */
   | { event: 'mic_lost'; reason: VoiceMicrophoneLossReason | 'rotation' | 'connection_lost' }
   | { event: 'livekit_disconnect'; reason: VoiceLiveKitDisconnectReason }
+  /** Прекратена гласова сесия на страницата: защо; при fail_connection — на кой етап. */
+  | { event: 'session_end'; reason: VoiceSessionEndReason; stage: VoiceFailStage }
+
+/** Защо страницата прекратява гласовата сесия (само диагностика). */
+export type VoiceSessionEndReason =
+  | 'leave_voice' | 'off_table' | 'page_hide' | 'page_restored' | 'context_changed' | 'fail_connection'
+  | 'disabled' | 'access_ended' | 'removed' | 'duplicate_identity' | 'game_connection_timeout' | 'disposed'
+/** Етап, на който failConnection е прекратил опита. */
+export type VoiceFailStage =
+  | 'none' | 'sdk_load' | 'presence' | 'token' | 'connect' | 'reconnect_exhausted' | 'rotation_resume' | 'permissions_reconnect'
 
 export type VoiceAdapter = {
   /**
