@@ -24,7 +24,7 @@ import type { VoiceSpeakPreview } from '../voiceSpeakPreview'
 import { resolveVoiceJoinOffer, type VoiceJoinOffer } from './voiceJoinOffer'
 import { applyVoiceSpeakingProfiles, ensureVoiceSpeakingStyles } from './voiceSpeakingIndicator'
 import { voiceIcon } from './voiceUiIcons'
-import { describeVoiceStatus, isInVoice, type VoiceUiSeat, type VoiceUiTheme } from './voiceUiStatus'
+import { describeVoiceStatus, isInVoice, voiceMicState, type VoiceMicState, type VoiceUiSeat, type VoiceUiTheme } from './voiceUiStatus'
 
 /** Панелът и прозорците — lazy chunk (renderVoicePanel.ts), извън основния bundle. */
 type VoicePanelView = typeof import('./renderVoicePanel')
@@ -72,6 +72,11 @@ const EXTRA_STYLES = `
   .pvs-sub--ok { color:#067647; } .pvs-sub--busy { color:#B54708; } .pvs-sub--error { color:#B42318; }
   .pvs-cta { flex:0 0 auto; min-height:36px; padding:0 12px; border-radius:9px; display:inline-flex; align-items:center; font-size:13px; font-weight:800; background:#7950E8; color:#FFFFFF; }
   .pvs-cta--open { background:#F4F0FF; color:#6941C6; }
+  .pvs-cta--icon { width:36px; min-height:36px; padding:0; justify-content:center; border-radius:10px; }
+  .pvs-ico--mic-on { background:#ECFDF3; border-color:#ABEFC6; color:#067647; }
+  .pvs-ico--mic-off { background:#FEF3F2; border-color:#FECDCA; color:#D92D20; }
+  .pvg.pvg--mic-on, .pvg.pvg--mic-on:hover { color:#4ADE80; }
+  .pvg.pvg--mic-off, .pvg.pvg--mic-off:hover { color:#F87171; }
   .pvg { position:fixed; bottom:5px; right:112px; z-index:9998; width:40px; height:40px; padding:0; border:0; border-radius:50%; background:rgba(20,20,24,0.92); border:2px solid rgba(212,165,32,0.80); box-shadow:0 0 12px rgba(212,165,32,0.25), 0 6px 20px rgba(0,0,0,0.50); display:flex; align-items:center; justify-content:center; color:#F4C432; cursor:pointer; -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); -webkit-tap-highlight-color:transparent; }
   .pvg::before { content:''; position:absolute; inset:-3px -2px -5px -2px; }
   .pvg--idle { color:rgba(244,196,50,0.62); }
@@ -90,6 +95,8 @@ const EXTRA_STYLES = `
   .pvs--dark .pvs-sub--ok { color:#4ADE80; } .pvs--dark .pvs-sub--busy { color:#FBBF24; } .pvs--dark .pvs-sub--error { color:#F87171; }
   .pvs--dark .pvs-cta { background:linear-gradient(180deg,#F4C95B 0%,#C98F13 100%); color:#080808; }
   .pvs--dark .pvs-cta--open { background:rgba(212,165,32,0.14); border:1px solid rgba(212,165,32,0.55); color:#F4C432; }
+  .pvs--dark .pvs-ico--mic-on { background:rgba(74,222,128,0.14); border-color:rgba(74,222,128,0.55); color:#4ADE80; }
+  .pvs--dark .pvs-ico--mic-off { background:rgba(248,113,113,0.14); border-color:rgba(248,113,113,0.55); color:#F87171; }
   .pvg--desktop, .pvg--desktop-free { width:52px; height:52px; right:auto; bottom:auto; flex:0 0 auto; transition:background 140ms ease, color 140ms ease; }
   .pvg--desktop { position:relative; z-index:auto; }
   .pvg--desktop-free { position:fixed; left:18px; bottom:24px; z-index:9400; }
@@ -330,11 +337,11 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
 
   // ─── Бутон в игра ───────────────────────────────────────────────────
 
-  function gameButtonIcon(snapshot: VoiceSnapshot, size: number): { html: string; idle: boolean } {
-    if (!isInVoice(snapshot)) return { html: voiceIcon.mic(size), idle: true }
-    if (snapshot.speak?.blockedReason === 'muted') return { html: voiceIcon.micOff(size), idle: false }
-    if (snapshot.microphone === 'live') return { html: voiceIcon.mic(size), idle: false }
-    return { html: voiceIcon.headphones(size), idle: false }
+  /** В гласа: зелен микрофон (включен) / неутрален (включване) / червен зачеркнат (изключен, недостъпен, заглушен). */
+  function gameButtonIcon(snapshot: VoiceSnapshot, size: number): { html: string; idle: boolean; mic: VoiceMicState | null } {
+    const mic = voiceMicState(snapshot)
+    if (mic === null) return { html: voiceIcon.mic(size), idle: true, mic }
+    return { html: mic === 'off' ? voiceIcon.micOff(size) : voiceIcon.mic(size), idle: false, mic }
   }
 
   /**
@@ -393,7 +400,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       doc.body.appendChild(buttonElement)
     }
     const icon = gameButtonIcon(snapshot, desktop ? 24 : 20)
-    const className = `pvg${placementClass}${icon.idle ? ' pvg--idle' : ''}`
+    const className = `pvg${placementClass}${icon.idle ? ' pvg--idle' : ''}${icon.mic === null ? '' : ` pvg--mic-${icon.mic}`}`
     if (buttonElement.className !== className) buttonElement.className = className
     if (buttonElement.dataset.iconKey !== icon.html) {
       buttonElement.dataset.iconKey = icon.html
@@ -409,15 +416,20 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
   function stripHtml(snapshot: VoiceSnapshot): string {
     const status = describeVoiceStatus(snapshot)
     const inVoice = isInVoice(snapshot)
-    const cta = inVoice ? 'Отвори' : snapshot.canRestore ? 'Възстанови' : 'Включи се'
+    const mic = voiceMicState(snapshot)
+    // В гласа: само зъбно колело — вход към панела/настройките (там е и „Включи микрофона“).
+    const cta = inVoice
+      ? `<span class="pvs-cta pvs-cta--open pvs-cta--icon" title="Настройки на гласовия чат">${voiceIcon.settings(20)}</span>`
+      : `<span class="pvs-cta">${snapshot.canRestore ? 'Възстанови' : 'Включи се'}</span>`
+    const ariaLabel = inVoice ? `Гласов чат: ${status.label}. Настройки` : `Гласов чат: ${status.label}`
     return `
-      <button type="button" class="pvs${isDesktop() ? ' pvs--dark' : ''}" data-voice-action="open-panel" aria-label="Гласов чат: ${status.label}">
-        <span class="pvs-ico">${inVoice && snapshot.microphone !== 'live' ? voiceIcon.headphones(18) : voiceIcon.mic(18)}</span>
+      <button type="button" class="pvs${isDesktop() ? ' pvs--dark' : ''}" data-voice-action="open-panel" aria-label="${ariaLabel}">
+        <span class="pvs-ico${mic === null ? '' : ` pvs-ico--mic-${mic}`}" data-voice-mic-state="${mic ?? 'none'}">${mic === 'off' ? voiceIcon.micOff(18) : voiceIcon.mic(18)}</span>
         <span class="pvs-copy">
           <span class="pvs-title">Гласов чат</span>
           <span class="pvs-sub pvs-sub--${status.tone}">${status.label}</span>
         </span>
-        <span class="pvs-cta${inVoice ? ' pvs-cta--open' : ''}">${cta}</span>
+        ${cta}
       </button>
     `
   }

@@ -106,7 +106,9 @@ try {
   const finalOnly = process.argv.includes('--final')
   // --desktop: само целевите проверки на desktop интерфейса (Етап 5).
   const desktopOnly = process.argv.includes('--desktop')
-  for (const vp of finalOnly || desktopOnly ? [] : VIEWPORTS) {
+  // --compact: само компактният статус на микрофона (лента + бутон в игра), mobile и desktop.
+  const compactOnly = process.argv.includes('--compact')
+  for (const vp of finalOnly || desktopOnly || compactOnly ? [] : VIEWPORTS) {
     console.log(`\n--- ${vp.label} ---`)
     const dir = join(OUT, vp.label)
     await mkdir(dir, { recursive: true })
@@ -309,12 +311,12 @@ try {
       await page.waitForFunction(() => document.getElementById('pika-voice-panel-ui') !== null, undefined, { timeout: 8000 })
       assert(requested.length >= 1, 'prefetch на гласова маса')
     })
-    await check(`${vp.label} статус „Микрофонът е включен“ (не „Говорите“), заглавният ред не се разпада`, async () => {
+    await check(`${vp.label} статус „Микрофон включен“ (не „Говорите“), заглавният ред не се разпада`, async () => {
       await h('setConnected', { mic: true, remotes: { p2: 'mic', p3: 'listen', p4: 'out' } })
       await h('openPanel')
       await page.waitForSelector('[data-voice-panel="1"]')
       const text = await panelText()
-      assert(text.includes('Микрофонът е включен') && !text.includes('Говорите'), 'нов статус')
+      assert(text.includes('Микрофон включен') && !text.includes('Говорите'), 'нов статус')
       const head = await page.evaluate(() => {
         const panel = document.querySelector('[data-voice-panel="1"]')!.getBoundingClientRect()
         const close = document.querySelector('[data-voice-panel="1"] .pvp-close')!.getBoundingClientRect()
@@ -322,7 +324,7 @@ try {
         return { insidePanel: close.right <= panel.right + 0.5 && status.right <= close.left, closeTop: close.top - panel.top }
       })
       assert(head.insidePanel, 'статусът и „×“ са в панела, без застъпване')
-      assert(await page.locator('[data-voice-game-toggle="1"]').getAttribute('aria-label') === 'Гласов чат: Микрофонът е включен', 'aria-label на бутона')
+      assert(await page.locator('[data-voice-game-toggle="1"]').getAttribute('aria-label') === 'Гласов чат: Микрофон включен', 'aria-label на бутона')
       await shot('F1-panel-mic-on')
       await h('closePanel')
     })
@@ -381,6 +383,167 @@ try {
     { label: '1366x768', width: 1366, height: 768, full: false },
     { label: '1920x1080', width: 1920, height: 1080, full: false },
   ]
+  // ─── --compact: компактният статус на собствения микрофон ─────────────
+  const COMPACT_VIEWPORTS = [
+    { label: '390x844', width: 390, height: 844, mobile: true },
+    { label: '320x568', width: 320, height: 568, mobile: true },
+    { label: '1280x800', width: 1280, height: 800, mobile: false },
+  ]
+  for (const vp of compactOnly ? COMPACT_VIEWPORTS : []) {
+    console.log(`\n--- ${vp.label} (компактен статус на микрофона) ---`)
+    const dir = join(OUT, `compact-${vp.label}`)
+    await mkdir(dir, { recursive: true })
+    const context = await browser!.newContext(vp.mobile
+      ? { viewport: { width: vp.width, height: vp.height }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 }
+      : { viewport: { width: vp.width, height: vp.height } })
+    const page = await context.newPage()
+    page.on('pageerror', (error) => console.error(`    pageerror: ${error.message}`))
+    await page.goto(`${base}?vip=1`)
+    await page.waitForFunction(() => (window as any).__voiceUiHarness !== undefined, undefined, { timeout: 20_000 })
+    const hc = (fn: string, ...args: unknown[]) => page.evaluate(([f, a]) => (window as any).__voiceUiHarness[f as string](...(a as unknown[])), [fn, args] as const)
+    const shotC = async (name: string) => {
+      await page.waitForTimeout(250)
+      await page.screenshot({ path: join(dir, `${name}.png`) })
+    }
+    /** Червено/зелено по изчисления цвят (rgb). */
+    const hue = (rgb: string): 'red' | 'green' | 'other' => {
+      const [r, g, b] = (rgb.match(/\d+/g) ?? []).map(Number) as [number, number, number]
+      if (r > g + 60 && r > b + 30) return 'red'
+      if (g > r + 40 && g > b + 20) return 'green'
+      return 'other'
+    }
+    const strip = () => page.evaluate(() => {
+      const root = document.querySelector('[data-voice-waiting-strip="1"]')
+      const btn = root?.querySelector<HTMLElement>('.pvs') ?? null
+      const sub = root?.querySelector<HTMLElement>('.pvs-sub') ?? null
+      const ico = root?.querySelector<HTMLElement>('.pvs-ico') ?? null
+      const cta = root?.querySelector<HTMLElement>('.pvs-cta') ?? null
+      return {
+        text: sub?.textContent ?? null,
+        subColor: sub ? getComputedStyle(sub).color : '',
+        icoColor: ico ? getComputedStyle(ico).color : '',
+        micState: ico?.dataset.voiceMicState ?? null,
+        // Зачеркнатият микрофон (Lucide mic-off) има диагонална линия x1=2 y1=2.
+        icoCrossed: ico?.querySelector('line[x1="2"][y1="2"]') !== null && ico?.querySelector('line[x1="2"][y1="2"]') !== undefined,
+        ctaText: (cta?.textContent ?? '').trim(),
+        ctaHasIcon: cta?.querySelector('svg') !== null && cta?.querySelector('svg') !== undefined,
+        ctaWidth: cta?.getBoundingClientRect().width ?? 0,
+        aria: btn?.getAttribute('aria-label') ?? null,
+        height: root?.getBoundingClientRect().height ?? 0,
+        overflow: btn !== null && btn.scrollWidth > btn.clientWidth + 1,
+      }
+    })
+
+    await check(`${vp.label} чакалня: изключен микрофон -> червено „Микрофон изключен“ + зачеркнат микрофон; бутон само със зъбно колело`, async () => {
+      await hc('showWaiting')
+      await page.locator('[data-voice-prompt="1"] [data-voice-action="not-now"]').first().click({ timeout: 8000 })
+      await page.waitForSelector('[data-voice-waiting-strip="1"] .pvs', { timeout: 5000 })
+      const idle = await strip()
+      assert(idle.ctaText === 'Включи се' && idle.micState === 'none', `извън гласа — без промяна: ${JSON.stringify(idle)}`)
+      for (const [label, connected, extra] of [
+        ['само слушане', { mic: false, remotes: { p2: 'mic', p3: 'listen' } }, {}],
+        ['неуспешно включване', { mic: false, remotes: { p2: 'mic' } }, { uiError: { code: 'mic_unavailable', message: 'Микрофонът е недостъпен.', detail: null } }],
+        ['заглушен', { mic: false, muted: true, remotes: { p2: 'mic' } }, {}],
+        ['без право (VIP)', { mic: false, canSpeak: false, remotes: { p2: 'mic' } }, {}],
+      ] as const) {
+        await hc('setConnected', connected, extra)
+        await page.waitForTimeout(80)
+        const s = await strip()
+        assert(s.text === 'Микрофон изключен', `${label}: текст ${s.text}`)
+        assert(hue(s.subColor) === 'red' && hue(s.icoColor) === 'red', `${label}: червено (${s.subColor} / ${s.icoColor})`)
+        assert(s.micState === 'off' && s.icoCrossed, `${label}: зачеркнат микрофон`)
+        assert(s.ctaText === '' && s.ctaHasIcon, `${label}: бутон само с икона (${JSON.stringify(s.ctaText)})`)
+        assert(s.aria !== null && s.aria.includes('Микрофон изключен') && s.aria.includes('Настройки'), `${label}: aria-label ${s.aria}`)
+        assert(!s.overflow && s.height >= 50 && s.height <= 56, `${label}: лентата ~52px без препълване (${s.height})`)
+      }
+      await hc('setConnected', { mic: false, remotes: { p2: 'mic', p3: 'listen' } })
+      await shotC('C1-waiting-mic-off')
+    })
+
+    await check(`${vp.label} чакалня: включен микрофон -> зелено „Микрофон включен“ + нормален микрофон; зъбното колело отваря панела`, async () => {
+      await hc('setConnected', { mic: true, remotes: { p2: 'mic', p3: 'listen' } })
+      await page.waitForTimeout(80)
+      const s = await strip()
+      assert(s.text === 'Микрофон включен', `текст ${s.text}`)
+      assert(hue(s.subColor) === 'green' && hue(s.icoColor) === 'green', `зелено (${s.subColor} / ${s.icoColor})`)
+      assert(s.micState === 'on' && !s.icoCrossed, 'нормален микрофон')
+      assert(s.ctaText === '' && s.ctaHasIcon && s.ctaWidth >= 34 && s.ctaWidth <= 38, `бутон-икона 36px (${s.ctaWidth})`)
+      await shotC('C2-waiting-mic-on')
+      await page.locator('[data-voice-waiting-strip="1"] .pvs-cta').click()
+      await page.waitForSelector('[data-voice-panel="1"]', { timeout: 5000 })
+      const head = await page.textContent('[data-voice-panel="1"] .pvp-status')
+      assert((head ?? '').includes('Микрофон включен'), `заглавието на панела: ${head}`)
+      await shotC('C3-panel-from-gear')
+      await hc('closePanel')
+    })
+
+    await check(`${vp.label} чакалня + игра: неутрално „Включване…“, докато се чака разрешение/публикуване -> зелено при успех, червено при неуспех`, async () => {
+      // Разрешението/публикуването чака: microphone='requesting'.
+      await hc('setConnected', { mic: false, remotes: { p2: 'mic' } }, { microphone: 'requesting', wantsToSpeak: true })
+      await page.waitForTimeout(80)
+      const pending = await strip()
+      assert(pending.text === 'Включване…', `текст ${pending.text}`)
+      assert(hue(pending.subColor) === 'other' && hue(pending.icoColor) === 'other', `неутрално (${pending.subColor} / ${pending.icoColor})`)
+      assert(pending.micState === 'pending' && !pending.icoCrossed, 'нормален (неоцветен) микрофон')
+      assert(pending.ctaText === '' && pending.ctaHasIcon, 'зъбното колело остава')
+      await shotC('C6-waiting-mic-pending')
+      // Успех -> зелено.
+      await hc('setConnected', { mic: true, remotes: { p2: 'mic' } })
+      await page.waitForTimeout(80)
+      const ok = await strip()
+      assert(ok.text === 'Микрофон включен' && hue(ok.subColor) === 'green', `след успех: ${ok.text}`)
+      // Отново чакане, после неуспех -> червено.
+      await hc('setConnected', { mic: false, remotes: { p2: 'mic' } }, { microphone: 'requesting', wantsToSpeak: true })
+      await page.waitForTimeout(80)
+      assert((await strip()).text === 'Включване…', 'второ включване')
+      await hc('setConnected', { mic: false, remotes: { p2: 'mic' } }, { uiError: { code: 'mic_not_enabled', message: 'Микрофонът не беше включен.', detail: 'Моля, опитайте отново.' } })
+      await page.waitForTimeout(80)
+      const failed = await strip()
+      assert(failed.text === 'Микрофон изключен' && hue(failed.subColor) === 'red' && failed.icoCrossed, `след неуспех: ${failed.text}`)
+      // Останалите статуси не са засегнати: „Звукът е спрян“ има предимство.
+      await hc('setConnected', { mic: false, remotes: { p2: 'mic' } }, { microphone: 'requesting', playbackBlocked: true })
+      await page.waitForTimeout(80)
+      assert((await strip()).text === 'Звукът е спрян', 'предупреждението за звука остава')
+      // Бутонът в игра: неутрален (без червено/зелено), после зелен.
+      await hc('showGame')
+      await page.waitForSelector('[data-voice-game-toggle="1"]', { timeout: 8000 })
+      await hc('setConnected', { mic: false, remotes: { p2: 'mic' } }, { microphone: 'requesting', wantsToSpeak: true })
+      await page.waitForTimeout(80)
+      const g = await page.evaluate(() => {
+        const btn = document.querySelector<HTMLElement>('[data-voice-game-toggle="1"]')!
+        return { cls: btn.className, color: getComputedStyle(btn).color, aria: btn.getAttribute('aria-label'), crossed: btn.querySelector('line[x1="2"][y1="2"]') !== null }
+      })
+      assert(!g.cls.includes('pvg--mic-on') && !g.cls.includes('pvg--mic-off') && hue(g.color) !== 'red' && hue(g.color) !== 'green' && !g.crossed && g.aria === 'Гласов чат: Включване…', `игра: ${JSON.stringify(g)}`)
+      await shotC('C7-game-mic-pending')
+    })
+
+    await check(`${vp.label} игра: бутонът на гласа — зелен микрофон / червен зачеркнат според микрофона`, async () => {
+      await hc('showGame')
+      await page.waitForSelector('[data-voice-game-toggle="1"]', { timeout: 8000 })
+      const game = () => page.evaluate(() => {
+        const btn = document.querySelector<HTMLElement>('[data-voice-game-toggle="1"]')!
+        return { cls: btn.className, color: getComputedStyle(btn).color, aria: btn.getAttribute('aria-label'), crossed: btn.querySelector('line[x1="2"][y1="2"]') !== null }
+      })
+      await hc('setConnected', { mic: true, remotes: { p2: 'mic' } })
+      await page.waitForTimeout(80)
+      const on = await game()
+      assert(on.cls.includes('pvg--mic-on') && hue(on.color) === 'green' && !on.crossed && on.aria === 'Гласов чат: Микрофон включен', `включен: ${JSON.stringify(on)}`)
+      await shotC('C4-game-mic-on')
+      await hc('setConnected', { mic: false, remotes: { p2: 'mic' } })
+      await page.waitForTimeout(80)
+      const off = await game()
+      assert(off.cls.includes('pvg--mic-off') && hue(off.color) === 'red' && off.crossed && off.aria === 'Гласов чат: Микрофон изключен', `изключен: ${JSON.stringify(off)}`)
+      await shotC('C5-game-mic-off')
+      if (!vp.mobile) {
+        // Hover не сменя цвета на състоянието.
+        await page.hover('[data-voice-game-toggle="1"]')
+        await page.waitForTimeout(200)
+        assert(hue((await game()).color) === 'red', 'hover запазва червения цвят')
+      }
+    })
+    await context.close()
+  }
+
   for (const vp of desktopOnly ? DESKTOP_VIEWPORTS : []) {
     console.log(`\n--- ${vp.label} (desktop) ---`)
     const dir = join(OUT, `desktop-${vp.label}`)
@@ -454,7 +617,7 @@ try {
         const panel = (await rectOf(page, '.pvl-panel'))!
         const stripBtn = (await rectOf(page, '[data-voice-waiting-strip="1"] .pvs'))!
         assert(panel.top >= stripBtn.bottom && panel.right <= vp.width - 15 && panel.bottom <= vp.height, `панелът е под лентата и в екрана (${JSON.stringify(panel)})`)
-        assert((await page.textContent('[data-voice-panel="1"]'))!.includes('Микрофонът е включен'), 'одобреният статус')
+        assert((await page.textContent('[data-voice-panel="1"]'))!.includes('Микрофон включен'), 'одобреният статус')
         await shotD(page, 'D08-waiting-panel')
         await page.context().close()
         const page2 = await openDesktop('vip=0')

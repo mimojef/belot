@@ -223,7 +223,7 @@ async function joinRoom(page: Page, roomId: string): Promise<void> {
 async function joinVoiceAsListener(page: Page): Promise<boolean> {
   await page.locator(PROMPT).waitFor({ state: 'visible', timeout: 25_000 })
   await page.locator('[data-voice-prompt-layer="1"] [data-voice-action="join-listen"]').first().click()
-  return waitFor(page, `(() => { const el = document.querySelector('[data-voice-waiting-strip="1"] .pvs-sub'); return !!el && el.textContent === 'Слушате' })()`, 20_000)
+  return waitFor(page, `(() => { const el = document.querySelector('[data-voice-waiting-strip="1"] .pvs-sub'); return !!el && el.textContent === 'Микрофон изключен' })()`, 20_000)
 }
 async function createVoiceRoom(page: Page, manualStart: boolean): Promise<void> {
   await page.locator(LOBBY_READY).first().click()
@@ -309,13 +309,13 @@ try {
   await check('[E1] [mobile] Кратко прекъсване в чакалнята: лента, без цял екран и reload; същата страница, мястото и гласовата сесия са запазени', async () => {
     assert(aVoice && bVoice, `гласът е включен: A=${aVoice} B=${bVoice}`)
     assert(bDrop.banner && !bDrop.overlayDuring && bDrop.waitingDuring, `по време: ${JSON.stringify({ banner: bDrop.banner, overlay: bDrop.overlayDuring, waiting: bDrop.waitingDuring })}`)
-    assert(bDrop.voiceDuring === 'Слушате', `гласът по време на прекъсването: ${bDrop.voiceDuring}`)
+    assert(bDrop.voiceDuring === 'Микрофон изключен', `гласът по време на прекъсването: ${bDrop.voiceDuring}`)
     assert(bDrop.recovered, 'лентата не изчезна')
     assert((await getMarker(b.page)) === bMarker && b.offlineReloads.length === 0, `reload: ${b.offlineReloads.join(', ')}`)
     assert(await isVisible(b.page, WAITING), 'чакалнята е на екрана')
     assert(seated(bDrop.received, guest.profileId), 'private_room_updated след възстановяването — B е на мястото')
     assert(bLiveKit !== null && bLiveKit.connects === 1 && bLiveKit.disconnects === 0 && bLiveKit.activeRooms === 1, `LiveKit: ${JSON.stringify(bLiveKit)}`)
-    assert((await voiceStripText(b.page)) === 'Слушате', 'гласът след възстановяването')
+    assert((await voiceStripText(b.page)) === 'Микрофон изключен', 'гласът след възстановяването')
     const roomsListIdx = bDrop.received.findIndex((f) => f.type === 'private_room_updated')
     const presenceIdx = bDrop.sent.findIndex((f) => f.type === 'voice_presence')
     assert(presenceIdx >= 0, 'voice_presence по новата връзка')
@@ -357,7 +357,7 @@ try {
     assert((await getMarker(b.page)) === bMarker && b.offlineReloads.length === 0, 'reload')
     assert(b.wsOpened() - openedBefore === 4, `нови връзки: ${b.wsOpened() - openedBefore}`)
     assert(bLiveKitAfterCycles !== null && bLiveKitAfterCycles.connects === 1 && bLiveKitAfterCycles.disconnects === 0, JSON.stringify(bLiveKitAfterCycles))
-    assert(await isVisible(b.page, WAITING) && (await voiceStripText(b.page)) === 'Слушате', 'чакалня и глас')
+    assert(await isVisible(b.page, WAITING) && (await voiceStripText(b.page)) === 'Микрофон изключен', 'чакалня и глас')
   })
 
   // ─── [E3] Продължително прекъсване ~20 s (desktop) ─────────────────────

@@ -485,7 +485,7 @@ async function rawConnect(h: GiftBackHarness, profile: TestProfile): Promise<{ w
     await V.page.locator('[data-private-room-waiting-screen="1"]').waitFor({ state: 'visible', timeout: 20_000 })
     const privateRoom = [...V.received].reverse().find((f) => f.type === 'private_room_updated')?.data.room
     await V.page.locator('[data-voice-prompt-layer="1"] [data-voice-action="join-listen"]').first().click({ timeout: 25_000 })
-    const listening = await waitForExpr(V.page, `(() => { const el = document.querySelector('[data-voice-waiting-strip="1"] .pvs-sub'); return !!el && el.textContent === 'Слушате' })()`, 20_000)
+    const listening = await waitForExpr(V.page, `(() => { const el = document.querySelector('[data-voice-waiting-strip="1"] .pvs-sub'); return !!el && el.textContent === 'Микрофон изключен' })()`, 20_000)
     const X = await rawConnect(h, pX)
     const freeB = privateRoom.slots.find((s: any) => s.occupant === null && s.team === 'B')
     X.ws.send(JSON.stringify({ type: 'join_private_room', privateRoomId: privateRoom.id, team: 'B', slotIndex: freeB.slotIndex }))
