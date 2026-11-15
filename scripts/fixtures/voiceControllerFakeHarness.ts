@@ -39,6 +39,8 @@ export function createClock() {
       clearTimeout: (handle: unknown): void => { timers.delete(handle as number) },
     },
     async advance(ms: number): Promise<void> {
+      // Първо вече чакащите microtasks (напр. мигновен отговор на сървъра), после таймерите.
+      await flush(4)
       const target = now + ms
       for (;;) {
         let nextId: number | null = null
@@ -244,6 +246,8 @@ export type Harness = {
   reports: VoiceDiagnosticReport[]
   /** Всички изпратени voice_presence (вкл. причината при onTableScreen:false). */
   presence: VoicePresenceClientMessage[]
+  /** Ред на заявките: "presence:on@<ms>", "presence:off@<ms>", "token@<ms>" (ръчен часовник). */
+  events: string[]
   trace: string[]
   ctx: (screen?: 'waiting' | 'game' | 'off_table', seats?: typeof SEATS, tableId?: string) => VoiceContext
   lazyLoads: () => number
@@ -256,10 +260,12 @@ export function createHarness(options: { facade?: boolean } = {}): Harness {
   const trace: string[] = []
   const backend: Harness['backend'] = { speak: SPEAK, generation: 1, tokenGate: null, presenceFailure: null, tokenFailures: [] }
   const presence: VoicePresenceClientMessage[] = []
+  const events: string[] = []
   let lazyLoads = 0
   let voice!: VoiceController
   const sendPresence = (message: VoicePresenceClientMessage): boolean => {
     presence.push(message)
+    events.push(`presence:${message.onTableScreen ? 'on' : 'off'}@${clock.now()}`)
     if (backend.presenceFailure === 'silent') return true
     queueMicrotask(() => {
       voice.handleServerMessage(backend.presenceFailure === null
@@ -274,6 +280,7 @@ export function createHarness(options: { facade?: boolean } = {}): Harness {
     postJson: async (path: string, body: unknown) => {
       void body
       if (path === '/api/voice/token') {
+        events.push(`token@${clock.now()}`)
         if (backend.tokenGate !== null) await backend.tokenGate
         const failure = backend.tokenFailures.shift()
         if (failure !== undefined) return { status: failure.status, body: { ok: false, code: failure.code } }
@@ -310,7 +317,7 @@ export function createHarness(options: { facade?: boolean } = {}): Harness {
     if (key !== last) { trace.push(key); last = key }
   })
   const ctx: Harness['ctx'] = (screen = 'waiting', seats = SEATS, tableId = TABLE) => ({ kind: 'table', voiceTableId: tableId, screen, selfProfileId: 'self', seats })
-  return { voice, clock, fake, backend, reports, presence, trace, ctx, lazyLoads: () => lazyLoads }
+  return { voice, clock, fake, backend, reports, presence, events, trace, ctx, lazyLoads: () => lazyLoads }
 }
 
 export const snap = (h: Harness): VoiceSnapshot => h.voice.getSnapshot()

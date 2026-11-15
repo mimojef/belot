@@ -110,6 +110,13 @@ export const VOICE_DISPLACEMENT_RECLAIM_MS = 15_000
 /** Lease без подновяване изтича след толкова (клиентът подновява на VOICE_LEASE_RENEW_MS). */
 export const VOICE_LEASE_TTL_MS = 60_000
 export const VOICE_LEASE_RENEW_MS = 20_000
+/**
+ * Минимален оставащ lease при издаване на токен. Иначе -> presence_required
+ * (клиентът потвърждава присъствието и опитва отново). Без това токен може
+ * да бъде издаден секунда преди lease-ът да изтече и сесията да бъде
+ * прекратена веднага след свързването (етап А, DX2).
+ */
+export const VOICE_TOKEN_MIN_LEASE_MS = 15_000
 export const VOICE_ROOM_MAX_PARTICIPANTS = 4
 export const VOICE_ROOM_EMPTY_TIMEOUT_SECONDS = 120
 export const VOICE_ROOM_DEPARTURE_TIMEOUT_SECONDS = 120
@@ -138,6 +145,12 @@ export type VoiceChatServiceDeps = {
   liveKit: { api: VoiceLiveKitApi; wsUrl: string; signToken: VoiceTokenSigner; roomNamespace?: string } | null
   dispatcher: VoiceLiveKitDispatcher
   resolveSeat: (profileId: string, table: VoiceTableRecord) => VoiceSeatLookup
+  /**
+   * Мачът на масата е приключил (финален екран) — напусканията там идват
+   * едно след друго и ротациите се обединяват (виж holdReadyAfterRotation).
+   * Липсва -> без обединяване.
+   */
+  isTableAtMatchEnd?: (table: VoiceTableRecord) => boolean
   isConnectionOpen: (connectionId: string) => boolean
   sendToConnection: (connectionId: string, message: VoiceServerMessage) => void
   isVipActive: (profileId: string) => boolean
@@ -163,6 +176,10 @@ export type VoiceChatServiceDeps = {
     displacementReclaimMs?: number
     leaseTtlMs?: number
     leaseRenewMs?: number
+    tokenMinLeaseMs?: number
+    /** Край на мача: плъзгащ се прозорец за обединяване на ротациите (по подразбиране 2 s / максимум 6 s). */
+    matchEndRotationHoldMs?: number
+    matchEndRotationHoldMaxMs?: number
     storeRetryBaseDelayMs?: number
   }
 }
@@ -370,6 +387,9 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
   const disconnectGraceMs = deps.timing?.disconnectGraceMs ?? VOICE_GAME_DISCONNECT_GRACE_MS
   const displacementReclaimMs = deps.timing?.displacementReclaimMs ?? VOICE_DISPLACEMENT_RECLAIM_MS
   const leaseTtlMs = deps.timing?.leaseTtlMs ?? VOICE_LEASE_TTL_MS
+  const matchEndHoldMs = deps.timing?.matchEndRotationHoldMs ?? 2_000
+  const matchEndHoldMaxMs = deps.timing?.matchEndRotationHoldMaxMs ?? 6_000
+  const tokenMinLeaseMs = Math.min(deps.timing?.tokenMinLeaseMs ?? VOICE_TOKEN_MIN_LEASE_MS, Math.floor(leaseTtlMs / 2))
   const leaseRenewMs = deps.timing?.leaseRenewMs ?? VOICE_LEASE_RENEW_MS
 
   const bindings = new Map<string, BindingState>()
@@ -377,6 +397,8 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
   const memberships = new Map<string, MembershipState>()
   /** Маси, за които временно НЕ се издават токени (освобождаване/ротация чакат запис). */
   const blockedTables = new Map<VoiceTableId, 'releasing' | 'rotation_pending'>()
+  /** Край на мача: прозорец, в който токени за новата генерация още не се издават (виж holdReadyAfterRotation). */
+  const readyHolds = new Map<VoiceTableId, { startedAt: number; until: number; timer: unknown }>()
   const pendingCreates = new Map<string, Promise<VoiceDispatchResult<void>>>()
   const counters: Record<string, number> = {
     tokensIssued: 0,
@@ -591,7 +613,47 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
   }
 
   function tableReady(voiceTableId: VoiceTableId): boolean {
-    return bootComplete && !blockedTables.has(voiceTableId) && !store.hasPendingRoomDeletion(voiceTableId)
+    return bootComplete && !blockedTables.has(voiceTableId) && !store.hasPendingRoomDeletion(voiceTableId) && !readyHolds.has(voiceTableId)
+  }
+
+  // ─── Обединени ротации в края на мача ────────────────────────────────
+  //
+  // При напускане след края на мача СТАРАТА стая се изтрива веднага, както
+  // винаги (никой токен не дава достъп до нея). Само издаването на токени
+  // за НОВАТА генерация (и известието ready:true) изчаква плъзгащ се
+  // прозорец (2 s от последното напускане, най-много 6 s от първото). Който
+  // напусне в прозореца, няма токен за новата генерация, затова не е нужна
+  // нова ротация — само отнемане в старата (вече изтрита) стая. Напускане
+  // СЛЕД прозореца (вече издадени токени) -> обичайната ротация и нов прозорец.
+
+  function holdReadyAfterRotation(voiceTableId: VoiceTableId): void {
+    const at = now()
+    const existing = readyHolds.get(voiceTableId)
+    const startedAt = existing?.startedAt ?? at
+    const until = Math.min(at + matchEndHoldMs, startedAt + matchEndHoldMaxMs)
+    if (existing !== undefined) scheduler.clearTimeout(existing.timer)
+    const timer = scheduler.setTimeout(() => releaseReadyHold(voiceTableId), Math.max(0, until - at))
+    readyHolds.set(voiceTableId, { startedAt, until, timer })
+    log(`[voice-chat] rotation_hold voiceTable=${voiceTableId} holdMs=${until - at} sinceFirstMs=${at - startedAt}`)
+  }
+
+  function releaseReadyHold(voiceTableId: VoiceTableId): void {
+    const hold = readyHolds.get(voiceTableId)
+    if (hold === undefined) return
+    scheduler.clearTimeout(hold.timer)
+    readyHolds.delete(voiceTableId)
+    if (!disposed) notifyTableReady(voiceTableId)
+  }
+
+  function isAtMatchEnd(voiceTableId: VoiceTableId): boolean {
+    if (deps.isTableAtMatchEnd === undefined) return false
+    const table = store.getVoiceTable(voiceTableId)
+    if (table === null || table.status !== 'active' || table.phase !== 'in_game') return false
+    try {
+      return deps.isTableAtMatchEnd(table)
+    } catch {
+      return false
+    }
   }
 
   function notifyTableReady(voiceTableId: VoiceTableId): void {
@@ -626,6 +688,8 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
    * достъп се отнема с приоритет преди DeleteRoom.
    */
   function rotateTable(voiceTableId: VoiceTableId, reason: VoiceRoomRetireReason, revoked: Array<{ roomName: string; identity: string }>): void {
+    // Преди ротацията: токени за новата генерация не се издават до края на прозореца.
+    if (reason === 'listen_revoked' && isAtMatchEnd(voiceTableId)) holdReadyAfterRotation(voiceTableId)
     for (const target of revoked) revokeParticipant(target.roomName, target.identity)
     // До успешния запис токени не се издават (fail-closed).
     blockedTables.set(voiceTableId, 'rotation_pending')
@@ -678,6 +742,8 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     send(binding.connectionId, { type: 'voice_access_ended', voiceTableId: binding.voiceTableId, reason })
     const live = liveRoomName(binding.voiceTableId)
     const rotates = binding.issuedRoomName !== null && binding.issuedRoomName === live
+    // Напускане в прозореца: удължава го (без нова ротация).
+    if (!rotates && retireReason === 'listen_revoked' && readyHolds.has(binding.voiceTableId)) holdReadyAfterRotation(binding.voiceTableId)
     bump(bindingEndsByReason, `${reason}:${rotates ? 'rotation' : 'no_rotation'}`)
     log(`[voice-chat] binding_end ${who(binding)} reason=${reason} rotation=${rotates ? 'yes' : 'no'} active=${binding.voiceActive ? 'yes' : 'no'} sinceTokenMs=${ago(binding.tokenIssuedAt)}`)
     if (binding.issuedRoomName !== null && binding.issuedRoomName === live) {
@@ -718,6 +784,11 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
 
   function handleTableReleased(voiceTableId: VoiceTableId, reason: 'table_released' | 'voice_off'): void {
     blockedTables.delete(voiceTableId)
+    const hold = readyHolds.get(voiceTableId)
+    if (hold !== undefined) {
+      scheduler.clearTimeout(hold.timer)
+      readyHolds.delete(voiceTableId)
+    }
     for (const binding of [...bindings.values()]) {
       if (binding.voiceTableId !== voiceTableId) continue
       clearBindingTimers(binding)
@@ -743,7 +814,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
 
   function evaluateClaim(
     claim: { profileId: string; voiceTableId: string; clientInstanceId: string },
-    options: { createMembership: boolean },
+    options: { createMembership: boolean; minLeaseMs?: number },
   ): EvaluationFailure | EvaluationSuccess {
     const mode = effectiveMode()
     if (mode === 'off') return { ok: false, status: 403, code: 'voice_off' }
@@ -753,6 +824,8 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     if (table === null) return { ok: false, status: 404, code: 'table_not_found' }
     if (table.status !== 'active') return { ok: false, status: 410, code: 'table_released' }
     if (blockedTables.has(table.voiceTableId)) return { ok: false, status: 503, code: 'voice_rotation_pending', retryAfterMs: 1_000 }
+    const hold = readyHolds.get(table.voiceTableId)
+    if (hold !== undefined) return { ok: false, status: 503, code: 'voice_rotation_pending', retryAfterMs: Math.max(200, hold.until - now()) }
 
     const isBanned = deps.isBanned(claim.profileId)
     const seat = deps.resolveSeat(claim.profileId, table)
@@ -797,7 +870,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     })
     if (!decision.canListen) return { ok: false, status: DENIAL_STATUS[decision.denialCode], code: decision.denialCode }
     if (binding === null) return { ok: false, status: 409, code: 'invalid_session' }
-    if (!binding.onTableScreen || binding.leaseExpiresAt <= now()) return { ok: false, status: 409, code: 'presence_required' }
+    if (!binding.onTableScreen || binding.leaseExpiresAt - now() <= (options.minLeaseMs ?? 0)) return { ok: false, status: 409, code: 'presence_required' }
 
     if (membership === null) {
       // Пропусната кука за сядане (не би трябвало) — консервативно ново
@@ -1161,7 +1234,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         sendResponse(result)
       }
       // (1) Проверка преди асинхронните операции.
-      const first = evaluateClaim(claim, { createMembership: true })
+      const first = evaluateClaim(claim, { createMembership: true, minLeaseMs: tokenMinLeaseMs })
       if (!first.ok) return respond(failure(first))
       if (shouldPersistSpeakingEntitlement(first.decision, first.membership.entitled)) entitleMembership(first.membership)
 
@@ -1171,7 +1244,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       }
       if (!dispatcher.isAvailable()) return respond(unavailable('voice_unavailable', Math.max(1_000, dispatcher.retryAfterMs())))
 
-      const before = evaluateClaim(claim, { createMembership: false })
+      const before = evaluateClaim(claim, { createMembership: false, minLeaseMs: tokenMinLeaseMs })
       if (!before.ok) return respond(failure(before))
       if (before.liveRoomName === null) return respond(unavailable('voice_state_changed', 500))
       const roomName = before.liveRoomName
@@ -1179,7 +1252,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
       // (2) CreateRoom (lazy, идемпотентен, с реален timeout) и проверка след него.
       const created = await ensureRoomCreated(roomName)
       if (!created.ok) return respond(unavailable('voice_unavailable', Math.max(1_000, dispatcher.retryAfterMs())))
-      const afterCreate = evaluateClaim(claim, { createMembership: false })
+      const afterCreate = evaluateClaim(claim, { createMembership: false, minLeaseMs: tokenMinLeaseMs })
       if (!afterCreate.ok) return respond(failure(afterCreate))
       if (afterCreate.fingerprint !== before.fingerprint) {
         counters.tokensDiscardedStale! += 1
@@ -1207,7 +1280,7 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
         return respond({ status: 500, body: { ok: false, code: 'token_sign_failed' } })
       }
       // (4) Окончателна синхронна проверка непосредствено преди предаването.
-      const final = evaluateClaim(claim, { createMembership: false })
+      const final = evaluateClaim(claim, { createMembership: false, minLeaseMs: tokenMinLeaseMs })
       if (!final.ok) {
         counters.tokensDiscardedStale! += 1
         return respond(failure(final))
@@ -1372,6 +1445,8 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
     dispose() {
       disposed = true
       for (const binding of bindings.values()) clearBindingTimers(binding)
+      for (const hold of readyHolds.values()) scheduler.clearTimeout(hold.timer)
+      readyHolds.clear()
       reconciler.dispose()
       retention.dispose()
       releaseQueue.dispose()

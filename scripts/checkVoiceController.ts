@@ -54,6 +54,8 @@ function createClock() {
       clearTimeout: (handle: unknown): void => { timers.delete(handle as number) },
     },
     async advance(ms: number): Promise<void> {
+      // Първо вече чакащите microtasks (напр. мигновен отговор на сървъра), после таймерите.
+      await flush(4)
       const target = now + ms
       for (;;) {
         let nextId: number | null = null

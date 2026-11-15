@@ -1204,6 +1204,16 @@ const voiceChatService = createVoiceChatService({
         },
   dispatcher: voiceLiveKitDispatcher,
   resolveSeat: (profileId, table) => resolveVoiceSeat(profileId, table),
+  // Край на мача: напусканията се обединяват в една ротация (етап Б).
+  isTableAtMatchEnd: (table) => {
+    const room = table.serverRoomId === null ? null : (serverState.rooms[table.serverRoomId] ?? null)
+    if (room === null || room.config.voiceTableId !== table.voiceTableId) return false
+    if (isRoomAtMatchEndedPhase(room)) return true
+    // Крайният резултат вече е известен (екранът с резултата преди фазата
+    // match-ended) — оттук нататък напусканията са „край на мача“.
+    const state = room.game.authoritativeState
+    return isRuntimeAuthoritativeState(state) && state.matchEnded != null
+  },
   isConnectionOpen: (connectionId) => getSocketByConnectionId(connectionId)?.readyState === WebSocket.OPEN,
   sendToConnection: (connectionId, message) => safeSendToConnection(connectionId, message),
   isVipActive: (profileId) => vipStore.getStatus(profileId).isActive,

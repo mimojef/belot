@@ -330,6 +330,9 @@ async function createHarness(options: {
   clock?: ManualClock
   boot?: Parameters<VoiceChatService['boot']>[0]
   mode?: 'public' | 'admin_only' | 'off'
+  /** Етап Б: масата е на финалния екран на мача. */
+  matchEnd?: { value: boolean }
+  timing?: Parameters<typeof createVoiceChatService>[0]['timing']
 } = { fake: null }): Promise<Harness> {
   const db = options.existing ?? (await freshDatabase())
   if (options.existing === undefined) {
@@ -361,6 +364,8 @@ async function createHarness(options: {
     liveKit: api === null ? null : { api, wsUrl: 'ws://127.0.0.1:7880', signToken: options.signToken ?? createVoiceTokenSigner({ apiKey: API_KEY, apiSecret: API_SECRET }) },
     dispatcher,
     resolveSeat: (profileId: string, table: VoiceTableRecord) => seats.get(`${table.voiceTableId}|${profileId}`) ?? { relation: 'none' },
+    ...(options.matchEnd === undefined ? {} : { isTableAtMatchEnd: () => options.matchEnd!.value }),
+    ...(options.timing === undefined ? {} : { timing: options.timing }),
     isConnectionOpen: (connectionId) => open.has(connectionId),
     sendToConnection: (connectionId, message) => { sent.push({ connectionId, message }) },
     isVipActive: (profileId) => vip.has(profileId),
@@ -427,6 +432,10 @@ async function createHarness(options: {
   return harness
 }
 const harnesses: Harness[] = []
+
+function decodeJwtRoom(token: string): string {
+  return String((decodeJwt(token).video as Record<string, unknown>).room)
+}
 
 function decodeJwt(token: string): Record<string, unknown> {
   return JSON.parse(base64UrlDecode(token.split('.')[1]!)) as Record<string, unknown>
@@ -1776,9 +1785,9 @@ try {
     assertEqual(h.service.stats().sessionEndsByReason['left_table:unspecified'], 1, 'стар клиент')
   })
 
-  await check('[DX2] Lease МОЖЕ да изтече веднага след успешно издаден токен: токен при оставащи 0,5 s -> token_near_lease_expiry; 0,5 s по-късно session_end lease_expired + RemoveParticipant', async () => {
+  await check('[DX2] (старото поведение, минимумът изключен) Lease МОЖЕ да изтече веднага след успешно издаден токен: токен при оставащи 0,5 s -> token_near_lease_expiry; 0,5 s по-късно session_end lease_expired + RemoveParticipant', async () => {
     fake.reset()
-    const h = await createHarness({ fake })
+    const h = await createHarness({ fake, timing: { tokenMinLeaseMs: 0 } })
     const creator = h.seedProfile('Host')
     const table = h.createTable(creator, 'c1')
     const inst = instanceId('dx2')
@@ -1862,6 +1871,174 @@ try {
     for (const line of diagnostic) {
       assert(!line.includes(joined.token) && !line.includes('eyJ') && !line.includes(API_SECRET) && !line.includes(joined.identity) && !line.includes(inst), `чувствителни данни: ${line}`)
     }
+  })
+
+  // ═══ [LB] Етап Б — минимален оставащ lease при издаване на токен ══════════
+  await check('[LB1] Токен само при ≥15 s оставащ lease: при 14 s -> presence_required (без токен, без RemoveParticipant); след ново присъствие -> токен с >30 s; не изтича веднага', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('lb1')
+    await joinWithToken(h, table, creator, 'c1', inst, fake)
+    h.clock.advance(44_000) // 16 s оставащ lease
+    assertEqual((await h.token(creator, table, inst)).status, 200, '16 s -> токен')
+    h.clock.advance(2_000) // 14 s оставащ
+    const short = await h.token(creator, table, inst)
+    assertEqual(short.body.code, 'presence_required', '14 s -> нужно е присъствие')
+    assertEqual(h.service.stats().tokenLeaseMargin.lt5s, undefined, 'никога под 5 s')
+    h.presence('c1', creator, table, inst)
+    fake.calls.length = 0
+    const renewed = await h.token(creator, table, inst)
+    assertEqual(renewed.status, 200, 'след присъствието')
+    assert((h.service.stats().tokenLeaseMargin.gt30s ?? 0) >= 1, 'с >30 s lease')
+    h.clock.advance(30_000)
+    await sleep(50)
+    assertEqual(h.service.stats().sessionEndsByReason.lease_expired, undefined, 'не изтича веднага след токена')
+    assert(!fake.calls.some((c) => c.method === 'RemoveParticipant'), 'без отстраняване')
+  })
+
+  await check('[LB2] Правото за говорене (speak-access) не изисква минимален lease — само валиден', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('lb2')
+    await joinWithToken(h, table, creator, 'c1', inst, fake)
+    h.clock.advance(50_000) // 10 s оставащ
+    const speak = await h.speak(creator, table, inst)
+    assertEqual(speak.status, 200, 'speak-access при 10 s lease')
+  })
+
+  // ═══ [MH] Етап Б — обединени ротации в края на мача ═══════════════════════
+  async function matchEndTable(options: { matchEnd: { value: boolean }; timing?: Parameters<typeof createVoiceChatService>[0]['timing'] }) {
+    fake.reset()
+    const h = await createHarness({ fake, matchEnd: options.matchEnd, ...(options.timing === undefined ? {} : { timing: options.timing }) })
+    const host = h.seedProfile('Host')
+    const a = h.seedProfile('A')
+    const b = h.seedProfile('B')
+    const c = h.seedProfile('C')
+    const table = h.createTable(host, 'c1')
+    for (const [profile, conn] of [[a, 'c2'], [b, 'c3'], [c, 'c4']] as const) {
+      h.vip.add(profile)
+      h.seat(table, profile, conn)
+    }
+    const inst = { host: instanceId('mh'), a: instanceId('ma'), b: instanceId('mb'), c: instanceId('mc') }
+    const joined = {
+      host: await joinWithToken(h, table, host, 'c1', inst.host, fake),
+      a: await joinWithToken(h, table, a, 'c2', inst.a, fake),
+      b: await joinWithToken(h, table, b, 'c3', inst.b, fake),
+      c: await joinWithToken(h, table, c, 'c4', inst.c, fake),
+    }
+    h.service.onGameStarted(table, `room-${randomUUID()}`)
+    assertEqual(h.store.getVoiceTable(table)?.phase, 'in_game', 'в игра')
+    const leave = (profile: string): void => {
+      h.seats.delete(`${table}|${profile}`)
+      h.service.onMemberRemoved(table, profile, 'permanently_left')
+    }
+    return { h, table, host, a, b, c, inst, joined, leave }
+  }
+  const lastUpdate = (h: Harness, conn: string) => messagesOf(h, conn, 'voice_table_updated').at(-1)
+
+  await check('[MH1] Край на мача: старата стая се трие ВЕДНАГА; токени за новата генерация чак след прозореца; напуснал в прозореца -> без нова ротация; плъзгане 2 s', async () => {
+    const matchEnd = { value: false }
+    const t = await matchEndTable({ matchEnd })
+    matchEnd.value = true
+    fake.calls.length = 0
+    t.leave(t.a) // 0 s
+    assertEqual(t.h.store.getLiveGeneration(t.table)?.generation, 2, 'една ротация')
+    assert(t.h.logs.some((l) => l.includes('[voice-chat] rotation_hold') && l.includes('holdMs=2000')), 'прозорец 2 s')
+    await sleep(100)
+    await t.h.reconcile()
+    assertEqual(t.h.store.getGeneration(t.joined.a.roomName)?.status, 'deleted', 'старата стая е изтрита веднага (преди прозореца)')
+    const held = await t.h.token(t.host, t.table, t.inst.host)
+    assert(held.status === 503 && held.body.code === 'voice_rotation_pending' && Number(held.body.retryAfterMs) <= 2_000, `в прозореца: ${JSON.stringify(held.body)}`)
+    assert(!(lastUpdate(t.h, 'c1') as { ready?: boolean } | undefined)?.ready, 'без ready:true в прозореца')
+    t.h.clock.advance(1_500)
+    t.leave(t.b) // 1,5 s — в прозореца
+    assertEqual(t.h.store.getLiveGeneration(t.table)?.generation, 2, 'напуснал в прозореца -> без нова ротация')
+    assertEqual(t.h.service.stats().bindingEndsByReason['left_table:no_rotation'], 1, 'без ротация')
+    t.h.clock.advance(1_900) // 3,4 s: прозорецът е плъзнат до 3,5 s
+    assertEqual((await t.h.token(t.host, t.table, t.inst.host)).status, 503, 'още в плъзнатия прозорец')
+    t.h.clock.advance(200) // 3,6 s
+    const ready = lastUpdate(t.h, 'c1')
+    assert(ready?.type === 'voice_table_updated' && ready.ready && ready.generation === 2, `ready: ${JSON.stringify(ready)}`)
+    const fresh = await t.h.token(t.host, t.table, t.inst.host)
+    assertEqual(fresh.status, 200, 'токен за новата генерация след прозореца')
+    assertEqual(t.h.service.stats().rotationsByReason.listen_revoked, 1, 'само една ротация за двете напускания')
+  })
+
+  await check('[MH2] Напуснал не получава достъп по никое време: нито стар токен (стаята е изтрита), нито нов (не е член) — в прозореца и след него', async () => {
+    const matchEnd = { value: true }
+    const t = await matchEndTable({ matchEnd })
+    t.leave(t.a)
+    await sleep(100)
+    await t.h.reconcile()
+    assertEqual(t.h.store.getGeneration(t.joined.a.roomName)?.status, 'deleted', 'старата стая на напусналия е изтрита')
+    const during = await t.h.token(t.a, t.table, t.inst.a)
+    assert(during.status !== 200, `в прозореца: ${during.status}`)
+    t.h.clock.advance(2_100)
+    const after = await t.h.token(t.a, t.table, t.inst.a)
+    assert(after.status !== 200, `след прозореца: ${after.status}`)
+    // Останалите получават токен само за новата генерация.
+    const host = await t.h.token(t.host, t.table, t.inst.host)
+    assertEqual(host.status, 200, 'член')
+    assert(decodeJwtRoom(String(host.body.token)) !== t.joined.a.roomName, 'новият токен е за новото име')
+  })
+
+  await check('[MH3] Напускане СЛЕД прозореца (вече издаден токен за новата генерация) -> нова ротация с веднага изтриване и нов прозорец', async () => {
+    const matchEnd = { value: true }
+    const t = await matchEndTable({ matchEnd })
+    t.leave(t.a)
+    await sleep(100)
+    await t.h.reconcile()
+    t.h.clock.advance(2_100)
+    const cToken = await t.h.token(t.c, t.table, t.inst.c) // C е свързан с новата генерация
+    assertEqual(cToken.status, 200, 'токен за генерация 2')
+    fake.addParticipant(decodeJwtRoom(String(cToken.body.token)), String(cToken.body.identity))
+    t.leave(t.c)
+    assertEqual(t.h.store.getLiveGeneration(t.table)?.generation, 3, 'нова ротация')
+    await sleep(100)
+    await t.h.reconcile()
+    assertEqual(t.h.store.getGeneration(decodeJwtRoom(String(cToken.body.token)))?.status, 'deleted', 'генерация 2 е изтрита веднага')
+    assertEqual((await t.h.token(t.host, t.table, t.inst.host)).body.code, 'voice_rotation_pending', 'нов прозорец')
+  })
+
+  await check('[MH4] Максимум: прозорецът не се плъзга след горната граница (2 s / max 3 s в теста)', async () => {
+    const matchEnd = { value: true }
+    const t = await matchEndTable({ matchEnd, timing: { matchEndRotationHoldMs: 2_000, matchEndRotationHoldMaxMs: 3_000 } })
+    t.leave(t.a) // 0 s
+    await sleep(100)
+    await t.h.reconcile()
+    t.h.clock.advance(1_500)
+    t.leave(t.b) // 1,5 s -> би плъзнал до 3,5 s, но максимумът е 3 s
+    t.h.clock.advance(1_550) // 3,05 s
+    const ready = lastUpdate(t.h, 'c1')
+    assert(ready?.type === 'voice_table_updated' && ready.ready, `готовност при максимума: ${JSON.stringify(ready)}`)
+    assertEqual((await t.h.token(t.host, t.table, t.inst.host)).status, 200, 'токен след максимума')
+  })
+
+  await check('[MH5] Не в края на мача (чакалня / по време на игра) -> без прозорец: готовност веднага след изтриването', async () => {
+    const matchEnd = { value: false }
+    const t = await matchEndTable({ matchEnd })
+    t.leave(t.a)
+    await sleep(100)
+    await t.h.reconcile()
+    assert(!t.h.logs.some((l) => l.includes('rotation_hold')), 'без прозорец')
+    const ready = lastUpdate(t.h, 'c1')
+    assert(ready?.type === 'voice_table_updated' && ready.ready, 'веднага готово')
+    assertEqual((await t.h.token(t.host, t.table, t.inst.host)).status, 200, 'токен веднага')
+  })
+
+  await check('[MH6] Ротации при session_replaced / session_displaced са запазени (и в края на мача — без прозорец)', async () => {
+    const matchEnd = { value: true }
+    const t = await matchEndTable({ matchEnd })
+    t.h.seats.set(`${t.table}|${t.host}`, { relation: 'player', permanentlyLeft: false, seatConnectionId: 'c9' })
+    t.h.open.add('c9')
+    t.h.presence('c9', t.host, t.table, instanceId('mh6'))
+    assertEqual(t.h.store.getLiveGeneration(t.table)?.generation, 2, 'нова страница -> ротация')
+    assertEqual(t.h.service.stats().rotationsByReason.session_displaced, 1, 'причина session_displaced')
+    assert(!t.h.logs.some((l) => l.includes('rotation_hold')), 'прозорецът е само за напускания')
   })
 
 } finally {

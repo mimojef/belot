@@ -338,6 +338,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   let retryTimer: unknown = null
   let retryKick: (() => void) | null = null
   let pendingAck: { resolve: (result: VoicePresenceResultMessage | null) => void; timer: unknown } | null = null
+  /** Чакащото потвърждение се СПОДЕЛЯ: втори handshake не отменя първия (иначе първият вижда null). */
+  let pendingAckPromise: Promise<VoicePresenceResultMessage | null> | null = null
+  /** Сесията, за която тече възстановяване след ротация/изтрита стая (без втори паралелен опит). */
+  let resumeInFlightSeq: number | null = null
 
   const locallyMuted = new Set<string>()
   let locallyMutedTableId: string | null = null
@@ -619,6 +623,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       ...(!onScreen && reason !== undefined ? { reason } : {}),
     })
     if (sent) counters.presenceSent! += 1
+    // Подновяването се отброява от ПОСЛЕДНОТО изпратено присъствие — никога
+    // от свързване/ротация (иначе паузата между две присъствия расте и
+    // lease-ът може да изтече веднага след издаден токен).
+    if (sent && onScreen) scheduleRenewal()
     return sent
   }
 
@@ -628,8 +636,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     presenceTimer = timers.setTimeout(() => {
       presenceTimer = null
       if (!inUse || !onTableScreen() || !gameConnected) return
-      sendPresence(true)
-      scheduleRenewal()
+      sendPresence(true) // самото изпращане насрочва следващото подновяване
     }, renewMs)
   }
 
@@ -637,19 +644,21 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     if (pendingAck === null) return
     const ack = pendingAck
     pendingAck = null
+    pendingAckPromise = null
     timers.clearTimeout(ack.timer)
     ack.resolve(result)
   }
 
   function presenceHandshake(): Promise<VoicePresenceResultMessage | null> {
-    settleAck(null)
+    if (pendingAck !== null && pendingAckPromise !== null) return pendingAckPromise
     if (!sendPresence(true)) return Promise.resolve(null)
-    return new Promise((resolve) => {
+    pendingAckPromise = new Promise((resolve) => {
       pendingAck = {
         resolve,
         timer: timers.setTimeout(() => settleAck(null), presenceAckTimeoutMs),
       }
     })
+    return pendingAckPromise
   }
 
   function waitKickable(delayMs: number): Promise<void> {
@@ -977,7 +986,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       const profileId = profileIdFromVoiceIdentity(participant.identity)
       if (profileId !== null && locallyMuted.has(profileId)) connected.setRemoteIdentityVolume(participant.identity, 0)
     }
-    scheduleRenewal()
     report({ event: 'connected' })
     scheduleTransportReport(seq, connected)
     invalidate()
@@ -1148,12 +1156,31 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   }
 
   async function resumeAfterInterruption(seq: number): Promise<void> {
-    const outcome = await tryResume(seq)
-    if (outcome === 'retry' && seq === sessionSeq) failConnection('service_unavailable', 'rotation_resume')
+    // ROOM_DELETED и voice_table_updated{ready} идват почти едновременно: един опит на сесия.
+    if (resumeInFlightSeq === seq) return
+    resumeInFlightSeq = seq
+    try {
+      const outcome = await tryResume(seq)
+      if (outcome === 'retry' && seq === sessionSeq) failConnection('service_unavailable', 'rotation_resume')
+    } finally {
+      if (resumeInFlightSeq === seq) resumeInFlightSeq = null
+    }
   }
 
   /** Нов токен за текущата генерация и свързване; запазва режима (слушане/микрофон). */
   async function tryResume(seq: number): Promise<'done' | 'retry'> {
+    // Присъствието се потвърждава ПРЕДИ токена (и при възстановяване/ротация):
+    // сървърът издава токен само при достатъчно оставащ lease.
+    const ack = await presenceHandshake()
+    if (seq !== sessionSeq) return 'done'
+    if (ack === null) return 'retry'
+    if (!ack.ok) {
+      if (DISABLING_PRESENCE_CODES.has(ack.code)) {
+        disableEntirely()
+        return 'done'
+      }
+      return 'retry'
+    }
     const outcome = await fetchToken(seq)
     if (seq !== sessionSeq) return 'done'
     if (outcome.kind === 'disabled') {
@@ -1182,7 +1209,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         if (profileId !== null && locallyMuted.has(profileId)) connected.setRemoteIdentityVolume(participant.identity, 0)
       }
       status = connectedStatus()
-      scheduleRenewal()
       report({ event: 'connected' })
       scheduleTransportReport(seq, connected)
       invalidate()
@@ -1669,7 +1695,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       disconnectTimer = clearTimer(disconnectTimer)
       if (inUse && onTableScreen()) {
         sendPresence(true)
-        scheduleRenewal()
         if (retryKick !== null) retryKick()
       }
     },
