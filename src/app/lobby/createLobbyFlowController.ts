@@ -191,6 +191,7 @@ import {
   forgetTournamentSpectatorTeamLabels,
   rememberTournamentSpectatorTeamLabels,
 } from '../activeRoom/spectatorTeamLabels'
+import { CO_PLAY_RESTRICTED_CODE, showCoPlayRestrictedNotice } from '../coPlay/showCoPlayRestrictedNotice'
 
 /** Гласов чат (Етап 4) — опцията във „Нова маса“ (виж server describeVoiceTableCreationOption). */
 export type PrivateRoomVoiceCreateOption = {
@@ -651,6 +652,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminProfileCustomizationRequest?: () => void
   /** „Гласови разговори“ (гласов чат, Етап 6) — admin меню: main.ts отваря панела. */
   onAdminVoiceChatRequest?: () => void
+  /** „Забрани за съвместна игра“ (Етап 5) — admin меню: main.ts отваря панела. */
+  onAdminCoPlayRestrictionsRequest?: () => void
   onAdminHardDeleteProfile?: (
     targetProfileId: string,
     reason: string,
@@ -8615,6 +8618,10 @@ export function createLobbyFlowController(
         if (!isFullAdminAuthSession(options.getAuthSession?.() ?? null)) return
         options.onAdminVoiceChatRequest?.()
       },
+      onAdminCoPlayRestrictionsOpen: () => {
+        if (!isFullAdminAuthSession(options.getAuthSession?.() ?? null)) return
+        options.onAdminCoPlayRestrictionsRequest?.()
+      },
       onAdminCampaignsBack: () => {
         void showAdminPanel()
       },
@@ -13045,6 +13052,7 @@ export function createLobbyFlowController(
       // счупи установения инвариант "error response не поврежда/затваря
       // popup state-a" (§J67 в checkTournamentsFrontendSource.ts).
       if (handleTournamentParticipationBlockedDenial(result.reason)) return
+      if (handleTournamentCoPlayRestrictedDenial(result.reason, result.message)) return
       if (handleTournamentRegisteredStartsSoonDenial(result.reason, result.blockingTournamentId, result.message)) return
       state.tournamentJoinErrorText = result.message
       render()
@@ -13212,6 +13220,7 @@ export function createLobbyFlowController(
       // Blocked-popup-ът stack-ва отгоре (z-index 9600 > 9500) вместо да
       // затваря picker-а под него — виж submitTournamentJoin по-горе.
       if (handleTournamentParticipationBlockedDenial(result.reason)) return
+      if (handleTournamentCoPlayRestrictedDenial(result.reason, result.message)) return
       if (handleTournamentRegisteredStartsSoonDenial(result.reason, result.blockingTournamentId, result.message)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
@@ -13253,6 +13262,7 @@ export function createLobbyFlowController(
     if (!result.ok) {
       if (handleTournamentBetaAccessDenial(result.reason)) return
       if (handleTournamentParticipationBlockedDenial(result.reason)) return
+      if (handleTournamentCoPlayRestrictedDenial(result.reason, result.message)) return
       if (handleTournamentRegisteredStartsSoonDenial(result.reason, result.blockingTournamentId, result.message)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
@@ -19642,6 +19652,16 @@ export function createLobbyFlowController(
     return true
   }
 
+  // „Забрана за съвместна игра“ (Етап 5) — отказ при запис/покана/приемане:
+  // информационният прозорец вместо inline грешката (стъква се над join
+  // confirm/picker popup-а, без да го затваря — същият инвариант като горе).
+  function handleTournamentCoPlayRestrictedDenial(reason: string | undefined, message: string | undefined): boolean {
+    if (reason !== CO_PLAY_RESTRICTED_CODE) return false
+    showCoPlayRestrictedNotice(message, 'tournament')
+    render()
+    return true
+  }
+
   // Multi-tournament registration banner — dedicated popup с "Виж турнира"
   // бутон, wired във всеки реален entry path, който сървърът може да
   // отхвърли с Case A ('registered_tournament_starts_soon') ИЛИ Case B
@@ -20764,6 +20784,13 @@ export function createLobbyFlowController(
   let reconnectSync: { done: (ok: boolean) => void; sessionInGame: boolean } | null = null
   /** Прекъснато търсене — съобщението се показва отново след 'connected' (то нулира errorText). */
   let matchmakingInterruptedNoticePending = false
+  /**
+   * „Забрана за съвместна игра“: момент на последното matchmaking_left. При
+   * отказ за влизане/премахване сървърът праща matchmaking_left непосредствено
+   * преди известието — така то се отнася към случайните маси, дори екранът
+   * вече да е лобито.
+   */
+  let lastMatchmakingLeftAt = 0
 
   function beginReconnectSync(done: (ok: boolean) => void): void {
     reconnectSync = { done, sessionInGame: false }
@@ -23068,7 +23095,11 @@ export function createLobbyFlowController(
           state.privateRoomPartnerInviteInFlight = false
         }
         state.privateRoomJoinSlotPopup = null
-        if (message.code === 'private_room_creator_blocked_you') {
+        if (message.code === CO_PLAY_RESTRICTED_CODE) {
+          // „Забрана за съвместна игра“ — само информационният прозорец (без
+          // общия банер); масата/чакалнята идва от сървърните snapshot-и.
+          showCoPlayRestrictedNotice(message.message, 'private_room')
+        } else if (message.code === 'private_room_creator_blocked_you') {
           // Mapping по machine-readable code — текстът на popup-а е клиентски
           // (PRIVATE_ROOM_CREATOR_BLOCKED_POPUP_LINES), не се парсва message.message.
           state.privateRoomCreatorBlockedPopupOpen = true
@@ -23087,6 +23118,14 @@ export function createLobbyFlowController(
         } else {
           state.privateRoomInfoText = message.message
         }
+      } else if (message.code === CO_PLAY_RESTRICTED_CODE) {
+        // „Забрана за съвместна игра“ — само информационният прозорец, без
+        // общото съобщение за грешка. Състоянието на случайната чакалня не се
+        // пипа: при отказ за ДРУГ залог сървърът връща matchmaking_status за
+        // текущия (таймер, бройка, залог), при премахване — matchmaking_left.
+        const isMatchmakingContext =
+          state.currentScreen === 'matchmaking-room' || Date.now() - lastMatchmakingLeftAt < 5_000
+        showCoPlayRestrictedNotice(message.message, isMatchmakingContext ? 'matchmaking' : 'private_room')
       } else {
         state.errorText = message.message
       }
@@ -23141,6 +23180,7 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'matchmaking_left') {
+      lastMatchmakingLeftAt = Date.now()
       state.errorText = null
       resetToLobby()
       return true

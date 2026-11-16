@@ -1,3 +1,4 @@
+import { CO_PLAY_RESTRICTED_CODE, showCoPlayRestrictedNotice } from '../coPlay/showCoPlayRestrictedNotice'
 import {
   type ActiveTableGiftSnapshot,
   type BelotSpectatorSnapshotMessage,
@@ -7112,6 +7113,14 @@ export function createActiveRoomFlowController(
     }
 
     if (message.type === 'error') {
+      // „Забрана за съвместна игра“ (Етап 5) — известие, не отговор на игрова
+      // команда (повторен мач: гласът вече е „изход“ в snapshot-а; join_room:
+      // отказ). Само информационният прозорец — без общото съобщение за
+      // грешка и без да се пипат чакащите cut/bid/play заявки.
+      if (message.code === CO_PLAY_RESTRICTED_CODE) {
+        showCoPlayRestrictedNotice(message.message, message.context === 'replay' ? 'replay' : 'private_room')
+        return true
+      }
       clearPendingCutSubmission()
       if (biddingUiState.pendingBidSent) {
         // Същото правило като при картата по-долу: без незабавно отключване

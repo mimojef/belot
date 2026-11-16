@@ -966,6 +966,8 @@ export type PrivateRoomActionErrorCode =
 export type ErrorMessage = {
   type: 'error'
   message: string
+  /** „Забрана за съвместна игра“: само при code 'co_play_restricted' от повторен мач. */
+  context?: 'replay'
   code?:
     | 'private_room_stake_unavailable'
     | 'private_room_insufficient_balance'

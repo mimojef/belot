@@ -1267,6 +1267,17 @@ function openAdminVoiceChatPanel(): void {
     .catch(() => {})
 }
 
+/**
+ * „Забрани за съвместна игра“ (Етап 5) — само пълен admin; правата са на
+ * сървъра. Отделен chunk (dynamic import) — не увеличава главния bundle.
+ */
+function openAdminCoPlayRestrictionsPanel(): void {
+  if (currentAuthSession?.account.role !== 'admin') return
+  void import('./app/adminCoPlayRestrictions/showAdminCoPlayRestrictionsPanel')
+    .then((module) => module.showAdminCoPlayRestrictionsPanel({ getApiBaseUrl }))
+    .catch(() => {})
+}
+
 async function submitRegisterRequest(body: Record<string, string>): Promise<{
   errorText: string | null
   pending?: { pendingRegistrationId: string; maskedEmail: string; expiresAt: string; deliveryWarning?: string } | null
@@ -7441,6 +7452,7 @@ lobby = createLobbyFlowController({
   onAdminProfileDeletionsRequest: () => openAdminProfileDeletionsPanel(),
   onAdminProfileCustomizationRequest: () => openAdminProfileCustomizationPanel(),
   onAdminVoiceChatRequest: () => openAdminVoiceChatPanel(),
+  onAdminCoPlayRestrictionsRequest: () => openAdminCoPlayRestrictionsPanel(),
   onProfileCustomizationRequest: () => openProfileCustomizationWindow(),
   onAdminProfileCustomizationGrantRequest: (profileId) => openAdminProfileCustomizationGrantWindow(profileId),
   onRegisterSubmit: (displayName, email, password, gender) =>

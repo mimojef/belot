@@ -8625,6 +8625,8 @@ const CO_PLAY_REMOVED_FROM_PRIVATE_ROOM_MESSAGE =
   'Мястото ви на частната маса беше освободено: на нея има играч, с когото нямате право да участвате на обща маса поради наложено административно наказание.'
 const CO_PLAY_PRIVATE_ROOM_INVITE_MESSAGE =
   'Поканата не може да бъде изпратена: поканеният няма право да участва на обща маса с играч от тази маса поради наложено административно наказание.'
+const CO_PLAY_REPLAY_MESSAGE =
+  'Не можете да участвате в повторен мач с играч, спрямо когото имате наложено административно ограничение.'
 
 function getPrivateOccupantCoPlayAccountId(occupant: PrivateRoomHumanOccupant): string | null {
   return occupant.coPlayAccountId ?? coPlayAccountIdByConnection.get(occupant.connectionId) ?? null
@@ -27744,10 +27746,19 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         function tryApplyReplayRestart(room: ServerRoom, votes: Seat[]): void {
           // + „Забрана за съвместна игра“: по-късно гласувалият от ограничена
           // двойка (същият механизъм; при изключен флаг — празно).
-          const conflictSeats = [...new Set([...findReplayConflictSeats(room), ...findReplayCoPlayConflictSeats(room, votes)])]
+          const coPlayConflictSeats = findReplayCoPlayConflictSeats(room, votes)
+          const conflictSeats = [...new Set([...findReplayConflictSeats(room), ...coPlayConflictSeats])]
           if (conflictSeats.length === 0) {
             applyReplayRestart(room)
             return
+          }
+          // Етап 5: известие само до отклонения от ограничена двойка (без името
+          // на другия играч); повторният мач и гласовете — както досега.
+          for (const seat of coPlayConflictSeats) {
+            const participant = room.seats[seat].participant
+            if (participant?.kind === 'human' && participant.connectionId !== null) {
+              safeSendToConnection(participant.connectionId, { type: 'error', message: CO_PLAY_REPLAY_MESSAGE, code: 'co_play_restricted', context: 'replay' })
+            }
           }
           console.warn(`[belot-participation] replay not started room=${room.id}: participant has other participation`)
           const blockedRoom: ServerRoom = {

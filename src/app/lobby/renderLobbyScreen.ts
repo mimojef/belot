@@ -1710,6 +1710,8 @@ export type RenderLobbyScreenOptions = {
   onAdminProfileCustomizationOpen?: () => void
   /** „Гласови разговори“ (Етап 6 на гласовия чат, само пълен admin; правата са на сървъра). */
   onAdminVoiceChatOpen?: () => void
+  /** „Забрани за съвместна игра“ (Етап 5, само пълен admin; правата са на сървъра). */
+  onAdminCoPlayRestrictionsOpen?: () => void
   onAdminCampaignsBack?: () => void
   onAdminCampaignCreate?: () => void
   onAdminCampaignEdit?: (campaignId: string) => void
@@ -4710,6 +4712,20 @@ function renderNav(state: LobbyScreenState): string {
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
                   Гласови разговори
                 </button>
+                <button type="button" data-lobby-nav-admin-co-play-restrictions="1" style="
+                  display:flex; align-items:center; gap:10px;
+                  width:100%; background:none; border:none;
+                  padding:13px 18px; cursor:pointer; text-align:left;
+                  font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                  color:rgba(255,255,255,0.82);
+                  transition:background 0.12s, color 0.12s;
+                "
+                onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'"
+                onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.82)'"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" y1="8" x2="23" y2="14"/><line x1="23" y1="8" x2="17" y2="14"/></svg>
+                  Забрани за съвместна игра
+                </button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="
                   display:flex; align-items:center; gap:10px;
@@ -6704,6 +6720,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
                 <button type="button" data-lobby-nav-admin-profile-deletions="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Заявки за изтриване')}</button>
                 <button type="button" data-lobby-nav-admin-profile-customization="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Персонализация')}</button>
                 <button type="button" data-lobby-nav-admin-voice-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Гласови разговори')}</button>
+                <button type="button" data-lobby-nav-admin-co-play-restrictions="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Забрани за съвместна игра')}</button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
                 <button type="button" data-lobby-nav-admin-server="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Сървър')}</button>
@@ -7345,6 +7362,7 @@ function renderGuestMobileLobbyMenu(state: LobbyScreenState | null = null): stri
             <button type="button" data-lobby-nav-admin-profile-deletions="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Заявки за изтриване')}</button>
             <button type="button" data-lobby-nav-admin-profile-customization="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Персонализация')}</button>
             <button type="button" data-lobby-nav-admin-voice-chat="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Гласови разговори')}</button>
+            <button type="button" data-lobby-nav-admin-co-play-restrictions="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Забрани за съвместна игра')}</button>
             ` : ''}
             <button type="button" data-lobby-nav-admin-info="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Админ информация')}</button>
             <button type="button" data-lobby-nav-admin-server="1" style="${guestLobbyMenuItemStyle()}">${item('admin', 'Сървър')}</button>
@@ -19532,6 +19550,13 @@ export function renderLobbyScreen(
     .forEach((button) => button.addEventListener('click', () => {
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminVoiceChatOpen?.()
+    }))
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-admin-co-play-restrictions="1"]')
+    .forEach((button) => button.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminCoPlayRestrictionsOpen?.()
     }))
 
   root

@@ -1773,10 +1773,15 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_partner_insufficient_balance'
   | 'private_room_partner_level_required'
   | 'private_room_partner_reservation_missing'
+  // „Забрана за съвместна игра“: административно наказание (случайна/частна
+  // маса, покана, повторен мач). Клиентът показва информационен прозорец.
+  | 'co_play_restricted'
 
 export type ErrorMessage = {
   type: 'error'
   message: string
+  /** Само при code 'co_play_restricted' от повторен мач. */
+  context?: 'replay'
   code?:
     | 'private_room_stake_unavailable'
     | 'private_room_insufficient_balance'
