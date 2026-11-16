@@ -21,8 +21,18 @@
 #   НЕ рестартира PM2, НЕ рестартира backend, НЕ прави DB migrations, НЕ
 #   пипа DB, НЕ прави nginx reload/restart. Не чисти стари releases/assets.
 #
-# Изисква: git, npm, node, sha256sum (или shasum), curl. Изпълнява се от
+# Изисква: git, npm, node, sha256sum (или shasum), curl, stat. Изпълнява се от
 # /var/www/belot-v2 (production repo checkout == production deploy root).
+#
+# Права (инцидент при deploy на aa92906): наследен umask 0077 направи новите
+# публични JS файлове 600 -> nginx върна 403. Затова build, release и shared
+# assets се създават с ИЗРИЧЕН umask 022, release-ът се нормализира (755/644),
+# shared assets се публикуват 644, вече наличен shared asset със същия
+# checksum, но без право за четене, получава a+r, и правата се проверяват
+# ПРЕДИ switch. Lock файлът и deployment state се пишат с НАСЛЕДЕНИЯ umask —
+# скриптът не пипа правата на база, конфигурации, ключове, backups или
+# други частни данни (chmod само в новия release, публикуваните shared
+# assets и директориите releases/ и assets/).
 
 set -euo pipefail
 
@@ -100,6 +110,49 @@ cache_bust_query() {
   printf '_cb=%s-%s' "$(date +%s%N 2>/dev/null || date +%s)" "$RANDOM"
 }
 
+# ─── Права на публичните файлове ────────────────────────────────────────────
+# Режимът (октално, напр. 644) — GNU stat, с BSD fallback; празно при грешка
+# (тогава проверките по-долу fail-ват — fail-closed).
+mode_of() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || true
+}
+# Публичен файл: четим от всички (nginx не е собственик).
+is_world_readable_file() {
+  local mode
+  mode="$(mode_of "$1")"
+  [ -n "$mode" ] && (( (8#$mode & 8#004) != 0 ))
+}
+# Публична директория: четима и проходима от всички.
+is_world_traversable_dir() {
+  local mode
+  mode="$(mode_of "$1")"
+  [ -n "$mode" ] && (( (8#$mode & 8#005) == 8#005 ))
+}
+# Само за публичните директории releases/ и assets/: добавя a+rx, без да
+# отнема други права. Никога за PROJECT_ROOT или частни директории.
+ensure_public_dir() {
+  local dir="$1" before
+  if ! is_world_traversable_dir "$dir"; then
+    before="$(mode_of "$dir")"
+    chmod a+rx -- "$dir" || fail "Не успях да дам a+rx на публичната директория $dir."
+    log "Права на публична директория коригирани ($before -> $(mode_of "$dir")): $dir"
+  fi
+  is_world_traversable_dir "$dir" || fail "Публичната директория $dir не е четима/проходима от nginx (режим $(mode_of "$dir"))."
+}
+# Вече наличен shared asset със същия checksum, но без право за четене
+# (напр. публикуван при umask 0077): a+r, съдържанието не се пипа.
+HASHED_PERMISSIONS_FIXED=0
+ensure_public_asset() {
+  local dest="$1" base="$2" before
+  if ! is_world_readable_file "$dest"; then
+    before="$(mode_of "$dest")"
+    chmod a+r -- "$dest" || fail "Не успях да дам a+r на shared asset $base."
+    HASHED_PERMISSIONS_FIXED=$((HASHED_PERMISSIONS_FIXED + 1))
+    log "  права коригирани ($before -> $(mode_of "$dest")), checksum непроменен: $base"
+  fi
+  is_world_readable_file "$dest" || fail "Shared asset $base не е четим от nginx (режим $(mode_of "$dest"))."
+}
+
 # ─── 0. Pre-flight: repo/tree/prerequisites checks ─────────────────────────
 section "Pre-flight checks"
 
@@ -115,6 +168,7 @@ command -v npm >/dev/null 2>&1 || fail "npm не е намерен в PATH."
 command -v node >/dev/null 2>&1 || fail "node не е намерен в PATH."
 command -v curl >/dev/null 2>&1 || fail "curl не е намерен в PATH (нужен за public HTTP verification)."
 command -v flock >/dev/null 2>&1 || fail "flock не е намерен в PATH (нужен за single-writer concurrency lock)."
+command -v stat >/dev/null 2>&1 || fail "stat не е намерен в PATH (нужен за проверка на правата на публичните файлове)."
 
 if command -v sha256sum >/dev/null 2>&1; then
   CHECKSUM_TOOL="sha256sum"
@@ -199,6 +253,14 @@ if ! rm -f "$DEPLOY_STATE_PREFLIGHT_RENAMED" 2>/dev/null; then
 fi
 log "Deployment state директория ($DEPLOY_STATE_DIR): create + rename + delete OK (frontend.json НЕ е пипнат)."
 
+# ─── Изричен umask за публичните файлове ────────────────────────────────────
+# Всичко от тук до deployment state (build -> dist/, release, shared assets)
+# е публично съдържание за nginx. Наследеният umask (напр. 0077 от сесията)
+# се пази и се връща за deployment state накрая.
+ORIGINAL_UMASK="$(umask)"
+umask 022
+log "umask за публичните файлове: 022 (наследен: $ORIGINAL_UMASK)"
+
 # ─── 1. Build ────────────────────────────────────────────────────────────────
 section "Build"
 
@@ -230,6 +292,9 @@ log "Post-build git immutability check: OK (HEAD непроменен, working t
 # ─── 2. Нов release: копирай целия dist/ (без rsync — cp -a) ────────────────
 section "Create release"
 
+ensure_public_dir "$RELEASES_DIR"
+ensure_public_dir "$SHARED_ASSETS_DIR"
+
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)-${GIT_SHORT_SHA}"
 NEW_RELEASE="$RELEASES_DIR/$RELEASE_ID"
 [ ! -e "$NEW_RELEASE" ] || fail "Release директорията вече съществува: $NEW_RELEASE"
@@ -238,6 +303,12 @@ log "Нов release: $NEW_RELEASE"
 mkdir -p "$NEW_RELEASE"
 cp -a "$DIST_DIR"/. "$NEW_RELEASE"/
 log "dist/ копиран в release-а (cp -a): OK"
+# cp -a запазва правата от dist/ (ако dist/ е от по-стар build при umask
+# 0077 — 600/700). Release-ът е изцяло публичен build output.
+chmod 755 -- "$NEW_RELEASE"
+find "$NEW_RELEASE" -mindepth 1 -type d -exec chmod 755 {} +
+find "$NEW_RELEASE" -type f -exec chmod 644 {} +
+log "Права на release-а: директории 755, файлове 644"
 
 [ -f "$NEW_RELEASE/index.html" ] || fail "index.html липсва в новия release след копиране."
 
@@ -261,6 +332,7 @@ while IFS= read -r -d '' file; do
     if [ "$src_sum" = "$dest_sum" ]; then
       HASHED_ALREADY_PRESENT_SAME=$((HASHED_ALREADY_PRESENT_SAME + 1))
       log "  съвпада (checksum еднакъв, пропускам copy): $base"
+      ensure_public_asset "$dest" "$base"
     else
       fail "Hashed asset $base вече съществува в $SHARED_ASSETS_DIR с РАЗЛИЧЕН checksum (src=$src_sum dest=$dest_sum). Immutable asset conflict — не презаписвам. Разследвай ръчно преди повторен опит."
     fi
@@ -283,6 +355,13 @@ while IFS= read -r -d '' file; do
       ACTIVE_TMP_ASSET=""
       fail "Checksum mismatch веднага след copy към temp файл: $base (source=$src_sum temp=$tmp_sum). Публикуването е прекратено, temp файлът е изтрит."
     fi
+    # Hard link-ът споделя inode-а: правата се задават ПРЕДИ ln, за да не се
+    # появи и за миг нечетим финален файл.
+    if ! chmod 644 -- "$tmp_dest"; then
+      rm -f "$tmp_dest"
+      ACTIVE_TMP_ASSET=""
+      fail "Не успях да задам 644 на temp файла за $base."
+    fi
 
     LN_ERROR=""
     if LN_ERROR="$(ln "$tmp_dest" "$dest" 2>&1)"; then
@@ -301,6 +380,7 @@ while IFS= read -r -d '' file; do
       if [ "$race_dest_sum" = "$src_sum" ]; then
         HASHED_ALREADY_PRESENT_SAME=$((HASHED_ALREADY_PRESENT_SAME + 1))
         log "  race: $base вече публикуван от друг процес междувременно, checksum съвпада — приемам като OK."
+        ensure_public_asset "$dest" "$base"
       else
         fail "Race condition при публикуване на $base: друг процес го е създал междувременно в $SHARED_ASSETS_DIR с РАЗЛИЧЕН checksum (source=$src_sum dest=$race_dest_sum). Immutable asset conflict — не презаписвам."
       fi
@@ -315,7 +395,7 @@ while IFS= read -r -d '' file; do
   fi
 done < <(find "$NEW_RELEASE/assets" -maxdepth 1 -type f -print0)
 
-log "Shared asset publish статус: $HASHED_PUBLISHED нови, $HASHED_ALREADY_PRESENT_SAME вече налични (checksum match), 0 конфликта."
+log "Shared asset publish статус: $HASHED_PUBLISHED нови, $HASHED_ALREADY_PRESENT_SAME вече налични (checksum match; $HASHED_PERMISSIONS_FIXED с коригирани права), 0 конфликта."
 
 # ─── 4. Verify checksum source <-> shared destination за всеки публикуван файл ──
 section "Pre-switch checks: checksum verification"
@@ -329,6 +409,27 @@ for base in "${PUBLISHED_HASHED_FILES[@]}"; do
   [ "$src_sum" = "$dest_sum" ] || fail "Checksum mismatch след publish: $base (release=$src_sum shared=$dest_sum)."
 done
 log "Checksum verification (release assets/ <-> shared assets/): OK за ${#PUBLISHED_HASHED_FILES[@]} hashed файла."
+
+# ─── 4b. Права за четене от nginx (всички файлове, не само entry-тата) ──────
+# Public HTTP проверката по-долу покрива само entry JS/CSS от index.html;
+# lazy chunk-овете (напр. гласовия) и останалите файлове се проверяват тук.
+section "Pre-switch checks: public read permissions"
+
+is_world_traversable_dir "$RELEASES_DIR" || fail "releases/ не е проходима от nginx (режим $(mode_of "$RELEASES_DIR"))."
+is_world_traversable_dir "$SHARED_ASSETS_DIR" || fail "assets/ не е проходима от nginx (режим $(mode_of "$SHARED_ASSETS_DIR"))."
+RELEASE_PERMISSION_PROBLEMS=0
+while IFS= read -r -d '' path; do
+  if [ -d "$path" ]; then
+    is_world_traversable_dir "$path" || { log "  нечетима директория: $path ($(mode_of "$path"))"; RELEASE_PERMISSION_PROBLEMS=$((RELEASE_PERMISSION_PROBLEMS + 1)); }
+  elif [ -f "$path" ]; then
+    is_world_readable_file "$path" || { log "  нечетим файл: $path ($(mode_of "$path"))"; RELEASE_PERMISSION_PROBLEMS=$((RELEASE_PERMISSION_PROBLEMS + 1)); }
+  fi
+done < <(find "$NEW_RELEASE" -print0)
+[ "$RELEASE_PERMISSION_PROBLEMS" -eq 0 ] || fail "Release-ът съдържа $RELEASE_PERMISSION_PROBLEMS нечетими от nginx файла/директории. current НЕ е превключен."
+for base in "${PUBLISHED_HASHED_FILES[@]}"; do
+  is_world_readable_file "$SHARED_ASSETS_DIR/$base" || fail "Shared asset $base не е четим от nginx (режим $(mode_of "$SHARED_ASSETS_DIR/$base")). current НЕ е превключен."
+done
+log "Права: release (директории + файлове) и ${#PUBLISHED_HASHED_FILES[@]} shared assets са четими от nginx."
 
 # ─── 5. Verify всички hashed JS/CSS, реферирани от новия index.html, съществуват ──
 section "Pre-switch checks: index.html reference closure"
@@ -427,6 +528,8 @@ log "Post-deploy checks: ВСИЧКИ минаха (/, entry JS/CSS, /health)."
 section "Persistent deployment state"
 
 DEPLOYED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Deployment state НЕ е публично съдържание: наследеният umask, както преди.
+umask "$ORIGINAL_UMASK"
 mkdir -p "$DEPLOY_STATE_DIR"
 
 state_write_failed() {
@@ -486,7 +589,8 @@ log "NEW_RELEASE:             $NEW_RELEASE"
 log "GIT_SHA:                 $GIT_SHA"
 log "Build status:             OK"
 log "Shared asset publish:     OK ($HASHED_PUBLISHED нови, $HASHED_ALREADY_PRESENT_SAME съвпадащи по checksum)"
-log "Pre-switch checks:        OK (checksum, reference closure, public HTTP)"
+log "Pre-switch checks:        OK (checksum, read permissions, reference closure, public HTTP)"
+log "Shared asset permissions: $HASHED_PERMISSIONS_FIXED коригирани (a+r)"
 log "Switch result:            OK (current -> $RELEASE_ID)"
 log "Post-deploy checks:       OK (/, entry JS/CSS, /health)"
 log "Rollback command (ако е нужно по-късно):"
