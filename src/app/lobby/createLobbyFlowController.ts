@@ -2028,6 +2028,13 @@ type InternalLobbyFlowState = {
   profilePopupTargetMute: TopicMuteSnapshot | null
   /** profileId, за който profilePopupTargetMute вече е (или се) зарежда — memoization guard, аналогично на profilePopupActiveBanProfileId. */
   profilePopupTargetMuteProfileId: string | null
+  /**
+   * Поколение на административните данни в профилния popup (mute, бан,
+   * роля). Увеличава се при всяко отваряне/затваряне (resetProfilePopupModerationState) —
+   * отговор на заявка от предишно поколение (затворен, сменен или затворен и
+   * отново отворен СЪЩИ профил) се игнорира.
+   */
+  profilePopupModerationGeneration: number
   banPopupOpen: boolean
   banPopupDaysDraft: string
   banPopupReasonDraft: string
@@ -2913,6 +2920,7 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupCampaignHistoryOpen: false,
     profilePopupTargetMute: null,
     profilePopupTargetMuteProfileId: null,
+    profilePopupModerationGeneration: 0,
     banPopupOpen: false,
     banPopupDaysDraft: '',
     banPopupReasonDraft: '',
@@ -5736,6 +5744,7 @@ export function createLobbyFlowController(
 
   function buildLobbyScreenState(): LobbyScreenState {
     const authSession = options.getAuthSession?.() ?? null
+    const scopedProfilePopupModeration = getScopedProfilePopupModeration(authSession)
     const friendshipAction = createProfileFriendshipAction(authSession)
     const acceptedRelationship =
       state.profilePopupProfile?.profileId
@@ -5844,15 +5853,15 @@ export function createLobbyFlowController(
       profilePopupProfile: state.profilePopupProfile,
       profilePopupCanEdit: state.profilePopupCanEdit,
       ownVipActiveUntil: resolveOwnVipActiveUntilForRender(authSession),
-      profilePopupTargetRole: state.profilePopupTargetRole,
+      profilePopupTargetRole: scopedProfilePopupModeration.targetRole,
       vipGrantOpen: state.vipGrantOpen,
       vipGrantSubmitting: state.vipGrantSubmitting,
       vipGrantErrorText: state.vipGrantErrorText,
-      profilePopupActiveBan: state.profilePopupActiveBan,
+      profilePopupActiveBan: scopedProfilePopupModeration.activeBan,
       profilePopupCampaignSummary: state.profilePopupCampaignSummary,
       profilePopupCampaignAllRewardsExpanded: state.profilePopupCampaignAllRewardsExpanded,
       profilePopupCampaignHistoryOpen: state.profilePopupCampaignHistoryOpen,
-      profilePopupTargetMute: state.profilePopupTargetMute,
+      profilePopupTargetMute: scopedProfilePopupModeration.targetMute,
       banPopupOpen: state.banPopupOpen,
       banPopupDaysDraft: state.banPopupDaysDraft,
       banPopupReasonDraft: state.banPopupReasonDraft,
@@ -6459,6 +6468,7 @@ export function createLobbyFlowController(
     resetFinalFillSequence()
     clearServerRoomSnapshot()
 
+    resetProfilePopupModerationStateIfClosed()
     ensureProfilePopupTargetRoleLoaded()
     ensureProfilePopupActiveBanLoaded()
     ensureProfilePopupCampaignSummaryLoaded()
@@ -6497,6 +6507,7 @@ export function createLobbyFlowController(
         render()
       },
       onProfileClick: () => {
+        resetProfilePopupModerationState()
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
         state.profilePopupOpen = true
@@ -6512,6 +6523,7 @@ export function createLobbyFlowController(
         void fetchOwnLikesCount()
       },
       onProfileClose: () => {
+        resetProfilePopupModerationState()
         state.profilePopupOpen = false
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
@@ -6689,6 +6701,7 @@ export function createLobbyFlowController(
         // това, entrance fade-in анимацията (140-160ms) би разкрила same Lobby.
         options.root.querySelector('[data-lobby-profile-editor-root="1"]')?.remove()
         markLobbyRootHtmlStale()
+        resetProfilePopupModerationState()
         state.profilePopupOpen = true
         renderPopupOnly({ skipAnimation: true })
       },
@@ -7618,6 +7631,7 @@ export function createLobbyFlowController(
       },
       onLevelLockedStakeViewProfileClick: () => {
         closeLevelLockedStakePopup()
+        resetProfilePopupModerationState()
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
         state.profilePopupOpen = true
@@ -8916,6 +8930,7 @@ export function createLobbyFlowController(
     state.profileEditorOpen = false
     state.profileEditorErrorText = null
     state.profileEditorSubmitting = false
+    resetProfilePopupModerationState()
     state.profilePopupOpen = true
     clearProfileEditorPendingState()
     // Същият overlay-only преход като при Cancel/X (виж onProfileEditClose) —
@@ -9049,6 +9064,7 @@ export function createLobbyFlowController(
     state.banPopupErrorText = null
     renderPopupOnly()
 
+    const profilePopupGeneration = state.profilePopupModerationGeneration
     const result = options.onAdminBanProfile
       ? await options.onAdminBanProfile(profileId, days, reason).catch(
           () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
@@ -9062,8 +9078,12 @@ export function createLobbyFlowController(
       return
     }
 
-    state.profilePopupActiveBan = result.ban
-    state.profilePopupActiveBanProfileId = profileId
+    // Само ако popup-ът е същият (не е затворен/сменен/отворен наново) —
+    // иначе новото отваряне зарежда актуалния бан статус от сървъра.
+    if (state.profilePopupModerationGeneration === profilePopupGeneration) {
+      state.profilePopupActiveBan = result.ban
+      state.profilePopupActiveBanProfileId = profileId
+    }
     state.banPopupOpen = false
     state.banPopupSubmitting = false
     state.banPopupErrorText = null
@@ -9080,6 +9100,7 @@ export function createLobbyFlowController(
     state.unbanSubmitting = true
     renderPopupOnly()
 
+    const profilePopupGeneration = state.profilePopupModerationGeneration
     const result = options.onAdminUnbanProfile
       ? await options.onAdminUnbanProfile(profileId).catch(
           () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
@@ -9099,7 +9120,9 @@ export function createLobbyFlowController(
       return
     }
 
-    state.profilePopupActiveBan = null
+    if (state.profilePopupModerationGeneration === profilePopupGeneration && state.profilePopupActiveBanProfileId === profileId) {
+      state.profilePopupActiveBan = null
+    }
     state.unbanConfirmOpen = false
     state.unbanSubmitting = false
     renderPopupOnly()
@@ -10023,7 +10046,9 @@ export function createLobbyFlowController(
    */
   function openProfileMuteOverlayPopup(targetProfileId: string, targetDisplayName: string): void {
     const mute = state.profilePopupTargetMute
-    if (mute === null || !mute.isMuted) return
+    // Срокът/причината трябва да са заредени именно за профила на иконата —
+    // иначе прозорецът би показал чуждо заглушаване с името на друг профил.
+    if (state.profilePopupTargetMuteProfileId !== targetProfileId || mute === null || !mute.isMuted) return
     state.topicModerationActionPopup = {
       kind: 'unmute',
       topicId: null,
@@ -10085,6 +10110,11 @@ export function createLobbyFlowController(
     const pending = state.topicModerationActionPopup
     if (!pending || state.topicModerationActionBusy) return
 
+    // Поколението на профилния popup преди заявката — ако междувременно е
+    // затворен/сменен/отворен наново, резултатът не пипа данните му (новото
+    // отваряне зарежда актуалния статус от сървъра).
+    const profilePopupGeneration = state.profilePopupModerationGeneration
+
     if (pending.kind === 'unmute') {
       state.topicModerationActionBusy = true
       render()
@@ -10104,7 +10134,8 @@ export function createLobbyFlowController(
       // трябва да изчезне веднага, без reload/повторно отваряне на popup-а.
       // Само локалната UI стойност; server-side статусът вече е актуален
       // (unmute-нат преди тази точка).
-      const shouldRefreshProfilePopup = state.profilePopupTargetMuteProfileId === pending.targetProfileId
+      const shouldRefreshProfilePopup = state.profilePopupModerationGeneration === profilePopupGeneration
+        && state.profilePopupTargetMuteProfileId === pending.targetProfileId
       if (shouldRefreshProfilePopup) {
         state.profilePopupTargetMute = null
       }
@@ -10167,7 +10198,11 @@ export function createLobbyFlowController(
       )
       state.topicModerationActionBusy = false
       const latestMute = profileResult?.mute ?? null
-      if (latestMute !== null && state.profilePopupTargetMuteProfileId === pending.targetProfileId) {
+      if (
+        latestMute !== null
+        && state.profilePopupModerationGeneration === profilePopupGeneration
+        && state.profilePopupTargetMuteProfileId === pending.targetProfileId
+      ) {
         // Статусът в профила се обновява веднага (без refresh) — бутонът
         // "Мют" изчезва и се показва overlay-ят за активен мют.
         state.profilePopupTargetMute = latestMute
@@ -21036,6 +21071,7 @@ export function createLobbyFlowController(
     return {
       onClose: () => {
         state.profilePopupRequestToken += 1
+        resetProfilePopupModerationState()
         state.profilePopupOpen = false
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
@@ -21314,6 +21350,59 @@ export function createLobbyFlowController(
    * Вика се от renderLobby() и renderPopupOnly() — покрива всички входни
    * точки за отваряне на попъпа без да ги дублира на всяко място.
    */
+  /**
+   * Нулира административните данни на профилния popup (mute, активен бан,
+   * роля) и техните profileId-та, и увеличава поколението — всяка заявка,
+   * стартирана преди това, се игнорира при пристигане. Вика се при ВСЯКО
+   * отваряне и затваряне на popup-а: следващото отваряне на чужд профил (вкл.
+   * същия) зарежда актуалните данни, а собственият профил никога не наследява
+   * данните на разгледан преди това чужд профил.
+   */
+  function resetProfilePopupModerationState(): void {
+    state.profilePopupModerationGeneration += 1
+    state.profilePopupTargetMute = null
+    state.profilePopupTargetMuteProfileId = null
+    state.profilePopupActiveBan = null
+    state.profilePopupActiveBanProfileId = null
+    state.profilePopupTargetRole = null
+    state.profilePopupTargetRoleProfileId = null
+  }
+
+  /**
+   * Затворен popup с останали административни данни (затворен по път, който
+   * не вика resetProfilePopupModerationState директно) — нулира ги при
+   * следващия render. Вика се от renderLobby() и renderPopupOnly().
+   */
+  function resetProfilePopupModerationStateIfClosed(): void {
+    if (state.profilePopupOpen) return
+    if (
+      state.profilePopupTargetMuteProfileId === null
+      && state.profilePopupActiveBanProfileId === null
+      && state.profilePopupTargetRoleProfileId === null
+      && state.profilePopupTargetMute === null
+      && state.profilePopupActiveBan === null
+      && state.profilePopupTargetRole === null
+    ) return
+    resetProfilePopupModerationState()
+  }
+
+  /**
+   * Административните данни, които се подават към renderer-а — САМО за
+   * показания ЧУЖД профил и само ако са заредени именно за него. Собственият
+   * профил (и данни на друг profileId) получава null.
+   */
+  function getScopedProfilePopupModeration(authSession: LobbyAuthSession | null) {
+    const popupProfileId = state.profilePopupProfile?.profileId ?? null
+    const ownProfileId = authSession?.profile.profileId ?? null
+    const isForeignProfile = popupProfileId !== null && popupProfileId !== ownProfileId
+    const belongsToPopup = (loadedForProfileId: string | null) => isForeignProfile && loadedForProfileId === popupProfileId
+    return {
+      targetRole: belongsToPopup(state.profilePopupTargetRoleProfileId) ? state.profilePopupTargetRole : null,
+      activeBan: belongsToPopup(state.profilePopupActiveBanProfileId) ? state.profilePopupActiveBan : null,
+      targetMute: belongsToPopup(state.profilePopupTargetMuteProfileId) ? state.profilePopupTargetMute : null,
+    }
+  }
+
   function ensureProfilePopupTargetRoleLoaded(): void {
     const authSession = options.getAuthSession?.() ?? null
     const profile = state.profilePopupProfile
@@ -21333,14 +21422,19 @@ export function createLobbyFlowController(
     }
 
     const targetProfileId = profile.profileId
+    const generation = state.profilePopupModerationGeneration
     state.profilePopupTargetRoleProfileId = targetProfileId
     state.profilePopupTargetRole = null
 
     void (async () => {
       const result = await options.onAdminGetTargetRole?.(targetProfileId)
-      // Ако попъпът вече сочи към друг профил (или е затворен) междувременно,
-      // резултатът е stale — не го прилагаме.
-      if (!result || state.profilePopupTargetRoleProfileId !== targetProfileId) {
+      // Ако попъпът вече сочи към друг профил, е затворен или е затворен и
+      // отново отворен (ново поколение) междувременно, резултатът е stale.
+      if (
+        !result
+        || state.profilePopupModerationGeneration !== generation
+        || state.profilePopupTargetRoleProfileId !== targetProfileId
+      ) {
         return
       }
       if (result.ok) {
@@ -21387,12 +21481,17 @@ export function createLobbyFlowController(
     }
 
     const targetProfileId = profile.profileId
+    const generation = state.profilePopupModerationGeneration
     state.profilePopupActiveBanProfileId = targetProfileId
     state.profilePopupActiveBan = null
 
     void (async () => {
       const result = await options.onAdminGetActiveBan?.(targetProfileId)
-      if (!result || state.profilePopupActiveBanProfileId !== targetProfileId) {
+      if (
+        !result
+        || state.profilePopupModerationGeneration !== generation
+        || state.profilePopupActiveBanProfileId !== targetProfileId
+      ) {
         return
       }
       if (result.ok) {
@@ -21485,12 +21584,17 @@ export function createLobbyFlowController(
     }
 
     const targetProfileId = profile.profileId
+    const generation = state.profilePopupModerationGeneration
     state.profilePopupTargetMuteProfileId = targetProfileId
     state.profilePopupTargetMute = null
 
     void (async () => {
       const result = await options.onProfileMuteStatusLoad?.(targetProfileId)
-      if (!result || state.profilePopupTargetMuteProfileId !== targetProfileId) {
+      if (
+        !result
+        || state.profilePopupModerationGeneration !== generation
+        || state.profilePopupTargetMuteProfileId !== targetProfileId
+      ) {
         return
       }
       if (result.ok) {
@@ -21900,6 +22004,7 @@ export function createLobbyFlowController(
     const requestToken = ++state.profilePopupRequestToken
 
     state.profileAccessBlockPopup = null
+    resetProfilePopupModerationState()
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupCanEdit = isOwn
@@ -22006,6 +22111,7 @@ export function createLobbyFlowController(
 
   function renderPopupOnly(renderOptions?: { skipAnimation?: boolean }): void {
     const authSession = options.getAuthSession?.() ?? null
+    resetProfilePopupModerationStateIfClosed()
     ensureProfilePopupTargetRoleLoaded()
     ensureProfilePopupActiveBanLoaded()
     ensureProfilePopupCampaignSummaryLoaded()
@@ -22017,6 +22123,7 @@ export function createLobbyFlowController(
       && popupProfile.profileId !== null
       && popupProfile.profileId === authSession.profile.profileId
     const showTopicsPersonalMessageButton = false
+    const scopedProfilePopupModeration = getScopedProfilePopupModeration(authSession)
     syncProfilePopup(
       {
         isOpen: state.profilePopupOpen,
@@ -22029,7 +22136,7 @@ export function createLobbyFlowController(
         friendshipAction: buildPopupFriendshipAction(),
         viewerIsFullAdmin: isFullAdminAuthSession(authSession),
         viewerCanProfileMute: isProfileMuteModeratorAuthSession(authSession),
-        targetAccountRole: state.profilePopupTargetRole,
+        targetAccountRole: scopedProfilePopupModeration.targetRole,
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
         showTopicsPersonalMessageButton,
         giftItemRecipientProfileId: !isOwnProfile ? popupProfile.profileId : null,
@@ -22038,8 +22145,8 @@ export function createLobbyFlowController(
         vipGrantOpen: state.vipGrantOpen,
         vipGrantSubmitting: state.vipGrantSubmitting,
         vipGrantErrorText: state.vipGrantErrorText,
-        activeBan: state.profilePopupActiveBan,
-        targetMute: state.profilePopupTargetMute,
+        activeBan: scopedProfilePopupModeration.activeBan,
+        targetMute: scopedProfilePopupModeration.targetMute,
         banPopupOpen: state.banPopupOpen,
         banPopupDaysDraft: state.banPopupDaysDraft,
         banPopupReasonDraft: state.banPopupReasonDraft,

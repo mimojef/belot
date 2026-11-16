@@ -2864,7 +2864,7 @@ function renderProfileContent(
             ${renderAvatar(profile, seat)}
           </div>
           ${renderLevelBadge(profile.level)}
-          ${targetMute?.isMuted ? renderProfileAvatarMuteOverlay(profile.profileId ?? '', displayName) : ''}
+          ${!isOwnProfile && targetMute?.isMuted ? renderProfileAvatarMuteOverlay(profile.profileId ?? '', displayName) : ''}
           ${friendshipAction?.giftFriendshipId ? `
             <div style="
               position:absolute;
