@@ -354,7 +354,7 @@ await check('[S14] Административен одит: налагане и 
   assertEqual(impose?.details?.selectedProfileIds, [w.b1, w.a1], 'избраните профили (в реда на избора)')
   assertEqual(impose?.details?.durationDays, 7, 'срок')
   assertEqual(impose?.details?.reason, 'Сговор', 'причина')
-  assertEqual(audit.items[0]?.details, { reason: 'Обжалване' }, 'причина за отмяна')
+  assertEqual(audit.items[0]?.details, { reason: 'Обжалване', previousStatus: 'active' }, 'причина за отмяна')
 })
 
 await check('[S15] Търсене по профил: по име или id на всеки профил от двата акаунта; филтри по статус', async () => {

@@ -1373,7 +1373,14 @@ const friendshipStore = await createFriendshipStore(
   playerProgressStore,
 )
 const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
-const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
+const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath, {
+  // „Забрана за съвместна игра“ (Етап 4) — само памет; при изключен флаг или
+  // без забрани транзакциите на записването не правят нито една нова заявка.
+  coPlayGuard: {
+    isActive: () => coPlayRestrictionStore.isTournamentEnforcementActive(),
+    areRestricted: (accountIdA, accountIdB) => coPlayRestrictionStore.areAccountsRestrictedForTournament(accountIdA, accountIdB),
+  },
+})
 const tournamentBetaAccessStore = await createTournamentBetaAccessStore(databaseBootstrap.databaseFilePath)
 // Конструираме я безусловно (евтино — само затваря deps), но всеки заявка
 // към нея минава първо през isLocalTournamentTestRequestAllowed (виж
@@ -8564,7 +8571,7 @@ function findLaterCoPlayConflictEntries(
 function removeCoPlayConflictedQueueEntry(
   entry: MatchmakingQueueEntry,
   restrictionId: string,
-  trigger: 'restriction_imposed' | 'flag_enabled' | 'pre_start',
+  trigger: 'restriction_imposed' | 'flag_enabled' | 'restriction_activated' | 'pre_start',
   actorProfileId: string | null,
 ): boolean {
   const stakeWasPaid = entry.stakePaid
@@ -8596,7 +8603,7 @@ function removeCoPlayConflictedQueueEntry(
  * по-късно влезлият от ограничена двойка излиза (залогът се връща). Най-рано
  * влезлият остава, затова таймерът на масата не се мести.
  */
-function resolveCoPlayConflictsInMatchmaking(trigger: 'restriction_imposed' | 'flag_enabled', actorProfileId: string | null): number {
+function resolveCoPlayConflictsInMatchmaking(trigger: 'restriction_imposed' | 'flag_enabled' | 'restriction_activated', actorProfileId: string | null): number {
   if (!coPlayRestrictionStore.isEnforcementActive()) return 0
   let removed = 0
   for (const stake of SUPPORTED_MATCH_STAKES) {
@@ -8690,7 +8697,7 @@ function notifyCoPlayPrivateRoomRemoval(
   occupant: PrivateRoomHumanOccupant,
   privateRoomId: string,
   restrictionId: string | null,
-  trigger: 'restriction_imposed' | 'flag_enabled' | 'pre_start',
+  trigger: 'restriction_imposed' | 'flag_enabled' | 'restriction_activated' | 'pre_start',
   actorProfileId: string | null,
 ): void {
   console.warn(`[co-play] released private seat room=${privateRoomId} trigger=${trigger}`)
@@ -8761,7 +8768,7 @@ function cancelCoPlayIncompatiblePrivateRoomInvites(privateRoomId: string): void
  * през съществуващия безопасен път; несъвместимите покани се отменят.
  * Започнатите мачове не се пипат (те вече не са в privateRoomsStore).
  */
-function resolveCoPlayConflictsInPrivateRooms(trigger: 'restriction_imposed' | 'flag_enabled', actorProfileId: string | null): number {
+function resolveCoPlayConflictsInPrivateRooms(trigger: 'restriction_imposed' | 'flag_enabled' | 'restriction_activated', actorProfileId: string | null): number {
   if (!coPlayRestrictionStore.isEnforcementActive()) return 0
   let removed = 0
   for (const room of privateRoomsStore.listRooms()) {
@@ -8774,6 +8781,65 @@ function resolveCoPlayConflictsInPrivateRooms(trigger: 'restriction_imposed' | '
     cancelCoPlayIncompatiblePrivateRoomInvites(room.id)
   }
   return removed
+}
+
+// ─── „Забрана за съвместна игра“ — отложено активиране (Етап 4) ────────────
+// Изчакващите забрани се активират след приключване/отмяна на всички общи
+// турнири. Проверката е идемпотентна (store-ът активира само веднъж и не мести
+// срока) и се вика: след събитията за край/отмяна на турнир, при старт на
+// сървъра и — като предпазна мрежа — най-много веднъж на 30 s от съществуващия
+// такт на координатора/планировчика, САМО ако има изчакващи забрани.
+
+const CO_PLAY_ACTIVATION_SWEEP_MIN_INTERVAL_MS = 30_000
+let lastCoPlayActivationSweepAt = 0
+
+function activatePendingCoPlayRestrictions(trigger: string): void {
+  if (coPlayRestrictionStore.getPendingRestrictionCount() === 0) return
+  lastCoPlayActivationSweepAt = Date.now()
+  let activated: string[] = []
+  try {
+    activated = coPlayRestrictionStore.activateEligiblePendingRestrictions()
+  } catch (error) {
+    console.error('[co-play] pending activation failed', error instanceof Error ? error.message : String(error))
+    return
+  }
+  if (activated.length === 0) return
+  console.warn(`[co-play] activated ${activated.length} pending restriction(s) trigger=${trigger}`)
+  // Активирана забрана започва да действа в интегрираните системи (при включен флаг).
+  resolveCoPlayConflictsInMatchmaking('restriction_activated', null)
+  resolveCoPlayConflictsInPrivateRooms('restriction_activated', null)
+}
+
+function maybeActivatePendingCoPlayRestrictions(trigger: string): void {
+  if (coPlayRestrictionStore.getPendingRestrictionCount() === 0) return
+  if (Date.now() - lastCoPlayActivationSweepAt < CO_PLAY_ACTIVATION_SWEEP_MIN_INTERVAL_MS) return
+  activatePendingCoPlayRestrictions(trigger)
+}
+
+/**
+ * Защитна проверка преди старт на турнир — САМО засичане (лог + одит, веднъж
+ * на турнир). НЕ блокира старта: неуспешен старт на насрочен турнир води до
+ * автоматична отмяна с връщане на таксите (tournamentScheduler), което е
+ * забранено за тази система. При включен флаг конфликтът не може да възникне
+ * през регистрациите (отказват се), а включването на флага се отказва при
+ * общ незапочнал турнир.
+ */
+const coPlayTournamentConflictsReported = new Set<string>()
+function detectCoPlayConflictsBeforeTournamentStart(tournamentId: string): void {
+  try {
+    if (!coPlayRestrictionStore.isEnabled() || coPlayTournamentConflictsReported.has(tournamentId)) return
+    const conflicts = coPlayRestrictionStore.findActiveConflictsInTournament(tournamentId)
+    if (conflicts.length === 0) return
+    coPlayTournamentConflictsReported.add(tournamentId)
+    console.warn(`[co-play] tournament ${tournamentId} starts with ${conflicts.length} co-play conflict(s) — start not blocked`)
+    coPlayRestrictionStore.recordAudit({
+      action: 'tournament_conflict_detected',
+      restrictionId: conflicts[0]!.restrictionId,
+      details: { tournamentId, restrictionIds: [...new Set(conflicts.map((conflict) => conflict.restrictionId))] },
+    })
+  } catch (error) {
+    console.error('[co-play] tournament conflict detection failed', error instanceof Error ? error.message : String(error))
+  }
 }
 
 /** Повторен мач: по-късно гласувалият от ограничена двойка (същият механизъм като findReplayConflictSeats). */
@@ -18170,6 +18236,10 @@ function isTournamentEntryActionRateLimited(profileId: string, now: number): boo
 const PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE =
   'Профилът ви е подаден за изтриване. Не можете да участвате в турнир, докато заявката е активна.'
 
+// „Забрана за съвместна игра“ — турнирна регистрация (без името на другия играч).
+const CO_PLAY_RESTRICTED_TOURNAMENT_MESSAGE =
+  'В този турнир има играч, с когото нямате право да участвате поради наложено административно наказание.'
+
 const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   tournament_not_found: 'Турнирът не е намерен.',
   tournament_not_open: 'Турнирът вече не приема записвания.',
@@ -18184,6 +18254,7 @@ const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
   shuffle_already_completed: 'Този турнир вече е разбъркан и не приема нови участници.',
   profile_deletion_pending: PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE,
+  co_play_restricted: CO_PLAY_RESTRICTED_TOURNAMENT_MESSAGE,
 }
 
 const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
@@ -18216,6 +18287,7 @@ const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   team_invalid: 'Отборът вече не е валиден.',
   participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
   profile_deletion_pending: PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE,
+  co_play_restricted: CO_PLAY_RESTRICTED_TOURNAMENT_MESSAGE,
 }
 
 function getPartnerInviteFailureStatus(reason: string): number {
@@ -18659,7 +18731,7 @@ async function handleTournamentJoinRequest(
       : result.reason === 'tournament_full' || result.reason === 'already_participating_elsewhere'
         || result.reason === 'tournament_not_open' || result.reason === 'rejoin_not_allowed'
         || result.reason === 'tournament_fill_expired' || result.reason === 'registered_tournament_starts_soon'
-        || result.reason === 'scheduled_tournament_time_conflict' ? 409
+        || result.reason === 'scheduled_tournament_time_conflict' || result.reason === 'co_play_restricted' ? 409
       : 400
     sendJsonResponse(res, status, {
       ok: false,
@@ -19006,6 +19078,8 @@ async function handleTournamentCancelRequest(
   if (!result.alreadyCancelled && result.refundedProfiles.length > 0) {
     sendTournamentEconomyRefundNotices(tournamentId, 'creator_cancelled', result.refundedProfiles)
   }
+  // „Забрана за съвместна игра“ — отмяната вече е записана.
+  activatePendingCoPlayRestrictions('tournament_cancelled')
   return true
 }
 
@@ -22274,6 +22348,8 @@ const handleCoPlayRestrictionAdminRequest = createCoPlayRestrictionAdminHttpRequ
     resolveCoPlayConflictsInMatchmaking('flag_enabled', actorProfileId)
     resolveCoPlayConflictsInPrivateRooms('flag_enabled', actorProfileId)
   },
+  // Етап 4: предпазна проверка за изчакващи забрани при четене от администратор.
+  activatePendingBeforeRead: () => activatePendingCoPlayRestrictions('admin_read'),
 })
 // Гласов чат (Етап 2б) — HTTPS: токени и повишаване на правата (никога WS).
 const handleVoiceChatApiRequest = createVoiceChatHttpRequestHandler({
@@ -31629,7 +31705,16 @@ try {
   const createTournamentSchedulerStartedAt = startupTimeline.now()
   tournamentScheduler = await createTournamentScheduler({
     databaseFilePath: databaseBootstrap.databaseFilePath,
-    economyStore: tournamentEconomyStore,
+    // „Забрана за съвместна игра“ — защитна проверка преди старт: само
+    // засичане (лог + одит), стартът НЕ се блокира (виж
+    // detectCoPlayConflictsBeforeTournamentStart). Иначе — същият store.
+    economyStore: {
+      ...tournamentEconomyStore,
+      startTournamentAtomically: (tournamentId, now) => {
+        detectCoPlayConflictsBeforeTournamentStart(tournamentId)
+        return tournamentEconomyStore.startTournamentAtomically(tournamentId, now)
+      },
+    },
     intervalMs: localTournamentTestPollIntervalMs,
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
     // §"ONLINE USER"/"OFFLINE USER"/"EXACTLY ONCE" в task spec-а за
@@ -31653,10 +31738,14 @@ try {
           tournamentEconomyStore.markTournamentEconomyNoticeDelivered(noticeId, profileId)
         }
       }
+      // Автоматична отмяна с връщане на таксите — транзакцията вече е минала.
+      activatePendingCoPlayRestrictions('tournament_auto_cancelled')
     },
     onTickTiming: (durationMs) => {
       backgroundJobMetrics.record('tournamentSchedulerTick', durationMs)
       startupTimeline.captureSchedulerTick({ durationMs })
+      // Предпазна мрежа (само при изчакващи забрани, ≤1 път на 30 s).
+      maybeActivatePendingCoPlayRestrictions('scheduler_tick')
     },
   })
   startupTimeline.recordSince('createTournamentScheduler', createTournamentSchedulerStartedAt)
@@ -31693,7 +31782,10 @@ try {
     },
     ensureRoomRuntime: (room) => activeRoomRuntime.ensureRoom(room),
     settleTournamentPrizes: (tournamentId) => {
-      return tournamentEconomyStore.settleTournamentPrizesAtomically(tournamentId, new Date())
+      const settleResult = tournamentEconomyStore.settleTournamentPrizesAtomically(tournamentId, new Date())
+      // „Забрана за съвместна игра“ — след като транзакцията на финала е минала.
+      activatePendingCoPlayRestrictions('tournament_finished')
+      return settleResult
     },
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => {
       const connection = serverState.connections[connectionId] ?? null
@@ -31731,6 +31823,7 @@ try {
       for (const profileId of new Set(profileIds)) {
         sendToOpenProfileConnections(profileId, { type: 'tournament_participation_ended', tournamentId })
       }
+      activatePendingCoPlayRestrictions('tournament_participation_ended')
     },
     notifyAssignment: (profileId, assignment) => {
       sendTournamentMatchAssignment(profileId, assignment)
@@ -31761,7 +31854,11 @@ try {
     onMatchResult: () => {
       activityCounters.incrementTournament('tournamentMatchResult')
     },
-    onTickTiming: (durationMs) => backgroundJobMetrics.record('tournamentCoordinatorTick', durationMs),
+    onTickTiming: (durationMs) => {
+      backgroundJobMetrics.record('tournamentCoordinatorTick', durationMs)
+      // Предпазна мрежа (само при изчакващи забрани, ≤1 път на 30 s).
+      maybeActivatePendingCoPlayRestrictions('coordinator_tick')
+    },
     // Performance audit Phase 0 — разбивка на tick-а към CPU incident /
     // admin monitoring контекста (bounded, без IDs).
     onTickMetrics: (metrics) => {
@@ -31794,6 +31891,10 @@ try {
 } catch (error) {
   console.error('[tournament-coordinator] Failed to start coordinator:', sanitizeErrorMessage(error))
 }
+
+// „Забрана за съвместна игра“ (Етап 4) — при старт: изчакващи забрани, чиито
+// общи турнири са приключили, докато сървърът е бил спрян, се активират.
+activatePendingCoPlayRestrictions('startup')
 
 // ─── Monitoring sampler ───────────────────────────────────────────────────────
 

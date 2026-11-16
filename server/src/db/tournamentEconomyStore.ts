@@ -105,6 +105,8 @@ export type JoinTournamentSoloResult =
         | 'insufficient_funds'
         | 'requires_password'
         | 'participation_blocked'
+        /** „Забрана за съвместна игра“ с участник в турнира (виж coPlayGuard). */
+        | 'co_play_restricted'
         | 'shuffle_already_completed'
         /** Профилът има активна заявка за самоизтриване (SQLite guard 20261026_001). */
         | 'profile_deletion_pending'
@@ -345,6 +347,8 @@ export type PartnerInviteMutationResult =
         | 'insufficient_funds'
         | 'team_invalid'
         | 'participation_blocked'
+        /** „Забрана за съвместна игра“ с участник в турнира (виж coPlayGuard). */
+        | 'co_play_restricted'
         /** Действащият профил (inviter при create, invitee при accept) има
          * активна заявка за самоизтриване (SQLite guard 20261026_001). */
         | 'profile_deletion_pending'
@@ -959,8 +963,21 @@ function mapActiveEntryBlockToPartnerInviteFailure(
   return { ok: false, reason: 'already_participating_elsewhere' }
 }
 
+/**
+ * „Забрана за съвместна игра“ — проверка, подадена отвън (само памет). Вика
+ * се вътре в атомарните транзакции на записването, ПРЕДИ удържането на
+ * таксата. Без нея (или при неактивна) — поведението е непроменено.
+ */
+export type TournamentCoPlayGuard = {
+  /** Флагът е включен и има поне една активна или изчакваща забрана. */
+  isActive: () => boolean
+  /** Двата акаунта нямат право да участват в един турнир (активна или изчакваща забрана). */
+  areRestricted: (accountIdA: string, accountIdB: string) => boolean
+}
+
 export async function createTournamentEconomyStore(
   databaseFilePath: string,
+  storeOptions: { coPlayGuard?: TournamentCoPlayGuard } = {},
 ): Promise<TournamentEconomyStore> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -1829,6 +1846,38 @@ export async function createTournamentEconomyStore(
 
   function isParticipationBlocked(tournamentId: TournamentId, profileId: ProfileId): boolean {
     return selectParticipationBlockStatement.get(profileId, tournamentId, profileId) !== undefined
+  }
+
+  // „Забрана за съвместна игра“ — само при активна проверка (флаг + забрани);
+  // иначе нито една заявка. Влизащите профили се сравняват помежду си
+  // (покана: поканил/поканен) и с всички записани в турнира.
+  const selectCoPlayProfileAccountStatement = database.prepare(`
+    SELECT account_id FROM profiles WHERE profile_id = ? LIMIT 1;
+  `)
+  const selectCoPlayTournamentAccountsStatement = database.prepare(`
+    SELECT DISTINCT p.account_id AS account_id
+    FROM tournament_entries e
+    JOIN profiles p ON p.profile_id = e.profile_id
+    WHERE e.tournament_id = ?
+      AND e.status NOT IN ('withdrawn', 'refunded')
+      AND p.account_id IS NOT NULL;
+  `)
+  function hasCoPlayConflictInTournament(tournamentId: TournamentId, joiningProfileIds: readonly ProfileId[]): boolean {
+    const guard = storeOptions.coPlayGuard
+    if (guard === undefined || !guard.isActive()) return false
+    const joiningAccounts = joiningProfileIds
+      .map((profileId) => (selectCoPlayProfileAccountStatement.get(profileId) as { account_id: string | null } | undefined)?.account_id ?? null)
+      .filter((accountId): accountId is string => accountId !== null)
+    for (let i = 0; i < joiningAccounts.length; i += 1) {
+      for (let j = i + 1; j < joiningAccounts.length; j += 1) {
+        if (joiningAccounts[i] !== joiningAccounts[j] && guard.areRestricted(joiningAccounts[i]!, joiningAccounts[j]!)) return true
+      }
+    }
+    const participantAccounts = (selectCoPlayTournamentAccountsStatement.all(tournamentId) as Array<{ account_id: string }>)
+      .map((row) => row.account_id)
+    return joiningAccounts.some((joining) =>
+      participantAccounts.some((participant) => participant !== joining && guard.areRestricted(joining, participant)),
+    )
   }
 
   function getReservedPendingPlaces(tournamentId: TournamentId): number {
@@ -3243,6 +3292,13 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'participation_blocked' }
         }
 
+        // „Забрана за съвместна игра“ — поканил и поканен помежду си и спрямо
+        // записаните; преди удържането на таксата, без промяна при отказ.
+        if (hasCoPlayConflictInTournament(tournamentId, [inviterProfileId, inviteeProfileId])) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'co_play_restricted' }
+        }
+
         const reusableTeamId = inviterHasOwnWaitingSoloTeam ? inviterEntry?.team_id ?? null : null
         const teamId = reusableTeamId ?? randomUUID()
         if (reusableTeamId === null) {
@@ -3422,6 +3478,12 @@ export async function createTournamentEconomyStore(
         if (inviteeValidation !== null) {
           database.exec('ROLLBACK;')
           return inviteeValidation
+        }
+        // „Забрана за съвместна игра“ — повторна проверка при приемане (съставът
+        // може да се е променил след поканата); поканата и отборът остават.
+        if (hasCoPlayConflictInTournament(tournamentId, [inviteeProfileId])) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'co_play_restricted' }
         }
         const inviteeEntry = selectEntryByTournamentAndProfileStatement.get(
           tournamentId,
@@ -3741,6 +3803,13 @@ export async function createTournamentEconomyStore(
         if (isParticipationBlocked(tournamentId, profileId)) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'participation_blocked' }
+        }
+
+        // „Забрана за съвместна игра“ — преди капацитета и удържането; така
+        // и автоматичното сдвояване никога не сдвоява ограничени акаунти.
+        if (hasCoPlayConflictInTournament(tournamentId, [profileId])) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'co_play_restricted' }
         }
 
         const playerCapacity = freshTournament.player_capacity

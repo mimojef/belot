@@ -38,6 +38,11 @@ export type CoPlayRestrictionAdminHttpApiDeps = {
   onRestrictionImposed?: (input: { actorProfileId: string }) => void
   /** След успешна промяна на глобалния флаг. */
   onEnabledChanged?: (input: { enabled: boolean; actorProfileId: string }) => void
+  /**
+   * Етап 4: преди четене на списък/забрана — идемпотентна проверка за
+   * изчакващи забрани, чиито общи турнири вече са приключили (предпазна мрежа).
+   */
+  activatePendingBeforeRead?: () => void
 }
 
 function runAfterCommit(label: string, fn: (() => void) | undefined): void {
@@ -67,7 +72,7 @@ const LIFT_STATUS: Record<LiftCoPlayRestrictionErrorCode, number> = {
   invalid_reason: 400,
 }
 
-const LIST_STATUSES = new Set<CoPlayRestrictionStatus | 'all'>(['active', 'expired', 'lifted', 'all'])
+const LIST_STATUSES = new Set<CoPlayRestrictionStatus | 'all'>(['active', 'pending_activation', 'expired', 'lifted', 'all'])
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status
@@ -130,6 +135,7 @@ export function createCoPlayRestrictionAdminHttpRequestHandler(deps: CoPlayRestr
           sendJson(res, 400, { ok: false, message: 'Невалиден статус.' })
           return true
         }
+        runAfterCommit('activatePendingBeforeRead', deps.activatePendingBeforeRead)
         const result = deps.store.listRestrictions({
           status: rawStatus as CoPlayRestrictionStatus | 'all',
           profileQuery: searchParams.get('q'),
@@ -188,6 +194,18 @@ export function createCoPlayRestrictionAdminHttpRequestHandler(deps: CoPlayRestr
           return true
         }
         const result = deps.store.setEnabled({ enabled: body.enabled, actorProfileId: actor.profileId })
+        if (!result.ok) {
+          // Етап 4: активна забрана с общ незапочнал турнир — флагът НЕ се
+          // включва; никой не се маха автоматично.
+          sendJson(res, 409, {
+            ok: false,
+            code: result.code,
+            message: 'Флагът не може да бъде включен: има активни забрани между участници в общ незапочнал турнир.',
+            conflicts: result.conflicts,
+            settings: result.settings,
+          })
+          return true
+        }
         if (result.changed) {
           const enabled = result.settings.enabled
           runAfterCommit('onEnabledChanged', deps.onEnabledChanged && (() => deps.onEnabledChanged!({ enabled, actorProfileId: actor.profileId })))
@@ -226,6 +244,7 @@ export function createCoPlayRestrictionAdminHttpRequestHandler(deps: CoPlayRestr
         sendJson(res, 405, { ok: false, message: 'Method not allowed' })
         return true
       }
+      runAfterCommit('activatePendingBeforeRead', deps.activatePendingBeforeRead)
       const restriction = deps.store.getRestriction(restrictionId)
       if (restriction === null) {
         sendJson(res, 404, { ok: false, message: 'Забраната не беше намерена.' })

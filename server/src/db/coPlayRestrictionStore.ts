@@ -34,7 +34,30 @@ export const CO_PLAY_MS_PER_DAY = 24 * 60 * 60 * 1000
 const PROFILE_ACCOUNT_MEMO_LIMIT = 200_000
 const SEARCH_PROFILE_LIMIT = 50
 
-export type CoPlayRestrictionStatus = 'active' | 'expired' | 'lifted'
+/**
+ * 'pending_activation' — наложена, но изчаква приключване/отмяна на общ
+ * незавършил турнир (Етап 4); не се прилага в игрите, но блокира нови общи
+ * турнирни регистрации (при включен флаг).
+ */
+export type CoPlayRestrictionStatus = 'active' | 'pending_activation' | 'expired' | 'lifted'
+
+/** Общ турнир, заради който забраната изчаква (живо име и статус). */
+export type CoPlayPendingTournamentRef = {
+  tournamentId: string
+  name: string | null
+  status: string | null
+}
+
+/** Конфликт: активна забрана + двата акаунта в общ турнир. */
+export type CoPlayTournamentConflict = {
+  restrictionId: string
+  tournamentId: string
+  tournamentName: string | null
+  tournamentStatus: string | null
+}
+
+const UNFINISHED_TOURNAMENT_SQL = `t.status NOT IN ('finished', 'cancelled', 'admin_cancelled', 'auto_cancelled', 'failed')`
+const PARTICIPATING_ENTRY_SQL = (alias: string) => `${alias}.status NOT IN ('withdrawn', 'refunded')`
 
 export type CoPlayRestrictionProfileRef = {
   profileId: string
@@ -51,11 +74,19 @@ export type CoPlayRestrictionView = {
   /** Двата избрани профила (историята); редът е по accountId, не по избора. */
   profiles: [CoPlayRestrictionProfileRef, CoPlayRestrictionProfileRef]
   reason: string
+  /** Заявеният срок в дни (null = безсрочна); тече от activatedAt. */
   durationDays: number | null
   isIndefinite: boolean
+  /** Момент на подаване на заявката (налагането). */
   createdAt: string
   createdByProfileId: string | null
   createdByDisplayName: string | null
+  /** Действителен момент на активиране (null — още изчаква). */
+  activatedAt: string | null
+  /** Причина за изчакване ('shared_tournament') — само докато изчаква. */
+  pendingReason: 'shared_tournament' | null
+  /** Общите турнири, записани при налагането/последната проверка. */
+  pendingTournaments: CoPlayPendingTournamentRef[]
   expiresAt: string | null
   endedAt: string | null
   /** 'lifted' — предсрочна отмяна; 'expired' — изтекъл срок (затворен при ново налагане). */
@@ -65,7 +96,9 @@ export type CoPlayRestrictionView = {
   liftReason: string | null
 }
 
-export type CoPlayRestrictionAuditAction = 'impose' | 'lift' | 'close_expired' | 'settings_update' | 'enforcement_removed'
+export type CoPlayRestrictionAuditAction =
+  | 'impose' | 'lift' | 'close_expired' | 'settings_update' | 'enforcement_removed'
+  | 'activate' | 'tournament_conflict_detected'
 
 export type CoPlayRestrictionAuditView = {
   auditId: string
@@ -116,7 +149,28 @@ export type CoPlayRestrictionStore = {
   /** Глобалният флаг (от паметта). */
   isEnabled: () => boolean
   getSettings: () => CoPlayRestrictionSettings
-  setEnabled: (input: { enabled: boolean; actorProfileId: string }) => { ok: true; changed: boolean; settings: CoPlayRestrictionSettings }
+  /**
+   * Включването се отказва ('tournament_conflicts'), ако активна забрана вече
+   * има общ НЕЗАПОЧНАЛ турнир (възникнал при изключен флаг). Нищо не се маха.
+   */
+  setEnabled: (input: { enabled: boolean; actorProfileId: string }) =>
+    | { ok: true; changed: boolean; settings: CoPlayRestrictionSettings }
+    | { ok: false; code: 'tournament_conflicts'; conflicts: CoPlayTournamentConflict[]; settings: CoPlayRestrictionSettings }
+  /** Брой изчакващи забрани (памет). */
+  getPendingRestrictionCount: () => number
+  /**
+   * Активира изчакващите забрани без общ незавършил турнир (идемпотентно;
+   * срокът тече от момента на активиране). Връща активираните.
+   */
+  activateEligiblePendingRestrictions: () => string[]
+  /** Турнирна проверка (памет): флаг + поне една активна или изчакваща забрана. */
+  isTournamentEnforcementActive: () => boolean
+  /** Двата акаунта нямат право на общ турнир (активна ИЛИ изчакваща; при включен флаг). */
+  areAccountsRestrictedForTournament: (accountIdA: string, accountIdB: string, game?: CoPlayGame) => boolean
+  /** Активни забрани между записаните в турнира (защитна проверка преди старт; само четене). */
+  findActiveConflictsInTournament: (tournamentId: string) => CoPlayTournamentConflict[]
+  /** Одит без промяна на забрана (напр. засечен конфликт преди старт на турнир). */
+  recordAudit: (input: { action: 'tournament_conflict_detected'; restrictionId: string | null; details: Record<string, unknown> }) => void
   /**
    * Проверка за честите пътища (само памет). false при изключен флаг, при
    * еднакви акаунти, при профил без акаунт (бот/гост) и при изтекла забрана.
@@ -177,6 +231,9 @@ type RestrictionRow = {
   end_kind: 'lifted' | 'expired' | null
   lifted_by_profile_id: string | null
   lift_reason: string | null
+  activated_at: string | null
+  requested_duration_days: number | null
+  pending_reason: 'shared_tournament' | null
   low_current_name?: string | null
   high_current_name?: string | null
   created_by_name?: string | null
@@ -196,11 +253,12 @@ function parseIsoMs(value: string | null): number | null {
 }
 
 export function computeCoPlayRestrictionStatus(
-  row: Pick<RestrictionRow, 'ended_at' | 'end_kind' | 'expires_at'>,
+  row: Pick<RestrictionRow, 'ended_at' | 'end_kind' | 'expires_at'> & { activated_at?: string | null },
   nowMs: number,
 ): CoPlayRestrictionStatus {
   if (row.end_kind === 'lifted') return 'lifted'
   if (row.end_kind === 'expired') return 'expired'
+  if (row.activated_at === null) return 'pending_activation'
   const expiresAtMs = parseIsoMs(row.expires_at)
   if (expiresAtMs !== null && expiresAtMs <= nowMs) return 'expired'
   return 'active'
@@ -226,6 +284,7 @@ export async function createCoPlayRestrictionStore(
     r.selected_profile_low_name_snapshot, r.selected_profile_high_name_snapshot,
     r.reason, r.duration_days, r.created_at, r.created_by_profile_id,
     r.expires_at, r.ended_at, r.end_kind, r.lifted_by_profile_id, r.lift_reason,
+    r.activated_at, r.requested_duration_days, r.pending_reason,
     pl.display_name AS low_current_name, ph.display_name AS high_current_name,
     pc.display_name AS created_by_name, pf.display_name AS lifted_by_name`
   const RESTRICTION_JOINS = `
@@ -241,10 +300,65 @@ export async function createCoPlayRestrictionStore(
     SELECT account_id, profile_kind FROM profiles WHERE profile_id = ? LIMIT 1;
   `)
   const selectOpenRestrictionsStatement = database.prepare(`
-    SELECT restriction_id, account_low_id, account_high_id, game_scope, expires_at
+    SELECT restriction_id, account_low_id, account_high_id, game_scope, expires_at, activated_at
     FROM co_play_restrictions
     WHERE ended_at IS NULL;
   `)
+  // Общи незавършили турнири на два акаунта (потвърдено участие на поне по
+  // един профил от всеки акаунт). Само при налагане/активиране/старт — рядко.
+  const selectSharedUnfinishedTournamentsStatement = database.prepare(`
+    SELECT DISTINCT t.tournament_id AS tournament_id, t.name AS name, t.status AS status
+    FROM tournament_entries e1
+    JOIN profiles p1 ON p1.profile_id = e1.profile_id
+    JOIN tournament_entries e2 ON e2.tournament_id = e1.tournament_id
+    JOIN profiles p2 ON p2.profile_id = e2.profile_id
+    JOIN tournaments t ON t.tournament_id = e1.tournament_id
+    WHERE p1.account_id = ? AND p2.account_id = ?
+      AND ${PARTICIPATING_ENTRY_SQL('e1')} AND ${PARTICIPATING_ENTRY_SQL('e2')}
+      AND ${UNFINISHED_TOURNAMENT_SQL}
+    ORDER BY t.tournament_id;
+  `)
+  const insertPendingTournamentStatement = database.prepare(`
+    INSERT OR IGNORE INTO co_play_restriction_pending_tournaments (restriction_id, tournament_id, recorded_at)
+    VALUES (?, ?, ?);
+  `)
+  const selectPendingTournamentsStatement = database.prepare(`
+    SELECT pt.tournament_id AS tournament_id, t.name AS name, t.status AS status
+    FROM co_play_restriction_pending_tournaments pt
+    LEFT JOIN tournaments t ON t.tournament_id = pt.tournament_id
+    WHERE pt.restriction_id = ?
+    ORDER BY pt.recorded_at, pt.tournament_id;
+  `)
+  const activateStatement = database.prepare(`
+    UPDATE co_play_restrictions
+    SET activated_at = ?, duration_days = requested_duration_days, expires_at = ?, pending_reason = NULL
+    WHERE restriction_id = ? AND activated_at IS NULL AND ended_at IS NULL;
+  `)
+  const selectPendingRestrictionRowsStatement = database.prepare(`
+    SELECT restriction_id, account_low_id, account_high_id, game_scope, requested_duration_days
+    FROM co_play_restrictions
+    WHERE ended_at IS NULL AND activated_at IS NULL;
+  `)
+  // Активни забрани, чиито акаунти са в общ турнир с даден статус-филтър.
+  const selectActiveRestrictionTournamentConflictsSql = (tournamentFilter: string) => `
+    SELECT DISTINCT r.restriction_id AS restriction_id, t.tournament_id AS tournament_id, t.name AS name, t.status AS status
+    FROM co_play_restrictions r
+    JOIN profiles p1 ON p1.account_id = r.account_low_id
+    JOIN tournament_entries e1 ON e1.profile_id = p1.profile_id
+    JOIN profiles p2 ON p2.account_id = r.account_high_id
+    JOIN tournament_entries e2 ON e2.profile_id = p2.profile_id AND e2.tournament_id = e1.tournament_id
+    JOIN tournaments t ON t.tournament_id = e1.tournament_id
+    WHERE r.ended_at IS NULL AND r.activated_at IS NOT NULL AND (r.expires_at IS NULL OR r.expires_at > ?)
+      AND ${PARTICIPATING_ENTRY_SQL('e1')} AND ${PARTICIPATING_ENTRY_SQL('e2')}
+      AND ${tournamentFilter}
+    ORDER BY t.tournament_id, r.restriction_id;
+  `
+  const selectActiveConflictsInOpenTournamentsStatement = database.prepare(
+    selectActiveRestrictionTournamentConflictsSql(`t.status = 'open'`),
+  )
+  const selectActiveConflictsInTournamentStatement = database.prepare(
+    selectActiveRestrictionTournamentConflictsSql(`t.tournament_id = ?`),
+  )
   const selectOpenRestrictionForPairStatement = database.prepare(`
     SELECT restriction_id, expires_at FROM co_play_restrictions
     WHERE account_low_id = ? AND account_high_id = ? AND game_scope = ? AND ended_at IS NULL
@@ -259,8 +373,9 @@ export async function createCoPlayRestrictionStore(
       restriction_id, account_low_id, account_high_id, game_scope,
       selected_profile_low_id, selected_profile_high_id,
       selected_profile_low_name_snapshot, selected_profile_high_name_snapshot,
-      reason, duration_days, created_at, created_by_profile_id, expires_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+      reason, duration_days, created_at, created_by_profile_id, expires_at,
+      activated_at, requested_duration_days, pending_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
   `)
   const closeExpiredStatement = database.prepare(`
     UPDATE co_play_restrictions SET ended_at = expires_at, end_kind = 'expired'
@@ -300,6 +415,11 @@ export async function createCoPlayRestrictionStore(
   const restrictionsByAccount = new Map<string, Map<string, Map<CoPlayGame, CacheEntry>>>()
   let cachedRestrictionCount = 0
   const accountByProfile = new Map<string, string | null>()
+  // Изчакващи забрани (Етап 4): ключ `${low}|${high}|${game}` -> restrictionId.
+  // Не участват в игровите проверки — само в турнирните регистрации.
+  const pendingByPair = new Map<string, string>()
+  const pairKey = (accountA: string, accountB: string, game: CoPlayGame) =>
+    accountA < accountB ? `${accountA}|${accountB}|${game}` : `${accountB}|${accountA}|${game}`
 
   function cacheSet(accountA: string, accountB: string, game: CoPlayGame, entry: CacheEntry): void {
     let added = false
@@ -368,6 +488,7 @@ export async function createCoPlayRestrictionStore(
 
     restrictionsByAccount.clear()
     cachedRestrictionCount = 0
+    pendingByPair.clear()
     const nowMs = now()
     const rows = selectOpenRestrictionsStatement.all() as Array<{
       restriction_id: string
@@ -375,9 +496,14 @@ export async function createCoPlayRestrictionStore(
       account_high_id: string
       game_scope: string
       expires_at: string | null
+      activated_at: string | null
     }>
     for (const row of rows) {
       if (!isCoPlayGame(row.game_scope)) continue
+      if (row.activated_at === null) {
+        pendingByPair.set(pairKey(row.account_low_id, row.account_high_id, row.game_scope), row.restriction_id)
+        continue
+      }
       const expiresAtMs = parseIsoMs(row.expires_at)
       if (row.expires_at !== null && (expiresAtMs === null || expiresAtMs <= nowMs)) continue
       cacheSet(row.account_low_id, row.account_high_id, row.game_scope, { restrictionId: row.restriction_id, expiresAtMs })
@@ -414,11 +540,15 @@ export async function createCoPlayRestrictionStore(
         },
       ],
       reason: row.reason,
-      durationDays: row.duration_days,
-      isIndefinite: row.duration_days === null,
+      durationDays: row.requested_duration_days ?? row.duration_days,
+      isIndefinite: (row.requested_duration_days ?? row.duration_days) === null,
       createdAt: row.created_at,
       createdByProfileId: row.created_by_profile_id,
       createdByDisplayName: row.created_by_name ?? null,
+      activatedAt: row.activated_at,
+      pendingReason: row.activated_at === null && row.ended_at === null ? row.pending_reason : null,
+      pendingTournaments: (selectPendingTournamentsStatement.all(row.restriction_id) as Array<{ tournament_id: string; name: string | null; status: string | null }>)
+        .map((item) => ({ tournamentId: item.tournament_id, name: item.name, status: item.status })),
       expiresAt: row.expires_at,
       endedAt: row.ended_at,
       endKind: row.end_kind,
@@ -519,12 +649,13 @@ export async function createCoPlayRestrictionStore(
       let closedExpiredId: string | null = null
       if (open !== undefined) {
         const openExpiresAtMs = parseIsoMs(open.expires_at)
+        // expires_at NULL = безсрочна ИЛИ изчакваща — и двете блокират дублиране.
         if (open.expires_at === null || (openExpiresAtMs !== null && openExpiresAtMs > nowMs)) {
           return {
             rollback: {
               ok: false,
               code: 'already_restricted',
-              message: 'Между тези акаунти вече има активна забрана.',
+              message: 'Между тези акаунти вече има активна или изчакваща забрана.',
               existingRestrictionId: open.restriction_id,
             },
           }
@@ -536,7 +667,15 @@ export async function createCoPlayRestrictionStore(
       }
 
       const restrictionId = randomUUID()
-      const expiresAtIso = durationDays === null ? null : new Date(nowMs + durationDays * CO_PLAY_MS_PER_DAY).toISOString()
+      // Етап 4: общ незавършил турнир -> изчакваща забрана (срокът тече от
+      // активирането); иначе — активна веднага (както досега).
+      const sharedTournaments = selectSharedUnfinishedTournamentsStatement.all(accountLow, accountHigh) as Array<{
+        tournament_id: string
+        name: string | null
+        status: string | null
+      }>
+      const isPending = sharedTournaments.length > 0
+      const expiresAtIso = isPending || durationDays === null ? null : new Date(nowMs + durationDays * CO_PLAY_MS_PER_DAY).toISOString()
       insertRestrictionStatement.run(
         restrictionId,
         accountLow,
@@ -547,11 +686,17 @@ export async function createCoPlayRestrictionStore(
         low.display_name,
         high.display_name,
         reason,
-        durationDays,
+        isPending ? null : durationDays,
         nowIso,
         input.actorProfileId,
         expiresAtIso,
+        isPending ? null : nowIso,
+        durationDays,
+        isPending ? 'shared_tournament' : null,
       )
+      for (const tournament of sharedTournaments) {
+        insertPendingTournamentStatement.run(restrictionId, tournament.tournament_id, nowIso)
+      }
       appendAudit(restrictionId, 'impose', input.actorProfileId, nowIso, {
         game,
         selectedProfileIds: [firstProfileId, secondProfileId],
@@ -559,16 +704,88 @@ export async function createCoPlayRestrictionStore(
         reason,
         durationDays,
         expiresAt: expiresAtIso,
+        status: isPending ? 'pending_activation' : 'active',
+        pendingTournamentIds: sharedTournaments.map((tournament) => tournament.tournament_id),
         replacedExpiredRestrictionId: closedExpiredId,
       })
       const restriction = getRestriction(restrictionId) as CoPlayRestrictionView
       return {
         result: { ok: true, restriction },
         onCommitted: () => {
-          cacheSet(accountLow, accountHigh, game, { restrictionId, expiresAtMs: parseIsoMs(expiresAtIso) })
+          if (isPending) pendingByPair.set(pairKey(accountLow, accountHigh, game), restrictionId)
+          else cacheSet(accountLow, accountHigh, game, { restrictionId, expiresAtMs: parseIsoMs(expiresAtIso) })
         },
       }
     })
+  }
+
+  /**
+   * Етап 4: активира изчакващите забрани без общ незавършил турнир. Срокът
+   * тече от момента на активиране; UPDATE-ът е условен (activated_at IS NULL),
+   * затова повторното извикване не активира/одитира втори път и не мести срока.
+   */
+  function activateEligiblePendingRestrictions(): string[] {
+    if (pendingByPair.size === 0) return []
+    const activated: string[] = []
+    const rows = selectPendingRestrictionRowsStatement.all() as Array<{
+      restriction_id: string
+      account_low_id: string
+      account_high_id: string
+      game_scope: string
+      requested_duration_days: number | null
+    }>
+    for (const row of rows) {
+      if (!isCoPlayGame(row.game_scope)) continue
+      const game = row.game_scope
+      const outcome = runTransaction<boolean>(() => {
+        const nowMs = now()
+        const nowIso = new Date(nowMs).toISOString()
+        const shared = selectSharedUnfinishedTournamentsStatement.all(row.account_low_id, row.account_high_id) as Array<{ tournament_id: string }>
+        if (shared.length > 0) {
+          // Все още има общ турнир (вкл. нов, записан при изключен флаг) — само се записва.
+          for (const tournament of shared) insertPendingTournamentStatement.run(row.restriction_id, tournament.tournament_id, nowIso)
+          return { result: false }
+        }
+        const expiresAtIso = row.requested_duration_days === null
+          ? null
+          : new Date(nowMs + row.requested_duration_days * CO_PLAY_MS_PER_DAY).toISOString()
+        const changes = (activateStatement.run(nowIso, expiresAtIso, row.restriction_id) as { changes?: number }).changes ?? 0
+        if (changes !== 1) return { rollback: false }
+        appendAudit(row.restriction_id, 'activate', null, nowIso, {
+          activatedAt: nowIso,
+          durationDays: row.requested_duration_days,
+          expiresAt: expiresAtIso,
+        })
+        return {
+          result: true,
+          onCommitted: () => {
+            pendingByPair.delete(pairKey(row.account_low_id, row.account_high_id, game))
+            cacheSet(row.account_low_id, row.account_high_id, game, { restrictionId: row.restriction_id, expiresAtMs: parseIsoMs(expiresAtIso) })
+          },
+        }
+      })
+      if (outcome) activated.push(row.restriction_id)
+    }
+    return activated
+  }
+
+  function findActiveConflictsInOpenTournaments(): CoPlayTournamentConflict[] {
+    return (selectActiveConflictsInOpenTournamentsStatement.all(new Date(now()).toISOString()) as Array<{
+      restriction_id: string
+      tournament_id: string
+      name: string | null
+      status: string | null
+    }>).map((row) => ({ restrictionId: row.restriction_id, tournamentId: row.tournament_id, tournamentName: row.name, tournamentStatus: row.status }))
+  }
+
+  function findActiveConflictsInTournament(tournamentId: string): CoPlayTournamentConflict[] {
+    if (cachedRestrictionCount === 0) return []
+    return (selectActiveConflictsInTournamentStatement.all(new Date(now()).toISOString(), tournamentId) as Array<{
+      restriction_id: string
+      tournament_id: string
+      name: string | null
+      status: string | null
+    }>).map((row) => ({ restrictionId: row.restriction_id, tournamentId: row.tournament_id, tournamentName: row.name, tournamentStatus: row.status }))
   }
 
   function liftRestriction(input: { restrictionId: string; actorProfileId: string; reason?: string | null }): LiftCoPlayRestrictionResult {
@@ -589,7 +806,8 @@ export async function createCoPlayRestrictionStore(
         return { rollback: { ok: false, code: 'not_found', message: 'Забраната не беше намерена.' } }
       }
       const status = computeCoPlayRestrictionStatus(row, nowMs)
-      if (status !== 'active') {
+      // Активна или изчакваща (Етап 4: изчакваща може да се отмени преди активирането).
+      if (status !== 'active' && status !== 'pending_activation') {
         return {
           rollback: {
             ok: false,
@@ -600,12 +818,14 @@ export async function createCoPlayRestrictionStore(
         }
       }
       liftStatement.run(nowIso, input.actorProfileId, liftReason, row.restriction_id)
-      appendAudit(row.restriction_id, 'lift', input.actorProfileId, nowIso, { reason: liftReason })
+      appendAudit(row.restriction_id, 'lift', input.actorProfileId, nowIso, { reason: liftReason, previousStatus: status })
       const restriction = getRestriction(row.restriction_id) as CoPlayRestrictionView
       return {
         result: { ok: true, restriction },
         onCommitted: () => {
-          if (isCoPlayGame(row.game_scope)) cacheDelete(row.account_low_id, row.account_high_id, row.game_scope)
+          if (!isCoPlayGame(row.game_scope)) return
+          if (status === 'pending_activation') pendingByPair.delete(pairKey(row.account_low_id, row.account_high_id, row.game_scope))
+          else cacheDelete(row.account_low_id, row.account_high_id, row.game_scope)
         },
       }
     })
@@ -615,11 +835,17 @@ export async function createCoPlayRestrictionStore(
     return { enabled, updatedAt: settingsUpdatedAt, updatedByProfileId: settingsUpdatedBy }
   }
 
-  function setEnabled(input: { enabled: boolean; actorProfileId: string }): { ok: true; changed: boolean; settings: CoPlayRestrictionSettings } {
+  function setEnabled(input: { enabled: boolean; actorProfileId: string }): ReturnType<CoPlayRestrictionStore['setEnabled']> {
     const nextEnabled = input.enabled === true
     if (nextEnabled === enabled) return { ok: true, changed: false, settings: getSettings() }
+    // Етап 4: при включване — активна забрана с общ незапочнал турнир (записан
+    // при изключен флаг) отказва включването; никой не се маха автоматично.
+    if (nextEnabled) {
+      const conflicts = findActiveConflictsInOpenTournaments()
+      if (conflicts.length > 0) return { ok: false, code: 'tournament_conflicts', conflicts, settings: getSettings() }
+    }
     const previous = enabled
-    return runTransaction(() => {
+    return runTransaction<ReturnType<CoPlayRestrictionStore['setEnabled']>>(() => {
       const nowIso = new Date(now()).toISOString()
       upsertSettingStatement.run(CO_PLAY_RESTRICTIONS_ENABLED_SETTING_KEY, nextEnabled ? '1' : '0', nowIso, input.actorProfileId)
       appendAudit(null, 'settings_update', input.actorProfileId, nowIso, {
@@ -664,6 +890,20 @@ export async function createCoPlayRestrictionStore(
     appendAudit(input.restrictionId, 'enforcement_removed', input.actorProfileId, new Date(now()).toISOString(), input.details)
   }
 
+  function recordAudit(input: { action: 'tournament_conflict_detected'; restrictionId: string | null; details: Record<string, unknown> }): void {
+    appendAudit(input.restrictionId, input.action, null, new Date(now()).toISOString(), input.details)
+  }
+
+  function isTournamentEnforcementActive(): boolean {
+    return enabled && (cachedRestrictionCount > 0 || pendingByPair.size > 0)
+  }
+
+  function areAccountsRestrictedForTournament(accountIdA: string, accountIdB: string, game: CoPlayGame = 'belot'): boolean {
+    if (!enabled || accountIdA === accountIdB) return false
+    if (pendingByPair.has(pairKey(accountIdA, accountIdB, game))) return true
+    return cachedRestrictionCount > 0 && getActiveCacheEntry(accountIdA, accountIdB, game, now()) !== null
+  }
+
   function isRestrictedBetweenProfiles(profileIdA: string, profileIdB: string, game: CoPlayGame = 'belot'): boolean {
     if (!enabled) return false
     return getActiveRestrictionIdBetweenProfiles(profileIdA, profileIdB, game) !== null
@@ -699,10 +939,12 @@ export async function createCoPlayRestrictionStore(
     const where: string[] = []
     const params: Array<string | number> = []
     if (status === 'active') {
-      where.push('r.ended_at IS NULL AND (r.expires_at IS NULL OR r.expires_at > ?)')
+      where.push('r.ended_at IS NULL AND r.activated_at IS NOT NULL AND (r.expires_at IS NULL OR r.expires_at > ?)')
       params.push(nowIso)
+    } else if (status === 'pending_activation') {
+      where.push('r.ended_at IS NULL AND r.activated_at IS NULL')
     } else if (status === 'expired') {
-      where.push("(r.end_kind = 'expired' OR (r.ended_at IS NULL AND r.expires_at IS NOT NULL AND r.expires_at <= ?))")
+      where.push("(r.end_kind = 'expired' OR (r.ended_at IS NULL AND r.activated_at IS NOT NULL AND r.expires_at IS NOT NULL AND r.expires_at <= ?))")
       params.push(nowIso)
     } else if (status === 'lifted') {
       where.push("r.end_kind = 'lifted'")
@@ -783,6 +1025,12 @@ export async function createCoPlayRestrictionStore(
     isEnforcementActive,
     getEnforcedRestrictionIdBetweenAccounts,
     recordEnforcementAudit,
+    getPendingRestrictionCount: () => pendingByPair.size,
+    activateEligiblePendingRestrictions,
+    isTournamentEnforcementActive,
+    areAccountsRestrictedForTournament,
+    findActiveConflictsInTournament,
+    recordAudit,
     imposeRestriction,
     liftRestriction,
     getRestriction,
