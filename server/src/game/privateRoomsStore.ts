@@ -25,7 +25,17 @@ export type PrivateRoomHumanOccupant = {
   avatarUrl: string | null
   level: number | null
   rankTitle: string | null
+  // „Забрана за съвместна игра“ — accountId от сървърната сесия (никога от
+  // клиента) и моментът на сядане (по-късно седналият излиза при конфликт).
+  // Само за тези проверки; липсва при записи, създадени без тях.
+  coPlayAccountId?: string | null
+  seatedAt?: number
 }
+
+export const PRIVATE_ROOM_CO_PLAY_REJECTION = {
+  message: 'На тази маса има играч, с когото нямате право да участвате на обща маса поради наложено административно наказание.',
+  code: 'co_play_restricted',
+} as const
 
 export type PrivateRoomBotOccupant = {
   kind: 'bot'
@@ -354,6 +364,8 @@ export type CreateRoomInput = {
   invitePartner?: boolean
   /** Гласов чат (Етап 2б) — вече резервиран voiceTableId; липсващо = без глас. */
   voiceTableId?: string | null
+  /** „Забрана за съвместна игра“ — accountId от сесията на връзката. */
+  coPlayAccountId?: string | null
 }
 
 export type CreateRoomResult =
@@ -371,6 +383,8 @@ export type JoinTeamInput = {
   team: Team
   slotIndex: 0 | 1
   isBlockedWith: IsBlockedWith
+  /** „Забрана за съвместна игра“ — accountId от сесията на връзката. */
+  coPlayAccountId?: string | null
 }
 
 export type JoinTeamResult =
@@ -460,6 +474,8 @@ export type AcceptPartnerInviteInput = {
   level: number | null
   rankTitle: string | null
   isBlockedWith: IsBlockedWith
+  /** „Забрана за съвместна игра“ — accountId от сесията на връзката. */
+  coPlayAccountId?: string | null
 }
 
 // inviteConsumed=true при отказ означава, че поканата е анулирана (домакинът
@@ -525,6 +541,19 @@ type StoreCallbacks = {
   // Мястото на такъв участник е освободено. roomAfter === null -> масата
   // остана без хора и е изтрита (onRoomEmptied вече е извикан).
   onMemberReleasedForConflict?: (roomAfter: PrivateRoom | null, roomBefore: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
+  // „Забрана за съвместна игра“ (всички синхронни, само памет):
+  //  - isCoPlayRestrictedWithRoom: влизащият (joinTeam/acceptPartnerInvite)
+  //    има активна забрана с НЯКОЙ от седналите -> отказ без промяна;
+  //  - resolveCoPlayStartConflicts: непосредствено преди старт (авто и ръчен)
+  //    — участниците, които трябва да напуснат заради забрана;
+  //  - onCoPlayMemberReleased: мястото на такъв участник е освободено
+  //    (след onMemberReleasedForConflict) — известие и одит.
+  isCoPlayRestrictedWithRoom?: (
+    room: PrivateRoom,
+    joining: { connectionId: string; profileId: string | null; accountId: string | null },
+  ) => boolean
+  resolveCoPlayStartConflicts?: (room: PrivateRoom) => PrivateRoomHumanOccupant[]
+  onCoPlayMemberReleased?: (roomAfter: PrivateRoom | null, roomBefore: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
 }
 
 type StoreOptions = {
@@ -656,6 +685,9 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
 
     const readiness = evaluateRoomReadiness(room, isBlockedWith)
     if (readiness.ready && !room.manualStart) {
+      // „Забрана за съвместна игра“ — финална проверка (масата не стартира).
+      const afterCoPlayRelease = releaseCoPlayStartConflicts(room)
+      if (afterCoPlayRelease !== null) return { room: afterCoPlayRelease, readyToStart: false }
       // leaveRoom вече е извикал onRoomsChanged.
       const afterRelease = releaseStartConflicts(room)
       if (afterRelease !== null) return { room: afterRelease, readyToStart: false }
@@ -694,6 +726,25 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
     return last
   }
 
+  // „Забрана за съвместна игра“ — същият leaveRoom път като releaseStartConflicts,
+  // за участниците от resolveCoPlayStartConflicts. null = няма конфликт.
+  function releaseCoPlayStartConflicts(room: PrivateRoom): PrivateRoom | null {
+    const restricted = callbacks.resolveCoPlayStartConflicts?.(room) ?? []
+    if (restricted.length === 0) return null
+    let last: PrivateRoom = room
+    for (const occupant of restricted) {
+      const before = rooms.get(room.id)
+      if (before === undefined) break
+      connectionToRoom.set(occupant.connectionId, room.id)
+      const after = leaveRoom(occupant.connectionId)
+      callbacks.onMemberReleasedForConflict?.(after, before, occupant)
+      callbacks.onCoPlayMemberReleased?.(after, before, occupant)
+      if (after === null) break
+      last = after
+    }
+    return last
+  }
+
   function createRoom(input: CreateRoomInput): CreateRoomResult {
     if (connectionToRoom.has(input.connectionId)) {
       return { ok: false, message: 'Вече си влязъл в тази маса.' }
@@ -718,6 +769,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       avatarUrl: input.avatarUrl,
       level: input.level,
       rankTitle: input.rankTitle,
+      coPlayAccountId: input.coPlayAccountId ?? null,
+      seatedAt: now,
     }
 
     const slots: PrivateRoomSlots = [
@@ -799,6 +852,16 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       return { ok: false, ...PRIVATE_ROOM_CREATOR_BLOCKED_REJECTION }
     }
 
+    // „Забрана за съвместна игра“ — окончателната защита: активна забрана с
+    // НЯКОЙ от седналите (партньор или противник) -> отказ без промяна.
+    if (callbacks.isCoPlayRestrictedWithRoom?.(room, {
+      connectionId: input.connectionId,
+      profileId: input.profileId,
+      accountId: input.coPlayAccountId ?? null,
+    })) {
+      return { ok: false, ...PRIVATE_ROOM_CO_PLAY_REJECTION }
+    }
+
     const targetSlot = findSlot(room, input.team, input.slotIndex)
     if (targetSlot === undefined) {
       return { ok: false, message: 'Невалидно място.' }
@@ -843,6 +906,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       avatarUrl: input.avatarUrl,
       level: input.level,
       rankTitle: input.rankTitle,
+      coPlayAccountId: input.coPlayAccountId ?? null,
+      seatedAt: Date.now(),
     }
 
     const nextSlots = room.slots.map((s) =>
@@ -991,6 +1056,16 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
         message: 'Масата не може да стартира в момента.',
         code: 'private_room_not_ready_to_start',
         readiness,
+      }
+    }
+
+    // „Забрана за съвместна игра“ — финална проверка: мястото на ограничения
+    // участник се освобождава, масата не стартира.
+    if (releaseCoPlayStartConflicts(room) !== null) {
+      return {
+        ok: false,
+        message: 'Масата не може да стартира: играч от нея не може да участва поради административно наказание. Мястото му беше освободено.',
+        code: 'co_play_restricted',
       }
     }
 
@@ -1572,6 +1647,17 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       return reject('Не можете да бъдете партньори с този играч.', 'private_room_partner_blocked')
     }
 
+    // „Забрана за съвместна игра“ — повторна проверка при приемане (съставът
+    // може да се е променил след поканата). Отказ БЕЗ промяна на масата и на
+    // поканата (тя изтича по обичайния ред).
+    if (callbacks.isCoPlayRestrictedWithRoom?.(room, {
+      connectionId: input.connectionId,
+      profileId: input.profileId,
+      accountId: input.coPlayAccountId ?? null,
+    })) {
+      return { ok: false, ...PRIVATE_ROOM_CO_PLAY_REJECTION, inviteConsumed: false }
+    }
+
     cancelPartnerInviteTimer(room.id)
 
     const occupant: PrivateRoomHumanOccupant = {
@@ -1582,6 +1668,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       avatarUrl: input.avatarUrl,
       level: input.level,
       rankTitle: input.rankTitle,
+      coPlayAccountId: input.coPlayAccountId ?? null,
+      seatedAt: Date.now(),
     }
 
     const nextSlots = room.slots.map((s) =>

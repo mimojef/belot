@@ -487,6 +487,7 @@ import {
   getTeamSlots,
   isProfileBannedByRoomCreator,
   PRIVATE_ROOM_CREATOR_BLOCKED_REJECTION,
+  PRIVATE_ROOM_CO_PLAY_REJECTION,
 } from './game/privateRoomsStore.js'
 import { createLudoRoomsStore, type LudoRoom } from './game/ludoRoomsStore.js'
 import { createLudoMatchRuntime, type LudoMatchSnapshot } from './game/ludoMatchRuntime.js'
@@ -5855,6 +5856,7 @@ function handlePrivateRoomPartnerInviteResponse(connectionId: ConnectionId, invi
     level: publicProfile.level,
     rankTitle: publicProfile.rankTitle,
     isBlockedWith: (a, b) => blockStore.isBlocked(a, b),
+    coPlayAccountId: coPlayAccountIdByConnection.get(connectionId) ?? null,
   })
 
   if (!acceptResult.ok) {
@@ -6314,6 +6316,10 @@ const privateRoomsStore = createPrivateRoomsStore({
   resolveStartConflicts: (room) => resolvePrivateRoomStartConflicts(room),
   onMemberReleasedForConflict: (roomAfter, roomBefore, occupant) =>
     handlePrivateRoomMemberReleasedForConflict(roomAfter, roomBefore, occupant),
+  // „Забрана за съвместна игра“ (само памет; при изключен флаг — нищо).
+  isCoPlayRestrictedWithRoom: (room, joining) => isCoPlayRestrictedWithPrivateRoom(room, joining),
+  resolveCoPlayStartConflicts: (room) => findPrivateRoomCoPlayVictims(room).map((victim) => victim.occupant),
+  onCoPlayMemberReleased: (_roomAfter, roomBefore, occupant) => handleCoPlayPrivateRoomMemberReleased(roomBefore, occupant),
   onTimerTiming: (label, durationMs) => mainThreadTimings.record('timer', label, durationMs),
 })
 
@@ -8601,6 +8607,201 @@ function resolveCoPlayConflictsInMatchmaking(trigger: 'restriction_imposed' | 'f
     }
   }
   return removed
+}
+
+// ─── „Забрана за съвместна игра“ — частни маси и повторни мачове (Етап 3) ──
+// accountId е от сесията (записан в слота при сядане или от връзката). Всички
+// проверки са само в паметта. Покани и повторни мачове (редки действия) могат
+// да ползват profileId -> accountId от базата веднъж за профил.
+
+const CO_PLAY_REMOVED_FROM_PRIVATE_ROOM_MESSAGE =
+  'Мястото ви на частната маса беше освободено: на нея има играч, с когото нямате право да участвате на обща маса поради наложено административно наказание.'
+const CO_PLAY_PRIVATE_ROOM_INVITE_MESSAGE =
+  'Поканата не може да бъде изпратена: поканеният няма право да участва на обща маса с играч от тази маса поради наложено административно наказание.'
+
+function getPrivateOccupantCoPlayAccountId(occupant: PrivateRoomHumanOccupant): string | null {
+  return occupant.coPlayAccountId ?? coPlayAccountIdByConnection.get(occupant.connectionId) ?? null
+}
+
+/** Влизащият има активна забрана с НЯКОЙ от седналите (store-куката; само памет). */
+function isCoPlayRestrictedWithPrivateRoom(
+  room: PrivateRoom,
+  joining: { connectionId: string; profileId: string | null; accountId: string | null },
+): boolean {
+  if (!coPlayRestrictionStore.isEnforcementActive()) return false
+  const accountId = joining.accountId ?? coPlayAccountIdByConnection.get(joining.connectionId) ?? null
+  if (accountId === null) return false
+  return room.slots.some((slot) =>
+    slot.occupant?.kind === 'human' &&
+    slot.occupant.profileId !== joining.profileId &&
+    coPlayRestrictionStore.getEnforcedRestrictionIdBetweenAccounts(accountId, getPrivateOccupantCoPlayAccountId(slot.occupant)) !== null,
+  )
+}
+
+/** Профил (покани — по profileId) срещу седналите на масата. */
+function isProfileCoPlayRestrictedWithPrivateRoom(room: PrivateRoom, profileId: string): boolean {
+  if (!coPlayRestrictionStore.isEnforcementActive()) return false
+  return room.slots.some((slot) =>
+    slot.occupant?.kind === 'human' &&
+    slot.occupant.profileId !== null &&
+    slot.occupant.profileId !== profileId &&
+    coPlayRestrictionStore.isRestrictedBetweenProfiles(profileId, slot.occupant.profileId),
+  )
+}
+
+/**
+ * Кой трябва да напусне масата при конфликт: създателят остава; иначе
+ * остава по-рано седналият (по seatedAt, после по реда на местата).
+ */
+function findPrivateRoomCoPlayVictims(room: PrivateRoom): Array<{ occupant: PrivateRoomHumanOccupant; restrictionId: string }> {
+  if (!coPlayRestrictionStore.isEnforcementActive()) return []
+  const humans = room.slots
+    .map((slot, index) => ({ occupant: slot.occupant, index }))
+    .filter((item): item is { occupant: PrivateRoomHumanOccupant; index: number } => item.occupant?.kind === 'human')
+  const rank = (item: { occupant: PrivateRoomHumanOccupant; index: number }) => [
+    item.occupant.profileId !== null && item.occupant.profileId === room.creatorProfileId ? 0 : 1,
+    item.occupant.seatedAt ?? Number.MAX_SAFE_INTEGER,
+    item.index,
+  ]
+  humans.sort((a, b) => {
+    const ra = rank(a)
+    const rb = rank(b)
+    return ra[0]! - rb[0]! || ra[1]! - rb[1]! || ra[2]! - rb[2]!
+  })
+  const kept: PrivateRoomHumanOccupant[] = []
+  const victims: Array<{ occupant: PrivateRoomHumanOccupant; restrictionId: string }> = []
+  for (const { occupant } of humans) {
+    const accountId = getPrivateOccupantCoPlayAccountId(occupant)
+    let restrictionId: string | null = null
+    if (accountId !== null) {
+      for (const keptOccupant of kept) {
+        restrictionId = coPlayRestrictionStore.getEnforcedRestrictionIdBetweenAccounts(accountId, getPrivateOccupantCoPlayAccountId(keptOccupant))
+        if (restrictionId !== null) break
+      }
+    }
+    if (restrictionId !== null) victims.push({ occupant, restrictionId })
+    else kept.push(occupant)
+  }
+  return victims
+}
+
+/** Известие до освободения играч + одит (мястото вече е освободено през leaveRoom). */
+function notifyCoPlayPrivateRoomRemoval(
+  occupant: PrivateRoomHumanOccupant,
+  privateRoomId: string,
+  restrictionId: string | null,
+  trigger: 'restriction_imposed' | 'flag_enabled' | 'pre_start',
+  actorProfileId: string | null,
+): void {
+  console.warn(`[co-play] released private seat room=${privateRoomId} trigger=${trigger}`)
+  const notice = { type: 'error' as const, message: CO_PLAY_REMOVED_FROM_PRIVATE_ROOM_MESSAGE, code: 'co_play_restricted' as const }
+  if (occupant.profileId !== null) sendToOpenProfileConnections(occupant.profileId, notice)
+  else safeSendToConnection(occupant.connectionId, notice)
+  try {
+    coPlayRestrictionStore.recordEnforcementAudit({
+      restrictionId,
+      actorProfileId,
+      details: {
+        context: 'private_room',
+        trigger,
+        privateRoomId,
+        profileId: occupant.profileId,
+        accountId: getPrivateOccupantCoPlayAccountId(occupant),
+        // Залогът на частна маса се удържа едва при старта — тук няма удържан залог.
+        stakeRefunded: false,
+      },
+    })
+  } catch (error) {
+    console.error('[co-play] enforcement audit failed', error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** Store-кука при финалната проверка: освободеният участник и неговата забрана (за одита). */
+function handleCoPlayPrivateRoomMemberReleased(roomBefore: PrivateRoom, occupant: PrivateRoomHumanOccupant): void {
+  const accountId = getPrivateOccupantCoPlayAccountId(occupant)
+  let restrictionId: string | null = null
+  for (const slot of roomBefore.slots) {
+    if (slot.occupant?.kind !== 'human' || slot.occupant.connectionId === occupant.connectionId) continue
+    restrictionId = coPlayRestrictionStore.getEnforcedRestrictionIdBetweenAccounts(accountId, getPrivateOccupantCoPlayAccountId(slot.occupant))
+    if (restrictionId !== null) break
+  }
+  notifyCoPlayPrivateRoomRemoval(occupant, roomBefore.id, restrictionId, 'pre_start', null)
+}
+
+/** Отменя висящите покани (обикновени и партньорска) към акаунти с забрана спрямо седналите. */
+function cancelCoPlayIncompatiblePrivateRoomInvites(privateRoomId: string): void {
+  const room = privateRoomsStore.listRooms().find((candidate) => candidate.id === privateRoomId)
+  if (room === undefined) return
+  let changed = false
+  for (const invite of room.pendingInvites) {
+    if (!isProfileCoPlayRestrictedWithPrivateRoom(room, invite.toProfileId)) continue
+    if (privateRoomsStore.removeInviteById(invite.inviteId) === null) continue
+    cancelPrivateRoomInviteTimer(invite.inviteId)
+    sendToOpenProfileConnections(invite.toProfileId, { type: 'private_room_invite_cancelled', inviteId: invite.inviteId })
+    changed = true
+  }
+  const partnerInvite = room.partnerReservation?.invite ?? null
+  if (partnerInvite !== null && isProfileCoPlayRestrictedWithPrivateRoom(room, partnerInvite.toProfileId)) {
+    const abandoned = privateRoomsStore.declinePartnerInvite({ inviteId: partnerInvite.inviteId, profileId: partnerInvite.toProfileId, outcome: 'unavailable' })
+    if (abandoned.ok) {
+      sendToOpenProfileConnections(partnerInvite.toProfileId, { type: 'private_room_invite_cancelled', inviteId: partnerInvite.inviteId })
+      notifyPrivateRoomPartnerInviteUnavailable(abandoned.invite)
+      changed = true
+    }
+  }
+  if (changed) {
+    const latest = privateRoomsStore.listRooms().find((candidate) => candidate.id === privateRoomId)
+    if (latest !== undefined) sendPrivateRoomUpdateToMembers(latest)
+  }
+}
+
+/**
+ * Налагане на забрана / включване на флага: на всяка НЕЗАПОЧНАЛА частна маса
+ * ограниченият участник напуска (създателят остава; иначе по-късно седналият)
+ * през съществуващия безопасен път; несъвместимите покани се отменят.
+ * Започнатите мачове не се пипат (те вече не са в privateRoomsStore).
+ */
+function resolveCoPlayConflictsInPrivateRooms(trigger: 'restriction_imposed' | 'flag_enabled', actorProfileId: string | null): number {
+  if (!coPlayRestrictionStore.isEnforcementActive()) return 0
+  let removed = 0
+  for (const room of privateRoomsStore.listRooms()) {
+    for (const { occupant, restrictionId } of findPrivateRoomCoPlayVictims(room)) {
+      if (occupant.profileId === null) continue
+      if (!privateRoomsStore.releaseMemberForConflict(occupant.profileId)) continue
+      notifyCoPlayPrivateRoomRemoval(occupant, room.id, restrictionId, trigger, actorProfileId)
+      removed += 1
+    }
+    cancelCoPlayIncompatiblePrivateRoomInvites(room.id)
+  }
+  return removed
+}
+
+/** Повторен мач: по-късно гласувалият от ограничена двойка (същият механизъм като findReplayConflictSeats). */
+function findReplayCoPlayConflictSeats(room: ServerRoom, votes: readonly Seat[]): Seat[] {
+  if (!coPlayRestrictionStore.isEnforcementActive()) return []
+  const humans = SERVER_SEAT_ORDER
+    .map((seat) => ({ seat, participant: room.seats[seat].participant }))
+    .filter((item) => item.participant?.kind === 'human')
+    .map((item) => {
+      const participant = item.participant as Extract<RoomParticipant, { kind: 'human' }>
+      const profileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+      const accountId = participant.connectionId !== null ? coPlayAccountIdByConnection.get(participant.connectionId) ?? null : null
+      const voteIndex = votes.indexOf(item.seat)
+      return { seat: item.seat, profileId, accountId, order: voteIndex === -1 ? Number.MAX_SAFE_INTEGER : voteIndex }
+    })
+    .filter((item) => item.profileId !== null)
+    .sort((a, b) => a.order - b.order)
+  const restricted = (a: (typeof humans)[number], b: (typeof humans)[number]): boolean =>
+    a.accountId !== null && b.accountId !== null
+      ? coPlayRestrictionStore.getEnforcedRestrictionIdBetweenAccounts(a.accountId, b.accountId) !== null
+      : coPlayRestrictionStore.isRestrictedBetweenProfiles(a.profileId!, b.profileId!)
+  const kept: typeof humans = []
+  const conflicts: Seat[] = []
+  for (const item of humans) {
+    if (kept.some((other) => restricted(item, other))) conflicts.push(item.seat)
+    else kept.push(item)
+  }
+  return conflicts
 }
 
 /**
@@ -22066,9 +22267,12 @@ const handleCoPlayRestrictionAdminRequest = createCoPlayRestrictionAdminHttpRequ
   // При изключен флаг resolveCoPlayConflictsInMatchmaking не прави нищо.
   onRestrictionImposed: ({ actorProfileId }) => {
     resolveCoPlayConflictsInMatchmaking('restriction_imposed', actorProfileId)
+    resolveCoPlayConflictsInPrivateRooms('restriction_imposed', actorProfileId)
   },
   onEnabledChanged: ({ enabled, actorProfileId }) => {
-    if (enabled) resolveCoPlayConflictsInMatchmaking('flag_enabled', actorProfileId)
+    if (!enabled) return
+    resolveCoPlayConflictsInMatchmaking('flag_enabled', actorProfileId)
+    resolveCoPlayConflictsInPrivateRooms('flag_enabled', actorProfileId)
   },
 })
 // Гласов чат (Етап 2б) — HTTPS: токени и повишаване на правата (никога WS).
@@ -27462,7 +27666,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // друго участие не влиза в него. Неговият глас става „изход“ (същият
         // механизъм като бот без жълтици) и повторният мач не стартира.
         function tryApplyReplayRestart(room: ServerRoom, votes: Seat[]): void {
-          const conflictSeats = findReplayConflictSeats(room)
+          // + „Забрана за съвместна игра“: по-късно гласувалият от ограничена
+          // двойка (същият механизъм; при изключен флаг — празно).
+          const conflictSeats = [...new Set([...findReplayConflictSeats(room), ...findReplayCoPlayConflictSeats(room, votes)])]
           if (conflictSeats.length === 0) {
             applyReplayRestart(room)
             return
@@ -28607,6 +28813,28 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           return
         }
 
+        // „Забрана за съвместна игра“ — защита в дълбочина (стаите обикновено
+        // са пълни и join_room не сяда никого; при изключен флаг — нищо).
+        const joinRoomTarget = serverState.rooms[message.roomId] ?? null
+        const joinRoomProfileId = joinRoomConnection?.profileId ?? null
+        if (joinRoomTarget !== null && joinRoomProfileId !== null && coPlayRestrictionStore.isEnforcementActive()) {
+          const joinRoomAccountId = coPlayAccountIdByConnection.get(connection.id) ?? null
+          const restricted = SERVER_SEAT_ORDER.some((seat) => {
+            const participant = joinRoomTarget.seats[seat].participant
+            if (participant?.kind !== 'human') return false
+            const otherProfileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+            if (otherProfileId === null || otherProfileId === joinRoomProfileId) return false
+            const otherAccountId = participant.connectionId !== null ? coPlayAccountIdByConnection.get(participant.connectionId) ?? null : null
+            return joinRoomAccountId !== null && otherAccountId !== null
+              ? coPlayRestrictionStore.getEnforcedRestrictionIdBetweenAccounts(joinRoomAccountId, otherAccountId) !== null
+              : coPlayRestrictionStore.isRestrictedBetweenProfiles(joinRoomProfileId, otherProfileId)
+          })
+          if (restricted) {
+            safeSendToConnection(connection.id, { type: 'error', ...PRIVATE_ROOM_CO_PLAY_REJECTION })
+            return
+          }
+        }
+
         const result = handleJoinRoom(
           serverState,
           connection.id,
@@ -29364,6 +29592,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           humanTurnTimeoutMs: message.humanTurnTimeoutMs,
           invitePartner: message.invitePartner === true,
           voiceTableId,
+          coPlayAccountId: coPlayAccountIdByConnection.get(connection.id) ?? null,
         })
 
         if (!createResult.ok) {
@@ -29471,6 +29700,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           team: message.team,
           slotIndex: message.slotIndex,
           isBlockedWith: (a, b) => blockStore.isBlocked(a, b),
+          coPlayAccountId: coPlayAccountIdByConnection.get(connection.id) ?? null,
         })
 
         if (!joinResult.ok) {
@@ -29829,10 +30059,19 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
 
         const hostPublicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
         const busyFriends: Array<{ displayName: string }> = []
+        // „Забрана за съвместна игра“ — поканата към акаунт с активна забрана
+        // спрямо седнал на масата не се създава (без името в известието).
+        const coPlayInviteRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
+        let coPlayInviteRejected = false
 
         for (const toProfile of message.toProfiles) {
           if (isProfileInActiveGame(toProfile.profileId)) {
             busyFriends.push({ displayName: toProfile.displayName })
+            continue
+          }
+
+          if (coPlayInviteRoom !== null && isProfileCoPlayRestrictedWithPrivateRoom(coPlayInviteRoom, toProfile.profileId)) {
+            coPlayInviteRejected = true
             continue
           }
 
@@ -29866,6 +30105,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
 
         if (busyFriends.length > 0) {
           safeSendToConnection(connection.id, { type: 'private_room_friend_busy', busyFriends })
+        }
+        if (coPlayInviteRejected) {
+          safeSendToConnection(connection.id, { type: 'error', message: CO_PLAY_PRIVATE_ROOM_INVITE_MESSAGE, code: 'co_play_restricted' })
         }
 
         const updatedRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
@@ -29929,6 +30171,13 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         }
         if (isProfileBusyForPrivateRoomPartnerInvite(message.toProfileId)) {
           rejectPartnerInvite(`${toProfile.displayName} в момента играе.`)
+          return
+        }
+        // „Забрана за съвместна игра“ — поканата не се създава (приемането
+        // проверява отново в store-а).
+        const coPlayPartnerRoom = privateRoomsStore.getRoomByConnectionId(connection.id)
+        if (coPlayPartnerRoom !== null && isProfileCoPlayRestrictedWithPrivateRoom(coPlayPartnerRoom, message.toProfileId)) {
+          safeSendToConnection(connection.id, { type: 'error', message: CO_PLAY_PRIVATE_ROOM_INVITE_MESSAGE, code: 'co_play_restricted' })
           return
         }
         // Същите правила за допустимост като join/accept
@@ -30037,6 +30286,22 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         if (publicProfile === null) {
           safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
           return
+        }
+
+        // „Забрана за съвместна игра“ — повторна проверка при приемане (съставът
+        // може да се е променил). Отказ без промяна на масата и на поканата.
+        if (message.accept) {
+          const invitedRoom = privateRoomsStore.listRooms().find((room) =>
+            room.pendingInvites.some((invite) => invite.inviteId === message.inviteId && invite.toProfileId === latestConnection.profileId),
+          )
+          if (invitedRoom !== undefined && isCoPlayRestrictedWithPrivateRoom(invitedRoom, {
+            connectionId: connection.id,
+            profileId: latestConnection.profileId,
+            accountId: null,
+          })) {
+            safeSendToConnection(connection.id, { type: 'error', ...PRIVATE_ROOM_CO_PLAY_REJECTION })
+            return
+          }
         }
 
         const respondResult = privateRoomsStore.respondToInvite({
