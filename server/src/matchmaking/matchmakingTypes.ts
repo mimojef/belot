@@ -39,6 +39,10 @@ export type MatchmakingQueueEntry = {
   // показва прогрес пръстенът продължителността на конкретната маса.
   waitDurationMs: number
   status: MatchmakingStatus
+  // „Забрана за съвместна игра“ — accountId от сървърната сесия на връзката
+  // (никога от клиента). Само за проверките за съвместна игра; null/липсва —
+  // без акаунт (гост) или запис, създаден без него. Не участва в matchmaking.
+  coPlayAccountId?: string | null
 }
 
 export type PendingMatchedHuman = {

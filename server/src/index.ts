@@ -22,6 +22,8 @@ import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant, type Privat
 import { createLudoRoomMatchStore, type LudoRoomMatchOccupant, type LudoRoomMatchRecord } from './db/ludoRoomMatchStore.js'
 import { logLudoDiagnosticEvent } from './diagnostics/ludoDiagnosticsLog.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
+import { createCoPlayRestrictionStore } from './db/coPlayRestrictionStore.js'
+import { createCoPlayRestrictionAdminHttpRequestHandler } from './coPlayRestrictions/coPlayRestrictionAdminHttpApi.js'
 import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
 import { createProfileDeletionRequestStore, type ProfileDeletionVisibilityEvent } from './db/profileDeletionRequestStore.js'
 import type { PersistedActiveGameEvidence } from './db/profileDeletionParticipationChecks.js'
@@ -1285,6 +1287,10 @@ const adCampaignsStore = await createAdCampaignsStore(
   databaseBootstrap.databaseFilePath,
 )
 const profileBanStore = await createProfileBanStore(databaseBootstrap.databaseFilePath)
+// „Забрана за съвместна игра“ (Етап 1) — store + кеш в паметта; при старт
+// зарежда глобалния флаг и незатворените забрани. Етап 1: само администрация
+// (още не се прилага в случайните/частните маси и турнирите).
+const coPlayRestrictionStore = await createCoPlayRestrictionStore(databaseBootstrap.databaseFilePath)
 // Аватар/снимка от галерията, която още се реферира от жив ред, не се трие
 // физически (виж deleteUploadFileByUrl по-долу).
 const profileUploadReferenceReader = await createProfileUploadReferenceReader(databaseBootstrap.databaseFilePath)
@@ -5238,6 +5244,10 @@ const SVARA_OTHER_GAME_ADMISSION_TYPES: ReadonlySet<ClientMessage['type']> = new
   'create_ludo_room', 'join_ludo_room',
 ])
 const guestIdByConnection = new Map<ConnectionId, string>()
+// „Забрана за съвместна игра“ — accountId от автентикираната сесия при WS
+// connect (никога от клиента); profileId на връзката не се сменя след това.
+// Само за проверките за съвместна игра, без SQL в честите пътища.
+const coPlayAccountIdByConnection = new Map<ConnectionId, string>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
 
 const inProcessActiveRoomRuntime =
@@ -8486,6 +8496,113 @@ function removeProfileFromMatchmakingForConflict(
   }
 }
 
+// ─── „Забрана за съвместна игра“ — случайни маси (Етап 2) ─────────────────
+// Само памет: accountId е от сесията на връзката (coPlayAccountIdByConnection)
+// или от записа в опашката; проверката е през кеша на coPlayRestrictionStore.
+// При изключен флаг или без активни забрани нищо не се прави.
+
+const CO_PLAY_RESTRICTED_MATCHMAKING_MESSAGE =
+  'В тази чакалня има играч, с когото нямате право да участвате на обща маса поради наложено административно наказание.'
+const CO_PLAY_REMOVED_FROM_MATCHMAKING_MESSAGE =
+  'Участието ви в чакалнята беше прекратено: в нея има играч, с когото нямате право да участвате на обща маса поради наложено административно наказание. Ако залогът е бил удържан, той е възстановен.'
+
+function getQueueEntryCoPlayAccountId(entry: MatchmakingQueueEntry): string | null {
+  return entry.coPlayAccountId ?? coPlayAccountIdByConnection.get(entry.connectionId) ?? null
+}
+
+/**
+ * Отказ за влизане в чакалнята за `stake`, ако в нея чака акаунт с активна
+ * забрана спрямо акаунта на връзката. Вика се ПРЕДИ всяка промяна (опашка,
+ * залог, таймер). Съществуващото участие на друг залог се запазва.
+ */
+function sendCoPlayMatchmakingBlockedIfNeeded(connectionId: ConnectionId, stake: MatchStake): boolean {
+  if (!coPlayRestrictionStore.isEnforcementActive()) return false
+  const accountId = coPlayAccountIdByConnection.get(connectionId) ?? null
+  if (accountId === null) return false
+  const conflict = getSearchingEntriesByStake(matchmakingState.queueEntries, stake).some((entry) =>
+    entry.connectionId !== connectionId &&
+    coPlayRestrictionStore.getEnforcedRestrictionIdBetweenAccounts(accountId, getQueueEntryCoPlayAccountId(entry)) !== null,
+  )
+  if (!conflict) return false
+  const existingEntry = getQueueEntryByConnectionId(matchmakingState.queueEntries, connectionId)
+  // Клиентът вече е минал на екрана за търсене -> обратно в лобито, освен ако
+  // играчът чака на друг залог (тогава екранът му се връща към него).
+  if (existingEntry === null) safeSendToConnection(connectionId, { type: 'matchmaking_left', removed: false })
+  safeSendToConnection(connectionId, { type: 'error', message: CO_PLAY_RESTRICTED_MATCHMAKING_MESSAGE, code: 'co_play_restricted' })
+  if (existingEntry !== null) sendMatchmakingStatusToConnection(connectionId, existingEntry.stake)
+  return true
+}
+
+/** По-късно влезлите (entries са подредени по joinedAt), които имат активна забрана с вече запазен участник. */
+function findLaterCoPlayConflictEntries(
+  entriesSortedByJoin: readonly MatchmakingQueueEntry[],
+): Array<{ entry: MatchmakingQueueEntry; restrictionId: string }> {
+  const kept: MatchmakingQueueEntry[] = []
+  const conflicted: Array<{ entry: MatchmakingQueueEntry; restrictionId: string }> = []
+  for (const entry of entriesSortedByJoin) {
+    const accountId = getQueueEntryCoPlayAccountId(entry)
+    let restrictionId: string | null = null
+    if (accountId !== null) {
+      for (const keptEntry of kept) {
+        restrictionId = coPlayRestrictionStore.getEnforcedRestrictionIdBetweenAccounts(accountId, getQueueEntryCoPlayAccountId(keptEntry))
+        if (restrictionId !== null) break
+      }
+    }
+    if (restrictionId !== null) conflicted.push({ entry, restrictionId })
+    else kept.push(entry)
+  }
+  return conflicted
+}
+
+/** Маха записа през съществуващия път (еднократно връщане на платен залог) + известие + одит. */
+function removeCoPlayConflictedQueueEntry(
+  entry: MatchmakingQueueEntry,
+  restrictionId: string,
+  trigger: 'restriction_imposed' | 'flag_enabled' | 'pre_start',
+  actorProfileId: string | null,
+): boolean {
+  const stakeWasPaid = entry.stakePaid
+  if (!removeConnectionFromMatchmaking(entry.connectionId)) return false
+  console.warn(`[co-play] removed from matchmaking stake=${entry.stake} trigger=${trigger}`)
+  safeSendToConnection(entry.connectionId, { type: 'matchmaking_left', removed: true })
+  safeSendToConnection(entry.connectionId, { type: 'error', message: CO_PLAY_REMOVED_FROM_MATCHMAKING_MESSAGE, code: 'co_play_restricted' })
+  try {
+    coPlayRestrictionStore.recordEnforcementAudit({
+      restrictionId,
+      actorProfileId,
+      details: {
+        context: 'matchmaking',
+        trigger,
+        stake: entry.stake,
+        profileId: entry.profileId,
+        accountId: getQueueEntryCoPlayAccountId(entry),
+        stakeRefunded: stakeWasPaid,
+      },
+    })
+  } catch (error) {
+    console.error('[co-play] enforcement audit failed', error instanceof Error ? error.message : String(error))
+  }
+  return true
+}
+
+/**
+ * Налагане на забрана / включване на флага: във всяка случайна чакалня
+ * по-късно влезлият от ограничена двойка излиза (залогът се връща). Най-рано
+ * влезлият остава, затова таймерът на масата не се мести.
+ */
+function resolveCoPlayConflictsInMatchmaking(trigger: 'restriction_imposed' | 'flag_enabled', actorProfileId: string | null): number {
+  if (!coPlayRestrictionStore.isEnforcementActive()) return 0
+  let removed = 0
+  for (const stake of SUPPORTED_MATCH_STAKES) {
+    const entries = getSearchingEntriesByStake(matchmakingState.queueEntries, stake).sort((a, b) => a.joinedAt - b.joinedAt)
+    if (entries.length < 2) continue
+    for (const { entry, restrictionId } of findLaterCoPlayConflictEntries(entries)) {
+      if (removeCoPlayConflictedQueueEntry(entry, restrictionId, trigger, actorProfileId)) removed += 1
+    }
+  }
+  return removed
+}
+
 /**
  * Непосредствено преди старт на частна маса (ръчен и автоматичен): членовете
  * в друг активен мач се връщат за освобождаване на мястото; останалите губят
@@ -9354,6 +9471,23 @@ function processMatchmakingUnsafe(): void {
         }
       }
       continue
+    }
+
+    // „Забрана за съвместна игра“ — финална проверка на всички двойки в
+    // групата (само памет; при изключен флаг/без забрани — нищо). По-късно
+    // влезлият от ограничена двойка излиза (залогът се връща), групата не се
+    // създава и опашката се преизчислява — както при конфликтите по-горе.
+    if (coPlayRestrictionStore.isEnforcementActive()) {
+      const coPlayConflicts = findLaterCoPlayConflictEntries(
+        [...result.group.matchedHumans].sort((a, b) => a.joinedAt - b.joinedAt),
+      )
+      if (coPlayConflicts.length > 0) {
+        cleanupTempBotsFromRoom(result.room)
+        for (const { entry, restrictionId } of coPlayConflicts) {
+          removeCoPlayConflictedQueueEntry(entry, restrictionId, 'pre_start', null)
+        }
+        continue
+      }
     }
 
     activityCounters.incrementRooms('matchmakingMatchFound')
@@ -21917,6 +22051,26 @@ const handleAdminVoiceChatRequest = createVoiceChatAdminRequestHandler({
   getRuntimeStats: () => voiceChatService.stats() as unknown as Record<string, unknown>,
   getMonitoring: voiceAdminMonitoring,
 })
+// „Забрана за съвместна игра“ — административно API (само role=admin).
+const handleCoPlayRestrictionAdminRequest = createCoPlayRestrictionAdminHttpRequestHandler({
+  store: coPlayRestrictionStore,
+  getSessionActor: (req) => {
+    const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+    const profileId = session?.profile?.profileId ?? null
+    return session === null || profileId === null ? null : { profileId, accountRole: session.account.role ?? null }
+  },
+  isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),
+  readJsonBody: (req) => readJsonRequestBody(req),
+  // Етап 2: налагане при общо чакане / включване на флага при вече
+  // съществуващ конфликт — по-късно влезлият излиза от случайната чакалня.
+  // При изключен флаг resolveCoPlayConflictsInMatchmaking не прави нищо.
+  onRestrictionImposed: ({ actorProfileId }) => {
+    resolveCoPlayConflictsInMatchmaking('restriction_imposed', actorProfileId)
+  },
+  onEnabledChanged: ({ enabled, actorProfileId }) => {
+    if (enabled) resolveCoPlayConflictsInMatchmaking('flag_enabled', actorProfileId)
+  },
+})
 // Гласов чат (Етап 2б) — HTTPS: токени и повишаване на правата (никога WS).
 const handleVoiceChatApiRequest = createVoiceChatHttpRequestHandler({
   service: voiceChatService,
@@ -25554,6 +25708,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleCoPlayRestrictionAdminRequest(req, res, requestUrl.pathname, requestUrl.searchParams)) {
+    return
+  }
+
   if (await handleAdminProfileHardDeleteRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -26192,6 +26350,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
 
   serverState = upsertServerConnection(serverState, connection)
   socketRegistry.set(connection.id, socket)
+  if (authSession !== null && authSession.profile.profileId !== null) {
+    coPlayAccountIdByConnection.set(connection.id, authSession.account.accountId)
+  }
   svaraLobby.attachConnection(connection.id, {
     profileId: connection.profileId,
     getSession: () => {
@@ -27877,6 +28038,16 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           return
         }
 
+        // „Забрана за съвместна игра“ — ПРЕДИ всяка промяна на опашката,
+        // залога, таймера или участието на друг залог (само памет). Повторното
+        // влизане в СЪЩИЯ залог минава по обичайния път.
+        if (
+          getQueueEntryByConnectionId(matchmakingState.queueEntries, connection.id)?.stake !== message.stake &&
+          sendCoPlayMatchmakingBlockedIfNeeded(connection.id, message.stake)
+        ) {
+          return
+        }
+
         if (!matchEconomyStore.hasEnoughBalance(profileId, message.stake)) {
           const existingEntry = getQueueEntryByConnectionId(
             matchmakingState.queueEntries,
@@ -27944,7 +28115,8 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           removeConnectionFromMatchmaking(connection.id)
         }
 
-        const nextEntry = createMatchmakingQueueEntry({
+        const nextEntry: MatchmakingQueueEntry = {
+          ...createMatchmakingQueueEntry({
           connectionId: connection.id,
           playerId: stablePlayerConnection.playerId ?? stablePlayerConnection.id,
           profileId,
@@ -27957,7 +28129,10 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           // текущата настройка.
           tableTimer: getSharedTableTimer(matchmakingState.queueEntries, message.stake),
           waitMs: getNewRandomTableWaitMs(message.stake),
-        })
+          }),
+          // accountId само от сървърната сесия на връзката (за забраните за съвместна игра).
+          coPlayAccountId: coPlayAccountIdByConnection.get(connection.id) ?? null,
+        }
 
         matchmakingState = {
           ...matchmakingState,
@@ -30857,6 +31032,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     }
 
     guestIdByConnection.delete(connection.id)
+    coPlayAccountIdByConnection.delete(connection.id)
     lobbyChatSubscriberConnectionIds.delete(connection.id)
     adCampaignManagementSubscriberConnectionIds.delete(connection.id)
     topicsDirectorySubscriberConnectionIds.delete(connection.id)
