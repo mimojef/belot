@@ -5537,6 +5537,8 @@ function recordPrivateRoomMatchStarted(privateRoom: PrivateRoom, roomId: string)
     stake: privateRoom.stake,
     teamA: [toOccupant(teamASlots[0]), toOccupant(teamASlots[1])],
     teamB: [toOccupant(teamBSlots[0]), toOccupant(teamBSlots[1])],
+    // Същото правило като „Чакащи“ (buildPrivateRoomSnapshot): маса с гласов чат.
+    voiceEnabled: privateRoom.voiceTableId !== null,
   })
 }
 
@@ -5551,6 +5553,7 @@ function privateRoomMatchRecordToSnapshot(record: PrivateRoomMatchRecord): Priva
     teamBScore: record.teamBScore ?? 0,
     startedAt: Date.parse(dbDateToUtc(record.startedAt)),
     finishedAt: record.finishedAt !== null ? Date.parse(dbDateToUtc(record.finishedAt)) : null,
+    voiceEnabled: record.voiceEnabled,
   }
 }
 

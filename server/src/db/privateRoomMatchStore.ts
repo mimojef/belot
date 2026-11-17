@@ -27,6 +27,8 @@ export type PrivateRoomMatchRecord = {
   teamBScore: number | null
   startedAt: string
   finishedAt: string | null
+  /** Масата е създадена с гласов чат (същото правило като „Чакащи“). false и при стари записи без стойност. */
+  voiceEnabled: boolean
 }
 
 export type PrivateRoomMatchStore = {
@@ -36,6 +38,8 @@ export type PrivateRoomMatchStore = {
     stake: number
     teamA: [PrivateRoomMatchOccupant, PrivateRoomMatchOccupant]
     teamB: [PrivateRoomMatchOccupant, PrivateRoomMatchOccupant]
+    /** Липсва -> NULL („неизвестно“, без индикатор). */
+    voiceEnabled?: boolean
   }) => void
   recordMatchScoreUpdate: (roomId: string, teamAScore: number, teamBScore: number) => void
   recordMatchFinished: (roomId: string, teamAScore: number, teamBScore: number) => void
@@ -68,6 +72,7 @@ type PrivateRoomMatchRow = {
   team_b_score: number | null
   started_at: string
   finished_at: string | null
+  voice_enabled: number | null
 }
 
 function rowToRecord(row: PrivateRoomMatchRow): PrivateRoomMatchRecord {
@@ -82,6 +87,8 @@ function rowToRecord(row: PrivateRoomMatchRow): PrivateRoomMatchRecord {
     teamBScore: row.team_b_score,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    // NULL (стари записи) -> без индикатор.
+    voiceEnabled: row.voice_enabled === 1,
   }
 }
 
@@ -99,8 +106,8 @@ export async function createPrivateRoomMatchStore(
 
   const insertMatchStatement = database.prepare(`
     INSERT INTO private_room_matches (
-      room_id, private_room_id, status, stake, team_a_json, team_b_json
-    ) VALUES (?, ?, 'playing', ?, ?, ?)
+      room_id, private_room_id, status, stake, team_a_json, team_b_json, voice_enabled
+    ) VALUES (?, ?, 'playing', ?, ?, ?, ?)
     ON CONFLICT(room_id) DO NOTHING;
   `)
 
@@ -121,7 +128,7 @@ export async function createPrivateRoomMatchStore(
 
   const listPlayingStatement = database.prepare(`
     SELECT room_id, private_room_id, status, stake, team_a_json, team_b_json,
-           team_a_score, team_b_score, started_at, finished_at
+           team_a_score, team_b_score, started_at, finished_at, voice_enabled
     FROM private_room_matches
     WHERE status = 'playing'
     ORDER BY started_at DESC;
@@ -137,7 +144,7 @@ export async function createPrivateRoomMatchStore(
     // никога от client input, safe за string interpolation тук.
     const statement = database.prepare(`
       SELECT room_id, private_room_id, status, stake, team_a_json, team_b_json,
-             team_a_score, team_b_score, started_at, finished_at
+             team_a_score, team_b_score, started_at, finished_at, voice_enabled
       FROM private_room_matches
       WHERE status = 'finished' AND finished_at >= datetime('now', '-${visibilityHours} hours')
       ORDER BY finished_at DESC;
@@ -148,7 +155,7 @@ export async function createPrivateRoomMatchStore(
 
   const getMatchStatement = database.prepare(`
     SELECT room_id, private_room_id, status, stake, team_a_json, team_b_json,
-           team_a_score, team_b_score, started_at, finished_at
+           team_a_score, team_b_score, started_at, finished_at, voice_enabled
     FROM private_room_matches
     WHERE room_id = ?;
   `)
@@ -164,6 +171,7 @@ export async function createPrivateRoomMatchStore(
     stake: number
     teamA: [PrivateRoomMatchOccupant, PrivateRoomMatchOccupant]
     teamB: [PrivateRoomMatchOccupant, PrivateRoomMatchOccupant]
+    voiceEnabled?: boolean
   }): void {
     insertMatchStatement.run(
       input.roomId,
@@ -171,6 +179,7 @@ export async function createPrivateRoomMatchStore(
       input.stake,
       JSON.stringify(input.teamA),
       JSON.stringify(input.teamB),
+      input.voiceEnabled === undefined ? null : input.voiceEnabled ? 1 : 0,
     )
   }
 

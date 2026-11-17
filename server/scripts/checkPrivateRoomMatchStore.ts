@@ -34,6 +34,8 @@ import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant } from '../s
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
 const migrationPath = resolve(serverRoot, 'database/migrations/20260820_001_create_private_room_matches.sql')
+// Индикатор за гласов чат („Играещи“/„Приключили“) — колоната, която store-ът чете.
+const voiceMigrationPath = resolve(serverRoot, 'database/migrations/20261117_003_private_room_match_voice_enabled.sql')
 
 let passed = 0
 let failed = 0
@@ -100,6 +102,7 @@ await withTempDir(async (dir) => {
   const dbFile = join(dir, 'test.sqlite')
   const setupDb = new DatabaseSync(dbFile, { open: true, enableForeignKeyConstraints: true })
   await applyMigrationFile(setupDb, migrationPath)
+  await applyMigrationFile(setupDb, voiceMigrationPath)
   setupDb.close()
 
   const store = await createPrivateRoomMatchStore(dbFile)

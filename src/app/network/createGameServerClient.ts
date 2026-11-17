@@ -2626,6 +2626,8 @@ export type PrivateRoomMatchSnapshot = {
   teamBScore: number
   startedAt: number
   finishedAt: number | null
+  /** Масата е създадена с гласов чат (не че участниците са говорили); липсва/false при стари записи. */
+  voiceEnabled?: boolean
 }
 
 export type PrivateGamesListMessage = {

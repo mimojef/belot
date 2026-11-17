@@ -15046,13 +15046,19 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
     ? `${PRIVATE_ROOMS_LIGHT_META_STYLE}margin-top:3px;`
     : 'font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;'
 
+  // Ред с входната такса + индикаторът за гласов чат (същият като в „Чакащи“;
+  // само при voiceEnabled === true — стари мачове без стойност нямат индикатор).
+  const matchStakeLineHtml = (game: PrivateRoomMatchSnapshot): string => `
+          <div style="${matchStakeStyle}display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <span>Вход ${formatStake(game.stake)} жълт.</span>
+            ${game.voiceEnabled === true ? renderPrivateRoomListVoiceBadge(light) : ''}
+          </div>`
+
   const playingGameCardHtml = (game: PrivateRoomMatchSnapshot): string => `
     <div style="${matchCardStyle}">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
         <div style="flex:1;min-width:0;">
-          <div style="${matchStakeStyle}">
-            Вход ${formatStake(game.stake)} жълт.
-          </div>
+          ${matchStakeLineHtml(game)}
         </div>
         ${state.belotSpectatingEnabled ? watchBelotRoomButtonHtml(game.roomId) : ''}
       </div>
@@ -15064,9 +15070,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState, light = false): string 
     <div style="${matchCardStyle}">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
         <div style="flex:1;min-width:0;">
-          <div style="${matchStakeStyle}">
-            Вход ${formatStake(game.stake)} жълт.
-          </div>
+          ${matchStakeLineHtml(game)}
         </div>
       </div>
       ${matchTeamsHtml(game)}

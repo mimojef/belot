@@ -226,6 +226,32 @@ async function frames(count = 2): Promise<void> {
     ] } as any)
     await new Promise((resolve) => setTimeout(resolve, 200))
   },
+  /**
+   * „Играещи“/„Приключили“: мач с гласов чат, без гласов чат и стар запис без
+   * стойност (voiceEnabled липсва). Табът се превключва с реалния бутон.
+   */
+  async showGames(tab: 'playing' | 'finished'): Promise<void> {
+    lobby.navigateToPrivateRooms()
+    const person = (name: string, id: string) => ({ profileId: id, displayName: name, avatarUrl: null, isBot: false })
+    const game = (roomId: string, status: 'playing' | 'finished', voiceEnabled: boolean | undefined, stake: number) => ({
+      roomId, status, stake,
+      teamA: [person('Георги', `${roomId}-a1`), person('Мария', `${roomId}-a2`)],
+      teamB: [person('Иван', `${roomId}-b1`), person('Ели', `${roomId}-b2`)],
+      teamAScore: 64, teamBScore: 48,
+      startedAt: Date.now() - 20 * 60_000,
+      finishedAt: status === 'finished' ? Date.now() - 5 * 60_000 : null,
+      ...(voiceEnabled === undefined ? {} : { voiceEnabled }),
+    })
+    lobby.handleServerMessage({
+      type: 'private_games_list',
+      playing: [game('play-voice', 'playing', true, 5000), game('play-plain', 'playing', false, 10000), game('play-legacy', 'playing', undefined, 20000)],
+      finished: [game('fin-voice', 'finished', true, 5000), game('fin-plain', 'finished', false, 10000), game('fin-legacy', 'finished', undefined, 20000)],
+      belotSpectatingEnabled: false,
+    } as any)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    lobbyRoot.querySelector<HTMLButtonElement>(`[data-private-rooms-lifecycle-tab="${tab}"]`)?.click()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  },
   async showWaiting(): Promise<void> {
     snapshot = baseSnapshot('waiting')
     ui ??= createVoiceMobileUi({ voice: fakeVoice, getSeats: () => harnessSeats(true), getOwnVipStatus: () => ownVipStatus, getSpeakPreview: () => null, isPhoneLayout: () => isPhoneLayoutViewport(), onGetVip: record('getVip') })
