@@ -579,6 +579,31 @@ body:has([data-lobby-screen-root="1"][data-mobile-layout="1"] [data-lobby-nav-gu
 }
 
 /*
+ * Мобилната рамка (iOS Safari): модалите, менюто и toast-овете са
+ * position:fixed ВЪТРЕ в root-а, който сам е скрол контейнер
+ * (position:fixed;overflow-y:auto). iOS WebKit композира всеки вложен
+ * скролер в отделен слой — напр. хоризонталния ред бутони във footer-а
+ * ("За Pika.bg", "Общи условия", ...) — докато fixed overlay без собствена
+ * причина за композиране се рисува в слоя на скролираното съдържание на
+ * root-а, т.е. ПОД вложения скролер въпреки z-index 9500. Затова footer-ът
+ * излизаше над "Създай игра" и закриваше бутоните. Header-ът (sticky) и
+ * долната навигация (backdrop-filter) вече имат собствен слой и не страдат.
+ * will-change:opacity дава собствен композитен слой (подреден по z-index),
+ * без да прави елемента containing block за fixed наследниците му (за
+ * разлика от transform:translateZ(0)). Само цялоекранните overlay-и
+ * (position:fixed + inset:0 — backdrop-ите на модалите и на менюто), които
+ * съществуват в DOM само докато са отворени: по един слой с размер на екрана
+ * на отворен прозорец, освободен при затваряне. Toast-ове, долната навигация
+ * и т.н. не се засягат. Само телефонната рамка — desktop не се засяга.
+ */
+[data-lobby-screen-root="1"][data-mobile-layout="1"] [style*="position:fixed"][style*="inset:0"],
+[data-lobby-screen-root="1"][data-mobile-layout="1"] [style*="position:fixed"][style*="inset: 0"],
+[data-lobby-screen-root="1"][data-mobile-layout="1"] [style*="position: fixed"][style*="inset:0"],
+[data-lobby-screen-root="1"][data-mobile-layout="1"] [style*="position: fixed"][style*="inset: 0"] {
+  will-change: opacity;
+}
+
+/*
  * Registration-only password/repeat-password inputs (renderLobbyScreen.ts's
  * auth modal, register mode) — реалният <input> е type="text" (НЕ
  * type="password"), за да не се разпознава от Chrome Password Manager като
