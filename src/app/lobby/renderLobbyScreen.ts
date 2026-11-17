@@ -1086,6 +1086,10 @@ export type LobbyScreenState = {
    * точно това (profileId, messageId) съобщение.
    */
   adminSupportDeleteProfileConfirm: { profileId: string; messageId: string } | null
+  /** Кошчето в „Поддръжка“ — messageId за потвърждение на hard delete (само собственикът). */
+  adminSupportMessageDeleteConfirmId: string | null
+  adminSupportMessageDeleteSubmitting: boolean
+  adminSupportMessageDeleteErrorText: string | null
   adminSupportDeleteProfileSubmitting: boolean
   adminSupportDeleteProfileErrorText: string | null
   /** Admin hard-delete UX/reliability fix (production report) — mirror на deletePopupPendingNotice за support-chat-driven delete flow-а. Виж submitAdminSupportDeleteProfile в createLobbyFlowController.ts. */
@@ -1649,6 +1653,10 @@ export type RenderLobbyScreenOptions = {
   onAdminSupportImageSelect: (profileId: string, file: File) => void
   onAdminSupportImageRemove: (profileId: string) => void
   onAdminSupportReply: (profileId: string, body: string) => void
+  /** Кошчето до собствено admin съобщение в „Поддръжка“ — отваря потвърждението. */
+  onAdminSupportMessageDeleteRequest: (messageId: string) => void
+  onAdminSupportMessageDeleteCancel: () => void
+  onAdminSupportMessageDeleteConfirm: () => void
   onAdminSupportDeleteClick: (profileId: string) => void
   onAdminSupportDeleteCancel: () => void
   onAdminSupportDeleteConfirm: (profileId: string) => void
@@ -13556,22 +13564,28 @@ export function renderSupportMessagesBubbles(
   if (messages.length === 0) {
     return `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:${light ? '#667085' : 'rgba(255,255,255,0.38)'};font-size:14px;font-weight:700;text-align:center;padding:24px;">Все още няма съобщения.<br>Изпрати ни запитване.</div>`
   }
-  return messages.map((msg) => {
+  // Кошче (само admin контекста и само при canDelete от сървъра — собствено
+  // съобщение на собственическия акаунт): същата иконка/стил като в личните
+  // чатове, вдясно извън admin балончето.
+  const hasDeletable = adminDeleteContext !== undefined && messages.some((msg) => msg.canDelete === true)
+  return (hasDeletable ? PERSONAL_CHAT_DELETE_STYLE : '') + messages.map((msg) => {
     const hasBody = msg.body.trim().length > 0
+    const canDeleteOwnMessage = adminDeleteContext !== undefined && msg.isFromAdmin && msg.canDelete === true
     const isRequestMessage = adminDeleteContext?.deletionArchive?.requestMessageId === msg.messageId
     const canDeleteByThisMessage =
       adminDeleteContext !== undefined &&
       adminDeleteContext.deletionArchive === null && // разговорът НЕ е deletion evidence archive (normal-archived е OK — round 4 корекция: "Маркирай като заявка за изтриване" работи и от Архивирани tab-а)
       !msg.isFromAdmin // само user-authored съобщения
     return `
-    <div style="display:flex;flex-direction:column;align-items:${msg.isFromAdmin ? 'flex-start' : 'flex-end'};gap:3px;">
-      <div style="
-        max-width:75%;padding:${hasBody ? '10px 14px' : '8px'};
+    <div data-support-message="${escapeHtml(msg.messageId)}" style="display:flex;flex-direction:column;align-items:${msg.isFromAdmin ? 'flex-start' : 'flex-end'};gap:3px;">
+      <div${canDeleteOwnMessage ? ' class="pika-chat-own"' : ''} style="
+        ${canDeleteOwnMessage ? 'position:relative;' : ''}max-width:75%;padding:${hasBody ? '10px 14px' : '8px'};
         border-radius:${msg.isFromAdmin ? '4px 14px 14px 14px' : '14px 4px 14px 14px'};
         background:${light ? (msg.isFromAdmin ? '#FFFFFF' : '#EEE9FF') : msg.isFromAdmin ? 'rgba(212,165,32,0.14)' : '#1e1e1e'};
         border:1px solid ${isRequestMessage ? 'rgba(239,68,68,0.55)' : light ? (msg.isFromAdmin ? '#E4E7EC' : '#D9CCFA') : msg.isFromAdmin ? 'rgba(212,165,32,0.30)' : 'rgba(255,255,255,0.10)'};
         color:${light ? '#17233C' : '#f8fafc'};font-size:14px;font-weight:600;line-height:1.55;word-break:break-word;
       ">
+        ${canDeleteOwnMessage ? `<button type="button" class="pika-chat-del" data-admin-support-message-delete="${escapeHtml(msg.messageId)}" aria-label="Изтрий съобщението" title="Изтрий съобщението" style="position:absolute;top:2px;left:calc(100% + 4px);width:30px;height:30px;">${TRASH_ICON_SVG}</button>` : ''}
         ${msg.attachment ? renderChatAttachmentBubble(msg.attachment, apiBaseUrl) : ''}
         ${hasBody ? `<div style="${msg.attachment ? 'margin-top:8px;' : ''}">${renderLinkifiedChatMessageBody(msg.body)}</div>` : ''}
       </div>
@@ -14150,6 +14164,48 @@ function renderSupportDeleteProfileConfirmModal(state: LobbyScreenState): string
   `
 }
 
+// Потвърждение за HARD DELETE на собствено admin съобщение в „Поддръжка“
+// (кошчето — само собственическият акаунт). Изтриването е окончателно и
+// премахва съобщението и при потребителя.
+function renderAdminSupportMessageDeleteConfirmModal(state: LobbyScreenState): string {
+  if (!state.adminSupportMessageDeleteConfirmId) return ''
+  const busy = state.adminSupportMessageDeleteSubmitting
+  return `
+    <div data-admin-support-message-delete-backdrop="1" style="
+      position:fixed;inset:0;z-index:12200;
+      background:rgba(0,0,0,0.72);
+      display:flex;align-items:center;justify-content:center;
+      padding:24px;box-sizing:border-box;
+    ">
+      <div role="dialog" aria-modal="true" aria-labelledby="admin-support-message-delete-title" style="
+        width:min(92vw, 420px);border-radius:12px;
+        background:linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%);
+        border:2px solid rgba(239,68,68,0.55);box-shadow:0 30px 70px rgba(0,0,0,0.5);
+        padding:22px;
+      " onclick="event.stopPropagation()">
+        <div id="admin-support-message-delete-title" style="font-size:18px;font-weight:900;color:#f8fafc;margin-bottom:14px;">Изтриване на съобщение</div>
+        <div style="font-size:14px;color:rgba(226,232,240,0.85);line-height:1.55;margin-bottom:${state.adminSupportMessageDeleteErrorText ? '12px' : '18px'};">
+          Съобщението (заедно с прикачената снимка) ще бъде изтрито окончателно и ще изчезне и при потребителя. Действието не може да бъде отменено.
+        </div>
+        ${state.adminSupportMessageDeleteErrorText ? `
+          <div role="alert" style="font-size:12px;font-weight:800;color:#fca5a5;margin-bottom:14px;">${escapeHtml(state.adminSupportMessageDeleteErrorText)}</div>
+        ` : ''}
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-admin-support-message-delete-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;height:42px;border:1px solid rgba(255,255,255,0.16);border-radius:8px;
+            background:#080808;color:#f8fafc;font-size:14px;font-weight:800;cursor:${busy ? 'default' : 'pointer'};
+          ">Отказ</button>
+          <button type="button" data-admin-support-message-delete-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;height:42px;border:0;border-radius:8px;
+            background:linear-gradient(180deg, rgba(220,38,38,0.92) 0%, rgba(185,28,28,0.95) 100%);
+            color:#fff1f2;font-size:14px;font-weight:900;cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.65' : '1'};
+          ">${busy ? 'Изтриване…' : 'Изтрий завинаги'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 // round 4 корекция — header action бутон в detail панела: "Архивирай"
 // (active tab, non-deletion-archived) / "Върни в активни" (archived tab,
 // non-deletion-archived) / нищо (deletion evidence archive — нито едното
@@ -14473,7 +14529,7 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
           </div>
           ${replyFormHtml}
         </section>
-        ${renderSupportDeleteProfileConfirmModal(state)}
+        ${renderSupportDeleteProfileConfirmModal(state)}${renderAdminSupportMessageDeleteConfirmModal(state)}
       `
     }
 
@@ -14485,7 +14541,7 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
           ${convListHtml}
         </div>
       </section>
-      ${renderSupportDeleteProfileConfirmModal(state)}
+      ${renderSupportDeleteProfileConfirmModal(state)}${renderAdminSupportMessageDeleteConfirmModal(state)}
     `
   }
 
@@ -14513,7 +14569,7 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
         </div>
       </div>
     </section>
-    ${renderSupportDeleteProfileConfirmModal(state)}
+    ${renderSupportDeleteProfileConfirmModal(state)}${renderAdminSupportMessageDeleteConfirmModal(state)}
   `
 }
 
@@ -22795,6 +22851,21 @@ export function renderLobbyScreen(
       if (profileId && messageId) options.onAdminSupportDeleteProfileClick(profileId, messageId)
     })
   })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-support-message-delete]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const messageId = btn.dataset.adminSupportMessageDelete?.trim() ?? ''
+      if (messageId) options.onAdminSupportMessageDeleteRequest(messageId)
+    })
+  })
+  root.querySelector<HTMLButtonElement>('[data-admin-support-message-delete-cancel="1"]')
+    ?.addEventListener('click', () => options.onAdminSupportMessageDeleteCancel())
+  root.querySelector<HTMLDivElement>('[data-admin-support-message-delete-backdrop="1"]')
+    ?.addEventListener('click', () => options.onAdminSupportMessageDeleteCancel())
+  root.querySelector<HTMLButtonElement>('[data-admin-support-message-delete-confirm="1"]')
+    ?.addEventListener('click', () => options.onAdminSupportMessageDeleteConfirm())
 
   root.querySelector<HTMLButtonElement>('[data-admin-support-delete-profile-confirm-cancel="1"]')
     ?.addEventListener('click', () => options.onAdminSupportDeleteProfileCancel())

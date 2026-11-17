@@ -325,7 +325,7 @@ import {
   isVipPackageId,
   type VipPackageId,
 } from './db/vipPurchaseStore.js'
-import { getConfiguredOfficialPikaProfileId, normalizeProfileSearchTerm, OFFICIAL_PIKA_PROFILE_ID } from './db/normalizeProfileIdentityText.js'
+import { getConfiguredOfficialPikaProfileId, getConfiguredPikaOwnerAccountId, normalizeProfileSearchTerm, OFFICIAL_PIKA_PROFILE_ID } from './db/normalizeProfileIdentityText.js'
 import {
   computePlayersPageOrder,
   generatePlayersPageSeed,
@@ -4273,6 +4273,20 @@ const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath
     return pending !== null && pending.action === 'delete' && pending.supportRequestMessageId !== null
   },
 })
+// „Поддръжка“ — собственическият акаунт (PIKA_OWNER_ACCOUNT_ID): приписване на
+// admin съобщенията отпреди въвеждането на автора. Fail-closed: липсващ/
+// невалиден env или несъществуващ/не-admin акаунт → нищо не се приписва.
+{
+  const ownerAccountId = getConfiguredPikaOwnerAccountId()
+  if (ownerAccountId === null) {
+    if ((process.env.PIKA_OWNER_ACCOUNT_ID ?? '').trim().length > 0) {
+      console.warn('[support] PIKA_OWNER_ACCOUNT_ID is not a valid UUID — own-message delete disabled, no backfill')
+    }
+  } else {
+    const attributed = supportStore.backfillLegacyAdminSenders(ownerAccountId)
+    if (attributed > 0) console.log(`[support] attributed ${attributed} legacy admin message(s) to the owner account`)
+  }
+}
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
 const guestTrialStore = await createGuestTrialStore(databaseBootstrap.databaseFilePath)
 const siteVisitStore = await createSiteVisitStore(databaseBootstrap.databaseFilePath)
@@ -9039,6 +9053,34 @@ function deleteProfileConnections(profileId: string, reason: string): void {
  * management events, тук няма нужда от explicit subscribe/unsubscribe —
  * клиентският guard вече върши същата работа locally).
  */
+/**
+ * „Поддръжка“ — собственикът е изтрил свое съобщение: потребителят на
+ * разговора (всички негови табове) го маха от отворения прозорец и опреснява
+ * брояча; пълните admin-и — от отворения разговор и списъка. Payload-ът е
+ * само { profileId, messageId } — без информация за автора.
+ */
+function broadcastSupportMessageDeleted(profileId: string, messageId: string): void {
+  const payload = { type: 'support_message_deleted', profileId, messageId }
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId === null) continue
+    if (conn.profileId === profileId || authStore.getAccountRoleForProfile(conn.profileId) === 'admin') {
+      safeSendToConnection(conn.id, payload)
+    }
+  }
+}
+
+/** Собственическият акаунт (PIKA_OWNER_ACCOUNT_ID) с пълна admin роля. */
+function isSupportOwnerSession(session: AuthSessionSnapshot | null): session is AuthSessionSnapshot {
+  const ownerAccountId = getConfiguredPikaOwnerAccountId()
+  return isFullAdminSession(session)
+    && ownerAccountId !== null
+    && session.account.accountId.toLowerCase() === ownerAccountId
+}
+
+function getSupportOwnerAccountIdForSession(session: AuthSessionSnapshot | null): string | null {
+  return isSupportOwnerSession(session) ? session.account.accountId.toLowerCase() : null
+}
+
 function broadcastAdminAggregateDataChangedToAdminConnections(excludeSessionId: string | null): void {
   for (const conn of Object.values(serverState.connections)) {
     if (conn.profileId === null) continue
@@ -25645,7 +25687,7 @@ async function handleSupportRequest(
       return true
     }
     const profileId = pathname.replace('/api/support/admin/messages/', '')
-    const messages = supportStore.getMessages(profileId)
+    const messages = supportStore.getMessagesForAdmin(profileId, getSupportOwnerAccountIdForSession(session))
     supportStore.markReadByAdmin(profileId)
     sendJsonResponse(res, 200, { ok: true, messages })
     return true
@@ -25691,7 +25733,7 @@ async function handleSupportRequest(
 
     let message: SupportMessageSnapshot | null
     try {
-      message = supportStore.sendAdminReply(profileId, text, upload.attachmentInput)
+      message = supportStore.sendAdminReply(profileId, text, upload.attachmentInput, session.account.accountId.toLowerCase())
     } catch (error) {
       if (upload.writtenAttachmentFilename !== null) {
         await trackHttpWait('io', deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename))
@@ -25715,8 +25757,38 @@ async function handleSupportRequest(
       return true
     }
     activityCounters.incrementChat('officialSupportMessages')
-    const messages = supportStore.getMessages(profileId)
+    const messages = supportStore.getMessagesForAdmin(profileId, getSupportOwnerAccountIdForSession(session))
     sendJsonResponse(res, 200, { ok: true, message, messages })
+    return true
+  }
+
+  // DELETE /api/support/admin/messages/:messageId — HARD DELETE на собствено
+  // admin съобщение. САМО собственическият акаунт (PIKA_OWNER_ACCOUNT_ID +
+  // role admin); store-ът проверява и авторството (sender_account_id).
+  if (pathname.startsWith('/api/support/admin/messages/') && req.method === 'DELETE') {
+    if (!isSupportOwnerSession(session)) {
+      sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+      return true
+    }
+    const messageId = decodeURIComponent(pathname.replace('/api/support/admin/messages/', '')).trim()
+    if (!messageId || messageId.includes('/')) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно съобщение.' })
+      return true
+    }
+    const result = supportStore.deleteOwnAdminMessage(messageId, session.account.accountId.toLowerCase())
+    if (!result.ok) {
+      const status = result.reason === 'not_found' ? 404 : result.reason === 'deletion_archive' ? 409 : 403
+      const message = result.reason === 'not_found'
+        ? 'Съобщението не е намерено.'
+        : result.reason === 'deletion_archive'
+          ? 'Разговорът е архивиран като доказателство и е само за четене.'
+          : 'Можеш да изтриваш само собствените си съобщения.'
+      sendJsonResponse(res, status, { ok: false, message })
+      return true
+    }
+    broadcastSupportMessageDeleted(result.profileId, messageId)
+    const messages = supportStore.getMessagesForAdmin(result.profileId, session.account.accountId.toLowerCase())
+    sendJsonResponse(res, 200, { ok: true, profileId: result.profileId, messageId, messages })
     return true
   }
 

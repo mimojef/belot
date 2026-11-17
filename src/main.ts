@@ -5046,6 +5046,27 @@ async function archiveAdminSupportConversation(profileId: string): Promise<{ ok:
   }
 }
 
+// Кошчето в „Поддръжка“ — HARD DELETE на собствено admin съобщение (само
+// собственическият акаунт; сървърът проверява права и авторство).
+async function deleteAdminSupportMessage(messageId: string): Promise<
+  | { ok: true; profileId: string; messages: SupportMessageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/support/admin/messages/${encodeURIComponent(messageId)}`,
+      { method: 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json()) as { ok: boolean; message?: string; profileId?: string; messages?: SupportMessageSnapshot[] }
+    if (!response.ok || !data.ok || typeof data.profileId !== 'string' || !Array.isArray(data.messages)) {
+      return { ok: false, message: data.message ?? 'Съобщението не беше изтрито.' }
+    }
+    return { ok: true, profileId: data.profileId, messages: data.messages }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function unarchiveAdminSupportConversation(profileId: string): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
     const response = await fetch(
@@ -7705,6 +7726,7 @@ lobby = createLobbyFlowController({
   onAdminSupportReply: (profileId, body, imageDataUrl) => sendAdminSupportReply(profileId, body, imageDataUrl),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
   onAdminSupportUnarchiveConversation: (profileId) => unarchiveAdminSupportConversation(profileId),
+  onAdminSupportMessageDelete: (messageId) => deleteAdminSupportMessage(messageId),
   onSupportDeleteConversation: () => deleteUserSupportConversation(),
   initialPrivateRoomInGameNotificationsEnabled: privateRoomInGameNotificationsEnabled,
   onPrivateRoomInGameNotificationsChange: (enabled) => {

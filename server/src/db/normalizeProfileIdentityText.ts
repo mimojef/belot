@@ -61,6 +61,17 @@ function normalizeOptionalUuid(value: string | null | undefined): string | null 
   return UUID_RE.test(trimmed) ? trimmed.toLowerCase() : null
 }
 
+/**
+ * Собственическият акаунт (account_id, UUID) — единственият, който може да
+ * трие собствените си съобщения в „Поддръжка“. Липсващ/невалиден → null
+ * (fail-closed: функцията е изключена за всички, нищо не се приписва).
+ */
+export function getConfiguredPikaOwnerAccountId(
+  value: string | null | undefined = process.env.PIKA_OWNER_ACCOUNT_ID,
+): string | null {
+  return normalizeOptionalUuid(value)
+}
+
 export function getConfiguredOfficialPikaProfileId(
   value: string | null | undefined = process.env.PIKA_OFFICIAL_PROFILE_ID,
 ): string | null {

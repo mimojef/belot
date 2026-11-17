@@ -29,6 +29,23 @@ export type SupportMessageSnapshot = {
   attachment: SupportAttachmentSnapshot | null
 }
 
+/**
+ * Admin изгледът на разговор — snapshot + canDelete. canDelete се изчислява
+ * на сървъра (true само за собственическия акаунт, само върху НЕГОВИ admin
+ * съобщения и не в разговор-доказателство). Авторът (sender_account_id) НЕ
+ * се изпраща към никой клиент.
+ */
+export type AdminSupportMessageSnapshot = SupportMessageSnapshot & {
+  canDelete: boolean
+}
+
+export type DeleteOwnAdminSupportMessageResult =
+  | { ok: true; profileId: string }
+  | { ok: false; reason: 'not_found' | 'forbidden' | 'deletion_archive' }
+
+/** Името на миграцията, след която новите admin съобщения имат автор. */
+export const SUPPORT_SENDER_ACCOUNT_MIGRATION_FILENAME = '20261117_002_support_message_sender_account.sql'
+
 export type SupportConversationSnapshot = {
   profileId: string
   displayName: string
@@ -74,7 +91,31 @@ export type SupportStore = {
    * не различава двата случая по връщаната стойност, вика getDeletionArchive
    * отделно, ако иска specific "профилът е изтрит" съобщение вместо generic 404.
    */
-  sendAdminReply: (profileId: string, body: string, attachment?: NewSupportAttachmentInput | null) => SupportMessageSnapshot | null
+  sendAdminReply: (
+    profileId: string,
+    body: string,
+    attachment?: NewSupportAttachmentInput | null,
+    senderAccountId?: string | null,
+  ) => SupportMessageSnapshot | null
+  /**
+   * Admin изглед: съобщенията + canDelete. ownerAccountId — account_id-то на
+   * собственика САМО когато заявката е от него (иначе null → canDelete false
+   * навсякъде).
+   */
+  getMessagesForAdmin: (profileId: string, ownerAccountId: string | null) => AdminSupportMessageSnapshot[]
+  /**
+   * HARD DELETE на admin съобщение на собственика (текст + прикачен файл —
+   * файлът отива в опашката за физическо изтриване). Не пипа съобщения на
+   * потребителя, чужди admin съобщения и разговори-доказателство.
+   */
+  deleteOwnAdminMessage: (messageId: string, ownerAccountId: string) => DeleteOwnAdminSupportMessageResult
+  /**
+   * Приписва admin съобщенията БЕЗ автор, създадени преди миграцията
+   * SUPPORT_SENDER_ACCOUNT_MIGRATION_FILENAME, на ownerAccountId — само ако
+   * той е съществуващ admin акаунт. Не презаписва установени автори.
+   * Връща броя приписани редове (0 при невалиден акаунт).
+   */
+  backfillLegacyAdminSenders: (ownerAccountId: string) => number
   markReadByUser: (profileId: string) => void
   markReadByAdmin: (profileId: string) => void
   getUnreadCountForUser: (profileId: string) => number
@@ -126,6 +167,7 @@ type SupportMessageRow = {
   created_at: string
   read_by_user: number
   read_by_admin: number
+  sender_account_id: string | null
   attachment_filename: string | null
   attachment_width: number | null
   attachment_height: number | null
@@ -213,9 +255,10 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
       is_from_admin,
       created_at,
       read_by_user,
-      read_by_admin
+      read_by_admin,
+      sender_account_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
   const insertAttachmentStatement = db.prepare(`
@@ -279,6 +322,36 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     FROM support_message_attachments
     WHERE storage_filename = ?
     LIMIT 1
+  `)
+
+  const selectMessageForOwnerDeleteStatement = db.prepare(`
+    SELECT m.profile_id, m.is_from_admin, m.sender_account_id, a.storage_filename
+    FROM support_messages m
+    LEFT JOIN support_message_attachments a ON a.message_id = m.message_id
+    WHERE m.message_id = ?
+    LIMIT 1
+  `)
+
+  const deleteAttachmentByMessageStatement = db.prepare(`
+    DELETE FROM support_message_attachments WHERE message_id = ?
+  `)
+
+  const deleteMessageStatement = db.prepare(`
+    DELETE FROM support_messages WHERE message_id = ?
+  `)
+
+  const selectAdminAccountStatement = db.prepare(`
+    SELECT 1 FROM accounts WHERE account_id = ? AND role = 'admin' LIMIT 1
+  `)
+
+  const backfillLegacyAdminSendersStatement = db.prepare(`
+    UPDATE support_messages
+    SET sender_account_id = ?
+    WHERE is_from_admin = 1
+      AND sender_account_id IS NULL
+      AND julianday(created_at) <= (
+        SELECT julianday(applied_at) FROM server_migrations WHERE filename = ?
+      )
   `)
 
   function runInTransaction<T>(callback: () => T): T {
@@ -356,6 +429,7 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     body: string,
     isFromAdmin: boolean,
     attachment: NewSupportAttachmentInput | null,
+    senderAccountId: string | null = null,
   ): SupportMessageSnapshot {
     const messageId = randomUUID()
     const now = new Date().toISOString()
@@ -368,6 +442,7 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
       now,
       isFromAdmin ? 0 : 1,
       isFromAdmin ? 1 : 0,
+      isFromAdmin ? senderAccountId : null,
     )
 
     if (attachment !== null) {
@@ -440,6 +515,7 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     profileId: string,
     body: string,
     attachment: NewSupportAttachmentInput | null = null,
+    senderAccountId: string | null = null,
   ): SupportMessageSnapshot | null {
     const normalized = normalizeBody(body)
 
@@ -456,7 +532,48 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     // позволявай нови admin съобщения в мъртъв разговор.
     if (getDeletionArchive(profileId) !== null) return null
 
-    return runInTransaction(() => insertMessage(profileId, normalized, true, attachment))
+    return runInTransaction(() => insertMessage(profileId, normalized, true, attachment, senderAccountId))
+  }
+
+  function getMessagesForAdmin(profileId: string, ownerAccountId: string | null): AdminSupportMessageSnapshot[] {
+    const rows = selectMessagesStatement.all(profileId) as SupportMessageRow[]
+    const isEvidenceArchive = getDeletionArchive(profileId) !== null
+    return rows.map((row) => ({
+      ...rowToSnapshot(row),
+      canDelete: ownerAccountId !== null
+        && !isEvidenceArchive
+        && row.is_from_admin === 1
+        && row.sender_account_id === ownerAccountId,
+    }))
+  }
+
+  function deleteOwnAdminMessage(messageId: string, ownerAccountId: string): DeleteOwnAdminSupportMessageResult {
+    return runInTransaction(() => {
+      const row = selectMessageForOwnerDeleteStatement.get(messageId) as
+        | { profile_id: string; is_from_admin: number; sender_account_id: string | null; storage_filename: string | null }
+        | undefined
+      if (!row) return { ok: false, reason: 'not_found' } as const
+      if (row.is_from_admin !== 1 || row.sender_account_id !== ownerAccountId) {
+        return { ok: false, reason: 'forbidden' } as const
+      }
+      // Разговор-доказателство за изтрит профил е само за четене.
+      if (getDeletionArchive(row.profile_id) !== null) return { ok: false, reason: 'deletion_archive' } as const
+
+      // Физическото изтриване на файла е в worker-а (runSupportAttachmentCleanupTick):
+      // той трие файла само ако никой друг запис не сочи към него.
+      if (row.storage_filename !== null) insertAttachmentDeletionStatement.run(row.storage_filename)
+      deleteAttachmentByMessageStatement.run(messageId)
+      deleteMessageStatement.run(messageId)
+      return { ok: true, profileId: row.profile_id } as const
+    })
+  }
+
+  function backfillLegacyAdminSenders(ownerAccountId: string): number {
+    const isAdminAccount = selectAdminAccountStatement.get(ownerAccountId) !== undefined
+    if (!isAdminAccount) return 0
+    // Само редове отпреди миграцията (без миграционен ред → NULL → нищо).
+    const result = backfillLegacyAdminSendersStatement.run(ownerAccountId, SUPPORT_SENDER_ACCOUNT_MIGRATION_FILENAME)
+    return Number(result.changes)
   }
 
   function markReadByUser(profileId: string): void {
@@ -807,6 +924,9 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
 
   return {
     getMessages,
+    getMessagesForAdmin,
+    deleteOwnAdminMessage,
+    backfillLegacyAdminSenders,
     sendUserMessage,
     sendAdminReply,
     markReadByUser,

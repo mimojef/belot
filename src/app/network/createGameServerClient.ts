@@ -446,6 +446,12 @@ export type SupportMessageSnapshot = {
   body: string
   isFromAdmin: boolean
   createdAt: string
+  /**
+   * Само в admin изгледа (GET /api/support/admin/messages/:profileId): true =
+   * собствено съобщение на собственическия акаунт, което може да изтрие.
+   * Авторът на admin съобщенията никога не се изпраща към клиента.
+   */
+  canDelete?: boolean
   attachment: {
     attachmentId: string
     width: number
@@ -3633,6 +3639,7 @@ export type ServerMessage =
   | AdCampaignManagementDispatchedMessage
   | AdCampaignManagementDeletedMessage
   | AdminAggregateDataChangedMessage
+  | SupportMessageDeletedMessage
 
 // --- "Рекламни кампании" (ad campaigns) — delivery push + management realtime sync ---
 
@@ -3698,6 +3705,17 @@ export type AdCampaignManagementDeletedMessage = {
  */
 export type AdminAggregateDataChangedMessage = {
   type: 'admin_aggregate_data_changed'
+}
+
+/**
+ * „Поддръжка“ — собственикът е изтрил (hard delete) свое admin съобщение.
+ * Получават го потребителят на разговора и пълните admin-и (виж
+ * broadcastSupportMessageDeleted в server/src/index.ts). Без данни за автора.
+ */
+export type SupportMessageDeletedMessage = {
+  type: 'support_message_deleted'
+  profileId: string
+  messageId: string
 }
 
 type CreateGameServerClientOptions = {

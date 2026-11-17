@@ -73,7 +73,30 @@ function prepareSupportSchema(database: SqliteDatabase): void {
       is_from_admin INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       read_by_user INTEGER NOT NULL DEFAULT 0,
-      read_by_admin INTEGER NOT NULL DEFAULT 0
+      read_by_admin INTEGER NOT NULL DEFAULT 0,
+      sender_account_id TEXT NULL
+    );
+
+    CREATE TABLE accounts (
+      account_id TEXT PRIMARY KEY,
+      role TEXT NOT NULL DEFAULT 'player'
+    );
+
+    CREATE TABLE server_migrations (
+      filename TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE support_deletion_archives (
+      archive_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      username_snapshot TEXT NOT NULL,
+      display_name_snapshot TEXT NOT NULL,
+      request_message_id TEXT NOT NULL,
+      requested_at TEXT NOT NULL,
+      deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      deleted_by_profile_id TEXT NULL,
+      reason TEXT NOT NULL DEFAULT 'user_request'
     );
 
     CREATE TABLE support_archived (
@@ -213,7 +236,7 @@ async function main(): Promise<void> {
         db.close()
       }
 
-      const store = await createSupportStore(dbPath)
+      const store = await createSupportStore(dbPath, { hasPendingSupportRequestDelete: () => false })
       const userImage = makeAttachment('11111111-1111-4111-8111-111111111111.webp')
       const adminImage = makeAttachment('22222222-2222-4222-8222-222222222222.webp')
       const userMessage = store.sendUserMessage('user-profile', '', userImage)

@@ -1132,6 +1132,11 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onAdminSupportDeleteConversation?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  /** HARD DELETE на собствено admin съобщение в „Поддръжка“ (само собственическият акаунт). */
+  onAdminSupportMessageDelete?: (messageId: string) => Promise<
+    | { ok: true; profileId: string; messages: SupportMessageSnapshot[] }
+    | { ok: false; message: string }
+  >
   /** "Върни в активни" — маха normal archive marker-а (support_archived), не пипа съобщения. */
   onAdminSupportUnarchiveConversation?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
@@ -2571,6 +2576,9 @@ type InternalLobbyFlowState = {
    * generic profile-popup delete dialog. Виж onAdminSupportDeleteProfileClick.
    */
   adminSupportDeleteProfileConfirm: { profileId: string; messageId: string } | null
+  adminSupportMessageDeleteConfirmId: string | null
+  adminSupportMessageDeleteSubmitting: boolean
+  adminSupportMessageDeleteErrorText: string | null
   adminSupportDeleteProfileSubmitting: boolean
   adminSupportDeleteProfileErrorText: string | null
   /**
@@ -3303,6 +3311,9 @@ function createInitialState(): InternalLobbyFlowState {
     adminSupportDeleteConfirmProfileId: null,
     adminSupportDeleteLoading: false,
     adminSupportDeleteProfileConfirm: null,
+    adminSupportMessageDeleteConfirmId: null,
+    adminSupportMessageDeleteSubmitting: false,
+    adminSupportMessageDeleteErrorText: null,
     adminSupportDeleteProfileSubmitting: false,
     adminSupportDeleteProfileErrorText: null,
     adminSupportDeleteProfilePendingNotice: null,
@@ -6189,6 +6200,9 @@ export function createLobbyFlowController(
       adminSupportDeleteConfirmProfileId: state.adminSupportDeleteConfirmProfileId,
       adminSupportDeleteLoading: state.adminSupportDeleteLoading,
       adminSupportDeleteProfileConfirm: state.adminSupportDeleteProfileConfirm,
+      adminSupportMessageDeleteConfirmId: state.adminSupportMessageDeleteConfirmId,
+      adminSupportMessageDeleteSubmitting: state.adminSupportMessageDeleteSubmitting,
+      adminSupportMessageDeleteErrorText: state.adminSupportMessageDeleteErrorText,
       adminSupportDeleteProfileSubmitting: state.adminSupportDeleteProfileSubmitting,
       adminSupportDeleteProfileErrorText: state.adminSupportDeleteProfileErrorText,
       adminSupportDeleteProfilePendingNotice: state.adminSupportDeleteProfilePendingNotice,
@@ -8185,6 +8199,21 @@ export function createLobbyFlowController(
       },
       onAdminSupportDeleteProfileConfirm: () => {
         void submitAdminSupportDeleteProfile()
+      },
+      onAdminSupportMessageDeleteRequest: (messageId) => {
+        if (state.adminSupportMessageDeleteSubmitting) return
+        state.adminSupportMessageDeleteConfirmId = messageId
+        state.adminSupportMessageDeleteErrorText = null
+        render()
+      },
+      onAdminSupportMessageDeleteCancel: () => {
+        if (state.adminSupportMessageDeleteSubmitting) return
+        state.adminSupportMessageDeleteConfirmId = null
+        state.adminSupportMessageDeleteErrorText = null
+        render()
+      },
+      onAdminSupportMessageDeleteConfirm: () => {
+        void submitAdminSupportMessageDelete()
       },
       onAdminSupportReplyDraftChange: (profileId, draft) => {
         state.adminSupportReplyDraftByProfileId = {
@@ -15483,6 +15512,77 @@ export function createLobbyFlowController(
     await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadMatchRooms(), loadAdminBelotVisual()])
   }
 
+  // Кошчето в „Поддръжка“ — HARD DELETE на собствено admin съобщение.
+  // Сървърът е authoritative (права + авторство); след успех заменяме
+  // съобщенията с отговора и презареждаме списъците (последно съобщение).
+  async function submitAdminSupportMessageDelete(): Promise<void> {
+    const messageId = state.adminSupportMessageDeleteConfirmId
+    if (messageId === null || state.adminSupportMessageDeleteSubmitting) return
+    if (!options.onAdminSupportMessageDelete) return
+    state.adminSupportMessageDeleteSubmitting = true
+    state.adminSupportMessageDeleteErrorText = null
+    render()
+    const result = await options.onAdminSupportMessageDelete(messageId)
+    state.adminSupportMessageDeleteSubmitting = false
+    if (!result.ok) {
+      state.adminSupportMessageDeleteErrorText = result.message
+      render()
+      return
+    }
+    state.adminSupportMessageDeleteConfirmId = null
+    state.adminSupportMessageDeleteErrorText = null
+    if (state.adminSupportSelectedProfileId === result.profileId) {
+      state.adminSupportMessages = result.messages
+    }
+    render()
+    void reloadAdminSupportListsAfterMessageDelete()
+  }
+
+  async function reloadAdminSupportListsAfterMessageDelete(): Promise<void> {
+    if (options.getAuthSession?.()?.account.role !== 'admin') return
+    if (state.currentScreen !== 'admin' && state.currentScreen !== 'support') return
+    if (!options.onAdminSupportConversationsLoad) return
+    const [active, archived] = await Promise.all([
+      options.onAdminSupportConversationsLoad('active'),
+      options.onAdminSupportConversationsLoad('archived'),
+    ])
+    if (state.currentScreen !== 'admin' && state.currentScreen !== 'support') return
+    if (active.ok) state.adminSupportConversations = active.conversations
+    if (archived.ok) state.adminSupportArchivedConversations = archived.conversations
+    render()
+  }
+
+  // WS support_message_deleted — махаме съобщението от отворения прозорец
+  // (потребител) / разговор (admin). Ако DOM възелът е наличен, го махаме
+  // директно (без пълен render — не губим фокуса в полето за писане); пълен
+  // render само ако разговорът остане празен или възелът липсва.
+  function applySupportMessageDeleted(profileId: string, messageId: string): void {
+    let needsRender = false
+    const removeFrom = (list: SupportMessageSnapshot[]): SupportMessageSnapshot[] | null => {
+      if (!list.some((msg) => msg.messageId === messageId)) return null
+      const next = list.filter((msg) => msg.messageId !== messageId)
+      if (next.length === 0) needsRender = true
+      return next
+    }
+    const nextUser = removeFrom(state.supportMessages)
+    if (nextUser !== null) state.supportMessages = nextUser
+    const nextAdmin = state.adminSupportSelectedProfileId === profileId ? removeFrom(state.adminSupportMessages) : null
+    if (nextAdmin !== null) state.adminSupportMessages = nextAdmin
+    if (state.adminSupportMessageDeleteConfirmId === messageId && !state.adminSupportMessageDeleteSubmitting) {
+      state.adminSupportMessageDeleteConfirmId = null
+      state.adminSupportMessageDeleteErrorText = null
+      needsRender = true
+    }
+    if (nextUser !== null || nextAdmin !== null) {
+      const nodes = options.root.querySelectorAll(`[data-support-message="${selectorEscape(messageId)}"]`)
+      if (nodes.length === 0) needsRender = true
+      nodes.forEach((node) => node.remove())
+    }
+    if (needsRender) render()
+    void refreshSupportUnreadNow()
+    void reloadAdminSupportListsAfterMessageDelete()
+  }
+
   async function loadAdminSupportConversations(): Promise<void> {
     if (state.currentScreen !== 'admin' && state.currentScreen !== 'support') return
     if (!options.onAdminSupportConversationsLoad) return
@@ -22556,6 +22656,11 @@ export function createLobbyFlowController(
       } else {
         render()
       }
+      return true
+    }
+
+    if (message.type === 'support_message_deleted') {
+      applySupportMessageDeleted(message.profileId, message.messageId)
       return true
     }
 
