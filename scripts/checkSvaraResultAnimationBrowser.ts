@@ -53,6 +53,27 @@ try {
         checks.push(label)
       }
       const frame = () => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())))
+      const realWait = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+      // Крайна точка на летящ чип в общата сцена (последният keyframe), спрямо сукното.
+      const chipDestinations = () => Array.from(root.querySelectorAll<HTMLElement>('[data-svara-sprite-kind="chip"][data-moving="1"]')).map((el) => {
+        const frames = el.getAnimations()[0]?.effect instanceof KeyframeEffect ? (el.getAnimations()[0]!.effect as KeyframeEffect).getKeyframes() : []
+        // Последният keyframe = кацането в купчинката на победителя (до аватара му).
+        const m = /translate3d\(\s*([-\d.]+)px,\s*([-\d.]+)px/.exec(String(frames.at(-1)?.transform ?? ''))
+        return m ? { x: Number(m[1]) + el.offsetWidth / 2, y: Number(m[2]) + el.offsetHeight / 2 } : null
+      }).filter((d): d is { x: number; y: number } => d !== null)
+      const avatarCenter = (seat: number) => {
+        const felt = root.querySelector<HTMLElement>('[data-svara-felt]')!.getBoundingClientRect()
+        const r = root.querySelector<HTMLElement>(`[data-svara-avatar="${seat}"]`)!.getBoundingClientRect()
+        return { x: r.left + r.width / 2 - felt.left, y: r.top + r.height / 2 - felt.top }
+      }
+      const near = (a: { x: number; y: number }, b: { x: number; y: number }, tolerance: number) => Math.hypot(a.x - b.x, a.y - b.y) < tolerance
+      // Купчинката на играча е до неговия аватар: най-близкият аватар е получателят.
+      const nearestSeat = (d: { x: number; y: number }) => {
+        const seats = Array.from(root.querySelectorAll<HTMLElement>('[data-svara-avatar]')).map((el) => Number(el.dataset.svaraAvatar))
+        return seats.sort((a, b) => Math.hypot(d.x - avatarCenter(a).x, d.y - avatarCenter(a).y) - Math.hypot(d.x - avatarCenter(b).x, d.y - avatarCenter(b).y))[0]
+      }
+      const facedCards = () => Array.from(root.querySelectorAll<HTMLElement>('[data-svara-sprite-kind="card"]')).filter((el) => Number(getComputedStyle(el).opacity) > 0.5
+        && Array.from(el.querySelectorAll('img')).some((img) => img.getAttribute('src') !== '/images/cards/card-back.webp'))
       let commandCount = 0
       const mount = () => createSvaraLobbyController({
         root, localProfileId: 'alice', onRefresh() {}, onCreate() {}, onJoin() {}, onLeave() { commandCount++ },
@@ -80,18 +101,21 @@ try {
           const r = bubble.getBoundingClientRect()
           return controls.every((control) => { const c = control.getBoundingClientRect(); return r.bottom <= c.top || r.top >= c.bottom || r.right <= c.left || r.left >= c.right })
         }), `${label}: win bubbles leave controls accessible`)
-        const overlay = root.querySelector<HTMLElement>('[data-svara-result-overlay]')!
-        ok(getComputedStyle(overlay).pointerEvents === 'none', `${label}: flights cannot intercept actions`)
-        const pot = root.querySelector<HTMLElement>('[data-svara-active-pot]')?.getBoundingClientRect()
+        const sprites = root.querySelector<HTMLElement>('[data-svara-scene-sprites]')!
+        ok(getComputedStyle(sprites).pointerEvents === 'none', `${label}: flights cannot intercept actions`)
+        const potEl = root.querySelector<HTMLElement>('[data-svara-active-pot]')
+        const pot = potEl && !potEl.closest('[data-svara-felt-center]') ? potEl.getBoundingClientRect() : null
+        // Подчертаната банка вече е само за четци на екрана (1 px) — проверява се, ако е видима.
         if (pot) ok(anchors.every((r) => Math.min(r.right, pot.right) <= Math.max(r.left, pot.left) + 1 || Math.min(r.bottom, pot.bottom) <= Math.max(r.top, pot.top) + 1), `${label}: highlighted bank stays clear of player panels`)
       }
       try {
         send()
         await frame()
-        const flips = Array.from(root.querySelectorAll<HTMLElement>('[data-svara-showdown-cards]'))
-        ok(flips.length === 2 && flips.every((el) => el.dataset.svaraFlipProgress === '0.2500'), 'simultaneous local/all-in public flip')
+        // Свързване по време на сравняването: двете сравнявани ръце са обърнати
+        // (лицата са само от сървъра); отказалият се играч няма карти.
+        ok(facedCards().length === 6, `compared hands are face up as scene sprites (${facedCards().length})`)
+        ok(root.querySelectorAll('[data-svara-sprite-kind="card"]:not([data-svara-sprite^="deck-"])').length === 6, 'folded / non-compared players have no cards')
         ok(root.querySelectorAll('[data-svara-showdown-points]').length === 2, 'only compared hands have server points')
-        ok(root.querySelector('[data-svara-seat-index="3"] [data-svara-seat-cards-mount]')!.childElementCount === 0, 'folded player has no cards')
         const avatar = root.querySelector('[data-svara-avatar="0"]')
         const table = root.querySelector('[data-svara-table]')
         now = RESULT_START + 500
@@ -100,26 +124,21 @@ try {
         layout('showdown')
         now = RESULT_START + 2999
         await frame()
-        ok(root.querySelectorAll('[data-svara-showdown-cards]').length === 2, 'cards stay until absolute showdown deadline')
+        ok(root.querySelectorAll('[data-svara-showdown-points]').length === 2, 'points stay until absolute showdown deadline')
         now++
         await frame()
-        ok(root.querySelectorAll('[data-svara-showdown-cards]').length === 0, 'expired showdown hides without waiting for another snapshot')
+        ok(root.querySelectorAll('[data-svara-showdown-points]').length === 0, 'expired showdown hides points without waiting for another snapshot')
         setFixturePayout(input)
         now = RESULT_START + 3300
         send()
         await frame()
         ok(root.querySelectorAll('[data-svara-win-bubble]').length === 1 && root.querySelector('[data-svara-win-bubble]')!.textContent === 'Печеля 1250!', 'main pot exact winner bubble')
         ok(root.querySelector('[data-svara-seat-index="1"] [data-svara-win-bubble]'), 'main bank reaches bob')
-        ok(root.querySelector('[data-svara-payout-flight="1"]'), 'chips fly to main recipient')
+        ok(chipDestinations().length > 0 && chipDestinations().every((d) => nearestSeat(d) === 1), 'chips fly from the pot to the main recipient stack')
         layout('main payout')
-        now = RESULT_START + 3940
-        await frame()
-        const flight = root.querySelector<HTMLElement>('[data-svara-payout-flight="1"]')!.getBoundingClientRect()
-        const destination = root.querySelector<HTMLElement>('[data-svara-avatar="1"]')!.getBoundingClientRect()
-        ok(Math.hypot(flight.left - (destination.left + destination.width / 2), flight.top - (destination.top + destination.height / 2)) < 2, 'chip flight lands at the measured avatar position')
         now = RESULT_START + 3960
-        await frame()
-        ok(!root.querySelector('[data-svara-payout-flight]') && root.querySelector('[data-svara-win-bubble]'), 'chips finish within their 1200ms window')
+        await realWait(1300)
+        ok(!root.querySelector('[data-svara-sprite-kind="chip"][data-moving="1"]') && root.querySelector('[data-svara-win-bubble]'), 'chips land and are released within the 1200ms window')
         controller.setSnapshot(input.snapshot)
         controller.setTiming(input.timing)
         await frame()
@@ -132,7 +151,9 @@ try {
         const key = root.querySelector('[data-svara-active-pot]')!.getAttribute('data-svara-payout-key')
         ok(root.querySelectorAll('[data-svara-win-bubble]').length === 2 && !root.textContent!.includes('Печеля 1250!'), 'remount mid-payout skips completed main bank')
         ok(Array.from(root.querySelectorAll('[data-svara-win-bubble]')).every((el) => el.textContent === 'Печеля 200!'), 'split shows exact server shares')
-        ok(root.querySelector('[data-svara-payout-flight="0"]') && root.querySelector('[data-svara-payout-flight="2"]'), 'split chips reach both recipients')
+        const split = chipDestinations()
+        ok(split.some((d) => nearestSeat(d) === 0) && split.some((d) => nearestSeat(d) === 2), 'remount resumes the active step: split chips fly to both recipients')
+        void near
         layout('split payout')
         controller.destroy()
         controller = mount()
@@ -141,7 +162,7 @@ try {
         ok(root.querySelector('[data-svara-active-pot]')!.getAttribute('data-svara-payout-key') === key, 'stable payout key across repeated remount')
         now = RESULT_START + 5400
         await frame()
-        ok(!root.querySelector('[data-svara-win-bubble],[data-svara-payout-flight]'), 'payout ends at server deadline without a new packet')
+        ok(!root.querySelector('[data-svara-win-bubble]'), 'payout ends at server deadline without a new packet')
         ok(commandCount === 0, 'presentation and destroy send no financial/game commands')
         for (const capacity of [2, 3, 4]) {
           const fixture = svaraResultFixture()
@@ -214,14 +235,21 @@ try {
     // A screenshot of the production renderer at a deterministic presentation
     // instant, separately from the lifecycle assertions above.
     await page.evaluate(async () => {
-      const rendererPath = '/src/app/games/svara/table/renderSvaraActiveTable.ts'
+      const controllerPath = '/src/app/games/svara/createSvaraLobbyController.ts'
       const fixturePath = '/scripts/fixtures/svaraResultFixtures.ts'
-      const { renderSvaraActiveTable } = await import(rendererPath)
+      const clockPath = '/src/app/network/serverClock.ts'
+      const { createSvaraLobbyController } = await import(controllerPath)
       const { svaraResultFixture, setFixturePayout, RESULT_START } = await import(fixturePath)
+      const { sharedServerClock } = await import(clockPath)
       const input = svaraResultFixture()
       setFixturePayout(input)
-      input.serverNow = RESULT_START + 4500
-      document.querySelector('#root')!.innerHTML = renderSvaraActiveTable(input)
+      sharedServerClock.recordServerNowSample(RESULT_START + 5300)
+      const root = document.querySelector<HTMLElement>('#root')!
+      const controller = createSvaraLobbyController({ root, localProfileId: 'alice', onRefresh() {}, onCreate() {}, onJoin() {}, onLeave() {}, onStart() {}, onRequestTableState() {}, onSubmitCommand() {} })
+      controller.setMyTable(input.table)
+      controller.setSnapshot(input.snapshot)
+      controller.setTiming(input.timing)
+      await new Promise<void>((done) => setTimeout(done, 200))
     })
     await page.screenshot({ path: resolve(outDir, `${width}x${height}.png`), fullPage: true })
     report.push({ viewport: `${width}x${height}`, checks })
@@ -247,11 +275,16 @@ try {
     controller.setSnapshot(input.snapshot)
     controller.setTiming(input.timing)
     await new Promise<void>((done) => requestAnimationFrame(() => done()))
-    if (!root.textContent!.includes('Печеля 1250!') || root.querySelector('[data-svara-payout-flight]')) throw new Error('Reduced motion must retain award and suppress flight')
+    // prefers-reduced-motion НЕ изключва анимациите на Свара (само настройката „Анимации“).
+    if (!root.textContent!.includes('Печеля 1250!') || !root.querySelector('[data-svara-sprite-kind="chip"][data-moving="1"]')) throw new Error('prefers-reduced-motion must keep the award AND the chip flight')
+    root.querySelector<HTMLElement>('[data-svara-animations-toggle]')!.click()
+    await new Promise<void>((done) => requestAnimationFrame(() => done()))
+    if (!root.textContent!.includes('Печеля 1250!') || root.querySelector('[data-svara-sprite-kind="chip"][data-moving="1"]') || !root.querySelector('[data-svara-sprite-kind="chip"]')) throw new Error('animations OFF: exact award, visible chips, no flight')
+    root.querySelector<HTMLElement>('[data-svara-animations-toggle]')!.click()
     controller.destroy()
     sharedServerClock.reset()
   })
-  console.log('  ok real prefers-reduced-motion media query')
+  console.log('  ok prefers-reduced-motion keeps animations; the Svara setting turns them off')
   assert.deepEqual(errors, [], 'no uncaught Chromium errors')
   await writeFile(resolve(outDir, 'report.json'), JSON.stringify({ kind: 'Chromium component fixtures; not auth/WS integration', report, errors }, null, 2))
   console.log(`Screenshots and report: ${outDir}`)

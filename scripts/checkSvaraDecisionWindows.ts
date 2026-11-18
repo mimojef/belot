@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { getSvaraDecisionWindow, renderSvaraDecisionWindow, svaraJoiningStatus } from '../src/app/games/svara/table/svaraDecisionWindows'
-import { renderSvaraActiveTable } from '../src/app/games/svara/table/renderSvaraActiveTable'
+import { renderSvaraTableView as renderSvaraActiveTable } from './fixtures/svaraTableView'
 import { svaraDecisionFixture, RESULT_START } from './fixtures/svaraDecisionFixtures'
 import { svaraResultFixture } from './fixtures/svaraResultFixtures'
 
@@ -121,7 +121,8 @@ check('server reveal shows winner cards/points only for its 3s deadline, with no
   assert(!html.includes('Печеля'))
   sample(input, 8000)
   html = renderSvaraActiveTable(input)
-  assert(!html.includes('data-svara-reveal-cards='))
+  // Точките изчезват със срока; картите се прибират от сцената при следващия рунд.
+  assert(!html.includes('data-svara-reveal-points='))
 })
 check('pending disables both buttons and error messages are escaped', () => {
   const input = svaraDecisionFixture()

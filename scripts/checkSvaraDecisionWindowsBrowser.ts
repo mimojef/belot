@@ -146,10 +146,13 @@ try {
         ok(!root.querySelector('[data-svara-decision-window]'), 'public reveal closes the choice window')
         now += 500
         await frames()
-        ok(root.querySelectorAll('[data-svara-reveal-cards] img').length === 3 && root.querySelector('[data-svara-reveal-points]')!.textContent === '33', 'existing reveal animation shows exactly winner cards and server points')
+        // Сцената: само картите на победителя са с лице (3 спрайта); точките — от сървъра.
+        const faced = () => Array.from(root.querySelectorAll<HTMLElement>('[data-svara-sprite-kind="card"]')).filter((el) => Number(getComputedStyle(el).opacity) > 0.5
+          && Array.from(el.querySelectorAll('img')).some((img) => img.getAttribute('src') !== '/images/cards/card-back.webp')).length
+        ok(faced() === 3 && root.querySelector('[data-svara-reveal-points]')!.textContent === '33', 'existing reveal animation shows exactly winner cards and server points')
         now += 2500
         await frames()
-        ok(!root.querySelector('[data-svara-reveal-cards]'), 'public cards disappear at exact 3s deadline without another snapshot')
+        ok(!root.querySelector('[data-svara-reveal-points]'), 'reveal points disappear at exact 3s deadline without another snapshot')
         const hide = svaraDecisionFixture('reveal', 'alice')
         hide.snapshot.round.roundId = 'reveal-hide'
         now = RESULT_START + 1000

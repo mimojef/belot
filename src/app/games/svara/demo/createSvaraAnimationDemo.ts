@@ -1,9 +1,10 @@
 // Свара — анимационен прототип (Етап 2А / 2А.1). Само демонстрационни
 // данни: без реални играчи, жълтици, залози или сървърни заявки.
 //
-// Слоеве: DOM маса/места/аватари/банка/банер/ефект за победа (статични или
-// compositor-only WAAPI ефекти) + сменяем renderer за картите и чиповете
-// (DOM/WAAPI или PixiJS). PixiJS се зарежда с dynamic import едва при избор.
+// Слоеве: ОБЩАТА визуална сцена (../scene/: обвивка — маса/места/аватари/
+// банка/банер/ефект за победа; оформление; хореография) + сменяем renderer за
+// картите и чиповете (DOM/WAAPI или PixiJS). Същата сцена рисува и истинската
+// игра. PixiJS се зарежда с dynamic import едва при избор.
 //
 // Прекъсване/възстановяване: „Прекъсни“ и смяна на renderer-а прилагат
 // детерминистичното крайно (или начално) състояние; resize по време на
@@ -11,6 +12,7 @@
 // продължава със следващата — координатите винаги идват от новия layout.
 
 import { playGameSound } from '../../../audio/gameSoundSettings'
+import { createSvaraSceneShell } from '../scene/svaraSceneShell'
 import { createSvaraDomRenderer } from './svaraDemoDomRenderer'
 import { createSvaraFrameMeter, type SvaraFrameStats } from './svaraDemoFrameMeter'
 import type { SvaraDemoRenderer, SvaraRendererKind } from './svaraDemoRenderer'
@@ -46,15 +48,6 @@ export function createSvaraAnimationDemo(): SvaraAnimationDemo {
   element.dataset.svaraDemo = '1'
   element.style.cssText = 'margin-top:18px;'
   element.innerHTML = `
-    <div data-svara-demo-stage style="position:relative;width:100%;border-radius:22px;overflow:hidden;background:linear-gradient(180deg,#5b3a1c,#3a2410);box-shadow:0 10px 30px rgba(0,0,0,0.45);user-select:none;-webkit-user-select:none;touch-action:manipulation;">
-      <div style="position:absolute;inset:7px;border-radius:17px;background:radial-gradient(ellipse at 50% 45%,#22985a 0%,#157240 55%,#0c4d2a 100%);box-shadow:inset 0 0 40px rgba(0,0,0,0.45);"></div>
-      <div data-svara-demo-seats style="position:absolute;inset:0;"></div>
-      <div data-svara-demo-sprites style="position:absolute;inset:0;"></div>
-      <div data-svara-demo-pot style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);padding:4px 11px;border-radius:999px;background:rgba(0,0,0,0.55);border:1px solid rgba(212,165,32,0.55);color:#f5d06f;font-weight:900;white-space:nowrap;opacity:0;transition:opacity 200ms ease;will-change:transform;">Банка: 0</div>
-      <div data-svara-demo-win style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);opacity:0;pointer-events:none;color:#ffe08a;font-weight:900;text-shadow:0 2px 6px rgba(0,0,0,0.7);white-space:nowrap;will-change:transform,opacity;">+0</div>
-      <div data-svara-demo-banner style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);opacity:0;pointer-events:none;padding:10px 26px;border-radius:14px;background:linear-gradient(180deg,#f5d06f,#d4a520);color:#1a1203;font-size:clamp(22px,6vw,40px);font-weight:900;letter-spacing:2px;box-shadow:0 8px 24px rgba(0,0,0,0.5);will-change:transform,opacity;">СВАРКА!</div>
-      <div data-svara-demo-loading style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.85);font-size:14px;font-weight:700;background:rgba(0,0,0,0.25);">Зареждане на графиката…</div>
-    </div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;">
       <button type="button" data-svara-demo-action="replay" style="${BUTTON_STYLE}">▶ Пусни отново</button>
       <button type="button" data-svara-demo-action="skip" style="${BUTTON_STYLE}">⏭ Прекъсни</button>
@@ -68,14 +61,24 @@ export function createSvaraAnimationDemo(): SvaraAnimationDemo {
     <div style="margin-top:6px;color:rgba(248,250,252,0.5);font-size:12px;">Демонстрация с примерни данни — без реални играчи, жълтици и залози. Звуците следват настройката „Звуци в играта“.</div>
   `
 
+  // Общата сцена (същата като в истинската игра) + атрибутите на демото.
+  const shell = createSvaraSceneShell({ bannerText: 'СВАРКА!', avatarSrcs: SVARA_DEMO_AVATAR_SRCS, names: SVARA_DEMO_SEAT_NAMES })
+  const stage = shell.stage
+  stage.dataset.svaraDemoStage = '1'
+  shell.seatsLayer.dataset.svaraDemoSeats = ''
+  shell.spritesHost.dataset.svaraDemoSprites = ''
+  shell.potLabel.dataset.svaraDemoPot = ''
+  shell.winLabel.dataset.svaraDemoWin = ''
+  shell.banner.dataset.svaraDemoBanner = ''
+  shell.seats.forEach((seat, i) => { seat.node.dataset.svaraDemoSeat = String(i) })
+  const loadingOverlay = document.createElement('div')
+  loadingOverlay.dataset.svaraDemoLoading = ''
+  loadingOverlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.85);font-size:14px;font-weight:700;background:rgba(0,0,0,0.25);'
+  loadingOverlay.textContent = 'Зареждане на графиката…'
+  stage.appendChild(loadingOverlay)
+  element.prepend(stage)
   const q = <T extends HTMLElement>(selector: string) => element.querySelector<T>(selector)!
-  const stage = q<HTMLElement>('[data-svara-demo-stage]')
-  const seatsLayer = q<HTMLElement>('[data-svara-demo-seats]')
-  const spritesHost = q<HTMLElement>('[data-svara-demo-sprites]')
-  const potLabel = q<HTMLElement>('[data-svara-demo-pot]')
-  const winLabel = q<HTMLElement>('[data-svara-demo-win]')
-  const banner = q<HTMLElement>('[data-svara-demo-banner]')
-  const loadingOverlay = q<HTMLElement>('[data-svara-demo-loading]')
+  const spritesHost = shell.spritesHost
   const statsBox = q<HTMLElement>('[data-svara-demo-stats]')
 
   let destroyed = false
@@ -90,26 +93,8 @@ export function createSvaraAnimationDemo(): SvaraAnimationDemo {
   let lastStats: SvaraFrameStats | null = null
   let lastRunInterrupted = false
   let lastRunResized = false
-  const hudAnimations = new Set<Animation>()
   const eventTimers = new Set<number>()
   const meter = createSvaraFrameMeter()
-  const seatRings: HTMLElement[] = []
-  const seatNodes: HTMLElement[] = []
-
-  // ── Места и аватари (статичен DOM) ───────────────────────────────────────
-  for (let i = 0; i < 4; i += 1) {
-    const seat = document.createElement('div')
-    seat.dataset.svaraDemoSeat = String(i)
-    seat.style.cssText = 'position:absolute;left:0;top:0;transform:translate(-50%,-50%);'
-    seat.innerHTML = `
-      <div data-ring style="position:absolute;inset:-7px;border-radius:50%;border:3px solid #f5d06f;box-shadow:0 0 18px rgba(245,208,111,0.85);opacity:0;will-change:transform,opacity;"></div>
-      <img src="${SVARA_DEMO_AVATAR_SRCS[i]}" alt="" draggable="false" style="display:block;width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid rgba(212,165,32,0.85);background:#0b0b0b;box-sizing:border-box;">
-      <div style="position:absolute;left:50%;bottom:0;transform:translate(-50%,45%);padding:1px 8px;border-radius:999px;background:rgba(0,0,0,0.72);color:#fff;font-size:11px;font-weight:800;white-space:nowrap;">${SVARA_DEMO_SEAT_NAMES[i]}</div>
-    `
-    seatsLayer.appendChild(seat)
-    seatNodes.push(seat)
-    seatRings.push(seat.querySelector<HTMLElement>('[data-ring]')!)
-  }
 
   // ── Размер на масата ─────────────────────────────────────────────────────
   // Desktop лобито е мащабирано с CSS zoom; височината се ограничава от
@@ -125,37 +110,12 @@ export function createSvaraAnimationDemo(): SvaraAnimationDemo {
   }
 
   function applyLayoutToDom(layout: SvaraDemoLayout): void {
-    stage.style.height = `${layout.height}px`
-    layout.seats.forEach((seat, i) => {
-      const node = seatNodes[i]!
-      node.style.left = `${seat.avatar.x}px`
-      node.style.top = `${seat.avatar.y}px`
-      node.style.width = `${layout.avatarSize}px`
-      node.style.height = `${layout.avatarSize}px`
-    })
-    potLabel.style.left = `${layout.potLabel.x}px`
-    potLabel.style.top = `${layout.potLabel.y}px`
-    potLabel.style.fontSize = `${Math.round(Math.max(12, layout.chipSize * 0.5))}px`
-    winLabel.style.fontSize = `${Math.round(Math.max(18, layout.chipSize * 0.9))}px`
-    // Банерът е над банката, за да не скрива чиповете.
-    banner.style.top = `${Math.max(layout.height * 0.2, layout.pot.y - layout.chipSize * 2.8)}px`
+    shell.applyLayout(layout)
   }
 
   // ── HUD (банка, банер, победител) ────────────────────────────────────────
-  function trackHud(animation: Animation): void {
-    hudAnimations.add(animation)
-    animation.finished.then(() => hudAnimations.delete(animation), () => hudAnimations.delete(animation))
-  }
-
   function setPot(value: number, pulse: boolean): void {
-    potLabel.textContent = `Банка: ${value}`
-    potLabel.style.opacity = value > 0 ? '1' : '0'
-    if (pulse && value > 0) {
-      trackHud(potLabel.animate(
-        [{ transform: 'translate(-50%,-50%) scale(1)' }, { transform: 'translate(-50%,-50%) scale(1.14)', offset: 0.35 }, { transform: 'translate(-50%,-50%) scale(1)' }],
-        { duration: 240, easing: 'ease-out' },
-      ))
-    }
+    shell.setPot(value, pulse)
   }
 
   function clearEventTimers(): void {
@@ -165,57 +125,15 @@ export function createSvaraAnimationDemo(): SvaraAnimationDemo {
 
   function resetHud(): void {
     clearEventTimers()
-    for (const animation of hudAnimations) animation.cancel()
-    hudAnimations.clear()
-    banner.style.opacity = '0'
-    winLabel.style.opacity = '0'
-    for (const ring of seatRings) ring.style.opacity = '0'
-    setPot(0, false)
+    shell.resetHud()
   }
 
   function showWinner(seatIndex: number, amount: number, animate: boolean): void {
-    const ring = seatRings[seatIndex]
-    const layout = script?.layout
-    if (!ring || !layout) return
-    ring.style.opacity = '1'
-    if (!animate) return
-    // Умерен ефект: пулс на пръстена + „+сума“, която се издига и изчезва.
-    trackHud(ring.animate(
-      [
-        { transform: 'scale(0.85)', opacity: 0 },
-        { transform: 'scale(1.16)', opacity: 1, offset: 0.3 },
-        { transform: 'scale(0.98)', opacity: 1, offset: 0.65 },
-        { transform: 'scale(1)', opacity: 1 },
-      ],
-      { duration: 700, easing: 'ease-out' },
-    ))
-    const seat = layout.seats[seatIndex]!
-    winLabel.textContent = `+${amount}`
-    winLabel.style.left = `${seat.avatar.x}px`
-    winLabel.style.top = `${seat.avatar.y - layout.avatarSize * 0.9}px`
-    trackHud(winLabel.animate(
-      [
-        { transform: 'translate(-50%,-50%) translateY(8px) scale(0.7)', opacity: 0 },
-        { transform: 'translate(-50%,-50%) translateY(0) scale(1.08)', opacity: 1, offset: 0.25 },
-        { transform: 'translate(-50%,-50%) translateY(-6px) scale(1)', opacity: 1, offset: 0.7 },
-        { transform: 'translate(-50%,-50%) translateY(-18px) scale(1)', opacity: 0 },
-      ],
-      { duration: 1300, easing: 'ease-out' },
-    ))
+    shell.showWinner(seatIndex, amount, animate)
   }
 
   function playBanner(phase: SvaraDemoPhase): void {
-    const totalMs = getSvaraPhaseDurationMs(phase) + phase.holdAfterMs
-    trackHud(banner.animate(
-      [
-        { opacity: 0, transform: 'translate(-50%,-50%) scale(0.6)' },
-        { opacity: 1, transform: 'translate(-50%,-50%) scale(1.12)', offset: 0.14 },
-        { opacity: 1, transform: 'translate(-50%,-50%) scale(1)', offset: 0.26 },
-        { opacity: 1, transform: 'translate(-50%,-50%) scale(1)', offset: 0.82 },
-        { opacity: 0, transform: 'translate(-50%,-50%) scale(1.06)' },
-      ],
-      { duration: totalMs, easing: 'ease-out' },
-    ))
+    shell.playBanner(getSvaraPhaseDurationMs(phase) + phase.holdAfterMs)
   }
 
   function scheduleEvents(events: SvaraDemoEvent[], token: number): void {

@@ -20,6 +20,9 @@ import {
   renderSvaraActiveTable,
   patchSvaraResultPresentation,
   patchSvaraDecisionTable,
+  renderSvaraSceneSeatHuds,
+  renderSvaraSceneStatusHtml,
+  svaraScenePotTotal,
   SVARA_FOLD_BUBBLE_TOTAL_MS,
   SVARA_LOOK_FLIP_TOTAL_MS,
   type SvaraActiveFoldEffect,
@@ -34,6 +37,8 @@ import { computeSvaraDealingVisualState } from './table/svaraTableAnimation'
 import { playSvaraFoldVoice } from './table/svaraFoldVoice'
 import { getSvaraDecisionWindow, patchSvaraDecisionWindow } from './table/svaraDecisionWindows'
 import { fetchSvaraTableCreationOptions, type SvaraTableCreationOptions } from './svaraAccess'
+import { createSvaraRealScene } from './table/svaraRealScene'
+import { computeSvaraResultVisualState } from './table/svaraResultAnimation'
 
 export type SvaraCreateDialogState = {
   open: boolean
@@ -102,6 +107,15 @@ export function createSvaraLobbyController(options: Options) {
   // файлове защо не се преизползва betAnimationTracker-а).
   const foldAnimationTracker = createSvaraFoldAnimationTracker()
   const lookAnimationTracker = createSvaraLookAnimationTracker()
+  // Общата визуална сцена от демото (места, тесте, карти, чипове, банка,
+  // „СВАРА!“, победител). Постоянна: оцелява при всяко обновяване на DOM-а
+  // на масата; следва само сървърните snapshot-и.
+  const tableScene = createSvaraRealScene({
+    onOpenProfile: (playerId) => {
+      const player = myTable?.players.find((participant) => participant.playerId === playerId)
+      if (player && !player.isBot) options.onOpenProfile?.(player.playerId, player.displayName ?? null) // ВРЕМЕННО: ботовете нямат профил
+    },
+  })
   // Активните, все още визуализирани fold/look ефекти — анкетирани към
   // АБСОЛЮТНО сървърно "сега" в момента на откриване (sharedServerClock), не
   // локален performance.now()/Date.now() старт; elapsedMs за рендиране се
@@ -109,17 +123,17 @@ export function createSvaraLobbyController(options: Options) {
   type ActiveFoldEffectState = { seatIndex: number; voluntary: boolean; startedAtServerMs: number }
   let activeFoldEffects: ActiveFoldEffectState[] = []
   let activeLookEffectStartedAtServerMs: number | null = null
-  // Задание §15 — prefers-reduced-motion: спира само летящите спрайтове/флип
-  // завъртания (виж renderSvaraActiveTable.ts), НИКОГА сървърния timeline.
-  const reducedMotionQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-    ? window.matchMedia('(prefers-reduced-motion: reduce)')
-    : null
-  let reducedMotion = reducedMotionQuery?.matches ?? false
-  function handleReducedMotionChange(): void {
-    reducedMotion = reducedMotionQuery?.matches ?? false
+  // Настройка „Анимации“ в Свара — включена по подразбиране, НЕЗАВИСИМО от
+  // prefers-reduced-motion/системните настройки; изборът се помни локално.
+  // Изключена: сцената показва крайните състояния директно (играта остава
+  // напълно функционална; тестето, картите и чиповете остават видими).
+  const ANIMATIONS_STORAGE_KEY = 'pika.svara.animations'
+  let reducedMotion = (() => { try { return window.localStorage.getItem(ANIMATIONS_STORAGE_KEY) === 'off' } catch { return false } })()
+  function setAnimationsEnabled(enabled: boolean): void {
+    reducedMotion = !enabled
+    try { window.localStorage.setItem(ANIMATIONS_STORAGE_KEY, enabled ? 'on' : 'off') } catch { /* личен режим — само за сесията */ }
     render()
   }
-  reducedMotionQuery?.addEventListener('change', handleReducedMotionChange)
 
   const button = 'border:1px solid rgba(212,165,32,.55);border-radius:7px;background:#0b0b0b;color:#f4c95b;min-height:40px;padding:0 16px;font-weight:800;cursor:pointer;'
   const panel = 'background:#090909;border:1px solid rgba(212,165,32,.35);border-radius:8px;padding:16px;'
@@ -144,7 +158,8 @@ export function createSvaraLobbyController(options: Options) {
     </section>`
     // Fullscreen belongs to this exact DOM node. Updating its contents keeps
     // the decision dialog in fullscreen through snapshots and command ACKs.
-    if (fullscreenSupported && tableElementRef && document.fullscreenElement === tableElementRef && isActiveTable) {
+    const patched = isActiveTable && patchActiveTable(html)
+    if (patched) { /* обновено по региони */ } else if (fullscreenSupported && tableElementRef && document.fullscreenElement === tableElementRef && isActiveTable) {
       const template = document.createElement('template')
       template.innerHTML = html
       const nextTable = template.content.querySelector<HTMLElement>('[data-svara-table]')
@@ -153,6 +168,10 @@ export function createSvaraLobbyController(options: Options) {
         tableElementRef.style.cssText = nextTable.style.cssText
       }
     } else options.root.innerHTML = html
+    if (!patched) {
+      const liveTable = options.root.querySelector('[data-svara-table]')
+      if (liveTable) recordRegions(liveTable, 'table')
+    }
     // Preserve the actual WAAPI nodes through countdown/look/fold renders.
     // Replacing innerHTML used to truncate the 900ms flash at the next tick.
     const flashScope = JSON.stringify([snapshot?.matchId, snapshot?.round?.roundId])
@@ -167,6 +186,7 @@ export function createSvaraLobbyController(options: Options) {
     if (createDialogElement) document.body.appendChild(createDialogElement)
     wire()
     ensureResultFrame()
+    syncTableMotion()
   }
 
   function renderEmptyState(text: string): string {
@@ -260,7 +280,7 @@ export function createSvaraLobbyController(options: Options) {
   }
 
   function patchResult(): void {
-    if (myTable && showingResult()) patchSvaraResultPresentation(options.root, activeTableInput(myTable))
+    if (myTable && showingResult()) { patchSvaraResultPresentation(options.root, activeTableInput(myTable)); syncTableMotion() }
   }
 
   function showingDecisionPhase(): boolean {
@@ -280,6 +300,7 @@ export function createSvaraLobbyController(options: Options) {
     patchSvaraDecisionWindow(options.root.querySelector('[data-svara-decision-mount]'), model,
       actionPending || (pendingDecision !== null && pendingDecision.key === model?.key), message)
     patchSvaraDecisionTable(options.root, activeTableInput(myTable))
+    syncTableMotion()
   }
 
   function handleDecisionClick(event: Event): void {
@@ -319,9 +340,12 @@ export function createSvaraLobbyController(options: Options) {
     if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || !round.dealing) return false
     return timing?.deadlines.some((deadline) => deadline.kind === 'dealing') ?? false
   }
+  // Раздаване, обръщане и отказ вече са WAAPI анимации в слоя за движение —
+  // няма нужда от чести (33 ms) пълни рендерирания; тиковете (250 ms) са само
+  // за обратното броене. isDealingAnimationActive остава за диагностика.
   function hasActiveVisualAnimation(): boolean {
-    if (reducedMotion) return false
-    return activeFoldEffects.length > 0 || activeLookEffectStartedAtServerMs !== null || isDealingAnimationActive()
+    void isDealingAnimationActive
+    return false
   }
 
   // Задание §11/§14 — изхвърля fold балончета/look-flip ефекти, чиято пълна
@@ -361,6 +385,7 @@ export function createSvaraLobbyController(options: Options) {
       seatIndex: effect.seatIndex,
       voluntary: effect.voluntary,
       elapsedMs: serverNow - effect.startedAtServerMs,
+      startedAtServerMs: effect.startedAtServerMs,
     }))
     const activeLookEffectInput: SvaraActiveLookEffect | null = activeLookEffectStartedAtServerMs === null
       ? null
@@ -382,6 +407,99 @@ export function createSvaraLobbyController(options: Options) {
       decisionPending: actionPending || (pendingDecision !== null && pendingDecision.key === currentDecision()?.key),
       decisionMessage: message,
     }
+  }
+
+  function syncTableMotion(): void {
+    const host = options.root.querySelector<HTMLElement>('[data-svara-scene-host]')
+    if (!myTable || myTable.phase === 'lobby' || !snapshot || snapshot.matchId !== myTable.matchId || !host) { tableScene.reset(); return }
+    const serverNow = sharedServerClock.getServerNow()
+    const liveTiming = timing?.matchId === snapshot.matchId ? timing : null
+    const tableInput = activeTableInput(myTable)
+    tableScene.update(host, {
+      snapshot, timing: liveTiming, serverNow, localProfileId: options.localProfileId, animations: !reducedMotion, table: myTable,
+      resultVisual: computeSvaraResultVisualState(snapshot, liveTiming, serverNow),
+      seatHuds: renderSvaraSceneSeatHuds(tableInput),
+      statusHtml: renderSvaraSceneStatusHtml(tableInput),
+      potTotal: svaraScenePotTotal(tableInput),
+    })
+    animateFoldBubbles(serverNow)
+  }
+
+  // Балончето „Бягам!“/„Времето изтече!“ — една WAAPI анимация спрямо
+  // сървърния момент на отказа; обновяване на масата не я рестартира.
+  function animateFoldBubbles(serverNow: number): void {
+    if (reducedMotion) return
+    for (const el of options.root.querySelectorAll<HTMLElement>('[data-svara-fold-bubble]')) {
+      const start = el.dataset.svaraFoldStart ? Number(el.dataset.svaraFoldStart) : NaN
+      if (el.dataset.svaraFoldAnimated || !Number.isFinite(start)) continue
+      el.dataset.svaraFoldAnimated = '1'
+      const total = SVARA_FOLD_BUBBLE_TOTAL_MS
+      el.animate([{ opacity: 0, offset: 0 }, { opacity: 1, offset: 150 / total }, { opacity: 1, offset: (total - 250) / total }, { opacity: 0, offset: 1 }],
+        { duration: total, delay: -(serverNow - start), fill: 'both' })
+    }
+  }
+
+  // ── Обновяване по региони вместо пълно преизграждане ─────────────────────
+  // Всеки регион (място, център, бар с действия, ...) се подменя САМО ако
+  // неговият HTML се е променил. Слоят за движение и летящите „+N“ не са
+  // рендирани региони и никога не се унищожават.
+  const renderedRegionHtml = new Map<string, string>()
+  let renderedShell: string | null = null
+  function regionKey(el: Element, index: number): string {
+    const data = (el as HTMLElement).dataset
+    if (data.svaraSeatIndex !== undefined) return `seat:${data.svaraSeatIndex}`
+    for (const name of ['svaraFelt', 'svaraFeltCenter', 'svaraResultOverlay', 'svaraResultBanner', 'svaraDiagnostics', 'svaraActionBar', 'svaraDecisionMount'] as const) {
+      if (data[name] !== undefined) return name
+    }
+    return `#${index}`
+  }
+  const isPersistentNode = (el: Element) => (el as HTMLElement).dataset.svaraSceneStage !== undefined || (el as HTMLElement).dataset.svaraBetFlash !== undefined
+  function recordRegions(container: Element, path: string): void {
+    ;[...container.children].filter((c) => !isPersistentNode(c)).forEach((child, i) => {
+      const key = `${path}/${regionKey(child, i)}`
+      if (regionKey(child, i) === 'svaraFelt') recordRegions(child, key)
+      else renderedRegionHtml.set(key, child.outerHTML)
+    })
+  }
+  function reconcileRegions(live: HTMLElement, next: HTMLElement, path: string): void {
+    for (const attr of [...next.attributes]) if (live.getAttribute(attr.name) !== attr.value) live.setAttribute(attr.name, attr.value)
+    const nextChildren = [...next.children]
+    const liveChildren = [...live.children].filter((c) => !isPersistentNode(c))
+    const nextKeys = nextChildren.map(regionKey)
+    if (nextKeys.join('|') !== liveChildren.map(regionKey).join('|')) {
+      const anchor = [...live.children].find(isPersistentNode) ?? null
+      for (const child of liveChildren) child.remove()
+      for (const child of nextChildren) live.insertBefore(child, anchor)
+      recordRegions(live, path)
+      return
+    }
+    nextChildren.forEach((child, i) => {
+      const key = `${path}/${nextKeys[i]}`
+      if (nextKeys[i] === 'svaraFelt') { reconcileRegions(liveChildren[i] as HTMLElement, child as HTMLElement, key); return }
+      const html = child.outerHTML
+      if (renderedRegionHtml.get(key) === html) return
+      liveChildren[i]!.replaceWith(child)
+      renderedRegionHtml.set(key, html)
+    })
+  }
+  /** true — масата е обновена по региони; false — нужно е пълно рендиране. */
+  function patchActiveTable(html: string): boolean {
+    const template = document.createElement('template')
+    template.innerHTML = html
+    const section = template.content.firstElementChild
+    const nextTable = template.content.querySelector<HTMLElement>('[data-svara-table]')
+    const liveTable = options.root.querySelector<HTMLElement>('[data-svara-table]')
+    if (!section || !nextTable) { renderedShell = null; renderedRegionHtml.clear(); return false }
+    const shellClone = section.cloneNode(true) as HTMLElement
+    shellClone.querySelector('[data-svara-table]')?.replaceChildren()
+    const shell = shellClone.outerHTML
+    if (!liveTable || renderedShell !== shell) {
+      renderedShell = shell
+      renderedRegionHtml.clear()
+      return false
+    }
+    reconcileRegions(liveTable, nextTable, 'table')
+    return true
   }
 
   function renderActiveTable(table: SvaraPublicTable): string {
@@ -433,6 +551,11 @@ export function createSvaraLobbyController(options: Options) {
       const seat = snapshot.seats.find((s) => s.playerId === entry.playerId)
       if (seat) playBetFlash(seat.seatIndex, entry.added)
     }
+    tableScene.onBets(newEntries.flatMap((entry) => {
+      const seat = snapshot?.seats.find((s) => s.playerId === entry.playerId)
+      return seat ? [{ seatIndex: seat.seatIndex, added: entry.added }] : []
+    }))
+    syncTableMotion()
     playBetSound()
   }
 
@@ -456,7 +579,7 @@ export function createSvaraLobbyController(options: Options) {
       }
     }
     const newLook = lookAnimationTracker.detectNewLook(round?.roundId ?? null, snapshot.you.looked)
-    if (newLook) activeLookEffectStartedAtServerMs = sharedServerClock.getServerNow()
+    if (newLook) { activeLookEffectStartedAtServerMs = sharedServerClock.getServerNow(); tableScene.onLook() }
     if (newFolds.length > 0 || newLook) render()
   }
 
@@ -495,25 +618,37 @@ export function createSvaraLobbyController(options: Options) {
     render()
   }
 
+  // Слушателите се закачат веднъж на елемент (обновяването по региони пази
+  // непроменените елементи — без двойни команди).
+  const boundListeners = new WeakMap<Element, Set<string>>()
+  function on(el: Element | null | undefined, type: string, listener: (event: Event) => void): void {
+    if (!el) return
+    const types = boundListeners.get(el) ?? new Set<string>()
+    if (types.has(type)) return
+    types.add(type)
+    boundListeners.set(el, types)
+    el.addEventListener(type, listener)
+  }
+
   function wire(): void {
     const createDialog = createDialogElement
     if (createDialog) {
       if (!createDialog.open) createDialog.showModal()
-      createDialog.addEventListener('cancel', (event) => {
+      on(createDialog, 'cancel', (event) => {
         event.preventDefault()
         dialogState.open = createOpen = false
         creationRequest++
         render()
       })
     }
-    options.root.querySelector('[data-svara-create-open]')?.addEventListener('click', () => {
+    on(options.root.querySelector('[data-svara-create-open]'), 'click', () => {
       dialogState.open = createOpen = true
       dialogState.draft = createDraft = { capacity: 2, entryFee: 5000, startMode: 'auto' }
       void loadCreationOptions()
     })
-    createDialog?.querySelector('[data-svara-create-retry]')?.addEventListener('click', () => { void loadCreationOptions() })
-    createDialog?.querySelector('[data-svara-create-close]')?.addEventListener('click', () => { dialogState.open = createOpen = false; creationRequest++; render() })
-    options.root.querySelectorAll<HTMLElement>('[data-svara-table-join]').forEach((el) => el.addEventListener('click', () => {
+    on(createDialog?.querySelector('[data-svara-create-retry]'), 'click', () => { void loadCreationOptions() })
+    on(createDialog?.querySelector('[data-svara-create-close]'), 'click', () => { dialogState.open = createOpen = false; creationRequest++; render() })
+    options.root.querySelectorAll<HTMLElement>('[data-svara-table-join]').forEach((el) => on(el, 'click', () => {
       const matchId = el.dataset.svaraTableJoin!
       if (joinPendingMatchId) return
       joinPendingMatchId = matchId
@@ -521,25 +656,25 @@ export function createSvaraLobbyController(options: Options) {
       render()
       options.onJoin(matchId)
     }))
-    options.root.querySelector('[data-svara-table-leave]')?.addEventListener('click', () => requestExit())
+    on(options.root.querySelector('[data-svara-table-leave]'), 'click', () => requestExit())
     // Бутонът „Изход“ в банера на приключил/прекратен мач — същото leave_svara_table.
-    options.root.querySelector('[data-svara-result-exit]')?.addEventListener('click', () => requestExit())
-    options.root.querySelector('[data-svara-table-start]')?.addEventListener('click', () => { if (myTable) options.onStart(myTable.matchId) })
+    on(options.root.querySelector('[data-svara-result-exit]'), 'click', () => requestExit())
+    on(options.root.querySelector('[data-svara-table-start]'), 'click', () => { if (myTable) options.onStart(myTable.matchId) })
     // ВРЕМЕННО — тестови ботове.
-    options.root.querySelector('[data-svara-table-fill-bots]')?.addEventListener('click', () => {
+    on(options.root.querySelector('[data-svara-table-fill-bots]'), 'click', () => {
       if (!myTable || fillBotsPending) return
       fillBotsPending = true
       message = ''
       render()
       options.onFillWithBots?.(myTable.matchId)
     })
-    options.root.querySelector('[data-svara-table-refresh]')?.addEventListener('click', () => { if (myTable) options.onRequestTableState(myTable.matchId) })
-    options.root.querySelectorAll<HTMLElement>('[data-svara-profile-id]').forEach((element) => element.addEventListener('click', () => {
+    on(options.root.querySelector('[data-svara-table-refresh]'), 'click', () => { if (myTable) options.onRequestTableState(myTable.matchId) })
+    options.root.querySelectorAll<HTMLElement>('[data-svara-profile-id]').forEach((element) => on(element, 'click', () => {
       const player = myTable?.players.find((participant) => participant.playerId === element.dataset.svaraProfileId)
       if (player && !player.isBot) options.onOpenProfile?.(player.playerId, player.displayName ?? null) // ВРЕМЕННО: ботовете нямат профил
     }))
     const createForm = createDialog?.querySelector<HTMLFormElement>('[data-svara-create-form]')
-    createForm?.addEventListener('change', () => {
+    if (createForm) on(createForm, 'change', () => {
       const data = new FormData(createForm)
       const capacity = Number(data.get('capacity'))
       const entry = creationOptions?.entries.find((option) => option.entryFee === Number(data.get('entryFee')))
@@ -552,7 +687,7 @@ export function createSvaraLobbyController(options: Options) {
       if (ante) ante.textContent = `Анте за раздаване: ${formatAmount(entry.entryChips)} чипа`
       if (prize) prize.textContent = `Изчислена тестова награда: ${formatAmount(entry.entryFee * capacity * 4 / 5)} жълтици (не се изплаща)`
     })
-    createForm?.addEventListener('submit', (event) => {
+    if (createForm) on(createForm, 'submit', (event) => {
       event.preventDefault()
       const data = new FormData(event.currentTarget as HTMLFormElement)
       const capacity = Number(data.get('capacity'))
@@ -566,8 +701,9 @@ export function createSvaraLobbyController(options: Options) {
       render()
     })
     tableElementRef = options.root.querySelector<HTMLElement>('[data-svara-table="1"]')
-    options.root.querySelector('[data-svara-fullscreen-toggle]')?.addEventListener('click', () => { void toggleFullscreen() })
-    options.root.querySelectorAll<HTMLElement>('[data-svara-action-button]').forEach((el) => el.addEventListener('click', () => {
+    on(options.root.querySelector('[data-svara-fullscreen-toggle]'), 'click', () => { void toggleFullscreen() })
+    on(options.root.querySelector('[data-svara-animations-toggle]'), 'click', () => setAnimationsEnabled(reducedMotion))
+    options.root.querySelectorAll<HTMLElement>('[data-svara-action-button]').forEach((el) => on(el, 'click', () => {
       const kind = el.dataset.svaraActionButton
       if (kind === 'request-return') { submitParticipantCommand({ type: 'request-return' }); return }
       const button = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false).find((b) => b.kind === kind)
@@ -702,7 +838,7 @@ export function createSvaraLobbyController(options: Options) {
       options.root.removeEventListener('click', handleDecisionClick)
       if (resultFrame !== null) { cancelAnimationFrame(resultFrame); resultFrame = null }
       if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }
-      reducedMotionQuery?.removeEventListener('change', handleReducedMotionChange)
+      tableScene.destroy()
       if (fullscreenSupported) document.removeEventListener('fullscreenchange', handleFullscreenChange)
       if (fullscreenSupported && document.fullscreenElement === tableElementRef && tableElementRef !== null) {
         void document.exitFullscreen().catch(() => {})

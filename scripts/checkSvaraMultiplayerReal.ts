@@ -101,7 +101,8 @@ async function game(count: 2 | 3 | 4) {
               index: Number((seat as HTMLElement).dataset.svaraSeatIndex),
               stack: Number(/^(\d+)/.exec(seat.querySelector('[data-svara-seat-total]')?.textContent?.trim() ?? '')?.[1]),
               dealer: !!seat.querySelector('[data-svara-dealer-badge]'),
-              cards: Array.from(seat.querySelectorAll<HTMLImageElement>('[data-svara-seat-cards-mount] img')).map((i) => new URL(i.src).pathname),
+              // Картите са спрайтове на общата сцена, маркирани с мястото си.
+              cards: Array.from(document.querySelectorAll<HTMLImageElement>(`[data-svara-card-seat="${(seat as HTMLElement).dataset.svaraSeatIndex}"] img`)).map((i) => new URL(i.src).pathname),
             })) }
         })
         if (view.revision !== `rev ${s.revision}` || stored().revision !== saved.revision || snapshot(p).revision !== s.revision) return false
@@ -120,7 +121,7 @@ async function game(count: 2 | 3 | 4) {
         const publicHand = s.round?.kind === 'showdown-display' ? s.round.cards[seat.playerId]
           : s.round?.kind === 'reveal-choice' && s.round.decision === 'revealed' && s.round.winnerId === seat.playerId ? s.round.cards : null
         const allowed = publicHand ?? (seat.playerId === p.id ? s.you.cards : null) ?? []
-        for (const src of view.cards) assert(src === SVARA_CARD_BACK_SRC || allowed.some((c) => svaraCardCodeToFaceSrc(c) === src), 'Unauthorized card in real DOM')
+        for (const src of view.cards) assert(src === SVARA_CARD_BACK_SRC || allowed.some((c) => svaraCardCodeToFaceSrc(c) === src), `Unauthorized card in real DOM: ${src} seat=${seat.seatIndex} round=${s.round?.kind}:${s.round?.roundId} looked=${s.you.looked} cards=${JSON.stringify(s.you.cards)} me=${seat.playerId === p.id}`)
       }
     }
     assert.equal(wallets(), initialWallets, 'Virtual Svara changed yellow-coin wallets')
@@ -490,7 +491,7 @@ try {
     await g.reload(g.peers[1]!)
     await g.remount(g.peers[1]!)
     assert.deepEqual(g.stored(), before, 'Reconnect changed authoritative state or absolute deadline')
-    assert.equal(await g.peers[1]!.page.locator('[data-svara-bet-flash], [data-svara-look-flip], [data-svara-dealing-overlay]').count(), 0, 'Recovery replayed a completed animation')
+    assert.equal(await g.peers[1]!.page.locator('[data-svara-bet-flash], [data-svara-look-flip], [data-svara-dealing-overlay], [data-svara-motion-sprite][data-moving="1"]').count(), 0, 'Recovery replayed a completed animation')
     await g.allInToEnd(); await g.leave()
     const finished = g.stored()
     await g.reconnect(g.peers[1]!, false, false)
@@ -607,7 +608,7 @@ try {
           assert(deadline.deadlineAt >= sentAt + 2950 && deadline.deadlineAt <= Date.now() + 3000, 'Not the real 3-second reveal window')
           for (const p of g.peers) {
             const s = g.snapshot(p); assert(s.round?.kind === 'reveal-choice' && s.round.cards?.length === 3)
-            await p.page.waitForSelector('[data-svara-reveal-cards]', { timeout: 1500 })
+            await p.page.waitForSelector('[data-svara-card-seat] img:not([src*="card-back"])', { timeout: 1500 })
           }
           if (i === 3) await g.reconnect(other)
           else await g.reload(other)

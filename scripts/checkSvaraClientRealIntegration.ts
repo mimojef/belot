@@ -107,7 +107,7 @@ async function measureSvaraLayoutOnce(page: Page) {
       anchors,
       bottomPanelBottom: bottom?.rect.bottom ?? null,
       diagnostics: document.querySelector('[data-svara-diagnostics]')?.textContent ?? null,
-      dealingOverlayActive: document.querySelector('[data-svara-dealing-overlay]') !== null,
+      dealingOverlayActive: document.querySelector('[data-svara-motion-sprite="card"][data-moving="1"]') !== null,
       actionButtonCount: document.querySelectorAll('[data-svara-action-bar] [data-svara-action-button]').length,
     }
   })
@@ -445,7 +445,8 @@ try {
     const seats = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('[data-svara-seat-index]')).map((anchor) => ({
       index: Number(anchor.dataset.svaraSeatIndex),
       stack: Number(/^(\d+)/.exec(anchor.querySelector('[data-svara-seat-total]')?.textContent?.trim() ?? '')?.[1]),
-      cards: Array.from(anchor.querySelectorAll<HTMLImageElement>('[data-svara-seat-cards-mount] img')).map((img) => new URL(img.src).pathname),
+      // Картите са спрайтове на общата сцена, маркирани с мястото си.
+      cards: Array.from(document.querySelectorAll<HTMLImageElement>(`[data-svara-card-seat="${anchor.dataset.svaraSeatIndex}"] img`)).map((img) => new URL(img.src).pathname),
     })))
     assert.equal(seats.length, snapshot.seats.length)
     for (const seat of snapshot.seats) {
@@ -555,8 +556,8 @@ try {
     // players; data-svara-own-cards must therefore be ABSENT, not merely
     // empty — rendering it with empty content would itself be a leak signal
     // (distinguishes "server sent nothing" from "server sent an empty hand").
-    const ownCardsVisibleA = await sessionA.page.locator('[data-svara-own-cards]').count()
-    const ownCardsVisibleB = await sessionB.page.locator('[data-svara-own-cards]').count()
+    const ownCardsVisibleA = await sessionA.page.locator('[data-svara-own-card]').count()
+    const ownCardsVisibleB = await sessionB.page.locator('[data-svara-own-card]').count()
     if (ownCardsVisibleA !== 0 || ownCardsVisibleB !== 0) {
       throw new Error('own cards must stay hidden until an explicit `look` command — data-svara-own-cards should not be rendered at all')
     }
@@ -627,13 +628,14 @@ try {
   function other(label: 'A' | 'B') { return label === 'A' ? sessionB : sessionA }
   async function readSeatTotalsOnce(page: Page): Promise<{ bank: number | null; selfStack: number | null; selfTotal: number | null; selfBadge: string | null; bottomAnchorPresent: boolean }> {
     return page.evaluate(() => {
-      const feltText = document.querySelector('[data-svara-felt-center]')?.textContent ?? ''
+      const feltText = document.querySelector('[data-svara-scene-pot]')?.textContent ?? ''
       const bankMatch = /Банка:\s*(\d+)/.exec(feltText)
       const bottomAnchor = document.querySelector('[data-svara-seat-anchor="bottom"]')
       const totalEl = bottomAnchor?.querySelector('[data-svara-seat-total]')
       const totalText = totalEl?.textContent ?? ''
       const stackMatch = /^(\d+)/.exec(totalText.trim())
-      const contribMatch = /общо\s*(\d+)/.exec(totalText)
+      // Текущият залог (вноската в раздаването) е числото до чиповете.
+      const contribMatch = /^(\d+)$/.exec(bottomAnchor?.querySelector('[data-svara-seat-bet]')?.textContent?.trim() ?? '')
       const badgeEl = bottomAnchor?.querySelector('[data-svara-seat-badges]')
       return {
         bank: bankMatch ? Number(bankMatch[1]) : null,
@@ -666,10 +668,12 @@ try {
   // T17, защото T16's реален отказ при 2-ма играчи приключва раздаването
   // веднага (reveal-choice преход), след което "Банка"/dealerId временно не
   // се показват по същия начин (виж T16's коментар по-долу).
-  await check('[T9] "ти" marker sits on the BOTTOM-anchored seat for EACH player — real, per-player seat rotation (задание §4/§18)', async () => {
+  await check('[T9] own-seat marker sits on the BOTTOM-anchored seat for EACH player — real, per-player seat rotation (задание §4/§18)', async () => {
     for (const session of [sessionA, sessionB]) {
-      const bottomText = await session.page.locator('[data-svara-seat-anchor="bottom"]').textContent()
-      if (!bottomText || !bottomText.includes('(ти)')) throw new Error(`expected the bottom-anchored seat to contain the local "(ти)" marker, got: ${bottomText}`)
+      // Без „(ти)“ в името (изчистена маса) — собственото място е маркирано с data-svara-local-seat.
+      const bottom = session.page.locator('[data-svara-seat-anchor="bottom"]')
+      if ((await bottom.getAttribute('data-svara-local-seat')) !== '1') throw new Error('expected the bottom-anchored seat to be the local player seat')
+      if ((await bottom.textContent())?.includes('(ти)')) throw new Error('"(ти)" must not be shown on the felt')
     }
     // And they must NOT be the same seatIndex (two real distinct players).
     const bottomSeatIndexA = await sessionA.page.locator('[data-svara-seat-anchor="bottom"]').getAttribute('data-svara-seat-index')
@@ -723,18 +727,18 @@ try {
 
   await check('[T13] Погледни -> реалните собствени карти се показват едва СЛЕД explicit клик (не оптимистично по-рано)', async () => {
     const actor = await findActor()
-    const beforeLook = await actor.page.locator('[data-svara-own-cards]').count()
+    const beforeLook = await actor.page.locator('[data-svara-own-card]').count()
     if (beforeLook !== 0) throw new Error('own cards must not be visible before an explicit "Погледни" click')
     const hasLook = await actor.page.locator('[data-svara-action-button="look"]').count()
     if (hasLook > 0) {
       await actor.page.click('[data-svara-action-button="look"]')
-      await actor.page.waitForFunction(() => document.querySelector('[data-svara-own-cards]') !== null, undefined, { timeout: 10_000 })
+      await actor.page.waitForFunction(() => document.querySelector('[data-svara-own-card]') !== null, undefined, { timeout: 10_000 })
     }
     const ownId = actor.label === 'A' ? userA.profileId : userB.profileId
     const snapshot = await compareBrowserToAuthoritativeSnapshot(actor.page, ownId)
     assert.equal(snapshot.you.cards?.length, 3)
     await actor.page.waitForFunction((expected: string[]) => {
-      const sources = Array.from(document.querySelectorAll<HTMLImageElement>('[data-svara-own-cards] img')).map((img) => new URL(img.src).pathname)
+      const sources = Array.from(document.querySelectorAll<HTMLImageElement>('[data-svara-own-card] img:not([src*="card-back"])')).map((img) => new URL(img.src).pathname)
       return expected.length === sources.length && sources.every((src, i) => src === expected[i])
     }, snapshot.you.cards!.map((card) => svaraCardCodeToFaceSrc(card)!), { timeout: 3000 })
     await compareBrowserToAuthoritativeSnapshot(other(actor.label).page, actor.label === 'A' ? userB.profileId : userA.profileId)
@@ -763,7 +767,7 @@ try {
     // Реалният бюджет се вижда еднакво и от ДВАМАТА (real-time, без manual refresh) — вкл. банката.
     const otherSession = other(actor.label)
     await otherSession.page.waitForFunction(
-      (expected) => (document.querySelector('[data-svara-felt-center]')?.textContent ?? '').includes(`Банка: ${expected}`),
+      (expected) => (document.querySelector('[data-svara-scene-pot]')?.textContent ?? '').includes(`Банка: ${expected}`),
       (before.bank ?? 0) + payAmount, { timeout: 10_000 },
     )
     await compareBrowserToAuthoritativeSnapshot(actor.page, actor.label === 'A' ? userA.profileId : userB.profileId)
@@ -798,7 +802,7 @@ try {
   await check('[T16] Реален отказ ("Бягам") -> ходът приключва (2 играчи: единственият останал печели веднага), без разкриване на картите на отказалия', async () => {
     const actor = await findActor()
     await actor.page.waitForSelector('[data-svara-action-button="fold"]:not([disabled])', { timeout: 10_000 })
-    const ownCardsBeforeFold = await actor.page.locator('[data-svara-own-cards]').textContent().catch(() => null)
+    const ownCardsBeforeFold = await actor.page.locator('[data-svara-own-card]').textContent().catch(() => null)
     await actor.page.click('[data-svara-action-button="fold"]')
     // С точно 2 играчи, "Бягам" оставя точно ЕДИН неотказал участник —
     // раздаването приключва ВЕДНАГА (банката се присъжда, виж §17 от

@@ -128,9 +128,14 @@ check('B3. фази, пренареждане на ветрилото и зву�
   const script = buildSvaraDemoScript(1100, 650)
   assert(script.phases.map((p) => p.name).join(',') === 'deal,reveal,bet,svarka,collect', script.phases.map((p) => p.name).join(','))
   const deal = script.phases[0]!
-  assert(new Set(deal.moves.map((m) => m.id)).size === 12, 'dealt cards')
+  // Останалото тесте (20 карти) изчезва плавно след последната кацнала карта.
+  const deckFades = deal.moves.filter((m) => m.to.alpha === 0)
+  const dealtMoves = deal.moves.filter((m) => m.to.alpha !== 0)
+  assert(new Set(dealtMoves.map((m) => m.id)).size === 12, 'dealt cards')
   // 12 полета + пренареждане (на място: 1 + 2 хода = 3) → 12 + 12 = 24
-  assert(deal.moves.length === 24, `deal moves ${deal.moves.length}`)
+  assert(dealtMoves.length === 24, `deal moves ${dealtMoves.length}`)
+  const lastLanding = Math.max(...dealtMoves.filter((m) => m.durationMs === 360).map((m) => m.delayMs + m.durationMs))
+  assert(deckFades.length === 20 && deckFades.every((m) => m.delayMs === lastLanding && m.durationMs === 200), 'deck fades out in 200 ms after the last landing')
   assert(deal.events.filter((e) => e.kind === 'sound').length === 12, 'deal sound per card')
   assert(script.phases[1]!.moves.length === 3 && script.phases[1]!.moves.every((m) => m.to.faceUp && !m.from.faceUp), 'reveal')
   assert(script.phases[3]!.showSvarkaBanner && script.phases.filter((p) => p.showSvarkaBanner).length === 1, 'svarka banner')
@@ -261,7 +266,7 @@ check('B10. подредба: тестето, банката, ръцете и о
     const chip = (id: string, snapshot: Record<string, { x: number; y: number; rotation: number; scale: number }>) => boxOf(snapshot[id]!, layout.chipSize, layout.chipSize)
     const afterDeal = script.statesAfter[0]!
     const afterBet = script.statesAfter[2]!
-    const dealt = new Set(script.phases[0]!.moves.map((m) => m.id))
+    const dealt = new Set(script.phases[0]!.moves.filter((m) => m.to.alpha !== 0).map((m) => m.id))
     const revealed = new Set(script.phases[1]!.moves.map((m) => m.id))
     const deck = union(script.sprites.filter((s) => s.kind === 'card' && !dealt.has(s.id)).map((s) => card(s.id, afterDeal)))
     // Всяка раздадена карта принадлежи на най-близкия аватар.

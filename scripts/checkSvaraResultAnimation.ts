@@ -1,7 +1,7 @@
 // Pure client presentation checks with a fake server clock. No real browser/WS.
 import assert from 'node:assert/strict'
 import { computeSvaraResultVisualState, SVARA_TIE_SOUND_SRC } from '../src/app/games/svara/table/svaraResultAnimation'
-import { renderSvaraActiveTable } from '../src/app/games/svara/table/renderSvaraActiveTable'
+import { renderSvaraTableView as renderSvaraActiveTable } from './fixtures/svaraTableView'
 import { RESULT_START, setFixturePayout, svaraResultFixture } from './fixtures/svaraResultFixtures'
 import { SVARA_PAYOUT_STEP_MS, SVARA_SHOWDOWN_DISPLAY_MS } from '../server/src/games/svara/runtime/svaraDeadlines'
 import { svaraCardCodeToFaceSrc } from '../src/app/games/svara/table/svaraTableAssets'
@@ -24,9 +24,12 @@ check('all compared hands flip together, including the local player and all-in p
   const input = svaraResultFixture()
   at(input, 105)
   const html = renderSvaraActiveTable(input)
-  assert.equal((html.match(/data-svara-flip-progress="0.2500"/g) ?? []).length, 2)
+  // Двете сравнявани ръце са в статичния слой с крайните лица (сървърът вече ги
+  // е изпратил); самото обръщане е спрайт анимация в слоя за движение
+  // (checkSvaraTableMotionBrowser.ts) — без стойности на кадър в HTML-а.
   assert.equal((html.match(/data-svara-showdown-cards=/g) ?? []).length, 2)
-  assert(!html.includes(svaraCardCodeToFaceSrc('AC')!)) // back half of flip
+  assert(html.includes(svaraCardCodeToFaceSrc('AC')!))
+  assert(!/data-svara-flip-progress|scaleX\(/.test(html), 'no per-frame flip state in the static layer')
 })
 check('exact server scores are rendered without evaluation', () => {
   const input = svaraResultFixture()
@@ -56,7 +59,9 @@ check('showdown lasts precisely the absolute 3000ms window, including late recon
   assert.equal(at(input, 2999).showCards, true)
   assert.equal(at(input, 3000).showCards, false)
   assert.equal(at(input, 7000).showCards, false)
-  assert(!renderSvaraActiveTable(input).includes('data-svara-showdown-cards='))
+  // Точките изчезват с прозореца; обърнатите карти остават на сукното (като в
+  // демото), докато сървърът не смени рунда — тогава сцената ги прибира.
+  assert(!renderSvaraActiveTable(input).includes('data-svara-showdown-points='))
 })
 check('no timing, another match, or old revision cannot start a result animation', () => {
   const input = svaraResultFixture()
@@ -100,14 +105,14 @@ check('exact win bubble, highlighted pot and chip destination are scoped to the 
   at(input, 3300)
   let html = renderSvaraActiveTable(input)
   assert.match(html, /Печеля 1250!/)
-  assert.match(html, /data-svara-payout-flight="1"/)
+  // Летящите чипове са в слоя за движение — не кадрово рисуван HTML.
+  assert(!html.includes('data-svara-payout-flight='))
   assert.match(html, /data-svara-active-pot="main"/)
   assert(!html.includes('Печеля 200!'))
   at(input, 4500)
   html = renderSvaraActiveTable(input)
   assert(!html.includes('Печеля 1250!'))
-  assert.match(html, /data-svara-payout-flight="0"/)
-  assert.match(html, /data-svara-payout-flight="2"/)
+  assert.match(html, /Печеля/)
 })
 check('reconnect mid-payout seeks to the active step and skips completed steps', () => {
   const input = svaraResultFixture()
@@ -138,7 +143,7 @@ check('tie leaves locked chips on the table while other resolved pots can fly', 
   at(input, 3300)
   const html = renderSvaraActiveTable(input)
   assert.match(html, /СВАРА!/)
-  assert.match(html, /Заключена банка \(Свара\): 777/)
+  assert.match(html, /Заключена банка \(Свара\): <b[^>]*>777</)
   assert.match(html, /Печеля 1250!/)
   assert(!html.includes('Печеля 777!'))
   assert.equal(SVARA_TIE_SOUND_SRC, null)
@@ -153,7 +158,7 @@ check('reduced motion preserves deadlines and amounts without flying chips or ca
   const input = svaraResultFixture()
   input.reducedMotion = true
   at(input, 1)
-  assert.match(renderSvaraActiveTable(input), /data-svara-flip-progress="1.0000"/)
+  assert(renderSvaraActiveTable(input).includes(svaraCardCodeToFaceSrc('AC')!), 'final faces without rotation')
   setFixturePayout(input)
   at(input, 3300)
   const html = renderSvaraActiveTable(input)
@@ -178,7 +183,7 @@ check('reveal-choice stays separate: pending hides public cards; revealed shows 
   assert.match(html, /data-svara-reveal-points="1"[^>]*>33</)
   assert(!html.includes('data-svara-showdown-cards='))
   at(input, 8000)
-  assert(!renderSvaraActiveTable(input).includes('data-svara-reveal-cards='))
+  assert(!renderSvaraActiveTable(input).includes('data-svara-reveal-points='))
 })
 check('all frame samples and render calls leave balances and snapshot byte-for-byte unchanged', () => {
   const input = svaraResultFixture()
