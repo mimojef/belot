@@ -163,18 +163,43 @@ async function playRounds(humans: Peer[], matchId: string, rounds: number, seed:
 }
 
 /** Хората излизат → ботовете трябва сами да излязат и мачът да приключи; след това нищо не тиктака. */
+/**
+ * Хората натискат истинския бутон „Изход“ един след друг. Докато остава друг
+ * реален играч, мачът продължава; изходът на последния прекратява мача
+ * веднага (без победител), връща в лобито и позволява нова маса веднага.
+ */
 async function exitAndVerifyRelease(humans: Peer[], matchId: string) {
-  for (const h of humans) {
-    if (!['active', 'absent'].includes(stored(matchId).state.status[h.id]!)) continue
-    await raw(h, { type: 'submit_svara_command', matchId, commandId: randomUUID(), expectedRevision: stored(matchId).revision, command: { type: 'exit' } })
-    await pause(300)
+  const playing = humans.filter((h) => ['active', 'absent'].includes(stored(matchId).state.status[h.id]!))
+  if (stored(matchId).state.phase !== 'in-progress' || playing.length === 0) return
+  for (const [index, h] of playing.entries()) {
+    const offset = h.frames.length
+    await h.page.click('[data-svara-table-leave]')
+    await wait('back in the Svara lobby', () => h.frames.slice(offset).some((f) => f.type === 'svara_table_left' && f.matchId === matchId), 5_000)
+    // Сървърът отговаря със svara_table_left СЛЕД прекратяването в същата заявка —
+    // затова мачът трябва вече да е приключил, без да чакаме бот/дисплей таймери.
+    const s = stored(matchId).state
+    await h.page.waitForSelector('[data-svara-create-open]', { timeout: 5_000 })
+    if (index < playing.length - 1) {
+      assert.equal(s.phase, 'in-progress', 'another real player remains: the match continues')
+      continue
+    }
+    assert.equal(s.phase, 'finished', 'the last human exit ends the match immediately (same request)')
+    assert.equal(s.winnerId, null, 'no fictitious winner')
+    // Нова маса веднага след изхода.
+    const createOffset = h.frames.length
+    await h.page.click('[data-svara-create-open]')
+    await h.page.click('[data-svara-create-form] button[type="submit"]')
+    await wait('new table right away', () => h.frames.slice(createOffset).some((f) => f.type === 'svara_table_updated' || f.type === 'svara_lobby_error'), 5_000)
+    const created = h.frames.slice(createOffset).find((f) => f.type === 'svara_table_updated' || f.type === 'svara_lobby_error')!
+    assert.equal(created.type, 'svara_table_updated', `new table right away (${created.code ?? ''})`)
+    await h.page.click('[data-svara-table-leave]')
+    await wait('left the new waiting table', () => h.frames.slice(createOffset).some((f) => f.type === 'svara_table_left' && f.matchId === created.table.matchId), 5_000)
   }
-  await wait('bots leave and the match finishes', () => stored(matchId).state.phase === 'finished', 20_000)
   const revision = stored(matchId).revision
   await pause(4_000)
   assert.equal(stored(matchId).revision, revision, 'no bot/system activity after the match finished')
+  assert.equal(stored(matchId).state.phase, 'finished', 'SQLite history retained')
   assert(!backend!.output().includes('[svara-test-bots] failed'), 'bot controller reported a failure')
-  for (const h of humans) await raw(h, { type: 'leave_svara_table', matchId, requestId: randomUUID() })
 }
 
 const initial: { wallets?: string } = {}
@@ -196,7 +221,7 @@ try {
     await playRounds([admin], matchId, 2, 11)
     assert.equal(stored(matchId).state.seats.filter(isSvaraTestBotId).length, 1)
     await exitAndVerifyRelease([admin], matchId)
-    ok('1 човек срещу 1 бот: UI запълване, авто старт, игра, изход → ботът излиза, нищо не тиктака')
+    ok('1 човек срещу 1 бот: UI запълване, авто старт, игра, „Изход“ → незабавен край без победител, лоби, нова маса, нищо не тиктака')
   }
 
   // A2. 1 човек срещу 2 бота, „При запълване“
@@ -207,7 +232,7 @@ try {
     await playRounds([admin], matchId, 2, 12)
     assert.equal(stored(matchId).state.seats.filter(isSvaraTestBotId).length, 2)
     await exitAndVerifyRelease([admin], matchId)
-    ok('1 човек срещу 2 бота: авто старт, игра, изход → ботовете излизат')
+    ok('1 човек срещу 2 бота: авто старт, игра, „Изход“ → незабавен край, лоби, нова маса')
   }
 
   // B. Смесена маса: 2 души + 1 бот, „При запълване“; subadmin не вижда бутона

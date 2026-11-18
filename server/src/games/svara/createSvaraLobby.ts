@@ -7,6 +7,7 @@ import { createSvaraMatchRuntime, SvaraRuntimeError, type SvaraMatchRuntime } fr
 import { createSvaraCommandExecutor } from './runtime/createSvaraCommandExecutor.js'
 import { createSvaraLifecycle, createSvaraRealClock, type SvaraClock } from './runtime/createSvaraLifecycle.js'
 import type { SvaraTestBotsFactory } from './testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
+import { exitAndAbortTestBotMatch, isLastHumanLeavingTestBotMatch } from './testBots/abortSvaraTestBotMatch.js' // ВРЕМЕННО — тестови ботове
 import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/svaraPersistence.js'
 import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
@@ -305,7 +306,15 @@ export function createSvaraLobby(deps: {
           if (!runtime.hasMatch(message.matchId)) { reject('match_not_found'); return }
           const before = runtime.getPublicTable(message.matchId)
           if (!before.players.some((p) => p.playerId === playerId)) { reject('not_a_participant'); return }
-          const result = commands.execute({ playerId }, message)
+          // ВРЕМЕННО — тестови ботове: същото незабавно прекратяване и за изрична
+          // игрова команда „exit“ (само при актуален revision; иначе нормален отказ).
+          const abortBotMatch = message.command.type === 'exit' && !!testBots && runtime.getMatchRevision(message.matchId) === message.expectedRevision
+            && isLastHumanLeavingTestBotMatch(runtime, message.matchId, playerId, testBots.isBot)
+          if (abortBotMatch) exitAndAbortTestBotMatch(runtime, message.matchId, playerId, message.commandId, testBots!.isBot)
+          const result = abortBotMatch
+            ? { type: 'svara_command_result' as const, matchId: message.matchId, commandId: message.commandId, status: 'applied' as const,
+                revision: runtime.getMatchRevision(message.matchId), phase: runtime.getPublicTable(message.matchId).phase }
+            : commands.execute({ playerId }, message)
           lifecycle.refresh(message.matchId)
           deliver(transport, result)
           if (result.status === 'duplicate') {
@@ -400,7 +409,11 @@ export function createSvaraLobby(deps: {
         const type = message.type === 'join_svara_table' ? 'join-seat'
           : message.type === 'start_svara_table' ? 'start-match'
           : before.phase === 'lobby' ? 'leave-seat' : 'exit'
-        runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, { type })
+        // ВРЕМЕННО — тестови ботове: изричен изход на последния човек от маса с
+        // ботове прекратява мача веднага, без победител. Маси само с хора — без промяна.
+        if (type === 'exit' && testBots && isLastHumanLeavingTestBotMatch(runtime, message.matchId, playerId, testBots.isBot)) {
+          exitAndAbortTestBotMatch(runtime, message.matchId, playerId, message.requestId, testBots.isBot)
+        } else runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, { type })
         lifecycle.refresh(message.matchId)
         if (message.type === 'join_svara_table') deps.onAdmission?.(playerId)
         if (message.type === 'join_svara_table') currentViews.set(transport, message.matchId)

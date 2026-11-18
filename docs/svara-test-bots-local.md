@@ -16,7 +16,15 @@
 - Сяда с участническата команда `join-seat` и действа през `executeParticipantCommand` — същия lobby път като човешка `submit_svara_command` (`lifecycle.sync` → команда → `publish` → `progress`).
 - Решава **само** по собствения защитен snapshot (`getPlayerSnapshot(botId)`) — същото, което получава човек-клиент: собствените карти едва след „Погледни“, чужди карти никога, позволените действия (`you.betting`) само на неговия ход. Engine валидира всяко действие.
 - Пауза 1–3 сек преди решение (0,6–1,2 сек след собственото „Погледни“). Всяка нова промяна на мача рестартира чакащия таймер, затова ботът не реагира мигновено по остарял план.
-- Ако на масата не остане човек (всички излезли или отпаднали), ботовете излизат и мачът приключва. Таймерите се освобождават при край, при закриване, при изключен флаг и при спиране на сървъра. Затварянето на финалния резултат от човека освобождава мача от паметта (ботовете се броят за затворили).
+- **Изрично „Изход“ на последния реален играч** (бутонът `leave_svara_table` или игрова команда `exit`) прекратява мача **веднага, в същата заявка**, във всяка фаза, без да се чака победител или край на раздаването ([testBots/abortSvaraTestBotMatch.ts](../server/src/games/svara/testBots/abortSvaraTestBotMatch.ts)). Използва само съществуващи engine команди, всяка валидирана от engine-а:
+  1. `set-absent` за ботовете, **преди** изхода на човека. Иначе изходът сам прави последния жив бот победител.
+  2. Обичайната команда `exit` на човека.
+  3. Същите системни команди, които lifecycle-ът изпълнява при изтичане на срок, но без изчакване.
+  4. `finish-presence-wait(null)`: съществуващото прекратяване `all-absent`, без победител. Свободните стекове остават на собствениците си, а неразрешените банки отиват в `removed`.
+
+  Ако ботовете вече са без чипове (напр. загубили на сравняването), мачът завършва по естествения път на engine-а, без жив играч и без победител. Резултатът се записва в SQLite. Мачът се освобождава от RAM веднага, ботът и игровите таймери спират, играчът се връща в лобито на Свара и може веднага да създаде нова маса.
+- Ако остава друг реален играч (активен или временно отсъстващ), мачът продължава нормално. Refresh, reconnect, прекъсната връзка и изтекъл ход не са изход и не прекратяват мача. Маси само с хора не се засягат.
+- Ако човекът отпадне (без чипове) и не натисне „Изход“, ботовете излизат сами. Таймерите се освобождават при край, при закриване, при изключен флаг и при спиране на сървъра. Затварянето на финалния резултат от човека освобождава мача от паметта (ботовете се броят за затворили).
 
 ### Минимална тестова стратегия
 
@@ -72,6 +80,7 @@
 | --- | --- |
 | `cd server; npm run check:svara-test-bots` — реален lobby/runtime/lifecycle + persistence порт, контролиран часовник | 9/9; 30/30 последователни пускания |
 | `npm run check:svara-test-bots-real` — компилиран backend, собствена SQLite, реален часовник, WS, Chromium UI | 6/6 (3 пълни пускания) |
+| `cd server; npm run check:svara-test-bot-abort` — незабавно прекратяване: 10 засети фази (раздаване, ход на човек/бот, Покажи/Скрий, показ, сравняване, изплащане, включване в Свара, раздаване и наддаване в Свара), реален изход 1 срещу 1/2/3, смесена маса, reconnect, отсъствие, маса само с хора | 7/7; 30/30 последователни пускания |
 | Съществуващи Svara проверки (lobby, lifecycle, snapshot, runtime, recovery, dealing, showdown, creation, waiting profiles, клиентските) | без регресии |
 | Svara проверки, които падат и на изходния HEAD | engine-2b1 (1), gameplay-2b34 (12), persistence-2b36a (1), stage1-access (2), match-optimization — **същите** преди и след промяната |
 | TypeScript сървър/клиент, `server npm run build`, `npm run build` | OK |
@@ -82,8 +91,9 @@
 
 Изтрий изцяло:
 
-- `server/src/games/svara/testBots/` (флаг, идентичност, стратегия, контролер)
+- `server/src/games/svara/testBots/` (флаг, идентичност, стратегия, контролер, незабавно прекратяване)
 - `server/scripts/checkSvaraTestBots.ts`
+- `server/scripts/checkSvaraTestBotAbort.ts`
 - `scripts/checkSvaraTestBotsReal.ts`
 - този документ
 
@@ -91,12 +101,12 @@
 
 | Файл | Какво |
 | --- | --- |
-| `server/src/games/svara/createSvaraLobby.ts` | import, `deps.testBots`, `testBots`/`testBotFillViewer`, бот профили в `tableWithProfiles`, клона `fill_svara_table_with_bots`, `testBots?.onMatchChanged` в `publish` и recovery, `testBots?.isBot` при освобождаване на финален мач, `testBots?.shutdown()` |
+| `server/src/games/svara/createSvaraLobby.ts` | двата import-а, `deps.testBots`, `testBots`/`testBotFillViewer`, бот профили в `tableWithProfiles`, клона `fill_svara_table_with_bots`, `testBots?.onMatchChanged` в `publish` и recovery, `testBots?.isBot` в `hasPendingFinishedViewer`, `testBots?.shutdown()`, незабавното прекратяване при `exit` в `submit_svara_command` и в `leave_svara_table` (връща се само `runtime.executeParticipantCommand` / `commands.execute`) |
 | `server/src/games/svara/createPersistentSvaraLobby.ts` | import и `testBots` в deps |
 | `server/src/games/svara/protocol/svaraLobbyProtocol.ts` | типа `fill_svara_table_with_bots`, записа в `SVARA_LOBBY_MESSAGE_TYPES`, клона в парсера |
 | `server/src/games/svara/protocol/svaraSnapshotProtocol.ts` | `isBot?` и `testBotFill?` в `SvaraPublicTable` |
 | `server/src/index.ts` | двата import-а, `testBots:` в `createPersistentSvaraLobby`, startup предупреждението, `case 'fill_svara_table_with_bots'` |
-| `server/package.json` | `check:svara-test-bots` |
+| `server/package.json` | `check:svara-test-bots`, `check:svara-test-bot-abort` |
 | `server/.env.example` (и локалния `server/.env`) | `SVARA_TEST_BOTS_ENABLED` |
 | `package.json` | `check:svara-test-bots-real` |
 | `scripts/svaraRealIntegrationHarness.ts` | опцията `extraEnv` |
