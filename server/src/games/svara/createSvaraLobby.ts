@@ -20,6 +20,8 @@ type Transport = {
   send: (message: SvaraLobbyServerMessage | string) => void
 }
 export type SvaraRecoveryState = 'initialization' | 'ready' | 'failed' | 'disabled'
+/** Най-дълго време за преглед на резултата на приключил мач в RAM (после само SQLite историята). */
+export const SVARA_FINISHED_REVIEW_RETENTION_MS = 10 * 60_000
 
 export function createSvaraLobby(deps: {
   hasOtherGameCommitment: (profileId: string) => boolean
@@ -49,6 +51,38 @@ export function createSvaraLobby(deps: {
   let stopped = false
   let recoveryState: SvaraRecoveryState = deps.persistence ? 'initialization' : 'ready'
   let recoveryAttempted = false
+  const clock = deps.clock ?? createSvaraRealClock()
+
+  // ── Освобождаване на приключили мачове от RAM ──────────────────────────────
+  // Историята остава в SQLite (releaseMatch трие само записа в паметта).
+  // Приключил мач остава в паметта само докато някой човек може още да
+  // разгледа резултата (не е излязъл и не го е затворил) и най-много
+  // SVARA_FINISHED_REVIEW_RETENTION_MS — иначе мач, чиито участници всички
+  // отсъстват (all-absent) или никога не се връщат, би останал завинаги.
+  const finishedReleases = new Map<string, () => void>()
+  function hasPendingFinishedViewer(matchId: string): boolean {
+    const dismissed = finishedDismissals.get(matchId)
+    // ВРЕМЕННО — тестови ботове: ботът не може да затвори резултата, затова не се брои.
+    return runtime.getPublicTable(matchId).players.some((p) => p.status !== 'exited' && !dismissed?.has(p.playerId) && !testBots?.isBot(p.playerId))
+  }
+  function releaseFinishedMatch(matchId: string): void {
+    finishedReleases.get(matchId)?.()
+    finishedReleases.delete(matchId)
+    if (!deps.persistence || !runtime.hasMatch(matchId) || runtime.getPublicTable(matchId).phase !== 'finished') return
+    runtime.releaseMatch(matchId)
+    finishedDismissals.delete(matchId)
+  }
+  function scheduleFinishedRelease(matchId: string): void {
+    if (stopped || !deps.persistence || finishedReleases.has(matchId) || !runtime.hasMatch(matchId)) return
+    if (runtime.getPublicTable(matchId).phase !== 'finished') return
+    // Винаги асинхронно: publish() се вика и от lifecycle прехода, който
+    // още чете този мач в същия синхронен цикъл.
+    finishedReleases.set(matchId, clock.schedule(() => {
+      finishedReleases.delete(matchId)
+      if (stopped) return
+      try { releaseFinishedMatch(matchId) } catch (cause) { deps.onError?.(cause) }
+    }, hasPendingFinishedViewer(matchId) ? SVARA_FINISHED_REVIEW_RETENTION_MS : 0))
+  }
 
   // ВРЕМЕННО — тестови ботове. Ботовете ползват само защитения snapshot и
   // същия команден път като човек; системни команди и сурово състояние няма.
@@ -65,7 +99,7 @@ export function createSvaraLobby(deps: {
       publish(matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId)))
       progress(matchId)
     },
-  }, deps.clock ?? createSvaraRealClock()) ?? null
+  }, clock) ?? null
 
   /** ВРЕМЕННО — тестови ботове: profileId на получател с право да запълва (admin), иначе null. */
   function testBotFillViewer(transport: Transport): string | null {
@@ -180,6 +214,7 @@ export function createSvaraLobby(deps: {
       if (publicChanged && subscribers.has(connectionId)) deliver(transport, { type: 'svara_tables_list', tables })
     }
     testBots?.onMatchChanged(matchId) // ВРЕМЕННО — тестови ботове: само планира таймер
+    if (table.phase === 'finished') scheduleFinishedRelease(matchId)
   }
 
   function progress(matchId: string) {
@@ -212,6 +247,8 @@ export function createSvaraLobby(deps: {
         recoveryState = 'ready'
         // ВРЕМЕННО — тестови ботове: възстановените мачове продължават след рестарт.
         for (const matchId of runtime.listMatchIds()) testBots?.onMatchChanged(matchId)
+        // Мач, приключил още при възстановяването (напр. изтекло чакане → all-absent).
+        for (const matchId of runtime.listMatchIds()) scheduleFinishedRelease(matchId)
       } catch (cause) {
         lifecycle.shutdown()
         const safe = cause instanceof SvaraPersistenceError ? cause : new SvaraPersistenceError('recovery-failed')
@@ -239,6 +276,8 @@ export function createSvaraLobby(deps: {
       stopped = true
       lifecycle.shutdown()
       testBots?.shutdown() // ВРЕМЕННО — тестови ботове
+      for (const cancel of finishedReleases.values()) cancel()
+      finishedReleases.clear()
       finishedDismissals.clear()
     },
     findCommitment,
@@ -342,12 +381,9 @@ export function createSvaraLobby(deps: {
           dismissed.add(playerId)
           finishedDismissals.set(message.matchId, dismissed)
           lifecycle.refresh(message.matchId)
-          // ВРЕМЕННО — тестови ботове: ботът никога не „затваря“ резултата сам, затова се брои за затворил.
-          if (before.players.every((p) => p.status === 'exited' || dismissed.has(p.playerId) || testBots?.isBot(p.playerId)) && deps.persistence) {
-            // releaseMatch deletes only the in-memory entry, never persistence.
-            runtime.releaseMatch(message.matchId)
-            finishedDismissals.delete(message.matchId)
-          }
+          // Последният човек, който може да разглежда резултата, го затвори →
+          // веднага от RAM (само паметта; историята остава в SQLite).
+          if (!hasPendingFinishedViewer(message.matchId)) releaseFinishedMatch(message.matchId)
           finishedLeft(transport, message.matchId, playerId, requestId)
           return
         }

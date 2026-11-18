@@ -522,6 +522,8 @@ export function createSvaraLobbyController(options: Options) {
       options.onJoin(matchId)
     }))
     options.root.querySelector('[data-svara-table-leave]')?.addEventListener('click', () => requestExit())
+    // Бутонът „Изход“ в банера на приключил/прекратен мач — същото leave_svara_table.
+    options.root.querySelector('[data-svara-result-exit]')?.addEventListener('click', () => requestExit())
     options.root.querySelector('[data-svara-table-start]')?.addEventListener('click', () => { if (myTable) options.onStart(myTable.matchId) })
     // ВРЕМЕННО — тестови ботове.
     options.root.querySelector('[data-svara-table-fill-bots]')?.addEventListener('click', () => {
@@ -664,7 +666,10 @@ export function createSvaraLobbyController(options: Options) {
       flushBetAnimations()
     },
     setTiming(next: SvaraMatchTimingMessage | null) { timing = next; render() },
-    showMessage(next: string) { joinPendingMatchId = null; fillBotsPending = false; message = next; render() },
+    // Отказана lobby заявка (вкл. напускане) освобождава бутоните — иначе
+    // „Изход“ остава завинаги неактивен („…“) до следващо обновяване на масата,
+    // което при приключил мач никога не идва.
+    showMessage(next: string) { joinPendingMatchId = null; fillBotsPending = false; leavePending = false; message = next; render() },
     // Задание §15 — само СЪЩАТА (или вече изчистената) commandId освобождава
     // бутоните; закъснял отговор за по-стара/отменена команда никога не
     // засяга по-новото pending действие.

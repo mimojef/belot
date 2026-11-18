@@ -7,7 +7,7 @@
  * „мрежата“ snapshot кадри — както истински клиент.
  */
 import assert from 'node:assert/strict'
-import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
+import { createSvaraLobby, SVARA_FINISHED_REVIEW_RETENTION_MS } from '../src/games/svara/createSvaraLobby.js'
 import type { SvaraClock } from '../src/games/svara/runtime/createSvaraLifecycle.js'
 import type { SvaraMatchPersistence, SvaraStoredMatch } from '../src/games/svara/runtime/svaraPersistence.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyServerMessage } from '../src/games/svara/protocol/svaraLobbyProtocol.js'
@@ -195,6 +195,9 @@ function playToFinish(t: Harness, clock: Clock, memory: ReturnType<typeof memory
 
 function assertResourcesReleased(t: Harness, clock: Clock, label: string) {
   assert.equal(t.bots.pendingTimerCount(), 0, `${label}: bot timers released`)
+  // Остава само таймерът за освобождаване на приключилия мач от RAM.
+  assert(clock.jobs.size <= 1, `${label}: only the finished-match release timer remains`)
+  clock.advance(SVARA_FINISHED_REVIEW_RETENTION_MS)
   assert.equal(clock.jobs.size, 0, `${label}: no live timers after the match`)
 }
 

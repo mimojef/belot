@@ -305,7 +305,10 @@ export function patchSvaraResultPresentation(root: HTMLElement, rawInput: Render
   replace(root.querySelector('[data-svara-result-overlay]'), payoutOverlayHtml(input, positions))
 }
 
-function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean, lastBetLabel: string | null, joiningStatus: string | null): string {
+function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean, lastBetLabel: string | null, joiningStatus: string | null, matchFinished = false): string {
+  // Приключил/прекратен мач: статусите „отсъстващ“/„връща се“ вече нямат
+  // смисъл (няма следващо раздаване) — показваме само крайния резултат.
+  if (matchFinished) return ''
   const badges: string[] = []
   if (joiningStatus) badges.push(joiningStatus)
   // Постоянен бадж за последния залог (задание §11.А) — отделен от
@@ -390,7 +393,7 @@ function seatPanelHtml(
         <div data-svara-seat-points-mount="1">${showingResult ? result.points : ''}</div>
       </div>
       <div data-svara-seat-cards-mount="1" data-card-size="${cardClamp}" style="display:flex;justify-content:center;">${showingResult ? result.cards : seatCardsHtml(seat, isLocal, ownCards, publicReveal, cardClamp, landedCardCount, lookEffect, foldEffect, input.reducedMotion)}</div>
-      ${seatStatusBadges(seat, isLocal, youReturnPending, lastBet ? formatSvaraLastBetBadge(lastBet) : null, svaraJoiningStatus(round, seat.playerId))}
+      ${seatStatusBadges(seat, isLocal, youReturnPending, lastBet ? formatSvaraLastBetBadge(lastBet) : null, svaraJoiningStatus(round, seat.playerId), input.snapshot?.result.finished === true)}
     </div>
   </div>`
 }
@@ -454,7 +457,8 @@ function feltCenterContentHtml(input: RenderSvaraActiveTableInput): string {
           : round.kind === 'svara-joining' ? 'Включване в Свара'
             : round.kind === 'svara' ? 'Свара'
               : 'Обикновено раздаване'
-    : 'Чакане на следващо раздаване'
+    // Приключил мач няма следващо раздаване — резултатът е в банера.
+    : input.snapshot?.result.finished ? '' : 'Чакане на следващо раздаване'
   const potTotal = round && 'potTotal' in round ? round.potTotal : null
   const carried = input.snapshot?.carriedTotal ?? 0
   const lockedTotal = (input.snapshot?.lockedPots ?? []).reduce((sum, pot) => sum + pot.amount, 0)
@@ -567,8 +571,13 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
     return parts.join('')
   })()
 
+  // Приключил/прекратен мач: банерът е в центъра, над местата, с ясен „Изход“
+  // (същото действие → leave_svara_table, както горният бутон „Изход“).
   const resultBanner = snapshot?.result.finished
-    ? `<div data-svara-result-banner="1" style="position:absolute;left:50%;top:12%;transform:translateX(-50%);max-width:88%;text-align:center;background:rgba(0,0,0,.82);border:1px solid rgba(212,165,32,.6);border-radius:10px;padding:8px 14px;font-size:clamp(11px,3vw,14px);font-weight:800;color:#f4c95b;">${esc(snapshot.result.message ?? 'Мачът приключи.')}</div>`
+    ? `<div data-svara-result-banner="1" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;width:max-content;max-width:80%;text-align:center;background:rgba(0,0,0,.88);border:1px solid rgba(212,165,32,.6);border-radius:10px;padding:10px 14px;font-size:clamp(11px,3vw,14px);font-weight:800;color:#f4c95b;">
+        <div>${esc(snapshot.result.message ?? 'Мачът приключи.')}</div>
+        <button data-svara-result-exit="1" ${input.leavePending ? 'disabled' : ''} style="margin-top:8px;min-height:34px;padding:0 18px;border-radius:8px;border:1px solid rgba(244,201,91,.6);background:#d4a520;color:#1a1200;font-size:13px;font-weight:900;cursor:pointer;${input.leavePending ? 'opacity:.55;cursor:wait;' : ''}">${input.leavePending ? 'Излизане…' : 'Изход'}</button>
+      </div>`
     : ''
 
   const fullscreenButton = input.fullscreenSupported
@@ -579,7 +588,8 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   // клиентско преизчисление); "Върни се" е независим от betting.canAct,
   // достъпен докато статусът е 'absent' и все още няма заявен return.
   const actionButtons = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false)
-  const showReturnButton = snapshot?.you.status === 'absent' && snapshot?.you.returnPending === false
+  // Приключил мач: няма към какво да се върнеш — само „Изход“.
+  const showReturnButton = snapshot?.result.finished !== true && snapshot?.you.status === 'absent' && snapshot?.you.returnPending === false
   const actionBar = actionBarHtml(actionButtons, input.actionPending, showReturnButton)
   const decisionWindow = getSvaraDecisionWindow(snapshot, timing, input.serverNow, input.localProfileId)
   const decisionPending = input.decisionPending ?? input.actionPending

@@ -22,6 +22,7 @@
     "check:svara-decision-windows": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraDecisionWindows.ts",
     "check:svara-decision-windows-browser": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraDecisionWindowsBrowser.ts",
     "check:svara-test-bots-real": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraTestBotsReal.ts",
+    "check:svara-finished-exit-real": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraFinishedExitReal.ts",
     "check:ludo-legal-move-math": "npx tsx scripts/checkLudoLegalMoveMath.ts",
     "check:ludo-stack-capture": "npx tsx scripts/checkLudoStackCapture.ts",
     "check:ludo-safe-cell-capture": "npx tsx scripts/checkLudoSafeCellCapture.ts",
