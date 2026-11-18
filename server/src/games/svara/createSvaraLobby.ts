@@ -5,7 +5,8 @@ import { evaluateSvaraAccess, type SvaraAccessSession } from './svaraAccess.js'
 import { SvaraMatchError } from './engine/svaraMatch.js'
 import { createSvaraMatchRuntime, SvaraRuntimeError, type SvaraMatchRuntime } from './runtime/svaraMatchRuntime.js'
 import { createSvaraCommandExecutor } from './runtime/createSvaraCommandExecutor.js'
-import { createSvaraLifecycle, type SvaraClock } from './runtime/createSvaraLifecycle.js'
+import { createSvaraLifecycle, createSvaraRealClock, type SvaraClock } from './runtime/createSvaraLifecycle.js'
+import type { SvaraTestBotsFactory } from './testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
 import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/svaraPersistence.js'
 import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
@@ -28,6 +29,8 @@ export function createSvaraLobby(deps: {
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void
   clock?: SvaraClock
+  /** ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). Без него ботове няма. */
+  testBots?: SvaraTestBotsFactory
 }) {
   // An injected runtime is a test/server-owned dependency. Production always supplies persistence.
   if (deps.runtime && deps.persistence) throw new Error('Provide persistence through the injected Svara runtime')
@@ -47,8 +50,36 @@ export function createSvaraLobby(deps: {
   let recoveryState: SvaraRecoveryState = deps.persistence ? 'initialization' : 'ready'
   let recoveryAttempted = false
 
-  function tableWithProfiles(table: SvaraPublicTable): SvaraPublicTable {
-    return { ...table, players: table.players.map(({ playerId, status }) => {
+  // ВРЕМЕННО — тестови ботове. Ботовете ползват само защитения snapshot и
+  // същия команден път като човек; системни команди и сурово състояние няма.
+  const testBots = deps.testBots?.({
+    hasMatch: (matchId) => runtime.hasMatch(matchId),
+    getPublicTable: (matchId) => runtime.getPublicTable(matchId),
+    getBotSnapshot: (matchId, botId) => runtime.getPlayerSnapshot(matchId, { playerId: botId }),
+    submit(matchId, botId, command, expectedRevision) {
+      if (stopped || recoveryState !== 'ready' || !testBots?.isBot(botId)) throw new SvaraRuntimeError('command-not-allowed', 'test bot command rejected')
+      lifecycle.sync(matchId)
+      const before = runtime.getPublicTable(matchId)
+      runtime.executeParticipantCommand(matchId, { playerId: botId }, randomUUID(), command, expectedRevision)
+      lifecycle.refresh(matchId)
+      publish(matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId)))
+      progress(matchId)
+    },
+  }, deps.clock ?? createSvaraRealClock()) ?? null
+
+  /** ВРЕМЕННО — тестови ботове: profileId на получател с право да запълва (admin), иначе null. */
+  function testBotFillViewer(transport: Transport): string | null {
+    if (!testBots?.isEnabled()) return null
+    const session = transport.getSession()
+    return session?.account.role === 'admin' ? session.profile.profileId : null
+  }
+
+  function tableWithProfiles(table: SvaraPublicTable, fillViewerId: string | null = null): SvaraPublicTable {
+    const canFill = fillViewerId !== null && fillViewerId === table.creatorId && table.phase === 'lobby' && table.players.length < table.capacity
+    return { ...table, ...(canFill ? { testBotFill: true } : {}), players: table.players.map(({ playerId, status }) => {
+      // ВРЕМЕННО — тестови ботове: име/аватар от модула, никога от базата.
+      const bot = testBots?.isBot(playerId) ? testBots.publicProfile(playerId) : null
+      if (bot) return { playerId, status, displayName: bot.displayName, avatarUrl: bot.avatarUrl, isBot: true }
       let profile: ReturnType<NonNullable<typeof deps.getPublicProfile>> = null
       try { profile = deps.getPublicProfile?.(playerId) ?? null } catch (cause) { deps.onError?.(cause) }
       // Presentation only: never persist profile data or spread a full profile.
@@ -58,8 +89,11 @@ export function createSvaraLobby(deps: {
 
   function deliver(transport: Transport, payload: SvaraLobbyServerMessage | string) {
     try {
-      if (typeof payload !== 'string' && payload.type === 'svara_table_updated') payload = { ...payload, table: tableWithProfiles(payload.table) }
-      else if (typeof payload !== 'string' && payload.type === 'svara_tables_list') payload = { ...payload, tables: payload.tables.map(tableWithProfiles) }
+      if (typeof payload !== 'string' && payload.type === 'svara_table_updated') payload = { ...payload, table: tableWithProfiles(payload.table, testBotFillViewer(transport)) }
+      else if (typeof payload !== 'string' && payload.type === 'svara_tables_list') {
+        const fillViewerId = testBotFillViewer(transport)
+        payload = { ...payload, tables: payload.tables.map((table) => tableWithProfiles(table, fillViewerId)) }
+      }
       transport.send(payload)
     } catch (cause) { deps.onError?.(cause) }
   }
@@ -145,6 +179,7 @@ export function createSvaraLobby(deps: {
       }
       if (publicChanged && subscribers.has(connectionId)) deliver(transport, { type: 'svara_tables_list', tables })
     }
+    testBots?.onMatchChanged(matchId) // ВРЕМЕННО — тестови ботове: само планира таймер
   }
 
   function progress(matchId: string) {
@@ -175,6 +210,8 @@ export function createSvaraLobby(deps: {
         // schedules; committed preceding transitions remain durable for next boot.
         for (const matchId of runtime.listMatchIds()) lifecycle.sync(matchId)
         recoveryState = 'ready'
+        // ВРЕМЕННО — тестови ботове: възстановените мачове продължават след рестарт.
+        for (const matchId of runtime.listMatchIds()) testBots?.onMatchChanged(matchId)
       } catch (cause) {
         lifecycle.shutdown()
         const safe = cause instanceof SvaraPersistenceError ? cause : new SvaraPersistenceError('recovery-failed')
@@ -201,6 +238,7 @@ export function createSvaraLobby(deps: {
     shutdown() {
       stopped = true
       lifecycle.shutdown()
+      testBots?.shutdown() // ВРЕМЕННО — тестови ботове
       finishedDismissals.clear()
     },
     findCommitment,
@@ -245,6 +283,28 @@ export function createSvaraLobby(deps: {
           deliver(transport, { type: 'svara_tables_list', tables: tablesFor(playerId) })
           return
         }
+        if (message.type === 'fill_svara_table_with_bots') {
+          // ВРЕМЕННО — тестови ботове. Правото се проверява тук (флаг + admin +
+          // създател + чакаща маса), не от видимостта на бутона.
+          if (!testBots?.isEnabled()) { reject('feature_disabled'); return }
+          if (session!.account.role !== 'admin') { reject('forbidden_role'); return }
+          if (!runtime.hasMatch(message.matchId)) { reject('match_not_found'); return }
+          const before = runtime.getPublicTable(message.matchId)
+          if (before.creatorId !== playerId || !before.players.some((p) => p.playerId === playerId)) { reject('not_allowed'); return }
+          if (before.phase !== 'lobby') { reject('wrong_phase'); return }
+          const free = before.capacity - before.players.length
+          if (free <= 0) { reject('table_full'); return }
+          // Същата участническа команда като при човек; при „При запълване“
+          // последното сядане стартира мача от самия engine.
+          for (const botId of testBots.createBotIds(before.players.map((p) => p.playerId), free)) {
+            runtime.executeParticipantCommand(message.matchId, { playerId: botId }, message.requestId, { type: 'join-seat' })
+          }
+          lifecycle.refresh(message.matchId)
+          deliver(transport, { type: 'svara_table_updated', table: runtime.getPublicTable(message.matchId), requestId })
+          publish(message.matchId, before.players.map((p) => p.playerId))
+          progress(message.matchId)
+          return
+        }
         if (message.type === 'create_svara_table' || message.type === 'join_svara_table') {
           if (deps.hasOtherGameCommitment(playerId)) { error(transport, 'other_game_commitment', requestId); return }
           const commitment = findCommitment(playerId)
@@ -282,7 +342,8 @@ export function createSvaraLobby(deps: {
           dismissed.add(playerId)
           finishedDismissals.set(message.matchId, dismissed)
           lifecycle.refresh(message.matchId)
-          if (before.players.every((p) => p.status === 'exited' || dismissed.has(p.playerId)) && deps.persistence) {
+          // ВРЕМЕННО — тестови ботове: ботът никога не „затваря“ резултата сам, затова се брои за затворил.
+          if (before.players.every((p) => p.status === 'exited' || dismissed.has(p.playerId) || testBots?.isBot(p.playerId)) && deps.persistence) {
             // releaseMatch deletes only the in-memory entry, never persistence.
             runtime.releaseMatch(message.matchId)
             finishedDismissals.delete(message.matchId)

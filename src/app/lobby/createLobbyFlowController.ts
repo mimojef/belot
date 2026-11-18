@@ -1091,6 +1091,8 @@ export type CreateLobbyFlowControllerOptions = {
   onSvaraTableJoin?: (matchId: string) => void
   onSvaraTableLeave?: (matchId: string) => void
   onSvaraTableStart?: (matchId: string) => void
+  /** ВРЕМЕННО — тестови ботове за Свара. */
+  onSvaraTableFillWithBots?: (matchId: string) => void
   onSvaraTableStateRequest?: (matchId: string) => void
   onSvaraSubmitCommand?: (matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand) => void
   /** "Турнирни срещи" (Виж игрите) — live абонамент за резултатите на срещите в турнир. */
@@ -4127,6 +4129,7 @@ export function createLobbyFlowController(
         onJoin: (matchId) => options.onSvaraTableJoin?.(matchId),
         onLeave: (matchId) => options.onSvaraTableLeave?.(matchId),
         onStart: (matchId) => options.onSvaraTableStart?.(matchId),
+        onFillWithBots: (matchId) => options.onSvaraTableFillWithBots?.(matchId), // ВРЕМЕННО — тестови ботове
         onRequestTableState: (matchId) => options.onSvaraTableStateRequest?.(matchId),
         onSubmitCommand: (matchId, commandId, expectedRevision, command) => options.onSvaraSubmitCommand?.(matchId, commandId, expectedRevision, command),
       })

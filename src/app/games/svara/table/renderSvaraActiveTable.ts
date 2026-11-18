@@ -345,6 +345,8 @@ function seatPanelHtml(
   round: SvaraSnapshotRound | null,
 ): string {
   const isLocal = seat.playerId === input.localProfileId
+  // ВРЕМЕННО — тестови ботове: сървърно обозначение от публичната маса (само представяне).
+  const testBot = input.table.players.find((p) => p.playerId === seat.playerId && p.isBot) ?? null
   const showingResult = isResultRound(input)
   const sizes = PANEL_WIDTH_VW_BY_SLOT[slot]
   const widthClamp = `clamp(${sizes.min}px, ${sizes.base}vw, ${sizes.max}px)`
@@ -379,10 +381,10 @@ function seatPanelHtml(
       <div data-svara-win-bubble-mount="1" style="text-align:center;width:100%;pointer-events:none;">${result.bubble}</div>
       <div data-svara-avatar="${seat.seatIndex}" style="position:relative;width:${avatarClamp};height:${avatarClamp};">
         ${ring}
-        <img src="${svaraPlaceholderAvatarSrc(seat.playerId)}" alt="" draggable="false" style="width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid ${seat.isDealer ? '#f4c95b' : 'rgba(255,255,255,.25)'};box-sizing:border-box;" />
+        <img src="${esc(testBot?.avatarUrl || svaraPlaceholderAvatarSrc(seat.playerId))}" alt="" draggable="false" style="width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid ${seat.isDealer ? '#f4c95b' : 'rgba(255,255,255,.25)'};box-sizing:border-box;" />
         ${seat.isDealer ? `<span data-svara-dealer-badge="1" title="Дилър" style="position:absolute;right:-2px;bottom:-2px;width:16px;height:16px;border-radius:50%;background:#d4a520;color:#1a1200;font-size:9px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #090909;">Д</span>` : ''}
       </div>
-      <div style="font-size:clamp(9px,2.6vw,13px);font-weight:800;color:#fff;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;line-height:1.15;">${esc(svaraPlaceholderName(seat.playerId))}${isLocal ? ' (ти)' : ''}</div>
+      <div style="font-size:clamp(9px,2.6vw,13px);font-weight:800;color:#fff;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;line-height:1.15;">${testBot ? `<span data-svara-bot-badge="1" style="color:#9fd0ff;">${esc(testBot.displayName || 'Бот')}</span>` : esc(svaraPlaceholderName(seat.playerId))}${isLocal ? ' (ти)' : ''}</div>
       <div style="display:flex;align-items:center;justify-content:center;gap:3px;flex-wrap:wrap;">
         <div data-svara-seat-total="1" style="font-size:clamp(8px,2.3vw,11px);color:#f4c95b;font-weight:700;line-height:1.15;" title="Общо внесени в това раздаване (вкл. Вход)">${seat.stack}${seat.roundContribution > 0 ? ` · общо ${seat.roundContribution}` : ''}</div>
         <div data-svara-seat-points-mount="1">${showingResult ? result.points : ''}</div>

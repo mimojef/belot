@@ -49,7 +49,11 @@ export type SvaraPublicTable = {
   entryPercent: SvaraEntryPercent
   startingChips: number
   entryChips: number
-  players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null }>
+  players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null
+    /** ВРЕМЕННО — тестови ботове: само представяне, добавя се от lobby при доставка. */
+    isBot?: boolean }>
+  /** ВРЕМЕННО — тестови ботове: само за получател с право на „Запълни с ботове“. */
+  testBotFill?: boolean
 }
 
 /** Explicit public whitelist; never copies cards or internal state. */

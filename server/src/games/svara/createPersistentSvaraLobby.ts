@@ -2,6 +2,7 @@ import { createSvaraMatchSnapshotStore } from '../../db/svaraMatchSnapshotStore.
 import { createSvaraLobby } from './createSvaraLobby.js'
 import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/svaraPersistence.js'
 import type { SvaraClock } from './runtime/createSvaraLifecycle.js'
+import type { SvaraTestBotsFactory } from './testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
 
 /** Isolate Svara startup failures from the rest of the platform. No migrations here. */
 export async function createPersistentSvaraLobby(deps: {
@@ -11,6 +12,8 @@ export async function createPersistentSvaraLobby(deps: {
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void
   clock?: SvaraClock
+  /** ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). */
+  testBots?: SvaraTestBotsFactory
 }) {
   let persistence: SvaraMatchPersistence
   let close = () => {}

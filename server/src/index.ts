@@ -122,6 +122,8 @@ import { canSessionAccessSvara } from './games/svara/svaraAccess.js'
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import { createPersistentSvaraLobby } from './games/svara/createPersistentSvaraLobby.js'
 import { createSvaraRealClock } from './games/svara/runtime/createSvaraLifecycle.js'
+import { createSvaraTestBotsFactory } from './games/svara/testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
+import { isSvaraTestBotsEnabled } from './games/svara/testBots/svaraTestBotsFeatureFlag.js' // ВРЕМЕННО — тестови ботове
 import { SVARA_LOBBY_MESSAGE_TYPES, type SvaraLobbyClientMessage } from './games/svara/protocol/svaraLobbyProtocol.js'
 import {
   recordBelotMatchForCampaign,
@@ -1030,6 +1032,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'start_svara_table':
     case 'request_svara_table_state':
     case 'submit_svara_command':
+    case 'fill_svara_table_with_bots': // ВРЕМЕННО — тестови ботове
     case 'request_private_games_list':
     case 'request_ludo_rooms_list':
     case 'request_ludo_games_list':
@@ -5256,7 +5259,12 @@ const svaraService = await createPersistentSvaraLobby({
   onError: (error) => console.error('[svara-lobby] request failed', error),
   onAdmission: (profileId) => endBelotSpectatingForProfile(profileId, 'game_commitment'),
   clock: createSvaraRealClock((label, durationMs) => mainThreadTimings.record('timer', label, durationMs)),
+  // ВРЕМЕННО — тестови ботове за Свара. Активни само при изрично включен
+  // локален флаг извън production (виж testBots/svaraTestBotsFeatureFlag.ts
+  // и docs/svara-test-bots-local.md).
+  testBots: createSvaraTestBotsFactory({ onError: (error) => console.error('[svara-test-bots] failed', error) }),
 })
+if (isSvaraTestBotsEnabled()) console.warn('[svara-test-bots] ENABLED — local testing only') // ВРЕМЕННО
 const svaraLobby = svaraService.lobby
 
 // Guard before any other game's admission path, including legacy rooms and invites.

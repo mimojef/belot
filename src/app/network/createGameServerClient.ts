@@ -1086,6 +1086,8 @@ export type ClientMessage =
   | { type: 'join_svara_table'; matchId: string; requestId: string }
   | { type: 'leave_svara_table'; matchId: string; requestId: string }
   | { type: 'start_svara_table'; matchId: string; requestId: string }
+  // ВРЕМЕННО — тестови ботове за Свара (docs/svara-test-bots-local.md); сървърът проверява правото.
+  | { type: 'fill_svara_table_with_bots'; matchId: string; requestId: string }
   | { type: 'request_svara_table_state'; matchId: string }
   | { type: 'submit_svara_command'; matchId: string; commandId: string; expectedRevision: number; command: SvaraParticipantCommand }
   | {
@@ -1286,7 +1288,11 @@ export type SvaraPublicTable = {
   entryPercent: SvaraEntryPercent
   startingChips: number
   entryChips: number
-  players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null }>
+  players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null
+    /** ВРЕМЕННО — тестови ботове: сървърно обозначение (само представяне). */
+    isBot?: boolean }>
+  /** ВРЕМЕННО — тестови ботове: сървърът го праща само на получател с право на „Запълни с ботове“. */
+  testBotFill?: boolean
 }
 
 export type SvaraBettingAction =
@@ -3811,6 +3817,8 @@ export type GameServerClient = {
   joinSvaraTable: (matchId: string) => void
   leaveSvaraTable: (matchId: string) => void
   startSvaraTable: (matchId: string) => void
+  /** ВРЕМЕННО — тестови ботове за Свара. */
+  fillSvaraTableWithBots: (matchId: string) => void
   requestSvaraTableState: (matchId: string) => void
   submitSvaraCommand: (matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand) => void
   subscribeTournamentMatches: (tournamentId: string, token: string) => void
@@ -4278,6 +4286,8 @@ export function createGameServerClient(
   function joinSvaraTable(matchId: string): void { send({ type: 'join_svara_table', matchId, requestId: crypto.randomUUID() }) }
   function leaveSvaraTable(matchId: string): void { send({ type: 'leave_svara_table', matchId, requestId: crypto.randomUUID() }) }
   function startSvaraTable(matchId: string): void { send({ type: 'start_svara_table', matchId, requestId: crypto.randomUUID() }) }
+  // ВРЕМЕННО — тестови ботове за Свара.
+  function fillSvaraTableWithBots(matchId: string): void { send({ type: 'fill_svara_table_with_bots', matchId, requestId: crypto.randomUUID() }) }
   function requestSvaraTableState(matchId: string): void { send({ type: 'request_svara_table_state', matchId }) }
   function submitSvaraCommand(matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand): void {
     send({ type: 'submit_svara_command', matchId, commandId, expectedRevision, command })
@@ -4491,6 +4501,7 @@ export function createGameServerClient(
     joinSvaraTable,
     leaveSvaraTable,
     startSvaraTable,
+    fillSvaraTableWithBots, // ВРЕМЕННО — тестови ботове
     requestSvaraTableState,
     submitSvaraCommand,
     subscribeTournamentMatches,

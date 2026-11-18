@@ -98,7 +98,7 @@ export function verifyHarnessIdentity(value: unknown, nonce: string, pid: number
   assert.equal(identity.parentPid, process.pid, 'Wrong parent PID')
 }
 
-export async function startIsolatedSvaraBackend(isolated: Awaited<ReturnType<typeof createIsolatedSvaraRoot>>, options: { featureFlag?: string | null; deckControl?: boolean } = {}) {
+export async function startIsolatedSvaraBackend(isolated: Awaited<ReturnType<typeof createIsolatedSvaraRoot>>, options: { featureFlag?: string | null; deckControl?: boolean; extraEnv?: Record<string, string> } = {}) {
   const nonce = randomUUID()
   if (options.deckControl) {
     // Existing restart fixture, installed ONLY in this owned private copy.
@@ -114,6 +114,8 @@ export async function startIsolatedSvaraBackend(isolated: Awaited<ReturnType<typ
   const env = backendTestEnv(process.env, process.pid, nonce)
   if (options.featureFlag === null) delete env.SVARA_TEST_ENABLED
   else if (options.featureFlag !== undefined) env.SVARA_TEST_ENABLED = options.featureFlag
+  // ВРЕМЕННО — ползва се от checkSvaraTestBotsReal.ts (SVARA_TEST_BOTS_ENABLED).
+  if (options.extraEnv) Object.assign(env, options.extraEnv)
   const child: ChildProcess = spawn(process.execPath, [isolated.runnerPath], {
     cwd: isolated.serverDir, env, windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],

@@ -11,6 +11,8 @@ export type SvaraLobbyClientMessage =
   | { type: 'create_svara_table'; requestId: string; capacity: 2 | 3 | 4; entryFee: number; entryPercent: SvaraEntryPercent; startMode: SvaraStartMode }
   | { type: 'join_svara_table' | 'leave_svara_table' | 'start_svara_table'; matchId: string; requestId: string }
   | { type: 'request_svara_table_state'; matchId: string }
+  // ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). Сървърът проверява флаг, роля admin и създател.
+  | { type: 'fill_svara_table_with_bots'; matchId: string; requestId: string }
 
 export type SvaraGameplayClientMessage = {
   type: 'submit_svara_command'
@@ -43,6 +45,7 @@ export const SVARA_LOBBY_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   'request_svara_tables_list', 'create_svara_table', 'join_svara_table',
   'leave_svara_table', 'start_svara_table', 'request_svara_table_state',
   'submit_svara_command',
+  'fill_svara_table_with_bots', // ВРЕМЕННО — тестови ботове
 ])
 
 const validId = (value: unknown): value is string =>
@@ -82,7 +85,7 @@ export function parseSvaraLobbyMessage(input: Record<string, unknown>): SvaraLob
     const entryPercent = SVARA_TEST_ENTRY_PERCENT
     return { type: input.type, requestId: input.requestId, capacity: input.capacity, entryFee: input.entryFee, entryPercent, startMode: input.startMode }
   }
-  if (input.type === 'join_svara_table' || input.type === 'leave_svara_table' || input.type === 'start_svara_table') {
+  if (input.type === 'join_svara_table' || input.type === 'leave_svara_table' || input.type === 'start_svara_table' || input.type === 'fill_svara_table_with_bots') {
     return validId(input.matchId) ? { type: input.type, matchId: input.matchId, requestId: input.requestId } : null
   }
   return null
