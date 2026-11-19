@@ -526,6 +526,85 @@ function bar(percentValue: number | null): string {
   return `<div style="display:flex;align-items:center;gap:8px;"><div style="flex:1;height:8px;border-radius:999px;background:rgba(255,255,255,0.08);overflow:hidden;min-width:60px;"><div style="width:${clamped.toFixed(1)}%;height:100%;background:${color};"></div></div><span style="font-size:12px;font-weight:800;min-width:52px;text-align:right;">${formatPercent(percentValue)}</span></div>`
 }
 
+/** UTC минута от сървъра -> българско време (дд.мм, чч:мм). */
+function formatSofiaMinute(iso: string): string {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString('bg-BG', { timeZone: 'Europe/Sofia', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+type RecentEntry = NonNullable<ClientStats['recent']>[number]
+
+/** Идентичност на ред от „Последни събития“ (за котвата на скрола). */
+function recentSignature(entry: RecentEntry): string {
+  return `${entry.at}\u0001${entry.event}\u0001${entry.platform}\u0001${entry.detail}`
+}
+
+/**
+ * С колко реда е изместен старият списък в новия (най-новите са първи, така че
+ * новите събития се добавят отгоре, а при пълен буфер най-старите отпадат отдолу).
+ * null — няма съвпадение (напр. рестарт на сървъра).
+ */
+function recentShift(previous: readonly string[], next: readonly string[]): number | null {
+  if (previous.length === 0 || next.length === 0) return null
+  for (let shift = 0; shift < next.length; shift += 1) {
+    const overlap = Math.min(previous.length, next.length - shift)
+    let same = true
+    for (let index = 0; index < overlap; index += 1) {
+      if (next[shift + index] !== previous[index]) { same = false; break }
+    }
+    if (same) return shift
+  }
+  return null
+}
+
+/** „Копирай лога“: цялата секция „Медийно здраве“ като четим текст (без DOM). */
+function buildMediaHealthLogText(m: Monitoring): string {
+  const c = m.clients
+  const media = c.media
+  const recent = c.recent ?? []
+  const lines: string[] = [
+    'Гласови разговори — Медийно здраве',
+    `Генерирано: ${formatDate(m.generatedAt)} (${m.generatedAt})`,
+    `Броячи от: ${formatDate(c.since)}`,
+    '',
+  ]
+  const counts = (title: string, entries: Record<string, number> | undefined, labels: Record<string, string>) => {
+    lines.push(`${title}:`)
+    const rows = Object.entries(entries ?? {}).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1])
+    if (rows.length === 0) lines.push('  няма')
+    for (const [code, count] of rows) lines.push(`  ${labels[code] ?? code} [${code}]: ${count}`)
+  }
+  if (media === undefined) {
+    lines.push('Броячи: сървърът още не отчита медийното здраве.')
+  } else {
+    counts('Микрофон (собствен поток)', media.input, MEDIA_INPUT_LABELS)
+    counts('Допълнително при подозрение', media.inputEvidence, MEDIA_EVIDENCE_LABELS)
+    counts('Възстановяване на микрофона', media.micRecovery, MIC_RECOVERY_LABELS)
+    counts('Входящ звук', media.output, MEDIA_OUTPUT_LABELS)
+    counts('Автоматично възстановяване на звука', media.recovery, MEDIA_RECOVERY_LABELS)
+    counts('По платформа (медийни събития)', media.byPlatform, PLATFORM_LABELS)
+  }
+  lines.push('')
+  lines.push(`Последни събития: ${recent.length} (до ${c.recentLimit ?? 500}, най-новите първи; време до минута)`)
+  if (recent.length === 0) lines.push('  няма')
+  for (const entry of recent) {
+    const platform = PLATFORM_LABELS[entry.platform] ?? entry.platform
+    lines.push(`${formatSofiaMinute(entry.at)} (${entry.at} UTC) | ${entry.event} | ${platform}${entry.detail === '' ? '' : ` | ${entry.detail}`}`)
+  }
+  return `${lines.join('\n')}\n`
+}
+
+type ViewState = {
+  hostTop: number
+  /** Котва на външния скрол: индекс на първия видим пряк наследник на тялото. */
+  anchor: { index: number; count: number; top: number } | null
+  scrolls: Map<string, { top: number; left: number }>
+  /** Котва на „Последни събития“: първият видим ред и отместването му. */
+  recent: { index: number; offset: number } | null
+  inputs: Map<string, { value: string; rendered: string; focused: boolean }>
+  details: Map<string, boolean>
+}
+
 export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close: () => void } {
   document.getElementById(HOST_ID)?.remove()
   const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -551,6 +630,18 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
   let loading = false
   let refreshTimer: ReturnType<typeof setTimeout> | null = null
   let closed = false
+  /** „Пауза на обновяването“: без автоматично обновяване; „Обнови“ работи. */
+  let refreshPaused = false
+  /** Автоматичното обновяване чака, докато в панела има маркиран текст. */
+  let renderDeferred = false
+  let renderedTabsHtml = ''
+  let renderedBannersHtml = ''
+  let renderedBodyHtml = ''
+  let renderedTab: Tab | null = null
+  let renderedRecent: string[] = []
+  let shownGeneratedAt: string | null = null
+  let copyStatus: { text: string; tone: 'ok' | 'error' } | null = null
+  let copyStatusTimer: ReturnType<typeof setTimeout> | null = null
 
   host.innerHTML = `
     <style>
@@ -575,15 +666,16 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
         style="width:min(100%,1040px);box-sizing:border-box;border-radius:8px;border:1px solid rgba(212,165,32,0.35);background:#111111;box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:18px;align-self:flex-start;color:#f1f5f9;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px;flex-wrap:wrap;">
           <h2 id="admin-voice-chat-title" style="margin:0;font-size:20px;font-weight:900;color:#d4a520;letter-spacing:0.02em;">Гласови разговори</h2>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <span data-avc-updated="1" style="font-size:12px;${MUTED}"></span>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+            <span data-avc-updated="1" role="status" aria-live="polite" style="font-size:12px;${MUTED}"></span>
+            <button type="button" data-avc-pause="1" aria-pressed="false" style="${BTN_SECONDARY}">Пауза на обновяването</button>
             <button type="button" data-avc-refresh="1" style="${BTN_SECONDARY}">Обнови</button>
             <button type="button" data-avc-close="1" aria-label="Затвори" style="${BTN_SECONDARY}">Затвори</button>
           </div>
         </div>
         <p style="margin:0 0 12px;font-size:13px;line-height:1.5;${MUTED}">Гласов чат в частните маси на Белот. Само технически показатели — без слушане, без записи и без имена на участниците.</p>
         <div data-avc-banners="1"></div>
-        <div data-avc-tabs="1" role="tablist" style="display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:12px;padding-bottom:2px;"></div>
+        <div data-avc-tabs="1" data-avc-scroll="tabs" role="tablist" style="display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:12px;padding-bottom:2px;"></div>
         <div data-avc-notice="1" role="status" aria-live="polite" style="display:none;margin:0 0 10px;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.45;"></div>
         <div data-avc-body="1"></div>
       </section>
@@ -594,6 +686,7 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
   const bodyEl = host.querySelector<HTMLElement>('[data-avc-body="1"]')!
   const noticeEl = host.querySelector<HTMLElement>('[data-avc-notice="1"]')!
   const updatedEl = host.querySelector<HTMLElement>('[data-avc-updated="1"]')!
+  const pauseEl = host.querySelector<HTMLButtonElement>('[data-avc-pause="1"]')!
 
   const showNotice = (text: string | null, tone: 'ok' | 'error' = 'ok') => {
     if (text === null) { noticeEl.style.display = 'none'; return }
@@ -628,15 +721,15 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
 
   // ─── Рендиране ────────────────────────────────────────────────────────
 
-  const renderTabs = () => {
+  const renderTabs = (): string => {
     const tabs: Array<[Tab, string]> = [['control', 'Управление'], ['live', 'Текущо състояние'], ['stats', 'Статистика и качество'], ['vps', 'Гласов VPS']]
-    tabsEl.innerHTML = tabs.map(([key, label]) => {
+    return tabs.map(([key, label]) => {
       const active = key === tab
       return `<button type="button" role="tab" aria-selected="${active}" data-avc-tab="${key}" style="flex:0 0 auto;min-height:36px;padding:0 14px;border-radius:999px;border:1px solid ${active ? '#d4a520' : 'rgba(255,255,255,0.18)'};background:${active ? 'rgba(212,165,32,0.16)' : 'transparent'};color:${active ? '#f4c95b' : '#e2e8f0'};font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap;">${escapeHtml(label)}</button>`
     }).join('')
   }
 
-  const renderBanners = () => {
+  const renderBanners = (): string => {
     const parts: string[] = []
     if (base?.emergencyStop === true) {
       parts.push(`<div style="${CARD_STYLE}border-color:rgba(248,113,113,0.5);background:rgba(248,113,113,0.08);color:#fecaca;font-size:13px;line-height:1.5;"><b>Авариен стоп от сървъра (VOICE_CHAT_ENABLED=0).</b> Гласът е изключен независимо от избрания режим. Отменя се само от средата на сървъра.</div>`)
@@ -644,7 +737,7 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
     if (loadError !== null) {
       parts.push(`<div style="${CARD_STYLE}border-color:rgba(248,113,113,0.45);color:#fecaca;font-size:13px;">${escapeHtml(loadError)}</div>`)
     }
-    bannersEl.innerHTML = parts.join('')
+    return parts.join('')
   }
 
   const renderControl = (data: BaseSnapshot): string => {
@@ -702,7 +795,7 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
           <h3 style="${H3}">Лимит на едновременните гласови маси</h3>
           <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;">
             <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;${MUTED}">Лимит (0–${data.maxTablesUpperBound})
-              <input type="number" min="0" max="${data.maxTablesUpperBound}" step="1" inputmode="numeric" data-avc-limit-input="1" value="${data.maxTables}" style="${INPUT_STYLE}width:110px;">
+              <input type="number" min="0" max="${data.maxTablesUpperBound}" step="1" inputmode="numeric" data-avc-limit-input="1" data-avc-input="limit" value="${data.maxTables}" style="${INPUT_STYLE}width:110px;">
             </label>
             <button type="button" data-avc-limit-save="1" ${busy ? 'disabled' : ''} style="${BTN_PRIMARY}">Запази</button>
           </div>
@@ -733,7 +826,7 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
       </div>
       <div style="${CARD_STYLE}">
         <h3 style="${H3}">История на промените</h3>
-        <div style="overflow-x:auto;"><table><thead><tr><th>Кога</th><th>Настройка</th><th>Промяна</th><th data-avc-hide-narrow="1">От</th></tr></thead><tbody>${historyRows}</tbody></table></div>
+        <div data-avc-scroll="control-history" style="overflow-x:auto;"><table><thead><tr><th>Кога</th><th>Настройка</th><th>Промяна</th><th data-avc-hide-narrow="1">От</th></tr></thead><tbody>${historyRows}</tbody></table></div>
       </div>`
   }
 
@@ -809,7 +902,7 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
       </div>
       <div style="${CARD_STYLE}">
         <h3 style="${H3}">Текущи гласови маси</h3>
-        <div data-avc-wide-only="1" style="overflow-x:auto;"><table>
+        <div data-avc-wide-only="1" data-avc-scroll="live-tables" style="overflow-x:auto;"><table>
           <thead><tr><th>Маса</th><th>Фаза</th><th>Отворена от</th><th>Генерация</th><th>Седнали</th><th>В гласа</th><th>Микр. / слуша</th><th>Състояние</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
@@ -873,16 +966,21 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
     // Етап H: медийно здраве — броячи и последните събития (UTC минута -> показва се в българско време).
     const media = c.media
     const recent = c.recent ?? []
-    const formatMinute = (iso: string): string => {
-      const date = new Date(iso)
-      return Number.isNaN(date.getTime()) ? iso : date.toLocaleString('bg-BG', { timeZone: 'Europe/Sofia', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-    }
     const recentRows = recent.length === 0
       ? `<div style="font-size:13px;${MUTED}">Няма събития.</div>`
-      : `<div data-avc-media-recent="1" style="max-height:300px;overflow-y:auto;overflow-x:hidden;font-size:12px;">${recent.map((entry) => `<div data-avc-media-recent-row="1" style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);min-width:0;"><div style="display:flex;flex-wrap:wrap;gap:2px 10px;font-weight:800;"><span title="${escapeHtml(entry.at)} UTC" style="white-space:nowrap;">${escapeHtml(formatMinute(entry.at))}</span><span>${escapeHtml(entry.event)}</span><span style="font-weight:400;${MUTED}">${escapeHtml(PLATFORM_LABELS[entry.platform] ?? entry.platform)}</span></div>${entry.detail === '' ? '' : `<div style="overflow-wrap:anywhere;${MUTED}">${escapeHtml(entry.detail)}</div>`}</div>`).join('')}</div>`
+      : `<div data-avc-media-recent="1" data-avc-scroll="media-recent" style="max-height:300px;overflow-y:auto;overflow-x:hidden;font-size:12px;">${recent.map((entry, index) => `<div data-avc-media-recent-row="1" data-avc-recent-index="${index}" style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);min-width:0;"><div style="display:flex;flex-wrap:wrap;gap:2px 10px;font-weight:800;"><span title="${escapeHtml(entry.at)} UTC" style="white-space:nowrap;">${escapeHtml(formatSofiaMinute(entry.at))}</span><span>${escapeHtml(entry.event)}</span><span style="font-weight:400;${MUTED}">${escapeHtml(PLATFORM_LABELS[entry.platform] ?? entry.platform)}</span></div>${entry.detail === '' ? '' : `<div style="overflow-wrap:anywhere;${MUTED}">${escapeHtml(entry.detail)}</div>`}</div>`).join('')}</div>`
+    const copyStatusHtml = copyStatus === null
+      ? ''
+      : `<span style="font-size:12px;font-weight:800;color:${copyStatus.tone === 'ok' ? '#86efac' : '#fca5a5'};">${escapeHtml(copyStatus.text)}</span>`
     const mediaCard = `
       <div style="${CARD_STYLE}" data-avc-media="1">
-        <h3 style="${H3}">Медийно здраве</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+          <h3 style="${H3}margin:0;">Медийно здраве</h3>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span data-avc-media-copy-status="1" role="status" aria-live="polite">${copyStatusHtml}</span>
+            <button type="button" data-avc-media-copy="1" style="${BTN_SECONDARY}">Копирай лога</button>
+          </div>
+        </div>
         ${media === undefined ? `<div style="font-size:13px;${MUTED}">Сървърът още не отчита медийното здраве.</div>` : `
         <div data-avc-cols="1">
           <div>
@@ -1102,24 +1200,188 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
       </div>
       <div style="${CARD_STYLE}">
         <h3 style="${H3}">Мрежов трафик</h3>
-        <div style="overflow-x:auto;"><table><thead><tr><th>Интерфейс</th><th>Входящ</th><th>Изходящ</th></tr></thead><tbody>${networkRows}</tbody></table></div>
+        <div data-avc-scroll="vps-network" style="overflow-x:auto;"><table><thead><tr><th>Интерфейс</th><th>Входящ</th><th>Изходящ</th></tr></thead><tbody>${networkRows}</tbody></table></div>
       </div>`
   }
 
-  const render = () => {
+  const renderBody = (): string => {
+    if (base === null) return `<div style="${CARD_STYLE}font-size:13px;">${loadError === null ? 'Зареждане…' : 'Данните не са заредени.'}</div>`
+    if (tab === 'control') return renderControl(base)
+    if (monitoring === null) return monitoringUnavailable()
+    if (tab === 'live') return renderLive(base, monitoring.live)
+    if (tab === 'stats') return renderStats(monitoring)
+    return renderVps(monitoring)
+  }
+
+  const renderHeader = () => {
+    const parts: string[] = []
+    if (shownGeneratedAt !== null) parts.push(`Обновено ${formatTime(shownGeneratedAt)}`)
+    if (refreshPaused) parts.push('обновяването е на пауза')
+    else if (renderDeferred) parts.push('новите данни изчакват маркирания текст')
+    updatedEl.textContent = parts.join(' · ')
+    pauseEl.textContent = refreshPaused ? 'Възобнови обновяването' : 'Пауза на обновяването'
+    pauseEl.setAttribute('aria-pressed', String(refreshPaused))
+  }
+
+  /** Маркиран (непразен) текст в панела — подмяната на DOM-а би го изтрила. */
+  const hasSelectionInPanel = (): boolean => {
+    const selection = window.getSelection?.() ?? null
+    if (selection === null || selection.isCollapsed || selection.rangeCount === 0) return false
+    return host.contains(selection.getRangeAt(0).commonAncestorContainer)
+  }
+
+  const captureView = (): ViewState => {
+    const hostRect = host.getBoundingClientRect()
+    let anchor: ViewState['anchor'] = null
+    if (host.scrollTop > 0) {
+      const children = Array.from(bodyEl.children)
+      const index = children.findIndex((child) => child.getBoundingClientRect().bottom > hostRect.top)
+      if (index >= 0) anchor = { index, count: children.length, top: children[index]!.getBoundingClientRect().top }
+    }
+    const scrolls = new Map<string, { top: number; left: number }>()
+    for (const element of host.querySelectorAll<HTMLElement>('[data-avc-scroll]')) {
+      scrolls.set(element.dataset.avcScroll!, { top: element.scrollTop, left: element.scrollLeft })
+    }
+    let recent: ViewState['recent'] = null
+    const list = bodyEl.querySelector<HTMLElement>('[data-avc-media-recent="1"]')
+    if (list !== null && list.scrollTop > 0) {
+      const listTop = list.getBoundingClientRect().top
+      for (const row of list.querySelectorAll<HTMLElement>('[data-avc-recent-index]')) {
+        const rect = row.getBoundingClientRect()
+        if (rect.bottom > listTop) { recent = { index: Number(row.dataset.avcRecentIndex), offset: rect.top - listTop }; break }
+      }
+    }
+    const inputs = new Map<string, { value: string; rendered: string; focused: boolean }>()
+    for (const input of bodyEl.querySelectorAll<HTMLInputElement>('input[data-avc-input]')) {
+      inputs.set(input.dataset.avcInput!, { value: input.value, rendered: input.defaultValue, focused: document.activeElement === input })
+    }
+    const details = new Map<string, boolean>()
+    for (const element of bodyEl.querySelectorAll<HTMLDetailsElement>('details[data-avc-details]')) details.set(element.dataset.avcDetails!, element.open)
+    return { hostTop: host.scrollTop, anchor, scrolls, recent, inputs, details }
+  }
+
+  const restoreView = (view: ViewState, previousRecent: readonly string[], nextRecent: readonly string[]) => {
+    for (const element of bodyEl.querySelectorAll<HTMLDetailsElement>('details[data-avc-details]')) {
+      const open = view.details.get(element.dataset.avcDetails!)
+      if (open !== undefined) element.open = open
+    }
+    for (const input of bodyEl.querySelectorAll<HTMLInputElement>('input[data-avc-input]')) {
+      const saved = view.inputs.get(input.dataset.avcInput!)
+      if (saved === undefined) continue
+      // Въведената (незапазена) стойност остава, освен ако сървърната се е сменила.
+      if (saved.value !== saved.rendered && input.defaultValue === saved.rendered) input.value = saved.value
+      if (saved.focused) input.focus({ preventScroll: true })
+    }
+    for (const element of host.querySelectorAll<HTMLElement>('[data-avc-scroll]')) {
+      const saved = view.scrolls.get(element.dataset.avcScroll!)
+      if (saved === undefined) continue
+      element.scrollLeft = saved.left
+      element.scrollTop = saved.top
+    }
+    // „Последни събития“: новите редове идват отгоре — котвата пази същия ред на същото място.
+    const list = bodyEl.querySelector<HTMLElement>('[data-avc-media-recent="1"]')
+    if (list !== null && view.recent !== null) {
+      const shift = recentShift(previousRecent, nextRecent)
+      const row = shift === null ? null : list.querySelector<HTMLElement>(`[data-avc-recent-index="${view.recent.index + shift}"]`)
+      if (row !== null) list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - view.recent.offset
+    }
+    host.scrollTop = view.hostTop
+    if (view.anchor !== null && bodyEl.children.length === view.anchor.count) {
+      const child = bodyEl.children[view.anchor.index]
+      if (child !== undefined) host.scrollTop += child.getBoundingClientRect().top - view.anchor.top
+    }
+  }
+
+  /**
+   * Подменя само променения HTML и пази изгледа (скрол, котви, въведени
+   * стойности). fromRefresh: автоматично обновяване — при маркиран текст в
+   * панела се отлага, докато маркирането не бъде премахнато.
+   */
+  const render = (fromRefresh = false) => {
     if (closed) return
-    renderTabs()
-    renderBanners()
-    updatedEl.textContent = monitoring === null ? '' : `Обновено ${formatTime(monitoring.generatedAt)}`
-    if (base === null) {
-      bodyEl.innerHTML = `<div style="${CARD_STYLE}font-size:13px;">${loadError === null ? 'Зареждане…' : 'Данните не са заредени.'}</div>`
+    if (fromRefresh && hasSelectionInPanel()) {
+      renderDeferred = true
+      renderHeader()
       return
     }
-    if (tab === 'control') bodyEl.innerHTML = renderControl(base)
-    else if (monitoring === null) bodyEl.innerHTML = monitoringUnavailable()
-    else if (tab === 'live') bodyEl.innerHTML = renderLive(base, monitoring.live)
-    else if (tab === 'stats') bodyEl.innerHTML = renderStats(monitoring)
-    else bodyEl.innerHTML = renderVps(monitoring)
+    renderDeferred = false
+    const sameTab = renderedTab === tab
+    const view = captureView()
+    const tabsHtml = renderTabs()
+    if (tabsHtml !== renderedTabsHtml) { tabsEl.innerHTML = tabsHtml; renderedTabsHtml = tabsHtml }
+    const bannersHtml = renderBanners()
+    if (bannersHtml !== renderedBannersHtml) { bannersEl.innerHTML = bannersHtml; renderedBannersHtml = bannersHtml }
+    const bodyHtml = renderBody()
+    const nextRecent = tab === 'stats' && monitoring !== null ? (monitoring.clients.recent ?? []).map(recentSignature) : []
+    if (bodyHtml !== renderedBodyHtml) {
+      bodyEl.innerHTML = bodyHtml
+      renderedBodyHtml = bodyHtml
+      if (sameTab) restoreView(view, renderedRecent, nextRecent)
+      else {
+        // Друг таб: позицията на тялото започва отначало, но табовете остават видими.
+        const tabsSaved = view.scrolls.get('tabs')
+        if (tabsSaved !== undefined) tabsEl.scrollLeft = tabsSaved.left
+      }
+    }
+    renderedTab = tab
+    renderedRecent = nextRecent
+    shownGeneratedAt = monitoring?.generatedAt ?? null
+    renderHeader()
+  }
+
+  const onSelectionChange = () => {
+    if (renderDeferred && !hasSelectionInPanel()) render(true)
+  }
+  document.addEventListener('selectionchange', onSelectionChange)
+
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard?.writeText !== undefined) {
+        await navigator.clipboard.writeText(text)
+        return true
+      }
+    } catch {
+      // Отказан достъп/несигурен контекст — резервният вариант по-долу.
+    }
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;'
+    host.appendChild(area)
+    let ok = false
+    try {
+      area.select()
+      ok = document.execCommand('copy')
+    } catch {
+      ok = false
+    }
+    area.remove()
+    active?.focus({ preventScroll: true })
+    return ok
+  }
+
+  const setCopyStatus = (status: { text: string; tone: 'ok' | 'error' } | null) => {
+    copyStatus = status
+    if (copyStatusTimer !== null) clearTimeout(copyStatusTimer)
+    copyStatusTimer = status === null ? null : setTimeout(() => { copyStatusTimer = null; setCopyStatus(null) }, 5_000)
+    // Само статуса до бутона — без пълно прерисуване (маркирането и скролът не се пипат).
+    const statusEl = bodyEl.querySelector<HTMLElement>('[data-avc-media-copy-status="1"]')
+    if (statusEl !== null) {
+      statusEl.innerHTML = status === null ? '' : `<span style="font-size:12px;font-weight:800;color:${status.tone === 'ok' ? '#86efac' : '#fca5a5'};">${escapeHtml(status.text)}</span>`
+    }
+    // Кешираният HTML вече не отговаря на DOM-а — следващото прерисуване го подменя изцяло.
+    renderedBodyHtml = ''
+  }
+
+  async function copyMediaLog(): Promise<void> {
+    if (monitoring === null) return
+    const count = monitoring.clients.recent?.length ?? 0
+    const ok = await copyText(buildMediaHealthLogText(monitoring))
+    if (closed) return
+    setCopyStatus(ok
+      ? { text: `Копирано: ${count} ${count === 1 ? 'събитие' : 'събития'} и броячите.`, tone: 'ok' }
+      : { text: 'Копирането не успя — браузърът не разреши достъп до клипборда.', tone: 'error' })
   }
 
   // ─── Данни ────────────────────────────────────────────────────────────
@@ -1127,18 +1389,20 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
   function scheduleRefresh(): void {
     if (refreshTimer !== null) clearTimeout(refreshTimer)
     refreshTimer = null
-    if (closed || refreshMs <= 0) return
+    if (closed || refreshMs <= 0 || refreshPaused) return
     refreshTimer = setTimeout(() => {
       refreshTimer = null
+      if (refreshPaused) return
       if (document.visibilityState === 'hidden') {
         scheduleRefresh()
         return
       }
-      void load()
+      void load(true)
     }, refreshMs)
   }
 
-  async function load(): Promise<void> {
+  /** fromRefresh: автоматично (по таймер) — прерисуването уважава маркирания текст. */
+  async function load(fromRefresh = false): Promise<void> {
     if (loading || closed) return
     loading = true
     const [baseResult, monitoringResult] = await Promise.all([api('GET', ''), api('GET', '/monitoring')])
@@ -1161,7 +1425,7 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
     } else {
       monitoringError = monitoringResult.message
     }
-    render()
+    render(fromRefresh)
     scheduleRefresh()
   }
 
@@ -1206,7 +1470,9 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
     if (closed) return
     closed = true
     if (refreshTimer !== null) clearTimeout(refreshTimer)
+    if (copyStatusTimer !== null) clearTimeout(copyStatusTimer)
     document.removeEventListener('keydown', onKeyDown)
+    document.removeEventListener('selectionchange', onSelectionChange)
     host.remove()
     previouslyFocused?.focus?.()
   }
@@ -1221,6 +1487,20 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
     if (target === null) return
     if (target.closest('[data-avc-close="1"]') !== null) { close(); return }
     if (target.closest('[data-avc-refresh="1"]') !== null) { void load(); return }
+    if (target.closest('[data-avc-pause="1"]') !== null) {
+      refreshPaused = !refreshPaused
+      if (refreshPaused) {
+        if (refreshTimer !== null) clearTimeout(refreshTimer)
+        refreshTimer = null
+        renderHeader()
+      } else {
+        // Възобновяване: веднага нови данни (с пазене на изгледа), после обичайният интервал.
+        renderHeader()
+        void load(true)
+      }
+      return
+    }
+    if (target.closest('[data-avc-media-copy="1"]') !== null) { void copyMediaLog(); return }
     const tabButton = target.closest<HTMLElement>('[data-avc-tab]')
     if (tabButton !== null) {
       tab = tabButton.dataset.avcTab as Tab

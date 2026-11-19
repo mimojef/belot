@@ -268,6 +268,220 @@ try {
         await page.context().close()
       })
     }
+
+    // ─── Автоматично обновяване: пазене на изгледа (скрол, маркиране, полета), пауза, „Копирай лога“ ───
+    // Без стила за скрийншоти: overlay-ът е position:fixed със собствен скрол, както в production.
+    const openLive = async (extra: string): Promise<Page> => {
+      const context = await browser!.newContext({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.mobile, isMobile: vp.mobile, deviceScaleFactor: vp.mobile ? 2 : 1 })
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+      const page = await context.newPage()
+      page.on('pageerror', (error) => console.error(`    pageerror: ${error.message}`))
+      await page.goto(`${base}?scenario=full${extra}`)
+      await page.waitForFunction(() => (window as any).__voiceAdminHarness?.ready() === true, undefined, { timeout: 20_000 })
+      return page
+    }
+    const monitoringReads = (page: Page) => page.evaluate(() => ((window as any).__voiceAdminHarness.requests as Array<{ path: string }>).filter((r) => r.path === '/monitoring').length)
+    const waitRefreshes = async (page: Page, count: number) => {
+      const target = (await monitoringReads(page)) + count
+      await page.waitForFunction((t) => ((window as any).__voiceAdminHarness.requests as Array<{ path: string }>).filter((r) => r.path === '/monitoring').length >= t, target, { timeout: 10_000 })
+      await page.waitForTimeout(80)
+    }
+    const headerText = (page: Page) => page.evaluate(() => document.querySelector('[data-avc-updated="1"]')?.textContent ?? '')
+    const scrollMedia = (page: Page, listTop: number) => page.evaluate((top) => {
+      const host = document.getElementById('admin-voice-chat-panel')!
+      const card = host.querySelector<HTMLElement>('[data-avc-media="1"]')!
+      host.scrollTop += card.getBoundingClientRect().top - 40
+      host.querySelector<HTMLElement>('[data-avc-media-recent="1"]')!.scrollTop = top
+    }, listTop)
+    const mediaView = (page: Page) => page.evaluate(() => {
+      const host = document.getElementById('admin-voice-chat-panel')!
+      const list = host.querySelector<HTMLElement>('[data-avc-media-recent="1"]')!
+      const listTop = list.getBoundingClientRect().top
+      const rows = Array.from(list.querySelectorAll<HTMLElement>('[data-avc-media-recent-row="1"]'))
+      const first = rows.find((row) => row.getBoundingClientRect().bottom > listTop)!
+      return {
+        hostTop: host.scrollTop,
+        listScroll: list.scrollTop,
+        firstText: first.textContent ?? '',
+        firstOffset: first.getBoundingClientRect().top - listTop,
+        cardTop: host.querySelector<HTMLElement>('[data-avc-media="1"]')!.getBoundingClientRect().top,
+        rows: rows.length,
+        newest: rows[0]!.textContent ?? '',
+      }
+    })
+
+    if (vp.label !== 'mobile-320x568') {
+      for (const [variant, extra] of [['буферът расте', ''], ['пълен буфер — най-старите отпадат', '&recentLimit=120']] as const) {
+        await check(`${vp.label} „Медийно здраве“ (${variant}): автоматичното обновяване пази позицията в „Последни събития“ и на страницата`, async () => {
+          const page = await openLive(`&refresh=300&recent=120&grow=1${extra}`)
+          await openTab(page, 'stats')
+          await scrollMedia(page, 1500)
+          await page.waitForTimeout(50)
+          const before = await mediaView(page)
+          assert(before.listScroll > 1000 && before.firstText.includes('old-event-'), `начален скрол (${before.listScroll})`)
+          await waitRefreshes(page, 3)
+          const after = await mediaView(page)
+          assert(after.newest !== before.newest && after.newest.includes('new-event-'), 'новите събития са в DOM-а (има прерисуване)')
+          assert(after.firstText === before.firstText, `същият ред остава първи видим („${before.firstText}“ -> „${after.firstText}“)`)
+          assert(Math.abs(after.firstOffset - before.firstOffset) <= 2, `отместване на реда ${before.firstOffset} -> ${after.firstOffset}`)
+          assert(after.listScroll > before.listScroll, `списъкът е преместен с новите редове отгоре (${before.listScroll} -> ${after.listScroll})`)
+          assert(Math.abs(after.cardTop - before.cardTop) <= 2 && Math.abs(after.hostTop - before.hostTop) <= 2, `страницата не мърда (карта ${before.cardTop} -> ${after.cardTop})`)
+          await page.context().close()
+        })
+      }
+
+      await check(`${vp.label} „Медийно здраве“: в началото на списъка новите събития се виждат (скролът остава 0)`, async () => {
+        const page = await openLive('&refresh=300&recent=120&grow=1')
+        await openTab(page, 'stats')
+        await scrollMedia(page, 0)
+        const before = await mediaView(page)
+        await waitRefreshes(page, 2)
+        const after = await mediaView(page)
+        assert(after.listScroll === 0 && after.newest !== before.newest && after.newest.includes('new-event-'), `най-новото отгоре (${after.listScroll}, ${after.newest})`)
+        await page.context().close()
+      })
+
+      await check(`${vp.label} „Медийно здраве“: маркираният текст остава; обновяването изчаква и се прилага след размаркиране`, async () => {
+        const page = await openLive('&refresh=250&recent=120&grow=1')
+        await openTab(page, 'stats')
+        await scrollMedia(page, 1500)
+        const selected = await page.evaluate(() => {
+          const list = document.querySelector<HTMLElement>('[data-avc-media-recent="1"]')!
+          const listTop = list.getBoundingClientRect().top
+          const row = Array.from(list.querySelectorAll<HTMLElement>('[data-avc-media-recent-row="1"]')).find((r) => r.getBoundingClientRect().top >= listTop)!
+          ;(window as any).__markedRow = row
+          const range = document.createRange()
+          range.setStart(row.firstElementChild!.firstChild!, 0)
+          range.setEnd(row.lastElementChild!.firstChild!, (row.lastElementChild!.textContent ?? '').length)
+          getSelection()!.removeAllRanges()
+          getSelection()!.addRange(range)
+          return getSelection()!.toString()
+        })
+        const before = await mediaView(page)
+        await waitRefreshes(page, 3)
+        const during = await page.evaluate(() => ({ text: getSelection()!.toString(), connected: (window as any).__markedRow.isConnected as boolean }))
+        assert(during.text === selected && during.connected, `маркирането е непокътнато („${selected}“ -> „${during.text}“)`)
+        assert((await headerText(page)).includes('изчакват маркирания текст'), 'заглавието показва, че обновяването изчаква')
+        await page.evaluate(() => getSelection()!.removeAllRanges())
+        await page.waitForTimeout(120)
+        const after = await mediaView(page)
+        assert(!(await page.evaluate(() => (window as any).__markedRow.isConnected as boolean)), 'след размаркиране — прерисувано с новите данни')
+        assert(after.newest !== before.newest && after.firstText === before.firstText, 'и позицията пак е запазена')
+        assert(!(await headerText(page)).includes('изчакват'), 'заглавието вече не изчаква')
+        await page.context().close()
+      })
+
+      await check(`${vp.label} „Пауза на обновяването“ / „Възобнови обновяването“`, async () => {
+        const page = await openLive('&refresh=200&recent=30&grow=1')
+        await openTab(page, 'stats')
+        await page.click('[data-avc-pause="1"]')
+        const pause = page.locator('[data-avc-pause="1"]')
+        assert((await pause.textContent()) === 'Възобнови обновяването' && (await pause.getAttribute('aria-pressed')) === 'true', 'бутонът сменя надписа')
+        assert((await headerText(page)).includes('на пауза'), 'заглавието показва пауза')
+        const paused = await monitoringReads(page)
+        const newest = (await mediaView(page)).newest
+        await page.waitForTimeout(900)
+        assert((await monitoringReads(page)) === paused && (await mediaView(page)).newest === newest, 'без заявки и без промени по време на пауза')
+        await page.click('[data-avc-refresh="1"]')
+        await page.waitForTimeout(300)
+        const manual = await monitoringReads(page)
+        assert(manual === paused + 1, `„Обнови“ работи и при пауза (${paused} -> ${manual})`)
+        await page.waitForTimeout(700)
+        assert((await monitoringReads(page)) === manual, 'след ръчното обновяване паузата продължава')
+        await page.click('[data-avc-pause="1"]')
+        assert((await pause.textContent()) === 'Пауза на обновяването' && (await pause.getAttribute('aria-pressed')) === 'false', 'надписът се връща')
+        await page.waitForTimeout(700)
+        assert((await monitoringReads(page)) >= manual + 3, 'автоматичното обновяване продължава (веднага + по интервал)')
+        assert(!(await overflow(page)), 'без хоризонтален overflow с новия бутон')
+        await page.context().close()
+      })
+
+      await check(`${vp.label} „Управление“: въведен лимит, фокус, отворено потвърждение и маркиран текст остават при обновяване`, async () => {
+        const page = await openLive('&refresh=250&baseTick=1')
+        const pending = () => page.evaluate(() => (document.querySelector('[data-avc-body="1"]')?.textContent ?? '').match(/DeleteRoom\s*(\d+)/)?.[1] ?? '')
+        await page.click('[data-avc-mode="public"]')
+        await page.fill('[data-avc-limit-input="1"]', '7')
+        const pendingBefore = await pending()
+        await waitRefreshes(page, 2)
+        assert((await pending()) !== pendingBefore, 'данните на таба са прерисувани')
+        const state = await page.evaluate(() => {
+          const input = document.querySelector<HTMLInputElement>('[data-avc-limit-input="1"]')!
+          return { value: input.value, focused: document.activeElement === input }
+        })
+        assert(state.value === '7' && state.focused, `въведената стойност и фокусът (${state.value}, ${state.focused})`)
+        assert((await page.locator('[data-avc-mode-confirm="1"]').count()) === 1, 'отвореното потвърждение остава')
+        const selected = await page.evaluate(() => {
+          const heading = Array.from(document.querySelectorAll('h3')).find((h) => h.textContent === 'История на промените')!
+          const range = document.createRange()
+          range.selectNodeContents(heading)
+          getSelection()!.removeAllRanges()
+          getSelection()!.addRange(range)
+          return getSelection()!.toString()
+        })
+        const pendingSelected = await pending()
+        await waitRefreshes(page, 2)
+        assert((await page.evaluate(() => getSelection()!.toString())) === selected && (await pending()) === pendingSelected, 'маркираното остава, прерисуването изчаква')
+        await page.evaluate(() => getSelection()!.removeAllRanges())
+        await page.waitForTimeout(120)
+        assert((await pending()) !== pendingSelected, 'след размаркиране — новите данни')
+        // Външният скрол на страницата.
+        const scrolled = await page.evaluate(() => {
+          const host = document.getElementById('admin-voice-chat-panel')!
+          host.scrollTop = host.scrollHeight
+          return host.scrollTop
+        })
+        await waitRefreshes(page, 2)
+        const hostTop = await page.evaluate(() => document.getElementById('admin-voice-chat-panel')!.scrollTop)
+        assert(Math.abs(hostTop - scrolled) <= 2, `скролът на страницата (${scrolled} -> ${hostTop})`)
+        await page.context().close()
+      })
+    }
+
+    if (vp.label === 'mobile-320x568') {
+      await check(`${vp.label} лентата с табове пази хоризонталния скрол при обновяване`, async () => {
+        const page = await openLive('&refresh=200&recent=30&grow=1&baseTick=1')
+        const left = await page.evaluate(() => {
+          const tabs = document.querySelector<HTMLElement>('[data-avc-tabs="1"]')!
+          tabs.scrollLeft = 120
+          return tabs.scrollLeft
+        })
+        assert(left > 0, 'табовете се скролират хоризонтално')
+        await waitRefreshes(page, 2)
+        assert((await page.evaluate(() => document.querySelector<HTMLElement>('[data-avc-tabs="1"]')!.scrollLeft)) === left, 'хоризонталният скрол остава')
+        assert(!(await overflow(page)), 'без хоризонтален overflow (бутоните в заглавието се пренасят)')
+        await page.context().close()
+      })
+    }
+
+    if (vp.label === 'desktop-1280x800') {
+      await check(`${vp.label} „Копирай лога“: всички събития и броячи като четим текст; резервен вариант и грешка`, async () => {
+        const page = await openLive('&recent=25')
+        await openTab(page, 'stats')
+        await page.click('[data-avc-media-copy="1"]')
+        await page.waitForFunction(() => (document.querySelector('[data-avc-media-copy-status="1"]')?.textContent ?? '').includes('Копирано'), undefined, { timeout: 3_000 })
+        const status = await page.locator('[data-avc-media-copy-status="1"]').textContent()
+        assert(status?.includes('Копирано: 25 събития') === true, `статус (${status})`)
+        const text = await page.evaluate(() => navigator.clipboard.readText())
+        for (const part of ['Гласови разговори — Медийно здраве', 'Генерирано:', 'Микрофон (собствен поток):', 'Подозрение: микрофонът не предава (RTP стои) [stall_suspected]: 2',
+          'Входящ звук:', 'Автоматично възстановяване на звука:', 'По платформа (медийни събития):', 'Последни събития: 25 (до 500', '18.11, 14:00', '(2026-11-18T12:00Z UTC) | media_input | iPhone/iPad · Safari | old-event-0', 'old-event-24']) {
+          assert(text.includes(part), `логът съдържа „${part}“`)
+        }
+        assert(text.split('\n').filter((line) => /\| media_(input|output|recovery) \|/.test(line)).length === 25, 'по един ред на събитие')
+        // Резервен вариант (Clipboard API отказан): execCommand('copy').
+        await page.evaluate(() => navigator.clipboard.writeText('стар клипборд'))
+        await page.evaluate(() => { navigator.clipboard.writeText = () => Promise.reject(new Error('denied')) })
+        await page.click('[data-avc-media-copy="1"]')
+        await page.waitForTimeout(200)
+        const fallback = await page.evaluate(() => navigator.clipboard.readText())
+        assert(fallback.startsWith('Гласови разговори — Медийно здраве') && fallback.includes('old-event-24'), 'резервното копиране работи')
+        assert((await page.locator('#admin-voice-chat-panel textarea').count()) === 0, 'временното поле е премахнато')
+        await page.evaluate(() => { document.execCommand = () => false })
+        await page.click('[data-avc-media-copy="1"]')
+        await page.waitForTimeout(200)
+        assert(((await page.locator('[data-avc-media-copy-status="1"]').textContent()) ?? '').includes('Копирането не успя'), 'съобщение при неуспех')
+        await page.context().close()
+      })
+    }
   }
 } finally {
   await browser?.close()

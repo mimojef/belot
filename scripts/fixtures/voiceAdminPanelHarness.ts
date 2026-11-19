@@ -32,6 +32,30 @@ let pendingDeletions = scenario === 'offline' ? 2 : 0
 let getsSinceOff = 0
 const confirmAfter = Number(params.get('confirmAfter') ?? 'Infinity')
 
+// Медийно здраве: ?recent=N — N фиксирани събития (вместо четирите); ?grow=1 —
+// при всяко четене на /monitoring отгоре се добавя ново събитие (както при сървъра:
+// най-новите първи, буфер до recentLimit — най-старите отпадат отдолу).
+const recentCount = Number(params.get('recent') ?? '0')
+const recentGrow = params.get('grow') === '1'
+const recentLimit = Number(params.get('recentLimit') ?? '500')
+const generatedRecent: Array<{ at: string; event: string; detail: string; platform: string }> = Array.from({ length: recentCount }, (_, index) => ({
+  at: new Date(Date.UTC(2026, 10, 18, 12, 0) - index * 60_000).toISOString().slice(0, 16) + 'Z',
+  event: index % 3 === 0 ? 'media_input' : index % 3 === 1 ? 'media_output' : 'media_recovery',
+  detail: `old-event-${index}`,
+  platform: index % 2 === 0 ? 'ios_safari' : 'android_chrome',
+}))
+let grown = 0
+function recentEvents() {
+  if (recentCount === 0) return null
+  return generatedRecent.slice(0, recentLimit)
+}
+function growRecent() {
+  if (!recentGrow || recentCount === 0) return
+  grown += 1
+  generatedRecent.unshift({ at: new Date(Date.UTC(2026, 10, 18, 12, 0) + grown * 60_000).toISOString().slice(0, 16) + 'Z', event: 'media_output', detail: `new-event-${grown}`, platform: 'desktop_chrome' })
+}
+
+
 function base() {
   const configured = scenario !== 'unconfigured'
   return {
@@ -180,13 +204,13 @@ function monitoring() {
             recovery: { 'play:success': 4, 'reattach:success': 1, 'play:gesture_required': 1, 'start_audio:success': 1 },
             byPlatform: { ios_safari: 6, android_samsung: 4, desktop_chrome: 3 },
           },
-      recent: unconfigured ? [] : [
+      recent: unconfigured ? [] : recentEvents() ?? [
         { at: '2026-11-18T13:39Z', event: 'media_input', detail: 'stall_suspected/capture_stalled/none', platform: 'ios_safari' },
         { at: '2026-11-18T13:38Z', event: 'media_output', detail: 'element_paused', platform: 'android_samsung' },
         { at: '2026-11-18T13:38Z', event: 'media_recovery', detail: 'output/play/success/pause', platform: 'android_samsung' },
         { at: '2026-11-18T13:34Z', event: 'connected', detail: '', platform: 'ios_safari' },
       ],
-      recentLimit: 500,
+      recentLimit,
       rejectedReports: 0,
     },
   }
@@ -202,13 +226,18 @@ const fetchImpl: typeof fetch = async (input, init) => {
   requests.push({ method, path, body })
   if (scenario === 'forbidden') return json(403, { ok: false, code: 'forbidden', message: 'Нямаш достъп до гласовия чат.' })
   if (method === 'GET' && path === '') {
+    // ?baseTick=1: всяко четене сменя данните на „Управление“ (за проверките на пазене на изгледа).
+    if (params.get('baseTick') === '1') pendingDeletions += 1
     if (released && pendingDeletions > 0) {
       getsSinceOff += 1
       if (getsSinceOff >= confirmAfter) pendingDeletions = 0
     }
     return json(200, base())
   }
-  if (method === 'GET' && path === '/monitoring') return json(200, monitoring())
+  if (method === 'GET' && path === '/monitoring') {
+    growRecent()
+    return json(200, monitoring())
+  }
   if (method === 'POST' && path === '/mode') {
     const previous = mode
     mode = body.mode
