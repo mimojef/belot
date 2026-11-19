@@ -26,14 +26,56 @@ export function isInVoice(snapshot: VoiceSnapshot): boolean {
  * Икона/цвят на собствения микрофон в компактните места (лента, бутон в
  * игра): 'on' — реално публикуван (зелен микрофон); 'pending' — изчаква се
  * разрешение или публикуване (неутрален микрофон); 'off' — в гласа, но
- * микрофонът не е включен (червен зачеркнат); null — не е в гласа.
+ * микрофонът не е включен (червен зачеркнат); 'warn' — публикуван, но
+ * устройството го е прекъснало или не се изпраща звук (Етап H1 — кехлибарен,
+ * никога зелен); null — не е в гласа.
  */
-export type VoiceMicState = 'on' | 'pending' | 'off'
+export type VoiceMicState = 'on' | 'pending' | 'off' | 'warn'
 
 export function voiceMicState(snapshot: VoiceSnapshot): VoiceMicState | null {
   if (!isInVoice(snapshot)) return null
-  if (snapshot.microphone === 'live') return 'on'
+  if (snapshot.microphone === 'live') return (snapshot.microphoneHealth ?? 'ok') === 'ok' ? 'on' : 'warn'
   return snapshot.microphone === 'requesting' ? 'pending' : 'off'
+}
+
+/**
+ * Етап H1/H3: текст за собствения микрофон при проблем (само за самия играч).
+ * action — да се покаже ли „Възстанови микрофона“ (изрично действие).
+ */
+export function describeMicHealth(snapshot: VoiceSnapshot): { short: string; title: string; text: string; action: boolean } | null {
+  if (voiceMicState(snapshot) !== 'warn') return null
+  const recovery = snapshot.microphoneRecovery ?? 'none'
+  if (recovery === 'recovering') {
+    return {
+      short: 'Възстановяване на микрофона…',
+      title: 'Микрофонът се възстановява',
+      text: 'Включваме микрофона наново, без да прекъсваме разговора.',
+      action: false,
+    }
+  }
+  if (snapshot.microphoneHealth === 'system_muted') {
+    // Не се „борим“ със системата — без бутон, докато трае прекъсването.
+    return {
+      short: 'Микрофонът е прекъснат',
+      title: 'Микрофонът е прекъснат от устройството',
+      text: 'Устройството временно спря микрофона (например при обаждане или друго приложение). Останалите не ви чуват, докато устройството не го освободи.',
+      action: false,
+    }
+  }
+  if (recovery === 'failed') {
+    return {
+      short: 'Микрофонът не предава',
+      title: 'Микрофонът не можа да бъде възстановен',
+      text: 'Останалите не ви чуват. Натиснете „Възстанови микрофона“. Ако не помогне, изключете и включете микрофона.',
+      action: true,
+    }
+  }
+  return {
+    short: 'Микрофонът не предава',
+    title: 'Микрофонът може да не предава звук',
+    text: 'От известно време не се изпраща звук от микрофона ви. Ако останалите не ви чуват, натиснете „Възстанови микрофона“.',
+    action: true,
+  }
 }
 
 export function describeVoiceStatus(snapshot: VoiceSnapshot): { label: string; tone: VoiceStatusTone } {
@@ -55,6 +97,8 @@ export function describeVoiceStatus(snapshot: VoiceSnapshot): { label: string; t
       // изключен, заглушен), е „изключен“ — ясно в червено.
       switch (voiceMicState(snapshot)) {
         case 'on': return { label: 'Микрофон включен', tone: 'ok' }
+        // Етап H1: реалното състояние — не подвеждащ зелен микрофон.
+        case 'warn': return { label: describeMicHealth(snapshot)!.short, tone: 'busy' }
         // Неутрално, докато се чака разрешение/публикуване (после зелено или червено).
         case 'pending': return { label: 'Включване…', tone: 'idle' }
         default: return { label: 'Микрофон изключен', tone: 'error' }

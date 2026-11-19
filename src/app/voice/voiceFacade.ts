@@ -40,7 +40,7 @@ const VOICE_SERVER_TYPES = new Set(['voice_presence_result', 'voice_table_update
 
 /** Полетата, които преди зареждането винаги са по подразбиране. */
 const IDLE_FIELDS = {
-  speak: null, microphone: 'off', playbackBlocked: false, canRestore: false, microphoneDevicesChanged: false,
+  speak: null, microphone: 'off', microphoneHealth: 'ok', microphoneRecovery: 'none', playbackBlocked: false, canRestore: false, microphoneDevicesChanged: false,
   generation: null, locallyMutedProfileIds: [], speakingProfileIds: [],
 } as const
 
@@ -119,7 +119,7 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps & { intent?: Voi
   }
 
   function activate(factory: VoiceControllerFactory): void {
-    const controller = factory({ sendPresence: deps.sendPresence, apiBaseUrl: deps.apiBaseUrl, onRequestVip: deps.onRequestVip })
+    const controller = factory({ sendPresence: deps.sendPresence, apiBaseUrl: deps.apiBaseUrl, onRequestVip: deps.onRequestVip, diagnosticsAccess: deps.diagnosticsAccess })
     // Само актуалното състояние — нищо остаряло от момента на натискането.
     if (!gameConnected) controller.setGameConnection(false)
     controller.setContext(context)
@@ -251,6 +251,7 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps & { intent?: Voi
     // Изключване по време на зареждането: включването продължава само като слушане.
     disableMicrophone: () => (real !== null ? real.disableMicrophone() : setPending(pending?.withMic ? { ...pending, withMic: false } : pending)),
     retryMicrophone: () => (real !== null ? real.retryMicrophone() : join(true)),
+    recoverMicrophone: () => real?.recoverMicrophone(),
     unlockAudio: () => real?.unlockAudio(),
     retryConnection: () => (real !== null ? real.retryConnection() : loadFailed ? join(lastWithMic) : undefined),
     // Преди първото включване участниците в гласа са неизвестни -> no-op.

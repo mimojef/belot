@@ -720,11 +720,14 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
    * напуснат екран, 120 s): отнемане на правата + RemoveParticipant, без
    * ротация. binding-ът остава — ново изрично включване е позволено.
    */
-  function endVoiceSession(binding: BindingState, reason: VoiceAccessEndReason, notify: boolean, detail?: string): void {
+  function endVoiceSession(binding: BindingState, reason: VoiceAccessEndReason, notify: boolean, detail?: string, leaseExpiresAtForLog?: number): void {
     if (binding.voiceActive) {
       const key = detail === undefined ? reason : `${reason}:${detail}`
       bump(sessionEndsByReason, key)
-      log(`[voice-chat] session_end ${who(binding)} reason=${key} sinceTokenMs=${ago(binding.tokenIssuedAt)} sincePresenceMs=${ago(binding.lastPresenceAt)} leaseLeftMs=${binding.leaseExpiresAt - now()}`)
+      // Само диагностика (Етап H): оставащият lease към момента на прекратяването —
+      // стойността ПРЕДИ нулирането при напускане; без lease -> 'none'.
+      const leaseAt = leaseExpiresAtForLog ?? binding.leaseExpiresAt
+      log(`[voice-chat] session_end ${who(binding)} reason=${key} sinceTokenMs=${ago(binding.tokenIssuedAt)} sincePresenceMs=${ago(binding.lastPresenceAt)} leaseLeftMs=${leaseAt > 0 ? leaseAt - now() : 'none'}`)
     }
     clearBindingTimers(binding)
     if (binding.voiceActive && binding.issuedRoomName !== null) revokeParticipant(binding.issuedRoomName, binding.identity)
@@ -1171,10 +1174,11 @@ export function createVoiceChatService(deps: VoiceChatServiceDeps): VoiceChatSer
 
       if (!message.onTableScreen) {
         if (binding !== null && binding.clientInstanceId === message.clientInstanceId) {
+          const leaseExpiresAtBefore = binding.leaseExpiresAt
           binding.connectionId = connectionId
           binding.onTableScreen = false
           binding.leaseExpiresAt = 0
-          endVoiceSession(binding, 'left_table', false, message.reason ?? 'unspecified')
+          endVoiceSession(binding, 'left_table', false, message.reason ?? 'unspecified', leaseExpiresAtBefore)
         }
         send(connectionId, {
           type: 'voice_presence_result',

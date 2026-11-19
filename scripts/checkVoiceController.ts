@@ -73,6 +73,8 @@ function createClock() {
       await flush()
     },
     pending: () => timers.size,
+    /** Текущото фалшиво време (за H3 лимитите). */
+    now: () => now,
   }
 }
 
@@ -119,6 +121,14 @@ function createFakeAdapter() {
     /** Етап 6: null -> стаята няма getTransportInfo (като стар адаптер). */
     transportInfo: null as VoiceTransportInfo | null,
     transportCalls: 0,
+    // Етап H3 (само новите тестове ги ползват)
+    confirmResult: 'confirmed' as 'confirmed' | 'not_confirmed' | 'unavailable',
+    recoverResult: 'recovered' as string,
+    recoverGate: null as Promise<void> | null,
+    recoverCalls: [] as boolean[],
+    confirmCalls: 0,
+    permission: true,
+    maxLiveCaptures: 0,
     activeRooms: () => rooms.filter((r) => r.connected && !r.disconnected).length,
     liveCaptures: () => captures.filter((c) => !c.stopped).length,
     last: () => rooms[rooms.length - 1]!,
@@ -150,6 +160,7 @@ function createFakeAdapter() {
         startAudioCalls: 1,
         isMuted,
         async disconnect() {
+          if (room.recovering) room.recoveryAborted = true
           if (room.disconnected) return
           await Promise.resolve() // реалният disconnect е асинхронен
           if (state.disconnectGate !== null) await state.disconnectGate
@@ -159,6 +170,7 @@ function createFakeAdapter() {
           room.capture = null
         },
         async detachMicrophoneForReuse() {
+          if (room.recovering) room.recoveryAborted = true
           state.detaches += 1
           if (state.detachGate !== null) await state.detachGate
           const capture = room.capture
@@ -171,6 +183,35 @@ function createFakeAdapter() {
           return retainHandle(capture)
         },
         retain: (capture) => retainHandle(capture),
+        // Етап H3: като адаптера — старият capture се спира ПРЕДИ новия; отмяна от изключване/ротация.
+        recovering: false,
+        recoveryAborted: false,
+        async confirmCaptureStall() {
+          state.confirmCalls += 1
+          return state.confirmResult
+        },
+        async recoverMicrophone(options) {
+          state.recoverCalls.push(options.explicit)
+          if (room.recovering) return 'busy'
+          room.recovering = true
+          room.recoveryAborted = false
+          if (room.capture !== null) room.capture.stopped = true
+          room.capture = null
+          try {
+            if (state.recoverGate !== null) await state.recoverGate
+            if (room.recoveryAborted || room.disconnected) return 'aborted'
+            const result = state.recoverResult
+            if (result === 'recovered' || result === 'no_rtp') {
+              const capture: FakeCapture = { id: captures.length + 1, stopped: false, ended: false }
+              captures.push(capture)
+              room.capture = capture
+            }
+            return result as never
+          } finally {
+            room.recovering = false
+            state.maxLiveCaptures = Math.max(state.maxLiveCaptures, state.liveCaptures())
+          }
+        },
         async enableMicrophone(reuse) {
           if (reuse !== undefined) {
             const capture = retained.get(reuse)
@@ -197,6 +238,7 @@ function createFakeAdapter() {
           room.micLive = true
         },
         async disableMicrophone() {
+          if (room.recovering) room.recoveryAborted = true
           room.micLive = false
           stop(room.capture)
           room.capture = null
@@ -300,7 +342,7 @@ const SEATS = [
  * facade: true — production пътят: createLazyVoiceController (основен bundle)
  * + „lazy“ factory, която създава истинския createVoiceController с fake адаптер.
  */
-function createHarness(options: { loadFails?: boolean; facade?: boolean; reports?: VoiceDiagnosticReport[] } = {}): Harness {
+function createHarness(options: { loadFails?: boolean; facade?: boolean; reports?: VoiceDiagnosticReport[]; micAutoRecovery?: boolean; permission?: boolean } = {}): Harness {
   const clock = createClock()
   const fake = createFakeAdapter()
   const presence: VoicePresenceClientMessage[] = []
@@ -347,10 +389,15 @@ function createHarness(options: { loadFails?: boolean; facade?: boolean; reports
         : { status: 200, body: { ok: true, canSpeak: false, code: backend.speak.blockedReason, speak: backend.speak } }
     },
     createClientInstanceId: () => 'inst_test_0000000000000001',
+    ...(options.micAutoRecovery === undefined ? {} : { micAutoRecovery: () => options.micAutoRecovery === true, now: () => clock.now() }),
     timers: clock.timers,
     log: (line: string) => logs.push(line),
     ...(options.reports === undefined ? {} : { reportDiagnostic: (report: VoiceDiagnosticReport) => { options.reports!.push(report) } }),
   })
+  if (options.permission !== undefined) {
+    fake.state.permission = options.permission
+    fake.adapter.microphonePermissionGranted = async () => fake.state.permission
+  }
   if (options.facade) {
     voice = createLazyVoiceController({
       sendPresence,
@@ -1652,6 +1699,316 @@ await check('[DG3] Без reportDiagnostic: нищо не се изпраща и
   await h.clock.advance(30_000)
   assertEqual(h.fake.state.transportCalls, 0, 'getTransportInfo не се вика')
   assert(!h.posts.some((p) => p.path.includes('client-report')), 'без client-report')
+})
+
+// ─── Етап H1: здраве на микрофона — само показване, без действия ─────────
+
+/** Всичко, което би било „действие“ върху микрофона/връзката. */
+function actionFootprint(h: Harness): string {
+  const st = h.fake.state
+  return JSON.stringify({
+    gum: st.getUserMediaCalls, reused: st.reusedPublishes, detaches: st.detaches, rooms: st.rooms.length,
+    captures: st.captures.length, live: st.liveCaptures(), startAudio: st.rooms.map((r) => r.startAudioCalls),
+    presence: h.presence.length, tokens: h.posts.filter((p) => p.path.includes('token')).length,
+    speakAccess: h.posts.filter((p) => p.path.includes('speak')).length,
+  })
+}
+
+await check('[MH1] H1: system_muted / stall_suspected -> snapshot.microphoneHealth и UI; НИКАКВО действие (getUserMedia, публикуване, нова стая, presence, токен) дори след 5 мин', async () => {
+  const h = createHarness()
+  await h.connect(true)
+  assertEqual(s(h).microphone, 'live', 'микрофонът е включен')
+  assertEqual(s(h).microphoneHealth, 'ok', 'начално ok')
+  const room = h.fake.state.last()
+  await h.clock.advance(1_000)
+  const presenceBefore = h.presence.length
+  const before = actionFootprint(h)
+  room.events.onMicHealthChanged?.('stall_suspected')
+  await flush(20)
+  assertEqual(s(h).microphoneHealth, 'stall_suspected', 'подозрение в snapshot')
+  assertEqual(s(h).microphone, 'live', 'микрофонът остава')
+  assertEqual(s(h).wantsToSpeak, true, 'желанието остава')
+  room.events.onMicHealthChanged?.('system_muted')
+  await flush(20)
+  assertEqual(s(h).microphoneHealth, 'system_muted', 'системно прекъснат')
+  // Само presence подновяването по график може да расте — нищо друго.
+  await h.clock.advance(300_000)
+  const after = JSON.parse(actionFootprint(h))
+  const expected = JSON.parse(before)
+  after.presence = expected.presence
+  assertEqual(JSON.stringify(after), JSON.stringify(expected), 'без действия върху микрофона/връзката')
+  assert(h.presence.slice(presenceBefore).every((p) => p.onTableScreen === true), 'само обичайното подновяване на присъствието')
+  assertEqual(s(h).microphoneHealth, 'system_muted', 'състоянието се пази до ново събитие')
+  room.events.onMicHealthChanged?.('ok')
+  await flush(20)
+  assertEqual(s(h).microphoneHealth, 'ok', 'обратно ok')
+})
+
+await check('[MH2] H1: здравето се показва само при включен микрофон; изключване/загуба на стаята -> ok; остарели събития от стара стая се игнорират', async () => {
+  const h = createHarness()
+  await h.connect(true)
+  const first = h.fake.state.last()
+  first.events.onMicHealthChanged?.('stall_suspected')
+  await flush(20)
+  assertEqual(s(h).microphoneHealth, 'stall_suspected', 'подозрение')
+  h.voice.disableMicrophone()
+  await flush(30)
+  assertEqual(s(h).microphone, 'off', 'изключен')
+  assertEqual(s(h).microphoneHealth, 'ok', 'без микрофон -> ok')
+  h.voice.enableMicrophone()
+  await flush(40)
+  assertEqual(s(h).microphone, 'live', 'отново включен')
+  assertEqual(s(h).microphoneHealth, 'ok', 'старото подозрение не се пренася')
+  // Загуба на стаята -> ok; събитие от старата стая -> игнорирано.
+  serverDisconnect(first, 'connection_lost')
+  await flush(20)
+  assertEqual(s(h).microphoneHealth, 'ok', 'без стая -> ok')
+  first.events.onMicHealthChanged?.('system_muted')
+  await flush(10)
+  assertEqual(s(h).microphoneHealth, 'ok', 'остаряло събитие')
+})
+
+await check('[MH3] Медийната диагностика се препраща (затворени стойности, без identity/токен); от стара стая — не; debugCounters съдържа media.*', async () => {
+  const reports: VoiceDiagnosticReport[] = []
+  const h = createHarness({ reports })
+  await h.connect(true)
+  const room = h.fake.state.last()
+  room.debugMedia = () => ({ getStatsCalls: 7, monitorTimerActive: 1 })
+  room.events.onMediaDiagnostic?.({ event: 'media_input', state: 'stall_suspected', evidence: 'capture_active', duration: 'none' })
+  room.events.onMediaDiagnostic?.({ event: 'media_recovery', target: 'output', step: 'play', result: 'success', trigger: 'pause' })
+  const media = reports.filter((r) => r.event.startsWith('media_'))
+  assertEqual(media.length, 2, 'препратени')
+  assertEqual(h.voice.debugCounters()['media.getStatsCalls'], 7, 'броячите на адаптера')
+  const text = JSON.stringify(media)
+  assert(!text.includes(JWT_MARK) && !text.includes('p_self'), 'без токен/identity')
+  serverDisconnect(room, 'connection_lost')
+  await flush(20)
+  room.events.onMediaDiagnostic?.({ event: 'media_output', state: 'element_paused' })
+  assertEqual(reports.filter((r) => r.event.startsWith('media_')).length, 2, 'стара стая -> не')
+})
+
+// ─── Етап H3: автоматично възстановяване на микрофона (политика в двигателя) ──
+
+async function h3Harness(options: { auto?: boolean; permission?: boolean } = {}) {
+  const reports: VoiceDiagnosticReport[] = []
+  const h = createHarness({ reports, micAutoRecovery: options.auto ?? true, permission: options.permission ?? true })
+  await h.connect(true)
+  assertEqual(s(h).microphone, 'live', 'микрофонът е включен')
+  const room = h.fake.state.last()
+  const recoveries = () => reports.filter((r) => r.event === 'mic_recovery') as Array<{ event: 'mic_recovery'; mode: string; outcome: string }>
+  const stall = async (evidence: 'capture_stalled' | 'capture_active' | 'packets_only' = 'capture_stalled') => {
+    room.events.onMicHealthChanged?.('stall_suspected', evidence)
+    await flush(30)
+  }
+  const healthy = async () => {
+    room.events.onMicHealthChanged?.('ok')
+    await flush(10)
+  }
+  return { h, room, reports, recoveries, stall, healthy }
+}
+
+await check('[RC1] H3: потвърден спрял capture + разрешен микрофон -> ЕДНА автоматична замяна в същата стая (без нова стая/токен/публикуване); никога два capture-а', async () => {
+  const { h, recoveries, stall } = await h3Harness()
+  const before = { rooms: h.fake.state.rooms.length, tokens: h.posts.filter((p) => p.path.includes('token')).length, reused: h.fake.state.reusedPublishes, gum: h.fake.state.getUserMediaCalls }
+  await stall()
+  assertEqual(h.fake.state.confirmCalls, 1, 'независимо потвърждение')
+  assertEqual(JSON.stringify(h.fake.state.recoverCalls), '[false]', 'една автоматична замяна (без жест)')
+  assertEqual(s(h).microphoneRecovery, 'none', 'приключило')
+  assertEqual(s(h).microphoneHealth, 'ok', 'здраво')
+  assertEqual(s(h).wantsToSpeak, true, 'желанието е запазено')
+  assert(h.fake.state.maxLiveCaptures <= 1 && h.fake.state.liveCaptures() === 1, `≤1 жив capture: ${h.fake.state.liveCaptures()}`)
+  const after = { rooms: h.fake.state.rooms.length, tokens: h.posts.filter((p) => p.path.includes('token')).length, reused: h.fake.state.reusedPublishes, gum: h.fake.state.getUserMediaCalls }
+  assertEqual(JSON.stringify(after), JSON.stringify(before), 'без нова стая/токен/публикуване')
+  assertEqual(recoveries().map((r) => `${r.mode}:${r.outcome}`).join(','), 'auto:recovered', 'диагностика')
+})
+
+await check('[RC2] H3: capture_active (capture дава кадри, RTP стои) -> БЕЗ автоматична замяна, бутон; ръчно -> замяна с жест', async () => {
+  const { h, recoveries, stall } = await h3Harness()
+  await stall('capture_active')
+  assertEqual(h.fake.state.recoverCalls.length, 0, 'без автоматичен опит')
+  assertEqual(s(h).microphoneRecovery, 'manual', 'бутон')
+  assertEqual(recoveries().map((r) => r.outcome).join(','), 'capture_active', 'причина')
+  h.voice.recoverMicrophone()
+  await flush(30)
+  assertEqual(JSON.stringify(h.fake.state.recoverCalls), '[true]', 'ръчно (explicit)')
+  assertEqual(s(h).microphoneRecovery, 'none', 'възстановен')
+})
+
+await check('[RC3] H3: без потвърдено спиране / без показатели / без разрешение / изключено автоматично -> бутон, без замяна', async () => {
+  for (const [label, setup, outcome] of [
+    ['not_confirmed', { auto: true, permission: true, confirm: 'not_confirmed' }, 'not_confirmed'],
+    ['unavailable', { auto: true, permission: true, confirm: 'unavailable' }, 'unavailable'],
+    ['permission prompt', { auto: true, permission: false, confirm: 'confirmed' }, 'permission_required'],
+    ['изключено (production)', { auto: false, permission: true, confirm: 'confirmed' }, 'disabled'],
+  ] as const) {
+    const { h, recoveries, stall } = await h3Harness({ auto: setup.auto, permission: setup.permission })
+    h.fake.state.confirmResult = setup.confirm
+    await stall()
+    assertEqual(h.fake.state.recoverCalls.length, 0, `${label}: без замяна`)
+    assertEqual(s(h).microphoneRecovery, 'manual', `${label}: бутон`)
+    assertEqual(recoveries().map((r) => r.outcome).join(','), outcome, `${label}: причина`)
+    if (setup.permission === false || setup.auto === false) assertEqual(h.fake.state.confirmCalls, 0, `${label}: без потвърждение`)
+  }
+})
+
+await check('[RC4] H3: системно прекъснат микрофон -> нито опит, нито бутон (не се „борим“ със системата); ръчното не прави нищо, докато трае', async () => {
+  const { h, room } = await h3Harness()
+  room.events.onMicHealthChanged?.('system_muted')
+  await flush(20)
+  assertEqual(s(h).microphoneHealth, 'system_muted', 'системно')
+  assertEqual(s(h).microphoneRecovery, 'none', 'без бутон')
+  h.voice.recoverMicrophone()
+  await flush(20)
+  assertEqual(h.fake.state.recoverCalls.length + h.fake.state.confirmCalls, 0, 'без опит')
+})
+
+await check('[RC5] H3: един автоматичен опит на инцидент; неуспех -> „failed“ + cooldown 60 s (нов инцидент в паузата -> само бутон); след 60 s -> отново автоматично', async () => {
+  const { h, recoveries, stall, healthy } = await h3Harness()
+  h.fake.state.recoverResult = 'no_rtp'
+  await stall()
+  assertEqual(s(h).microphoneRecovery, 'failed', 'неуспех -> бутон')
+  // Същият инцидент (повторено подозрение) -> без втори опит.
+  await stall()
+  assertEqual(h.fake.state.recoverCalls.length, 1, 'един опит на инцидент')
+  // Нов инцидент в паузата.
+  h.fake.state.recoverResult = 'recovered'
+  h.voice.recoverMicrophone() // ръчно — не се брои в автоматичните лимити
+  await flush(30)
+  assertEqual(s(h).microphoneRecovery, 'none', 'ръчно възстановен')
+  await healthy()
+  await stall()
+  assertEqual(h.fake.state.recoverCalls.filter((explicit) => !explicit).length, 1, 'в паузата — без автоматичен опит')
+  assert(recoveries().some((r) => r.outcome === 'cooldown'), 'cooldown')
+  await h.clock.advance(61_000)
+  await healthy()
+  await stall()
+  assertEqual(h.fake.state.recoverCalls.filter((explicit) => !explicit).length, 2, 'след паузата — отново автоматично')
+})
+
+await check('[RC6] H3: най-много 3 автоматични опита за 10 мин (успешните също се броят); НЕ се нулират при замяна на track или нова стая (ротация)', async () => {
+  const { h, recoveries, stall, healthy } = await h3Harness()
+  for (let i = 0; i < 3; i += 1) {
+    await stall()
+    await healthy()
+    await h.clock.advance(5_000)
+  }
+  assertEqual(h.fake.state.recoverCalls.length, 3, 'три автоматични')
+  // Ротация (нова стая) — лимитът остава.
+  serverDisconnect(h.fake.state.last(), 'room_deleted')
+  h.backend.generation = 2
+  h.voice.handleServerMessage(tableUpdated(2, true))
+  await h.clock.advance(3_000)
+  await flush(60)
+  const next = h.fake.state.last()
+  assert(next.connected && !next.disconnected && s(h).microphone === 'live', `новата стая: ${s(h).status}/${s(h).microphone}`)
+  next.events.onMicHealthChanged?.('stall_suspected', 'capture_stalled')
+  await flush(30)
+  assertEqual(h.fake.state.recoverCalls.length, 3, '4-ти опит в прозореца -> не')
+  assert(recoveries().some((r) => r.outcome === 'limit'), 'limit')
+  assertEqual(s(h).microphoneRecovery, 'manual', 'само ръчно')
+  await h.clock.advance(10 * 60_000)
+  next.events.onMicHealthChanged?.('ok')
+  await flush(10)
+  next.events.onMicHealthChanged?.('stall_suspected', 'capture_stalled')
+  await flush(30)
+  assertEqual(h.fake.state.recoverCalls.length, 4, 'след 10 мин — отново')
+})
+
+await check('[RC7] H3: ръчно изключване по време на възстановяването -> отменено; новият capture не се публикува; 0 живи capture-а; желанието е изключено', async () => {
+  const { h, stall } = await h3Harness()
+  let release!: () => void
+  h.fake.state.recoverGate = new Promise<void>((resolve) => { release = resolve })
+  await stall()
+  assertEqual(s(h).microphoneRecovery, 'recovering', 'тече')
+  h.voice.disableMicrophone()
+  await flush(10)
+  release()
+  await flush(40)
+  assertEqual(s(h).microphone, 'off', 'изключен')
+  assertEqual(s(h).wantsToSpeak, false, 'желанието е изключено (ръчно)')
+  assertEqual(s(h).microphoneRecovery, 'none', 'без възстановяване')
+  assertEqual(h.fake.state.liveCaptures(), 0, '0 живи capture-а')
+})
+
+await check('[RC8] H3: напускане на гласа / ротация по време на възстановяването -> отменено; ≤1 жив capture; без опит в новата стая', async () => {
+  {
+    const { h, stall } = await h3Harness()
+    let release!: () => void
+    h.fake.state.recoverGate = new Promise<void>((resolve) => { release = resolve })
+    await stall()
+    h.voice.leaveVoice()
+    await flush(10)
+    release()
+    await flush(40)
+    assertEqual(s(h).status, 'idle', 'напуснал')
+    assertEqual(h.fake.state.liveCaptures(), 0, '0 живи capture-а след напускане')
+  }
+  {
+    const { h, room, stall } = await h3Harness()
+    let release!: () => void
+    h.fake.state.recoverGate = new Promise<void>((resolve) => { release = resolve })
+    await stall()
+    serverDisconnect(room, 'room_deleted')
+    h.backend.generation = 2
+    h.voice.handleServerMessage(tableUpdated(2, true))
+    release()
+    await h.clock.advance(3_000)
+    await flush(60)
+    assert(h.fake.state.liveCaptures() <= 1 && h.fake.state.maxLiveCaptures <= 1, `≤1 жив capture: ${h.fake.state.liveCaptures()}`)
+    assertEqual(s(h).microphoneRecovery, 'none', 'новата стая започва без възстановяване')
+    assertEqual(h.fake.state.recoverCalls.length, 1, 'без нов опит в новата стая')
+  }
+})
+
+await check('[RC9] H3: прекъснато от reconnect след спрения стар capture (aborted_orphaned) -> „failed“, публикацията се пази (без второ публикуване при kick); ръчно -> възстановен', async () => {
+  const { h, room, stall } = await h3Harness()
+  h.fake.state.recoverResult = 'aborted_orphaned'
+  await stall()
+  assertEqual(s(h).microphoneRecovery, 'failed', 'failed')
+  const before = { gum: h.fake.state.getUserMediaCalls, reused: h.fake.state.reusedPublishes, rooms: h.fake.state.rooms.length }
+  room.events.onReconnecting()
+  room.events.onReconnected()
+  room.micLive = false
+  room.events.onParticipantsChanged()
+  await flush(40)
+  const after = { gum: h.fake.state.getUserMediaCalls, reused: h.fake.state.reusedPublishes, rooms: h.fake.state.rooms.length }
+  assertEqual(JSON.stringify(after), JSON.stringify(before), 'без второ публикуване/нов capture/нова стая')
+  assertEqual(s(h).wantsToSpeak, true, 'желанието е запазено')
+  h.fake.state.recoverResult = 'recovered'
+  h.voice.recoverMicrophone()
+  await flush(30)
+  assertEqual(s(h).microphoneRecovery, 'none', 'ръчно възстановен')
+})
+
+await check('[RC10] H3: загуба на правото за говорене по време на възстановяването -> отменено, без микрофон', async () => {
+  const { h, stall } = await h3Harness()
+  let release!: () => void
+  h.fake.state.recoverGate = new Promise<void>((resolve) => { release = resolve })
+  await stall()
+  h.voice.handleServerMessage({ type: 'voice_speak_access_updated', voiceTableId: TABLE, speak: MUTED } as never)
+  await flush(10)
+  release()
+  await flush(40)
+  assertEqual(s(h).microphone, 'off', 'без микрофон')
+  assertEqual(h.fake.state.liveCaptures(), 0, '0 живи capture-а')
+})
+
+await check('[RC11] H3 UI: „Възстанови микрофона“ при manual/failed; не по време на възстановяването и при системно прекъсване', async () => {
+  const { describeMicHealth } = await import('../src/app/voice/ui/voiceUiStatus')
+  const { h, room, stall } = await h3Harness({ auto: false })
+  await stall()
+  assertEqual(describeMicHealth(s(h))?.action, true, 'manual -> бутон')
+  let release!: () => void
+  h.fake.state.recoverGate = new Promise<void>((resolve) => { release = resolve })
+  h.voice.recoverMicrophone()
+  await flush(10)
+  assertEqual(describeMicHealth(s(h))?.action, false, 'тече -> без бутон')
+  assert(describeMicHealth(s(h))?.short.includes('Възстановяване'), 'текст „Възстановяване…“')
+  release()
+  await flush(30)
+  room.events.onMicHealthChanged?.('system_muted')
+  await flush(10)
+  assertEqual(describeMicHealth(s(h))?.action, false, 'системно -> без бутон')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

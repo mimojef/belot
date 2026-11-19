@@ -138,6 +138,17 @@ type ClientStats = {
   }
   liveKitDisconnects?: Record<string, number>
   sessionEnds?: { byReason: Record<string, number>; failStages: Record<string, number> }
+  /** Етап H — липсват при по-стар сървър. */
+  media?: {
+    input: Record<string, number>
+    inputEvidence: Record<string, number>
+    output: Record<string, number>
+    recovery: Record<string, number>
+    micRecovery?: Record<string, number>
+    byPlatform: Record<string, number>
+  }
+  recent?: Array<{ at: string; event: string; detail: string; platform: string }>
+  recentLimit?: number
   rejectedReports: number
 }
 
@@ -249,6 +260,50 @@ const MIC_LOST_LABELS: Record<string, string> = {
   connection_lost: 'При загубена връзка',
 }
 
+// Етап H — медийно здраве (затворени стойности от клиентите).
+const MEDIA_INPUT_LABELS: Record<string, string> = {
+  system_muted: 'Микрофонът е прекъснат от устройството',
+  system_unmuted: 'Устройството освободи микрофона',
+  stall_suspected: 'Подозрение: микрофонът не предава (RTP стои)',
+  stall_cleared: 'Предаването се възстанови',
+}
+const MEDIA_EVIDENCE_LABELS: Record<string, string> = {
+  packets_only: 'Само по пакетите (без media-source)',
+  capture_stalled: 'Capture-ът не дава кадри',
+  capture_active: 'Capture-ът дава кадри, RTP стои',
+}
+const MEDIA_OUTPUT_LABELS: Record<string, string> = {
+  element_paused: 'Неочаквано спрян звук (пауза)',
+  element_missing: 'Неправилно прикачен звук',
+  playback_blocked: 'Нужно е натискане („Включи звука“)',
+  remote_stall_suspected: 'Говори, но звукът не пристига (допълнителен сигнал)',
+}
+const MEDIA_RECOVERY_LABELS: Record<string, string> = {
+  'play:success': 'Пуснат отново — успех',
+  'play:failed': 'Пуснат отново — неуспех',
+  'play:gesture_required': 'Пуснат отново — нужно натискане',
+  'play:limited': 'Пуснат отново — лимит',
+  'reattach:success': 'Прикачен отново — успех',
+  'reattach:failed': 'Прикачен отново — неуспех',
+  'reattach:gesture_required': 'Прикачен отново — нужно натискане',
+  'reattach:limited': 'Прикачен отново — лимит',
+  'start_audio:success': '„Включи звука“ — успех',
+}
+const MIC_RECOVERY_OUTCOME_LABELS: Record<string, string> = {
+  recovered: 'възстановен', no_rtp: 'без звук след замяната', gum_failed: 'грешка на микрофона', gum_denied: 'отказано разрешение',
+  replace_failed: 'неуспешна замяна', aborted: 'отменено', not_confirmed: 'спирането не е потвърдено', unavailable: 'няма показатели',
+  permission_required: 'нужно натискане (разрешение)', cooldown: 'пауза след неуспех', limit: 'лимит (3 за 10 мин)',
+  capture_active: 'микрофонът дава звук, предаването стои', disabled: 'автоматичното е изключено',
+}
+const MIC_RECOVERY_LABELS: Record<string, string> = Object.fromEntries(
+  ['auto', 'manual'].flatMap((mode) => Object.entries(MIC_RECOVERY_OUTCOME_LABELS).map(([outcome, label]) => [`${mode}:${outcome}`, `${mode === 'auto' ? 'Автоматично' : 'Ръчно'} — ${label}`])),
+)
+const PLATFORM_LABELS: Record<string, string> = {
+  ios_safari: 'iPhone/iPad · Safari', ios_pwa: 'iPhone/iPad · приложение (PWA)', ios_other: 'iPhone/iPad · друг браузър',
+  android_chrome: 'Android · Chrome', android_samsung: 'Android · Samsung Internet', android_pwa: 'Android · приложение (PWA)', android_other: 'Android · друг',
+  desktop_chrome: 'Компютър · Chrome', desktop_edge: 'Компютър · Edge', desktop_safari: 'Компютър · Safari', desktop_firefox: 'Компютър · Firefox', desktop_other: 'Компютър · друг',
+  unknown: 'Неизвестна',
+}
 const LIVEKIT_DISCONNECT_LABELS: Record<string, string> = {
   network: 'Мрежа / неизвестна',
   server_shutdown: 'Спиране на сървъра',
@@ -815,6 +870,42 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
       ]))
     const gumRows = ['lt1s', '1to5s', '5to15s', 'gt15s'].map((bucket): [string, string] => [MIC_GUM_LABELS[bucket] ?? bucket, escapeHtml(String(mic?.gum[bucket] ?? 0))])
     const subTitle = (text: string, first = false): string => `<h4 style="margin:${first ? '0' : '10px'} 0 6px;font-size:13px;">${escapeHtml(text)}</h4>`
+    // Етап H: медийно здраве — броячи и последните събития (UTC минута -> показва се в българско време).
+    const media = c.media
+    const recent = c.recent ?? []
+    const formatMinute = (iso: string): string => {
+      const date = new Date(iso)
+      return Number.isNaN(date.getTime()) ? iso : date.toLocaleString('bg-BG', { timeZone: 'Europe/Sofia', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+    }
+    const recentRows = recent.length === 0
+      ? `<div style="font-size:13px;${MUTED}">Няма събития.</div>`
+      : `<div data-avc-media-recent="1" style="max-height:300px;overflow-y:auto;overflow-x:hidden;font-size:12px;">${recent.map((entry) => `<div data-avc-media-recent-row="1" style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);min-width:0;"><div style="display:flex;flex-wrap:wrap;gap:2px 10px;font-weight:800;"><span title="${escapeHtml(entry.at)} UTC" style="white-space:nowrap;">${escapeHtml(formatMinute(entry.at))}</span><span>${escapeHtml(entry.event)}</span><span style="font-weight:400;${MUTED}">${escapeHtml(PLATFORM_LABELS[entry.platform] ?? entry.platform)}</span></div>${entry.detail === '' ? '' : `<div style="overflow-wrap:anywhere;${MUTED}">${escapeHtml(entry.detail)}</div>`}</div>`).join('')}</div>`
+    const mediaCard = `
+      <div style="${CARD_STYLE}" data-avc-media="1">
+        <h3 style="${H3}">Медийно здраве</h3>
+        ${media === undefined ? `<div style="font-size:13px;${MUTED}">Сървърът още не отчита медийното здраве.</div>` : `
+        <div data-avc-cols="1">
+          <div>
+            ${subTitle('Микрофон (собствен поток)', true)}
+            ${countRows(media.input, MEDIA_INPUT_LABELS, 'Няма събития.')}
+            ${subTitle('Допълнително при подозрение')}
+            ${countRows(media.inputEvidence, MEDIA_EVIDENCE_LABELS, 'Няма.')}
+            ${subTitle('Възстановяване на микрофона')}
+            ${countRows(media.micRecovery, MIC_RECOVERY_LABELS, 'Няма опити.')}
+          </div>
+          <div>
+            ${subTitle('Входящ звук', true)}
+            ${countRows(media.output, MEDIA_OUTPUT_LABELS, 'Няма събития.')}
+            ${subTitle('Автоматично възстановяване на звука')}
+            ${countRows(media.recovery, MEDIA_RECOVERY_LABELS, 'Няма опити.')}
+            ${subTitle('По платформа (медийни събития)')}
+            ${countRows(media.byPlatform, PLATFORM_LABELS, 'Няма.')}
+          </div>
+        </div>`}
+        ${subTitle(`Последни събития (до ${c.recentLimit ?? 500}, най-новите първи)`)}
+        ${recentRows}
+        <div style="margin-top:6px;font-size:12px;line-height:1.45;${MUTED}">„Подозрение“ не е доказан дефект: при него микрофонът не се възстановява автоматично. Без профили, IP, устройства и аудио; само в паметта на сървъра (последните ${c.recentLimit ?? 500} събития, време до минута).</div>
+      </div>`
     const lkNote = lkOk ? '' : `<div style="margin-bottom:8px;">${statusPill(m.vps.liveKit.status === 'not_configured' ? 'muted' : 'bad', m.vps.liveKit.status === 'not_configured' ? 'Метриките на гласовия VPS не са конфигурирани' : `Метриките на LiveKit са недостъпни — ${reasonText(m.vps.liveKit.reason)}`)}</div>`
     return `
       <div style="font-size:12px;margin-bottom:10px;${MUTED}">Броячите са от последния рестарт на игровия сървър (${escapeHtml(formatDate(s.since))}).</div>
@@ -869,6 +960,7 @@ export function showAdminVoiceChatPanel(deps: AdminVoiceChatPanelDeps): { close:
         </div>
         <div style="margin-top:6px;font-size:12px;line-height:1.45;${MUTED}">Анонимни броячи от браузърите (без аудио, токени, IP и имена на устройства).</div>
       </div>
+      ${mediaCard}
       <div style="${CARD_STYLE}" data-avc-session-ends="1">
         <h3 style="${H3}">Прекратяване на гласови сесии</h3>
         <div data-avc-cols="1">

@@ -123,6 +123,16 @@ try {
         assert(mic.includes(text), `„Микрофон“: липсва „${text}“`)
       }
       await fullShot(page, 'stats-mic')
+      // Етап H: „Медийно здраве“ — броячи, допълнителен сигнал и последните събития (в българско време).
+      assert((await page.locator('[data-avc-media="1"]').count()) === 1, 'картата „Медийно здраве“')
+      const media = ((await page.locator('[data-avc-media="1"]').textContent()) ?? '').replace(/\s+/g, ' ')
+      for (const text of ['Медийно здраве', 'Подозрение: микрофонът не предава (RTP стои)', 'Capture-ът не дава кадри', 'Неочаквано спрян звук (пауза)',
+        'Говори, но звукът не пристига (допълнителен сигнал)', 'Пуснат отново — успех', '„Включи звука“ — успех', 'iPhone/iPad · Safari', 'Android · Samsung Internet',
+        'Последни събития (до 500', '18.11, 15:39', 'stall_suspected/capture_stalled/none', '„Подозрение“ не е доказан дефект']) {
+        assert(media.includes(text), `„Медийно здраве“: липсва „${text}“`)
+      }
+      assert((await page.locator('[data-avc-media-recent="1"] [data-avc-media-recent-row="1"]').count()) === 4, 'четири последни събития')
+      await page.locator('[data-avc-media="1"]').screenshot({ path: join(dir, 'stats-media-health.png') })
       // „Прекратяване на гласови сесии“: сървърни причини (вкл. причината от клиента), край на участието, откази, lease при токен; браузърни причини и етапи.
       assert((await page.locator('[data-avc-session-ends="1"]').count()) === 1, 'картата „Прекратяване на гласови сесии“')
       const ends = ((await page.locator('[data-avc-session-ends="1"]').textContent()) ?? '').replace(/\s+/g, ' ')

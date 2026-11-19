@@ -46,13 +46,33 @@ import {
   type VoiceMicAttemptFailure,
   type VoiceMicAttemptResult,
   type VoiceMicGumBucket,
+  type VoiceMediaInputEvidence,
+  type VoiceMicHealth,
   type VoiceMicInterruption,
+  type VoiceMicRecoveryMode,
+  type VoiceMicRecoveryOutcome,
+  type VoiceMicRecoveryResult,
   type VoiceMicRequestSource,
   type VoicePublishErrorKind,
   type VoiceRetainedMicrophone,
   type VoiceSessionEndReason,
 } from './voiceAdapter'
 import { clearVoiceIntent, markVoiceIntentLeaving, saveVoiceIntent } from './voiceIntentStore'
+
+export type { VoiceMicHealth } from './voiceAdapter'
+
+/**
+ * Етап H3: възстановяване на собствения микрофон (само за този играч):
+ *   'none' — няма; 'recovering' — тече (нов capture + replaceTrack);
+ *   'manual' — нужно е „Възстанови микрофона“ (автоматично не е позволено/потвърдено);
+ *   'failed' — опитът не успя (публикацията е заглушена) — „Възстанови микрофона“.
+ */
+export type VoiceMicRecoveryState = 'none' | 'recovering' | 'manual' | 'failed'
+
+/** H3 ограничения (решение на собственика, 2026-11-18). */
+export const VOICE_MIC_RECOVERY_COOLDOWN_MS = 60_000
+export const VOICE_MIC_RECOVERY_WINDOW_MS = 10 * 60_000
+export const VOICE_MIC_RECOVERY_MAX_ATTEMPTS = 3
 import {
   VOICE_SPEAK_ACCESS_PATH,
   VOICE_TOKEN_PATH,
@@ -145,6 +165,13 @@ export type VoiceSnapshot = {
   speak: VoiceSpeakState | null
   wantsToSpeak: boolean
   microphone: VoiceMicrophoneState
+  /**
+   * Етап H1: здраве на собствения ПУБЛИКУВАН микрофон ('ok', ако не е 'live').
+   * Само за този играч; само показване — контролерът не предприема действия.
+   */
+  microphoneHealth: VoiceMicHealth
+  /** Етап H3: възстановяване на собствения микрофон ('none', ако не е 'live'). */
+  microphoneRecovery: VoiceMicRecoveryState
   playbackBlocked: boolean
   uiError: VoiceUiError | null
   /** „Възстанови гласовия чат“ — гласът е бил спрян изрично (лоби/магазин), без автоматично връщане. */
@@ -180,6 +207,8 @@ export type VoiceController = {
   enableMicrophone: () => void
   disableMicrophone: () => void
   retryMicrophone: () => void
+  /** Етап H3: „Възстанови микрофона“ (жест) — нов capture в същата публикация. */
+  recoverMicrophone: () => void
   unlockAudio: () => void
   retryConnection: () => void
   muteRemoteParticipant: (profileId: string) => void
@@ -207,6 +236,11 @@ export type VoiceControllerDeps = {
   onRequestVip?: () => void
   /** Анонимна диагностика (best-effort); липсваща -> нищо не се изпраща. */
   reportDiagnostic?: (report: VoiceDiagnosticReport) => void
+  /**
+   * Етап H3: разрешено ли е АВТОМАТИЧНОТО възстановяване на микрофона.
+   * Липсва/false -> само бутон „Възстанови микрофона“ (production по подразбиране).
+   */
+  micAutoRecovery?: () => boolean
   createClientInstanceId?: () => string
   timers?: VoiceTimers
   /** Часовник за продължителността на getUserMedia (диагностика); по подразбиране Date.now. */
@@ -336,6 +370,18 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
 
   // ── микрофон ──
   let microphone: VoiceMicrophoneState = 'off'
+  /** Етап H1: последното здраве от адаптера за текущата стая (само наблюдение). */
+  let micHealth: VoiceMicHealth = 'ok'
+  // ── Етап H3: възстановяване на микрофона (стъпка на двигателя) ──
+  let micStallEvidence: VoiceMediaInputEvidence = 'none'
+  let micRecovery: VoiceMicRecoveryState = 'none'
+  let micRecoveryRequest: VoiceMicRecoveryMode | null = null
+  /** Един автоматичен опит на инцидент (инцидент: от подозрението до 'ok'). */
+  let micIncidentAttempted = false
+  /** Автоматичните опити (10 мин прозорец) и последният неуспех — за страницата, НЕ се нулират при смяна на track/стая. */
+  const micAutoAttempts: number[] = []
+  let micLastFailureAt: number | null = null
+  let micPermissionSeq = 0
   let held: VoiceRetainedMicrophone | null = null
   let heldTimer: unknown = null
   let acquiring = false
@@ -604,6 +650,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     micStartedAt = null
     publishHandbacks = 0
     everLive = false
+    resetMicRecovery()
     const current = room
     if (microphone !== 'off' && current !== null) counters.micDisabled! += 1
     if (current !== null) void current.disableMicrophone().catch(() => {})
@@ -617,6 +664,121 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     setUiError(speak?.blockedReason === 'muted' ? 'mic_blocked' : 'vip_required')
     finishMicRequest('failed', 'not_permitted')
     saveIntent()
+  }
+
+  // ─── Етап H3: политика за възстановяване на микрофона ─────────────────
+
+  /** Отменя текущото искане/състояние (лимитите и историята на опитите остават). */
+  function resetMicRecovery(): void {
+    micRecovery = 'none'
+    micRecoveryRequest = null
+    micIncidentAttempted = false
+    micStallEvidence = 'none'
+    micPermissionSeq += 1
+  }
+
+  function autoRecoveryBlocked(): VoiceMicRecoveryOutcome | null {
+    if (deps.micAutoRecovery?.() !== true) return 'disabled'
+    // Само спрял capture: нов capture не поправя спрял sender (capture_active).
+    if (micStallEvidence === 'capture_active') return 'capture_active'
+    if (micStallEvidence !== 'capture_stalled') return 'unavailable'
+    const now = nowMs()
+    if (micLastFailureAt !== null && now - micLastFailureAt < VOICE_MIC_RECOVERY_COOLDOWN_MS) return 'cooldown'
+    while (micAutoAttempts.length > 0 && now - micAutoAttempts[0]! >= VOICE_MIC_RECOVERY_WINDOW_MS) micAutoAttempts.shift()
+    if (micAutoAttempts.length >= VOICE_MIC_RECOVERY_MAX_ATTEMPTS) return 'limit'
+    return null
+  }
+
+  /** Подозрение за спрял микрофон: бутон; автоматично — само ако всичко го позволява. */
+  function considerMicRecovery(): void {
+    if (micRecovery !== 'none' || micRecoveryRequest !== null) return
+    const current = room
+    if (current === null || current.recoverMicrophone === undefined) return
+    if (microphone !== 'live' || !wantMic || speak?.canSpeak !== true || link !== 'connected' || rotating || closeRequested !== null) return
+    micRecovery = 'manual'
+    if (micIncidentAttempted) return
+    micIncidentAttempted = true
+    const blocked = autoRecoveryBlocked()
+    if (blocked !== null) {
+      report({ event: 'mic_recovery', mode: 'auto', outcome: blocked })
+      return
+    }
+    // Нов capture без жест — САМО при вече разрешен микрофон (без прозорец за разрешение).
+    const seq = ++micPermissionSeq
+    const granted = adapter?.microphonePermissionGranted === undefined ? Promise.resolve(false) : adapter.microphonePermissionGranted().catch(() => false)
+    void granted.then((ok) => {
+      if (seq !== micPermissionSeq || room !== current || micRecovery !== 'manual' || micHealth !== 'stall_suspected' || disposed) return
+      if (!ok) {
+        report({ event: 'mic_recovery', mode: 'auto', outcome: 'permission_required' })
+        return
+      }
+      micRecoveryRequest = 'auto'
+      micRecovery = 'recovering'
+      invalidate()
+      kick()
+    })
+  }
+
+  function recoveryOutcome(result: VoiceMicRecoveryResult): VoiceMicRecoveryOutcome {
+    switch (result) {
+      case 'recovered':
+      case 'no_rtp':
+      case 'gum_failed':
+      case 'gum_denied':
+      case 'replace_failed':
+        return result
+      default:
+        return 'aborted'
+    }
+  }
+
+  /** Вътре в двигателя (ensureMicrophone): една операция, отменима, в текущата стая. */
+  async function runMicRecovery(current: VoiceConnectedRoom): Promise<void> {
+    const mode = micRecoveryRequest!
+    micRecoveryRequest = null
+    if (current.recoverMicrophone === undefined) {
+      micRecovery = 'manual'
+      return
+    }
+    if (mode === 'auto') {
+      const confirmation = current.confirmCaptureStall === undefined ? 'unavailable' : await current.confirmCaptureStall().catch(() => 'unavailable' as const)
+      if (room !== current || !wantMic || microphone !== 'live' || micRecovery !== 'recovering') return
+      if (confirmation !== 'confirmed') {
+        micRecovery = 'manual'
+        report({ event: 'mic_recovery', mode, outcome: confirmation === 'unavailable' ? 'unavailable' : 'not_confirmed' })
+        invalidate()
+        return
+      }
+      micAutoAttempts.push(nowMs())
+    }
+    micRecovery = 'recovering'
+    invalidate()
+    const result = await current.recoverMicrophone({ explicit: mode === 'manual' }).catch(() => 'replace_failed' as const)
+    // Стаята е сменена (състоянието е нулирано там) / отменено (изключен микрофон, напускане).
+    if (room !== current || disposed || micRecovery !== 'recovering') {
+      report({ event: 'mic_recovery', mode, outcome: 'aborted' })
+      return
+    }
+    switch (result) {
+      case 'recovered':
+        micRecovery = 'none'
+        micHealth = 'ok'
+        micStallEvidence = 'none'
+        micIncidentAttempted = false
+        break
+      case 'aborted':
+      case 'busy':
+      case 'not_applicable':
+      case 'system_muted':
+        micRecovery = micHealth === 'stall_suspected' ? 'manual' : 'none'
+        break
+      default:
+        // no_rtp / gum_failed / gum_denied / replace_failed / aborted_orphaned
+        micRecovery = 'failed'
+        if (mode === 'auto') micLastFailureAt = nowMs()
+    }
+    report({ event: 'mic_recovery', mode, outcome: recoveryOutcome(result) })
+    invalidate()
   }
 
   // ─── Придобиване (getUserMedia) — извън двигателя ────────────────────
@@ -733,6 +895,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         if (cause !== 'client') report({ event: 'livekit_disconnect', reason: reason ?? livekitReasonOf(cause) })
         // Стаята е мъртва (LiveKit вече я е затворил) — двигателят решава какво следва.
         room = null
+        micHealth = 'ok'
+        resetMicRecovery()
         link = 'none'
         roomOwner = null
         roomsOpen = Math.max(0, roomsOpen - 1)
@@ -805,6 +969,33 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         setUiError(speak?.blockedReason === 'muted' ? 'mic_blocked' : 'mic_unavailable')
         saveIntent()
         invalidate()
+      },
+      // Етап H1: само показване и диагностика — НИКАКВО действие върху микрофона
+      // (без нов capture, публикуване, reconnect или смяна на желанието).
+      onMicHealthChanged: (health, evidence) => {
+        if (!current() || room === null) return
+        const nextEvidence = health === 'stall_suspected' ? (evidence ?? 'none') : 'none'
+        if (health === micHealth && nextEvidence === micStallEvidence) return
+        micHealth = health
+        micStallEvidence = nextEvidence
+        // По време на операцията резултатът идва от нея (без двойни решения).
+        if (micRecovery === 'recovering') {
+          invalidate()
+          return
+        }
+        if (health === 'ok') {
+          micIncidentAttempted = false
+          micRecovery = 'none'
+        } else if (health === 'system_muted') {
+          // Не се „борим“ със системата: без бутон и без опит, докато трае.
+          if (micRecovery === 'manual') micRecovery = 'none'
+        } else {
+          considerMicRecovery()
+        }
+        invalidate()
+      },
+      onMediaDiagnostic: (event) => {
+        if (current()) report(event)
       },
       onDevicesChanged: () => {
         if (!current()) return
@@ -920,6 +1111,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     link = 'none'
     roomOwner = null
     preparedSlot = null
+    micHealth = 'ok'
+    resetMicRecovery()
     clearSpeaking()
     transportTimer = clearTimer(transportTimer)
     invalidate()
@@ -1080,6 +1273,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
     room = connected
     link = 'connected'
+    micHealth = 'ok'
+    resetMicRecovery()
     everConnected = true
     rotating = false
     attempts = 0
@@ -1147,6 +1342,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       return
     }
     counters.micEnabled! += 1
+    // Нов публикуван capture: старо подозрение/прекъсване не се пренася (H1).
+    micHealth = 'ok'
+    resetMicRecovery()
     microphone = 'live'
     everLive = true
     micStartedAt = null
@@ -1170,6 +1368,14 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       denySpeaking()
       return
     }
+    // H3: възстановяването е стъпка на двигателя (сериализирано с публикуване/ротация).
+    if (micRecoveryRequest !== null && microphone === 'live') {
+      await runMicRecovery(current)
+      return
+    }
+    // Публикацията се пази (същият sid) по време на/след неуспешно възстановяване —
+    // без второ публикуване; следва само ръчно „Възстанови микрофона“ или изключване.
+    if (microphone === 'live' && (micRecovery === 'recovering' || micRecovery === 'failed')) return
     if (microphone === 'live' && current.isMicrophoneLive()) return
     if (held !== null) {
       const capture = held
@@ -1480,6 +1686,8 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       speak,
       wantsToSpeak: wantMic,
       microphone,
+      microphoneHealth: microphone === 'live' && room !== null && link === 'connected' ? micHealth : 'ok',
+      microphoneRecovery: microphone === 'live' && room !== null ? micRecovery : 'none',
       playbackBlocked,
       uiError,
       canRestore,
@@ -1650,6 +1858,20 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     retryMicrophone() {
       controller.enableMicrophone()
     },
+    recoverMicrophone() {
+      if (disposed || !wantVoice) return
+      // Без включен микрофон — обичайното изрично включване.
+      if (microphone !== 'live' || !wantMic || room === null) {
+        controller.enableMicrophone()
+        return
+      }
+      if (micRecovery === 'recovering' || micRecoveryRequest !== null || micHealth === 'system_muted') return
+      // Изрично действие (жест): разрешение може да се поиска; не се брои в автоматичните лимити.
+      micRecoveryRequest = 'manual'
+      micRecovery = 'recovering'
+      invalidate()
+      kick()
+    },
     unlockAudio() {
       const current = room
       if (current === null) return
@@ -1734,6 +1956,12 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       pendingTimers: [presenceTimer, retryTimer, heldTimer, transportTimer].filter((t) => t !== null).length + speakingHoldTimers.size + (pendingAck === null ? 0 : 1),
       retainedMicrophone: held === null ? 0 : 1,
       driving: driving ? 1 : 0,
+      micAutoAttempts: micAutoAttempts.length,
+      micAutoRecovery: deps.micAutoRecovery?.() === true ? 1 : 0,
+      micLastFailureAgoMs: micLastFailureAt === null ? -1 : Math.max(0, nowMs() - micLastFailureAt),
+      // Етап H: измерване на натоварването и изтичане (само тестове/диагностика).
+      ...Object.fromEntries(Object.entries(room?.debugMedia?.() ?? {}).map(([key, value]) => [`media.${key}`, value])),
+      ...Object.fromEntries(Object.entries(adapter?.debugMediaGlobal?.() ?? {}).map(([key, value]) => [`mediaGlobal.${key}`, value])),
     }),
   }
 

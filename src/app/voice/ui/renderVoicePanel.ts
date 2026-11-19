@@ -14,7 +14,7 @@ import type { VoiceSpeakPreview } from '../voiceSpeakPreview'
 import type { VoiceJoinOffer } from './voiceJoinOffer'
 import { renderVoiceSpeakingSlot } from './voiceSpeakingIndicator'
 import { lucideIcon, voiceIcon as baseIcon } from './voiceUiIcons'
-import { describeVoiceStatus, isInVoice, type VoiceUiSeat, type VoiceUiTheme } from './voiceUiStatus'
+import { describeMicHealth, describeVoiceStatus, isInVoice, type VoiceUiSeat, type VoiceUiTheme } from './voiceUiStatus'
 
 // Иконите само на панела — в този lazy chunk.
 const voiceIcon = {
@@ -109,6 +109,11 @@ function renderNotices(options: VoicePanelOptions): string {
   if (connected && snapshot.playbackBlocked) {
     notice('warn', 'Браузърът спря звука.', 'Натиснете, за да чувате останалите.', button('data-voice-action="unlock-audio"', 'Включи звука', 'primary', voiceIcon.volume(16)))
   }
+  // Етап H1: само за самия играч (snapshot-ът е собственият) — без действие.
+  const micHealth = connected ? describeMicHealth(snapshot) : null
+  if (micHealth !== null) {
+    notice('warn', micHealth.title, micHealth.text, micHealth.action ? button('data-voice-action="recover-mic"', 'Възстанови микрофона', 'primary', voiceIcon.mic(16)) : '')
+  }
   const code = snapshot.uiError?.code ?? null
   // Преди включване — последното сървърно решение от WS snapshot-ите.
   const speak = isInVoice(snapshot) ? snapshot.speak : (options.preJoinSpeak ?? snapshot.speak)
@@ -157,7 +162,7 @@ function renderRows(options: VoicePanelOptions): string {
           sub = 'Слуша'
           stateIcon = voiceIcon.micOff(16)
         } else if (snapshot.microphone === 'live') {
-          sub = 'Микрофон вкл.'
+          sub = describeMicHealth(snapshot)?.short ?? 'Микрофон вкл.'
           stateIcon = voiceIcon.mic(16)
         } else {
           sub = 'Слуша'

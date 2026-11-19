@@ -170,6 +170,23 @@ function monitoring() {
       sessionEnds: unconfigured
         ? { byReason: {}, failStages: {} }
         : { byReason: { leave_voice: 3, page_hide: 2, fail_connection: 2, access_ended: 1 }, failStages: { presence: 1, rotation_resume: 1 } },
+      // Етап H: медийно здраве (броячи + последните събития, UTC минута).
+      media: unconfigured
+        ? { input: {}, inputEvidence: {}, output: {}, recovery: {}, byPlatform: {} }
+        : {
+            input: { stall_suspected: 2, stall_cleared: 1, system_muted: 3, system_unmuted: 3 },
+            inputEvidence: { capture_stalled: 1, capture_active: 1 },
+            output: { element_paused: 4, element_missing: 1, playback_blocked: 1, remote_stall_suspected: 1 },
+            recovery: { 'play:success': 4, 'reattach:success': 1, 'play:gesture_required': 1, 'start_audio:success': 1 },
+            byPlatform: { ios_safari: 6, android_samsung: 4, desktop_chrome: 3 },
+          },
+      recent: unconfigured ? [] : [
+        { at: '2026-11-18T13:39Z', event: 'media_input', detail: 'stall_suspected/capture_stalled/none', platform: 'ios_safari' },
+        { at: '2026-11-18T13:38Z', event: 'media_output', detail: 'element_paused', platform: 'android_samsung' },
+        { at: '2026-11-18T13:38Z', event: 'media_recovery', detail: 'output/play/success/pause', platform: 'android_samsung' },
+        { at: '2026-11-18T13:34Z', event: 'connected', detail: '', platform: 'ios_safari' },
+      ],
+      recentLimit: 500,
       rejectedReports: 0,
     },
   }

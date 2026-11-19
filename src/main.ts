@@ -11096,11 +11096,25 @@ void loadGuestTrialStatus().finally(() => {
 // само минималният посредник (voiceFacade) — controller-ът и livekit-client
 // са в lazy chunk assets/voice-* и се зареждат при изрично включване.
 
+// Етап H3: заявка за панела „Диагностика на звука“ (измерване на телефони) —
+// ?voicediag=1 се запомня за таба (sessionStorage) преди рутерът да промени
+// адреса; ?voicediag=0 я премахва. Заявката сама НЕ дава достъп: панелът е само
+// за пълен администратор (diagnosticsAccess по-долу, проверява се постоянно).
+try {
+  const voiceDiagnostics = new URLSearchParams(window.location.search).get('voicediag')
+  if (voiceDiagnostics === '1') window.sessionStorage.setItem('pika.voice.diag', '1')
+  else if (voiceDiagnostics === '0') window.sessionStorage.removeItem('pika.voice.diag')
+} catch {
+  /* без sessionStorage — без панел */
+}
+
 function createAppVoiceController(): VoiceController {
   const controller = createLazyVoiceController({
     sendPresence: (message) => client.sendVoicePresence(message),
     // HTTPS транспортът (token/speak-access) е в lazy runtime-а.
     apiBaseUrl: getApiBaseUrl,
+    // Етап H3: панелът и тестовото превключване — само пълен администратор (текущата сесия).
+    diagnosticsAccess: () => ({ fullAdmin: currentAuthSession?.account.role === 'admin', profileId: currentAuthSession?.profile.profileId ?? null }),
   })
   window.addEventListener('pageshow', (event) => controller.onPageShow(event.persisted))
   window.addEventListener('pagehide', () => controller.onPageHide())

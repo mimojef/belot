@@ -78,6 +78,7 @@ const fakeVoice: VoiceController = {
   enableMicrophone: record('enableMicrophone'),
   disableMicrophone: record('disableMicrophone'),
   retryMicrophone: record('retryMicrophone'),
+  recoverMicrophone: record('recoverMicrophone'),
   unlockAudio: record('unlockAudio'),
   retryConnection: record('retryConnection'),
   muteRemoteParticipant: (id) => { actions.push(`mute:${id}`) },

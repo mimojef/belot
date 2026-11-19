@@ -75,8 +75,10 @@ const EXTRA_STYLES = `
   .pvs-cta--icon { width:36px; min-height:36px; padding:0; justify-content:center; border-radius:10px; }
   .pvs-ico--mic-on { background:#ECFDF3; border-color:#ABEFC6; color:#067647; }
   .pvs-ico--mic-off { background:#FEF3F2; border-color:#FECDCA; color:#D92D20; }
+  .pvs-ico--mic-warn { background:#FFFAEB; border-color:#FEDF89; color:#B54708; }
   .pvg.pvg--mic-on, .pvg.pvg--mic-on:hover { color:#4ADE80; }
   .pvg.pvg--mic-off, .pvg.pvg--mic-off:hover { color:#F87171; }
+  .pvg.pvg--mic-warn, .pvg.pvg--mic-warn:hover { color:#FBBF24; }
   .pvg { position:fixed; bottom:5px; right:112px; z-index:9998; width:40px; height:40px; padding:0; border:0; border-radius:50%; background:rgba(20,20,24,0.92); border:2px solid rgba(212,165,32,0.80); box-shadow:0 0 12px rgba(212,165,32,0.25), 0 6px 20px rgba(0,0,0,0.50); display:flex; align-items:center; justify-content:center; color:#F4C432; cursor:pointer; -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); -webkit-tap-highlight-color:transparent; }
   .pvg::before { content:''; position:absolute; inset:-3px -2px -5px -2px; }
   .pvg--idle { color:rgba(244,196,50,0.62); }
@@ -97,6 +99,7 @@ const EXTRA_STYLES = `
   .pvs--dark .pvs-cta--open { background:rgba(212,165,32,0.14); border:1px solid rgba(212,165,32,0.55); color:#F4C432; }
   .pvs--dark .pvs-ico--mic-on { background:rgba(74,222,128,0.14); border-color:rgba(74,222,128,0.55); color:#4ADE80; }
   .pvs--dark .pvs-ico--mic-off { background:rgba(248,113,113,0.14); border-color:rgba(248,113,113,0.55); color:#F87171; }
+  .pvs--dark .pvs-ico--mic-warn { background:rgba(251,191,36,0.14); border-color:rgba(251,191,36,0.55); color:#FBBF24; }
   .pvg--desktop, .pvg--desktop-free { width:52px; height:52px; right:auto; bottom:auto; flex:0 0 auto; transition:background 140ms ease, color 140ms ease; }
   .pvg--desktop { position:relative; z-index:auto; }
   .pvg--desktop-free { position:fixed; left:18px; bottom:24px; z-index:9400; }
@@ -194,6 +197,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       case 'mic-on': voice.enableMicrophone(); return
       case 'mic-off': voice.disableMicrophone(); return
       case 'retry-mic': voice.retryMicrophone(); return
+      case 'recover-mic': voice.recoverMicrophone(); return
       case 'retry-connection': voice.retryConnection(); return
       case 'unlock-audio': voice.unlockAudio(); return
       case 'leave': voice.leaveVoice(); return

@@ -1787,6 +1787,33 @@ try {
     assertEqual(h.service.stats().sessionEndsByReason['left_table:unspecified'], 1, 'стар клиент')
   })
 
+  await check('[DX7] Етап H: leaseLeftMs в session_end при напускане е оставащият lease ПРЕДИ нулирането (не -Date.now()); lease логиката непроменена', async () => {
+    fake.reset()
+    const h = await createHarness({ fake })
+    const creator = h.seedProfile('Host')
+    const table = h.createTable(creator, 'c1')
+    const inst = instanceId('dx7')
+    await joinWithToken(h, table, creator, 'c1', inst, fake)
+    h.clock.advance(10_000)
+    h.service.handlePresence('c1', creator, { type: 'voice_presence', voiceTableId: table, clientInstanceId: inst, onTableScreen: false, reason: 'leave_voice' })
+    const line = h.logs.find((l) => l.includes('[voice-chat] session_end') && l.includes('reason=left_table:leave_voice'))
+    const value = Number(/leaseLeftMs=(-?\d+)/.exec(line ?? '')?.[1])
+    assert(line !== undefined && Number.isFinite(value) && value > 0 && value <= 60_000, `разумен оставащ lease: ${line}`)
+    assert(value <= 50_000, `изминалите 10 s са извадени: ${value}`)
+    // Lease логиката: след напускането токен не се издава без ново присъствие (непроменено).
+    const again = await h.token(creator, table, inst)
+    assert(again.status !== 200, `без токен след напускане: ${again.status}`)
+    // Повторно включване и изтекъл lease -> стойност около 0, никога огромна отрицателна.
+    h.presence('c1', creator, table, inst, true)
+    await h.token(creator, table, inst)
+    h.clock.advance(61_000)
+    await sleep(100)
+    const expired = h.logs.find((l) => l.includes('[voice-chat] session_end') && l.includes('reason=lease_expired'))
+    const expiredValue = Number(/leaseLeftMs=(-?\d+)/.exec(expired ?? '')?.[1])
+    assert(expired !== undefined && Number.isFinite(expiredValue) && expiredValue <= 0 && expiredValue > -5_000, `изтекъл lease: ${expired}`)
+    assert(!h.logs.some((l) => /leaseLeftMs=-\d{10,}/.test(l)), 'никога -Date.now()')
+  })
+
   await check('[DX2] (старото поведение, минимумът изключен) Lease МОЖЕ да изтече веднага след успешно издаден токен: токен при оставащи 0,5 s -> token_near_lease_expiry; 0,5 s по-късно session_end lease_expired + RemoveParticipant', async () => {
     fake.reset()
     const h = await createHarness({ fake, timing: { tokenMinLeaseMs: 0 } })

@@ -87,7 +87,58 @@ export type VoiceAdapterEvents = {
   onLocalMicrophoneLost: (reason?: VoiceMicrophoneLossReason) => void
   /** Списъкът с аудио устройства се е сменил (само информация — без автоматично включване). */
   onDevicesChanged: () => void
+  /**
+   * Етап H1: здраве на собствения публикуван микрофон (само наблюдение —
+   * адаптерът НЕ предприема възстановяване на микрофона). Липсва -> не се ползва.
+   */
+  onMicHealthChanged?: (health: VoiceMicHealth, evidence?: VoiceMediaInputEvidence) => void
+  /** Етап H1/H2: анонимно медийно събитие за диагностиката (при промяна на състояние). */
+  onMediaDiagnostic?: (report: VoiceMediaDiagnosticReport) => void
 }
+
+/**
+ * Здраве на собствения микрофон (Етап H1):
+ *   * 'ok' — няма установен проблем (вкл. нормална тишина и DTX);
+ *   * 'system_muted' — устройството/ОС е прекъснало capture-а (track.muted)
+ *     или LiveKit е спрял изходящото аудио заради това;
+ *   * 'stall_suspected' — RTP изпращането стои, без независимо доказателство
+ *     за дефект (подозрение — не се възстановява автоматично).
+ */
+export type VoiceMicHealth = 'ok' | 'system_muted' | 'stall_suspected'
+
+/** Медийна диагностика (затворени изброявания; виж server voiceClientDiagnostics). */
+export type VoiceMediaInputState = 'system_muted' | 'system_unmuted' | 'stall_suspected' | 'stall_cleared'
+/**
+ * Допълнително (НЕ доказателство) при stall: 'capture_stalled' — media-source
+ * не получава кадри; 'capture_active' — capture-ът дава кадри, а RTP стои;
+ * 'packets_only' — няма media-source показател.
+ */
+export type VoiceMediaInputEvidence = 'none' | 'packets_only' | 'capture_stalled' | 'capture_active'
+export type VoiceMediaDurationBucket = 'none' | 'lt10s' | '10to60s' | 'gt60s'
+export type VoiceMediaOutputState = 'element_paused' | 'element_missing' | 'playback_blocked' | 'remote_stall_suspected'
+export type VoiceMediaRecoveryStep = 'play' | 'reattach' | 'start_audio'
+export type VoiceMediaRecoveryResult = 'success' | 'failed' | 'gesture_required' | 'limited'
+export type VoiceMediaTrigger = 'pause' | 'visible' | 'focus' | 'pageshow' | 'devicechange' | 'attach_check' | 'gesture'
+/**
+ * Етап H3: резултат от възстановяването на микрофона (нов capture + replaceTrack
+ * в СЪЩАТА публикация). 'aborted_orphaned' — отменено (reconnect и др.), след като
+ * старият capture вече е спрян: публикацията е заглушена и чака ръчно възстановяване.
+ */
+export type VoiceMicRecoveryResult =
+  | 'recovered' | 'no_rtp' | 'gum_failed' | 'gum_denied' | 'replace_failed'
+  | 'aborted' | 'aborted_orphaned' | 'busy' | 'system_muted' | 'not_applicable'
+/** Независимо потвърждение (броячи на кадрите, не енергия), че capture-ът е спрял. */
+export type VoiceCaptureStallConfirmation = 'confirmed' | 'not_confirmed' | 'unavailable'
+/** Диагностика на H3 (затворени стойности; виж server voiceClientDiagnostics). */
+export type VoiceMicRecoveryMode = 'auto' | 'manual'
+export type VoiceMicRecoveryOutcome =
+  | 'recovered' | 'no_rtp' | 'gum_failed' | 'gum_denied' | 'replace_failed' | 'aborted'
+  | 'not_confirmed' | 'unavailable' | 'permission_required' | 'cooldown' | 'limit' | 'capture_active' | 'disabled'
+export type VoiceMediaDiagnosticReport =
+  | { event: 'media_input'; state: VoiceMediaInputState; evidence: VoiceMediaInputEvidence; duration: VoiceMediaDurationBucket }
+  | { event: 'media_output'; state: VoiceMediaOutputState }
+  | { event: 'media_recovery'; target: 'output'; step: VoiceMediaRecoveryStep; result: VoiceMediaRecoveryResult; trigger: VoiceMediaTrigger }
+  | { event: 'mic_recovery'; mode: VoiceMicRecoveryMode; outcome: VoiceMicRecoveryOutcome }
 
 /**
  * Запазен (непубликуван) микрофонен capture при контролирана ротация — за
@@ -128,6 +179,16 @@ export type VoiceConnectedRoom = {
    * няма аудио track/статистика.
    */
   getTransportInfo?: () => Promise<VoiceTransportInfo | null>
+  /** Само за тестове/измерване на натоварването (броячи на медийното наблюдение). */
+  debugMedia?: () => Record<string, number>
+  /** Етап H3: независимо потвърждение на спрял capture (само при capture_stalled). */
+  confirmCaptureStall?: () => Promise<VoiceCaptureStallConfirmation>
+  /**
+   * Етап H3: нов capture + replaceTrack в СЪЩАТА публикация (същият track sid).
+   * Старият capture се спира ПРЕДИ новия (никога два живи). explicit — от жест
+   * (прозорец за разрешение е позволен); иначе само при вече разрешен микрофон.
+   */
+  recoverMicrophone?: (options: { explicit: boolean }) => Promise<VoiceMicRecoveryResult>
 }
 
 /** Без адреси/IP — само вид и протокол на кандидата и закръглени показатели. */
@@ -146,6 +207,7 @@ export type VoiceDiagnosticReport =
   | { event: 'mic_failed'; reason: 'mic_not_found' | 'mic_permission_denied' | 'mic_unavailable' | 'mic_not_permitted' }
   | { event: 'transport'; transport: VoiceTransportInfo }
   | VoiceMicDiagnosticReport
+  | VoiceMediaDiagnosticReport
 
 /**
  * Микрофон — анонимна диагностика на включването (без аудио, токени, IP,
@@ -207,6 +269,8 @@ export type VoiceAdapter = {
     /** Отказ преди/по време на connect (идемпотентно). */
     abort: () => Promise<void>
   }
+  /** Само за тестове: активни таймери/слушатели на медийното наблюдение във всички стаи (изтичане). */
+  debugMediaGlobal?: () => Record<string, number>
 }
 
 export type VoiceAdapterLoader = () => Promise<VoiceAdapter>
