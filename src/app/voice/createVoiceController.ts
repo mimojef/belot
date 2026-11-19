@@ -1303,6 +1303,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       await current.enableMicrophone(capture)
     } catch (error) {
       const handedBack = error instanceof VoiceMicrophoneError ? error.retained : null
+      if (handedBack !== null && (!wantMic || !wantVoice)) {
+        // Изключено/напуснато, докато публикуването чакаше reconnect-а — capture-ът се спира.
+        handedBack.release()
+        if (microphone === 'requesting') microphone = 'off'
+        invalidate()
+        return
+      }
       if (handedBack !== null) {
         // Прекъснато от SDK reconnect: публикуване след Reconnected (kick); общият срок тече.
         noteMicInterruption('sdk_reconnect')
@@ -1317,6 +1324,12 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       }
       if (room !== current) return // стаята е сменена; следващият цикъл решава
       microphone = 'off'
+      if (!wantMic) {
+        // Изключено / напуснато / отнето право по време на публикуването: без грешка
+        // (собственото съобщение на отмяната, напр. за правата, остава).
+        invalidate()
+        return
+      }
       const failure = error instanceof VoiceMicrophoneError ? error.failure : 'unavailable'
       const publishError = error instanceof VoiceMicrophoneError ? error.publishError : null
       if (failure === 'not_permitted') {

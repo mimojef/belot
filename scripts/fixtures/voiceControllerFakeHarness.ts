@@ -62,6 +62,10 @@ export function createClock() {
 // ─── Fake LiveKit адаптер с отделно придобиване ───────────────────────────
 export type FakeCapture = { id: number; stopped: boolean; ended: boolean }
 export type PublishStep = 'ok' | 'sdk_reconnect_cancel' | 'fail_timeout' | 'fail_not_permitted'
+  // Публикуването чака publishGate (адаптерът чака reconnect на SDK-то), после:
+  // 'gate_interrupt' — reconnect потвърден -> връщане на живия capture;
+  // 'gate_fail' — без потвърден reconnect / отменено -> окончателна грешка (capture спрян).
+  | 'gate_interrupt' | 'gate_fail'
 
 export type FakeRoom = VoiceConnectedRoom & {
   events: VoiceAdapterEvents
@@ -87,6 +91,8 @@ export function createFakeAdapter() {
     micBehavior: 'ok' as 'ok' | VoiceMicrophoneFailure,
     /** Сценарий за следващите публикувания (по ред); празно -> 'ok'. */
     publishSteps: [] as PublishStep[],
+    /** За 'gate_interrupt' / 'gate_fail'. */
+    publishGate: null as Promise<void> | null,
     connectGate: null as Promise<void> | null,
     /** Опити за втора стая, докато предишната не е изключена. */
     prepareRejected: 0,
@@ -160,6 +166,15 @@ export function createFakeAdapter() {
           retained.delete(reuse)
           await Promise.resolve()
           const step = state.publishSteps.shift() ?? 'ok'
+          if (step === 'gate_interrupt' || step === 'gate_fail') {
+            if (state.publishGate !== null) await state.publishGate
+            if (step === 'gate_interrupt') {
+              room.events.onReconnecting()
+              throw new VoiceMicrophoneError('interrupted', { retained: retainHandle(capture), publishError: 'other' })
+            }
+            stop(capture)
+            throw new VoiceMicrophoneError('unavailable', { publishError: 'other' })
+          }
           if (step === 'sdk_reconnect_cancel') {
             // Като LiveKit 2.x: пълният reconnect (Reconnecting) отменя
             // незавършеното addTrack -> адаптерът връща живия capture.

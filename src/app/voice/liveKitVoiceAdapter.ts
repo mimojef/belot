@@ -21,7 +21,14 @@
 //     capture-ът се освобождава; НЕ се превключва автоматично към друго устройство;
 //   * публикуване, прекъснато от reconnect на SDK-то (пълният reconnect отменя
 //     незавършеното addTrack) -> живият capture се връща на контролера
-//     (VoiceMicrophoneError('interrupted')) за публикуване след възстановяването.
+//     (VoiceMicrophoneError('interrupted')) за публикуване след възстановяването;
+//   * неуспешно публикуване, СЛЕД което SDK-то започва reconnect: SDK-то
+//     (2.23.0) отхвърля publish-а ПРЕДИ насрочения reconnect (setTimeout) —
+//     до PUBLISH_SETTLE_MS се чака той да започне; потвърден -> същото
+//     връщане на capture-а (висящият sender на опита се маха). Без потвърден
+//     reconnect -> окончателна грешка, както досега.
+// Signal resume (SignalReconnecting) също се съобщава на контролера като
+// reconnecting -> до Reconnected (SDK-то го излъчва и след resume) не публикува.
 
 import {
   AudioPresets,
@@ -29,6 +36,7 @@ import {
   DisconnectReason,
   LogLevel,
   MediaDeviceFailure,
+  ParticipantEvent,
   type LocalTrack,
   type Participant,
   type RemoteAudioTrack,
@@ -85,6 +93,13 @@ const AUDIO_CAPTURE = {
 
 /** Колко се чака Disconnected след сървърно премахване на микрофона (изтриване на стаята при ротация). */
 const SERVER_UNPUBLISH_GRACE_MS = 2_000
+
+/**
+ * Колко се чака SDK-то да започне reconnect след неуспешно публикуване.
+ * livekit-client 2.23.0: RTCEngine.negotiate() вика handleDisconnect (reconnect
+ * чрез setTimeout, първо забавяне 0 ms) и ЧАК ТОГАВА отхвърля publish-а.
+ */
+const PUBLISH_SETTLE_MS = 1_000
 
 function mapDisconnectReason(reason: DisconnectReason | undefined, clientInitiated: boolean): VoiceDisconnectCause {
   if (clientInitiated || reason === DisconnectReason.CLIENT_INITIATED) return 'client'
@@ -280,6 +295,10 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       // Брояч на reconnect-ите на SDK-то — за разпознаване на публикуване,
       // прекъснато от reconnect (пълният reconnect отменя незавършеното addTrack).
       let reconnectEpoch = 0
+      /** Reconnect (resume или пълен) вече е съобщен на контролера — до Reconnected/Disconnected. */
+      let sdkReconnectSignalled = false
+      /** Отмяна на текущото изчакване след неуспешно публикуване (изключване/напускане/затваряне). */
+      let publishSettleCancel: (() => void) | null = null
       const attachedTrackSids = new Set<string>()
 
       // Отключване на аудиото в СЪЩИЯ потребителски жест (преди мрежата).
@@ -370,6 +389,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       }
 
       function stopLocalMicrophone(): Promise<void> {
+        // Изключване/напускане/затваряне по време на изчакването след неуспешно публикуване -> веднага.
+        publishSettleCancel?.()
         abortRecovery()
         recoveryOrphaned = false
         const capture = micCapture
@@ -922,19 +943,103 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         pausedReportedAt.clear()
       }
 
+      /**
+       * След неуспешно публикуване: започва ли SDK-то reconnect (resume или
+       * пълен)? Вече започнал -> веднага true (събитието не може да бъде
+       * пропуснато: reconnectEpoch се брои от слушателите от prepare()).
+       * Иначе — до PUBLISH_SETTLE_MS за SignalReconnecting/Reconnecting.
+       * Disconnected, изтекъл срок или отмяна (stopLocalMicrophone: изключване,
+       * напускане, затваряне) -> false. Слушателите и таймерът се махат винаги.
+       */
+      function awaitSdkReconnect(epoch: number): Promise<boolean> {
+        const started = (): boolean => reconnectEpoch !== epoch || isReconnectingState()
+        if (started()) return Promise.resolve(true)
+        if (disposed || clientDisconnect || room.state !== ConnectionState.Connected) return Promise.resolve(false)
+        return new Promise((resolve) => {
+          let settled = false
+          const onReconnect = (): void => finish(true)
+          const onEnd = (): void => finish(false)
+          const cancel = (): void => finish(false)
+          const timer = setTimeout(() => finish(started()), PUBLISH_SETTLE_MS)
+          function finish(value: boolean): void {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            room.off(RoomEvent.SignalReconnecting, onReconnect)
+            room.off(RoomEvent.Reconnecting, onReconnect)
+            room.off(RoomEvent.Disconnected, onEnd)
+            if (publishSettleCancel === cancel) publishSettleCancel = null
+            resolve(value)
+          }
+          room.on(RoomEvent.SignalReconnecting, onReconnect)
+          room.on(RoomEvent.Reconnecting, onReconnect)
+          room.on(RoomEvent.Disconnected, onEnd)
+          publishSettleCancel?.()
+          publishSettleCancel = cancel
+        })
+      }
+
+      /**
+       * SDK-то не маха sender-а на неуспешно договорено публикуване. Ако PC-то
+       * оцелее (resume), следващото договаряне би изпратило capture-а без
+       * публикация, а повторното публикуване — втори sender. Затова се маха.
+       */
+      function dropFailedSender(sender: RTCRtpSender | null): void {
+        if (sender === null || disposed) return
+        try {
+          room.engine.removeTrack(sender)
+        } catch {
+          /* PC-то вече е затворено (пълен reconnect) */
+        }
+      }
+
+      /**
+       * Същият capture за повторното публикуване, но с НОВ id. cid на AddTrack
+       * е id-то на track-а; при успешен signal resume сървърът пази
+       * незавършеното AddTrack от неуспешния опит и на второ със същия cid не
+       * отговаря (10 s -> publish_timeout). clone() НЕ е нов getUserMedia: без
+       * разрешение, същият източник и обработка (EC/NS/AGC). Оригиналът се спира.
+       */
+      function trackForRetry(capture: MediaStreamTrack): MediaStreamTrack {
+        let clone: MediaStreamTrack
+        try {
+          clone = capture.clone()
+        } catch {
+          return capture
+        }
+        if (clone.readyState !== 'live') {
+          stopCapture(clone)
+          return capture
+        }
+        stopCapture(capture)
+        return clone
+      }
+
       async function publishCapture(capture: MediaStreamTrack): Promise<void> {
         const epoch = reconnectEpoch
+        let sender: RTCRtpSender | null = null
+        const onSender = (created: RTCRtpSender, track: Track): void => {
+          if (track.mediaStreamTrack === capture) sender = created
+        }
+        room.localParticipant.on(ParticipantEvent.LocalSenderCreated, onSender)
         try {
           await room.localParticipant.publishTrack(capture, { source: Track.Source.Microphone })
         } catch (error) {
+          room.localParticipant.off(ParticipantEvent.LocalSenderCreated, onSender)
           const publishError = classifyPublishError(error)
           // Прекъснато от reconnect на SDK-то (не от нас): живият capture НЕ се
           // спира — връща се на контролера за публикуване след Reconnected.
           // Потвърден отказ на правата никога не е прекъсване.
-          const interrupted = publishError !== 'not_permitted' && !disposed && !clientDisconnect && capture.readyState === 'live'
-            && (reconnectEpoch !== epoch || isReconnectingState())
-          if (interrupted && micTrack()?.mediaStreamTrack !== capture) {
-            throw new VoiceMicrophoneError('interrupted', { retained: retainCapture(capture), publishError })
+          const eligible = (): boolean => publishError !== 'not_permitted' && !disposed && !clientDisconnect && capture.readyState === 'live'
+          let interrupted = eligible() && (reconnectEpoch !== epoch || isReconnectingState())
+          // SDK-то насрочва reconnect-а СЛЕД отхвърлянето — кратко изчакване (само при живо право и capture).
+          if (!interrupted && eligible()) interrupted = (await awaitSdkReconnect(epoch)) && eligible()
+          const published = micTrack()?.mediaStreamTrack === capture
+          // Висящият sender на неуспешния опит — и при окончателна грешка (иначе
+          // следващото договаряне би обявило track без публикация).
+          if (!published) dropFailedSender(sender)
+          if (interrupted && !published) {
+            throw new VoiceMicrophoneError('interrupted', { retained: retainCapture(trackForRetry(capture)), publishError })
           }
           stopCapture(capture)
           await stopLocalMicrophone()
@@ -942,6 +1047,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           // MediaDeviceFailure.getFailure връща Other за всяка грешка с name.
           throw new VoiceMicrophoneError(publishError === 'not_permitted' ? 'not_permitted' : mapMicrophoneError(error), { publishError })
         }
+        room.localParticipant.off(ParticipantEvent.LocalSenderCreated, onSender)
         micCapture = capture
         // H1: само наблюдение на новия capture (без действия).
         clearMicHealth()
@@ -976,6 +1082,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
 
       room
         .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+          sdkReconnectSignalled = false
           unwatchPageLeave()
           clearServerUnpublish()
           abortRecovery()
@@ -1002,15 +1109,28 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           }
           events.onDisconnected(cause, held, detail)
         })
+        // Signal resume (без пълен reconnect; 2.23.0: EngineEvent.Resuming ->
+        // SignalReconnecting, Resumed -> Reconnected): докато трае, връзката не е
+        // годна — контролерът не публикува. Медийното наблюдение (H1/H3) не се пипа.
+        .on(RoomEvent.SignalReconnecting, () => {
+          reconnectEpoch += 1
+          if (sdkReconnectSignalled) return
+          sdkReconnectSignalled = true
+          events.onReconnecting()
+        })
         .on(RoomEvent.Reconnecting, () => {
           reconnectEpoch += 1
           abortRecovery()
           // Измерването през reconnect не е сравнимо — базата започва наново.
           stopMonitor()
           inputHealth.resetBaseline()
+          // Неуспешен resume -> пълен reconnect: вече съобщено (едно „reconnecting“).
+          if (sdkReconnectSignalled) return
+          sdkReconnectSignalled = true
           events.onReconnecting()
         })
         .on(RoomEvent.Reconnected, () => {
+          sdkReconnectSignalled = false
           events.onReconnected()
           // Официалният пълен reconnect публикува същия track наново; ако не е
           // успял — capture-ът не остава активен без публикация.

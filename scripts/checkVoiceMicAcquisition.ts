@@ -392,6 +392,91 @@ for (const [failure, code] of [['permission_denied', 'mic_permission_denied'], [
 
 // ═══ Диагностиката минава сървърната валидация ═══════════════════════════
 
+// ═══ Неуспешно публикуване, докато адаптерът чака reconnect на SDK-то ═════
+// (реалният адаптер: до PUBLISH_SETTLE_MS след отхвърления publish; тук — publishGate)
+
+function gatedPublish(h: Harness, step: 'gate_interrupt' | 'gate_fail'): () => Promise<void> {
+  let open!: () => void
+  h.fake.state.publishGate = new Promise<void>((resolve) => { open = resolve })
+  h.fake.state.publishSteps = [step]
+  return async () => {
+    h.fake.state.publishGate = null
+    open()
+    await flush(40)
+  }
+}
+
+const cancellations: Array<[string, (h: Harness) => void, string | null]> = [
+  ['ръчно изключване', (h) => h.voice.disableMicrophone(), null],
+  ['напускане на гласа', (h) => h.voice.leaveVoice(), null],
+  ['административно заглушаване', (h) => {
+    h.backend.speak = MUTED
+    h.voice.handleServerMessage({ type: 'voice_speak_access_updated', voiceTableId: TABLE, speak: MUTED } as never)
+  }, 'mic_blocked'],
+  ['преминаване към лобито', (h) => h.voice.setContext(h.ctx('off_table')), null],
+]
+for (const [label, cancel, code] of cancellations) {
+  for (const step of ['gate_interrupt', 'gate_fail'] as const) {
+    await check(`[MG-${step}] ${label} докато публикуването чака reconnect -> capture-ът е спрян, без публикуване${code === null ? ' и без грешка' : ` („${code}“)`}`, async () => {
+      const h = createHarness()
+      const release = gatedPublish(h, step)
+      await joinWithMic(h)
+      assertEqual(snap(h).microphone, 'requesting', 'публикуването чака')
+      cancel(h)
+      await flush(30)
+      await release()
+      assertEqual(h.fake.state.liveCaptures(), 0, 'capture-и')
+      assertEqual(h.fake.state.publishedMics(), 0, 'публикувани')
+      assertEqual(snap(h).microphone, 'off', 'микрофон')
+      assertEqual(snap(h).uiError?.code ?? null, code, 'съобщение')
+      assert(!h.reports.some((r) => r.event === 'mic_failed'), 'без mic_failed')
+      // Закъснял Reconnected -> нищо.
+      h.fake.state.last().events.onReconnected()
+      await flush(30)
+      assertEqual(h.fake.state.publishedMics(), 0, 'след закъснял Reconnected')
+      assertEqual(h.fake.state.getUserMediaCalls, 1, 'без нов getUserMedia')
+    })
+  }
+}
+
+await check('[MG1] Потвърден reconnect (signal resume) след неуспешно публикуване -> контролерът НЕ публикува до Reconnected (и при външен kick); после — същият capture, един публикуван микрофон', async () => {
+  const h = createHarness()
+  const release = gatedPublish(h, 'gate_interrupt')
+  await joinWithMic(h)
+  await release()
+  assertEqual(snap(h).status, 'reconnecting', '„Възстановяване…“')
+  assertEqual(snap(h).microphone, 'requesting', 'намерението е запазено')
+  assertEqual(h.fake.state.liveCaptures(), 1, 'capture-ът е задържан')
+  // Външни kick-ове по време на възстановяването (контекст, готовност на масата).
+  h.voice.setContext(h.ctx('waiting', [...SEATS]))
+  h.voice.handleServerMessage({ type: 'voice_table_updated', voiceTableId: TABLE, generation: h.backend.generation, ready: true } as never)
+  await flush(30)
+  assertEqual(h.fake.state.last().publishes, 0, 'без публикуване по време на възстановяването')
+  h.fake.state.last().events.onReconnected()
+  await flush(30)
+  assertClean(h, true, 'след Reconnected')
+  assertEqual(h.fake.state.last().publishes, 1, 'едно публикуване')
+  assertEqual(h.fake.state.getUserMediaCalls, 1, 'без втори getUserMedia')
+  const attempt = micAttempts(h).at(-1)
+  assert(attempt?.result === 'recovered' && attempt.interruption === 'sdk_reconnect', `отчет: ${JSON.stringify(attempt)}`)
+  assertNoError(h, 'MG1')
+})
+
+await check('[MG2] Неуспешно публикуване без потвърден reconnect -> както досега: „Микрофонът не е достъпен“, без автоматично повтаряне', async () => {
+  const h = createHarness()
+  const release = gatedPublish(h, 'gate_fail')
+  await joinWithMic(h)
+  await release()
+  assertClean(h, false, 'MG2')
+  assertEqual(snap(h).uiError?.code ?? null, 'mic_unavailable', 'съобщение')
+  assertEqual(micAttempts(h).at(-1)?.failure, 'publish_failed', 'диагностика')
+  await h.clock.advance(30_000)
+  h.voice.handleServerMessage({ type: 'voice_table_updated', voiceTableId: TABLE, generation: h.backend.generation, ready: true } as never)
+  await flush(30)
+  assertEqual(h.fake.state.last().publishes, 0, 'без автоматично повтаряне')
+  assertEqual(h.fake.state.getUserMediaCalls, 1, 'без нов getUserMedia')
+})
+
 await check('[MF1] Всички mic_attempt / mic_lost / livekit_disconnect отчети минават строгата сървърна валидация; без токени/идентичност; броячите в таблицата', async () => {
   const all: VoiceDiagnosticReport[] = []
   for (const scenario of ['connection_lost', 'rotation', 'room_deleted'] as const) {

@@ -1062,14 +1062,17 @@ await check('[W1] Интеграция: основният bundle — само �
   // Леки модули без импорти, умишлено в основния bundle:
   //   voiceOwnVipStatus / voiceSpeakPreview / ui/voiceJoinOffer (12a5c41 —
   //   подсказка за прозореца преди включване; voiceJoinOffer е чиста функция
-  //   само с type импорти), voiceIntentStore (етап В — намерение след презареждане).
+  //   само с type импорти), voiceIntentStore (етап В — намерение след презареждане),
+  //   voiceDiagnosticsRequest (H3, b6e04e5c — заявката ?voicediag=1 преди рутера и
+  //   след prerender; БЕЗ импорти — проверено по-долу; достъпът е в lazy chunk-а).
   //   Транзитивната проверка по-долу гарантира, че не водят до lazy модулите.
-  const MAIN_BUNDLE_VOICE_MODULES = new Set(['voiceFacade', 'voiceIntentStore', 'voiceOwnVipStatus', 'voiceSpeakPreview', 'ui/voiceJoinOffer', 'ui/createVoiceMobileUi', 'ui/voiceSpeakingIndicator', 'ui/voiceUiIcons', 'ui/voiceUiStatus'])
+  const MAIN_BUNDLE_VOICE_MODULES = new Set(['voiceFacade', 'voiceIntentStore', 'voiceOwnVipStatus', 'voiceSpeakPreview', 'voiceDiagnosticsRequest', 'ui/voiceJoinOffer', 'ui/createVoiceMobileUi', 'ui/voiceSpeakingIndicator', 'ui/voiceUiIcons', 'ui/voiceUiStatus'])
   const LAZY_ONLY_VOICE_MODULES = new Set(['createVoiceController', 'voiceRuntime', 'liveKitVoiceAdapter', 'voiceAdapter', 'voiceAudioSink', 'voiceProtocol', 'voiceTransportStats', 'ui/renderVoicePanel'])
   /** Статични импорти: { spec, typeOnly }. `import { a, type B }` е runtime импорт. */
   const staticImports = (source: string): Array<{ spec: string; typeOnly: boolean }> =>
     [...source.matchAll(/^import\s+(type\s+)?(?:[^'";]*?\s+from\s+)?'([^']+)'/gm)].map((match) => ({ spec: match[2]!, typeOnly: match[1] !== undefined }))
   const mainVoiceImports = staticImports(main).filter((entry) => entry.spec.startsWith('./app/voice/'))
+  assert(staticImports(await readFile('src/app/voice/voiceDiagnosticsRequest.ts', 'utf8')).length === 0 && !/import\(/.test(await readFile('src/app/voice/voiceDiagnosticsRequest.ts', 'utf8')), 'voiceDiagnosticsRequest: без статични и динамични импорти')
   assert(mainVoiceImports.length > 0, 'main.ts импортира гласовия посредник')
   const runtimeRoots = mainVoiceImports.filter((entry) => !entry.typeOnly).map((entry) => entry.spec.slice('./app/voice/'.length))
   for (const root of runtimeRoots) {
