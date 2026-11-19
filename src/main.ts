@@ -181,6 +181,7 @@ import {
 import { VIOLET_3D_BUTTON_CLASS, ensureViolet3dButtonStyles } from './ui/layout/violet3dButton'
 import type { VoiceContext, VoiceController } from './app/voice/createVoiceController'
 import { createLazyVoiceController } from './app/voice/voiceFacade'
+import { installVoiceDiagnosticsRequest } from './app/voice/voiceDiagnosticsRequest'
 import { createVoiceOwnVipStatusSource, type VoiceOwnVipLoadResult, type VoiceOwnVipStatusSource } from './app/voice/voiceOwnVipStatus'
 import { createVoiceSpeakPreviewTracker } from './app/voice/voiceSpeakPreview'
 import { createVoiceMobileUi, type VoiceMobileUi } from './app/voice/ui/createVoiceMobileUi'
@@ -11098,15 +11099,11 @@ void loadGuestTrialStatus().finally(() => {
 
 // Етап H3: заявка за панела „Диагностика на звука“ (измерване на телефони) —
 // ?voicediag=1 се запомня за таба (sessionStorage) преди рутерът да промени
-// адреса; ?voicediag=0 я премахва. Заявката сама НЕ дава достъп: панелът е само
-// за пълен администратор (diagnosticsAccess по-долу, проверява се постоянно).
-try {
-  const voiceDiagnostics = new URLSearchParams(window.location.search).get('voicediag')
-  if (voiceDiagnostics === '1') window.sessionStorage.setItem('pika.voice.diag', '1')
-  else if (voiceDiagnostics === '0') window.sessionStorage.removeItem('pika.voice.diag')
-} catch {
-  /* без sessionStorage — без панел */
-}
+// адреса; ?voicediag=0 я премахва. При prerender (Chrome адресна лента) се
+// записва повторно при активирането — иначе записът се губи. Заявката сама НЕ
+// дава достъп: панелът е само за пълен администратор (diagnosticsAccess по-долу,
+// проверява се постоянно).
+installVoiceDiagnosticsRequest()
 
 function createAppVoiceController(): VoiceController {
   const controller = createLazyVoiceController({

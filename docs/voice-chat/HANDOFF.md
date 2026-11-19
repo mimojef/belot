@@ -2489,3 +2489,10 @@ Production инциденти с **еднопосочно аудио**, при �
 - **Ротация по време на автоматично (не ръчно) възстановяване** е покрита в unit тестовете на контролера (RC8); E2E ROT използва ръчно (същият път на отмяна).
 - **Отдалеченият stall** (ActiveSpeakers) е покрит само с unit тест.
 - **Неизпълнени:** H4 (republish) и DUPLICATE_IDENTITY.
+
+### 23.11 Поправка: панелът не се появява след prerender (2026-11-19, некомитнато)
+- **Симптом:** Android Chrome, `https://pika.bg/lobby?voicediag=1`, пълен администратор, заключена маса, зелен микрофон — панел няма.
+- **Първопричина:** Chrome може да **prerender-не** адреса, въведен в адресната лента. Prerender-ната страница има отделен `sessionStorage`, който се изхвърля при активирането. `main.ts` записваше заявката само веднъж при зареждане (т.е. по време на prerender-а) → след активирането `pika.voice.diag` липсва → `mountVoiceDiagnosticsOverlay` не монтира. Доказано с реалния production bundle и Chromium без DevTools: prerender → `null`, директно → `1`.
+- **Защо E2E не го хванаха:** Playwright/DevTools забранява prerender (`PrerenderingDisabledByDevTools`); `page.goto` винаги е директно зареждане.
+- **Поправка:** `src/app/voice/voiceDiagnosticsRequest.ts` — записва заявката при стартиране и повторно при `prerenderingchange`; при монтиране адресът (`?voicediag=1/0`) е резервен източник. Достъпът е непроменен (само `account.role === 'admin'`). Медийната логика, A–G и флагът за автоматичното не са пипани.
+- **Тестове:** `checkVoiceMediaHealth.ts` 23/23 (+U23); `checkVoiceDiagnosticsPrerender.ts` 2/2 (без поправката P1 пада); `checkVoiceDiagnosticsAccessE2E.ts` 3/3 (production build: телефон гост→вход→заключена маса→микрофон и desktop — панел; player, VIP, subadmin, chat_admin, top_chat_admin, pika_team, marketing — без панел); `checkVoiceBundle.mjs` OK; Media Health E2E M0+M13 2/2.

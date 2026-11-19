@@ -26,17 +26,11 @@ import {
   setVoiceMicAutoRecoveryOverride,
   type VoiceDiagnosticsAccess,
 } from './voiceMicRecoveryConfig'
+// Заявката (?voicediag=1, вкл. след prerender) — voiceDiagnosticsRequest.ts.
+import { isVoiceDiagnosticsRequested, VOICE_DIAGNOSTICS_STORAGE_KEY } from './voiceDiagnosticsRequest'
 
-export const VOICE_DIAGNOSTICS_STORAGE_KEY = 'pika.voice.diag'
+export { isVoiceDiagnosticsRequested, VOICE_DIAGNOSTICS_STORAGE_KEY }
 const HOST_ID = 'voice-diagnostics-overlay'
-
-export function isVoiceDiagnosticsRequested(): boolean {
-  try {
-    return window.sessionStorage.getItem(VOICE_DIAGNOSTICS_STORAGE_KEY) === '1'
-  } catch {
-    return false
-  }
-}
 
 /** Заявката сама не стига: само пълен администратор с профил. */
 export function canShowVoiceDiagnostics(requested: boolean, access: VoiceDiagnosticsAccess | null): boolean {

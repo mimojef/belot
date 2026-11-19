@@ -397,5 +397,49 @@ await check('[U21] Панелът „Диагностика на звука“: 
   assert(main.includes("diagnosticsAccess: () => ({ fullAdmin: currentAuthSession?.account.role === 'admin'"), 'достъпът = account.role === \'admin\' от текущата сесия')
 })
 
+await check('[U23] Заявката ?voicediag=1 оцелява след prerender (Chrome адресна лента): записва се и при активирането; адресът е резервен източник', async () => {
+  const request = await import('../src/app/voice/voiceDiagnosticsRequest')
+  const makeStorage = () => {
+    const data = new Map<string, string>()
+    return { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { data.set(k, v) }, removeItem: (k: string) => { data.delete(k) } }
+  }
+  // Prerender: страницата пише в ОТДЕЛЕН sessionStorage, който се изхвърля при активирането.
+  const prerenderStorage = makeStorage()
+  const tabStorage = makeStorage()
+  let active = prerenderStorage
+  let search = '?voicediag=1'
+  const env = { search: () => search, storage: () => active }
+  const listeners: Array<() => void> = []
+  const doc = { prerendering: true, addEventListener: (type: string, fn: () => void) => { if (type === 'prerenderingchange') listeners.push(fn) } }
+  request.installVoiceDiagnosticsRequest(doc as never, env)
+  assertEqual(prerenderStorage.getItem(request.VOICE_DIAGNOSTICS_STORAGE_KEY), '1', 'записано по време на prerender')
+  active = tabStorage
+  doc.prerendering = false
+  for (const fn of listeners) fn()
+  assertEqual(tabStorage.getItem(request.VOICE_DIAGNOSTICS_STORAGE_KEY), '1', 'записано отново в sessionStorage на таба при активирането')
+  assertEqual(listeners.length, 1, 'един слушател (once)')
+  // Рутерът махна адреса -> остава запомненото за таба.
+  search = ''
+  assertEqual(request.isVoiceDiagnosticsRequested(env), true, 'запомнено за таба')
+  // Резервно: адресът все още е ?voicediag=1, а записът липсва.
+  const empty = makeStorage()
+  assertEqual(request.isVoiceDiagnosticsRequested({ search: () => '?voicediag=1', storage: () => empty }), true, 'адресът е достатъчен като заявка')
+  assertEqual(request.isVoiceDiagnosticsRequested({ search: () => '?voicediag=0', storage: () => tabStorage }), false, '?voicediag=0 има предимство')
+  request.recordVoiceDiagnosticsRequest({ search: () => '?voicediag=0', storage: () => tabStorage })
+  assertEqual(tabStorage.getItem(request.VOICE_DIAGNOSTICS_STORAGE_KEY), null, '?voicediag=0 изтрива заявката')
+  assertEqual(request.isVoiceDiagnosticsRequested({ search: () => '', storage: () => { throw new Error('blocked') } }), false, 'без sessionStorage и без адрес -> не')
+  // Без prerender — без слушател.
+  const plainListeners: unknown[] = []
+  request.installVoiceDiagnosticsRequest({ prerendering: false, addEventListener: (...a: unknown[]) => { plainListeners.push(a) } } as never, { search: () => '?voicediag=1', storage: () => makeStorage() })
+  assertEqual(plainListeners.length, 0, 'без prerender -> без слушател')
+  // Заявката НЕ е достъп: само пълен администратор (U21) — и сега, и при заявка от адреса.
+  const { canShowVoiceDiagnostics } = await import('../src/app/voice/voiceDiagnosticsOverlay')
+  assertEqual(canShowVoiceDiagnostics(true, { fullAdmin: false, profileId: 'subadmin-1' }), false, 'заявка без права -> не')
+  const main = readFileSync(join(process.cwd(), 'src/main.ts'), 'utf8')
+  assert(main.includes('installVoiceDiagnosticsRequest()'), 'main.ts записва заявката през installVoiceDiagnosticsRequest')
+  const source = readFileSync(join(process.cwd(), 'src/app/voice/voiceDiagnosticsRequest.ts'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  for (const forbidden of ['fetch(', 'XMLHttpRequest', 'WebSocket', 'sendBeacon', 'localStorage']) assert(!source.includes(forbidden), `без ${forbidden}`)
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)
