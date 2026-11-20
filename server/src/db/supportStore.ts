@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
+import { SUPPORT_MESSAGE_LIMITS, normalizeMultilineMessageBody } from '../shared/multilineMessageBody.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -180,14 +181,11 @@ function buildAttachmentUrls(storageFilename: string): { viewUrl: string; downlo
   return { viewUrl: base, downloadUrl: `${base}?download=1` }
 }
 
+// Многоредов текст (потребител и администратор) — новите и празните редове се
+// пазят; до 2000 символа и 60 реда (виж shared/multilineMessageBody.ts).
 function normalizeBody(value: string): string | null {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-
-  if (normalized.length > 2000) {
-    return null
-  }
-
-  return normalized
+  const normalized = normalizeMultilineMessageBody(value, SUPPORT_MESSAGE_LIMITS)
+  return normalized.ok ? normalized.body : null
 }
 
 export type SupportStoreDeps = {

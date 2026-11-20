@@ -8,6 +8,7 @@ import type { ProfileCustomizationDisplay } from '../profileCustomization/profil
 import type { PlayerProgressStore } from './playerProgressStore.js'
 import { dbDateToUtc } from './dbDate.js'
 import { getConfiguredOfficialPikaProfileId } from './normalizeProfileIdentityText.js'
+import { PERSONAL_CHAT_MESSAGE_LIMITS, describeMultilineMessageLimit, normalizeMultilineMessageBody } from '../shared/multilineMessageBody.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -29,6 +30,7 @@ export type ChatStoreErrorCode =
   | 'invalid_cursor'
   | 'message_not_found'
   | 'message_required'
+  | 'message_too_many_lines'
   | 'recipient_not_found'
   | 'self'
   | 'vip_required'
@@ -1706,14 +1708,17 @@ export async function createChatStore(
       }
     }
 
-    const normalizedBody = normalizeMessageBody(body)
+    // Личният чат (приятели, „Екип Pika.bg“): многоредов текст — новите и
+    // празните редове се пазят (виж shared/multilineMessageBody.ts).
+    const normalized = normalizeMultilineMessageBody(body, PERSONAL_CHAT_MESSAGE_LIMITS)
 
-    if (normalizedBody === null) {
-      return {
-        ok: false,
-        message: 'Съобщението трябва да е до 1000 символа.',
-      }
+    if (!normalized.ok) {
+      return normalized.reason === 'too_many_lines'
+        ? { ok: false, message: describeMultilineMessageLimit(normalized, PERSONAL_CHAT_MESSAGE_LIMITS), code: 'message_too_many_lines' }
+        : { ok: false, message: 'Съобщението трябва да е до 1000 символа.' }
     }
+
+    const normalizedBody = normalized.body
 
     if (normalizedBody.length === 0 && attachment === null) {
       return {

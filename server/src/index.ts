@@ -199,6 +199,7 @@ import {
   PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS,
 } from './protocol/privateRoomChatValidation.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
+import { SUPPORT_MESSAGE_LIMITS, describeMultilineMessageLimit, normalizeMultilineMessageBody } from './shared/multilineMessageBody.js'
 import { createAdminProfileDeletionCoordinator } from './core/adminProfileDeletionCoordinator.js'
 import { createGuestContactStore } from './db/guestContactStore.js'
 import {
@@ -25628,6 +25629,11 @@ async function handleSupportRequest(
       sendJsonResponse(res, 400, { ok: false, message: 'Невалидно съобщение.' })
       return true
     }
+    const textCheck = normalizeMultilineMessageBody(text, SUPPORT_MESSAGE_LIMITS)
+    if (!textCheck.ok) {
+      sendJsonResponse(res, 400, { ok: false, code: textCheck.reason, message: textCheck.reason === 'too_many_lines' ? describeMultilineMessageLimit(textCheck, SUPPORT_MESSAGE_LIMITS) : 'Невалидно съобщение.' })
+      return true
+    }
     const upload = await createSupportAttachmentUpload(parsed.imageDataUrl)
     if (!upload.ok) {
       sendJsonResponse(res, upload.statusCode, { ok: false, message: upload.message })
@@ -25730,6 +25736,11 @@ async function handleSupportRequest(
     const text = getStringField(parsed, 'body').trim()
     if (!profileId || text.length > 2000) {
       sendJsonResponse(res, 400, { ok: false, message: 'Невалидни данни.' })
+      return true
+    }
+    const textCheck = normalizeMultilineMessageBody(text, SUPPORT_MESSAGE_LIMITS)
+    if (!textCheck.ok) {
+      sendJsonResponse(res, 400, { ok: false, code: textCheck.reason, message: textCheck.reason === 'too_many_lines' ? describeMultilineMessageLimit(textCheck, SUPPORT_MESSAGE_LIMITS) : 'Невалидни данни.' })
       return true
     }
     const upload = await createSupportAttachmentUpload(parsed.imageDataUrl)

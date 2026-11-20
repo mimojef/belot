@@ -2615,6 +2615,90 @@ function submitTextareaOnEnter(textarea: HTMLTextAreaElement | null): void {
   })
 }
 
+// ─── Многоредови полета: личен чат и „Поддръжка“ (потребител и админ) ────
+//
+// Enter: компютър — изпраща, Shift+Enter — нов ред; устройство с докосване
+// (телефон и таблет, без hover) — нов ред, изпращането е само с бутона.
+// Задържан Enter (event.repeat) не изпраща повторно; двойното изпращане се
+// пази и от in-flight флаговете на контролера.
+const MULTILINE_COMPOSER_SELECTOR = 'textarea[data-multiline-composer="1"]'
+const MULTILINE_COMPOSER_TOUCH_QUERY = '(hover: none) and (pointer: coarse)'
+/** Максимална височина преди вътрешния скрол. */
+const MULTILINE_COMPOSER_MAX_HEIGHT_DESKTOP = 132
+const MULTILINE_COMPOSER_MAX_HEIGHT_PHONE = 120
+
+function isTouchComposerDevice(): boolean {
+  try {
+    return window.matchMedia(MULTILINE_COMPOSER_TOUCH_QUERY).matches
+  } catch {
+    return false
+  }
+}
+
+function wireMultilineComposerEnter(textarea: HTMLTextAreaElement | null): void {
+  textarea?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return
+    if (event.shiftKey || isTouchComposerDevice()) return // нов ред (поведението по подразбиране)
+    event.preventDefault()
+    if (event.repeat) return
+    textarea.form?.requestSubmit()
+  })
+}
+
+/** Височината на празното поле: data-composer-base-height или естествената (rows/CSS). */
+function multilineComposerBaseHeight(textarea: HTMLTextAreaElement): number {
+  const explicit = Number(textarea.dataset.composerBaseHeight)
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  const previous = textarea.style.height
+  textarea.style.height = ''
+  const natural = textarea.offsetHeight
+  textarea.style.height = previous
+  return natural
+}
+
+/**
+ * Автоматична височина според съдържанието: празно -> началната височина;
+ * иначе до MAX (телефон/компютър), после вътрешен скрол. Пази скрола на полето.
+ */
+function syncMultilineComposerHeight(textarea: HTMLTextAreaElement): void {
+  if (textarea.offsetParent === null && textarea.getClientRects().length === 0) return // скрито
+  const base = multilineComposerBaseHeight(textarea)
+  if (base <= 0) return
+  const max = Math.max(base, isPhoneLayoutViewport() ? MULTILINE_COMPOSER_MAX_HEIGHT_PHONE : MULTILINE_COMPOSER_MAX_HEIGHT_DESKTOP)
+  if (textarea.value.length === 0) {
+    textarea.style.height = `${base}px`
+    textarea.style.overflowY = 'hidden'
+    return
+  }
+  const scrollTop = textarea.scrollTop
+  textarea.style.height = `${base}px`
+  const borders = textarea.offsetHeight - textarea.clientHeight
+  const needed = textarea.scrollHeight + borders
+  textarea.style.height = `${Math.min(max, Math.max(base, needed))}px`
+  textarea.style.overflowY = needed > max ? 'auto' : 'hidden'
+  textarea.scrollTop = scrollTop
+}
+
+function syncAllMultilineComposerHeights(root: ParentNode): void {
+  root.querySelectorAll<HTMLTextAreaElement>(MULTILINE_COMPOSER_SELECTOR).forEach(syncMultilineComposerHeight)
+}
+
+/**
+ * Полето на личния чат (вместо досегашния <input>): същата визия — височина,
+ * рамка, фон, шрифт (системният шрифт на полетата, -webkit-small-control) —
+ * и един ред, вертикално центриран (line-height 20px).
+ */
+function renderPersonalChatComposerTextarea(options: {
+  draft: string
+  placeholder: string
+  disabled: boolean
+  height: number
+  style: string
+}): string {
+  const verticalPadding = Math.max(0, Math.floor((options.height - 2 - 20) / 2))
+  return `<textarea name="message" data-lobby-chat-message-input="1" data-multiline-composer="1" data-composer-base-height="${options.height}" rows="1" maxlength="1000" autocomplete="off" placeholder="${escapeHtml(options.placeholder)}" ${options.disabled ? 'disabled' : ''} style="font:-webkit-small-control;${options.style}height:${options.height}px;box-sizing:border-box;padding-top:${verticalPadding}px;padding-bottom:${verticalPadding}px;line-height:20px;resize:none;overflow-y:hidden;display:block;">\n${escapeHtml(options.draft)}</textarea>`
+}
+
 // Bounded auto-grow (Етап 2 Topics composer) — рязко се разширява до
 // съдържанието, capped от CSS max-height (виж inline style в
 // renderTopicsComposer) — composer-ът никога не поглъща целия message viewport.
@@ -9277,9 +9361,16 @@ function renderMobileChatPanel(state: LobbyScreenState, light = false): string {
   // Писалото е общо за двата варианта (визията му е за отделен етап).
   const composerHtml = activeConversation === null ? '' : `
     <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:6px;padding:10px;border-top:1px solid rgba(212,165,32,0.20);">
-      <div style="display:flex;gap:8px;align-items:center;">
+      ${state.chatErrorText && state.chatErrorText !== state.chatOlderMessagesErrorText ? `<div role="alert" style="font-size:12px;font-weight:800;color:#fecaca;line-height:1.35;">${escapeHtml(state.chatErrorText)}</div>` : ''}
+      <div style="display:flex;gap:8px;align-items:flex-end;">
         ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
-        <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Съобщение..." ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:40px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 10px;font-size:14px;font-weight:700;outline:none;">
+        ${renderPersonalChatComposerTextarea({
+          draft: state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '',
+          placeholder: 'Съобщение...',
+          disabled: state.chatUploadingFriendshipIds.has(activeConversation.friendshipId),
+          height: 40,
+          style: 'flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 10px;font-size:14px;font-weight:700;outline:none;',
+        })}
         <button type="submit" ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:40px;padding:0 12px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;opacity:${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване…' : 'Изпрати'}</button>
       </div>
     </form>
@@ -9292,9 +9383,15 @@ function renderMobileChatPanel(state: LobbyScreenState, light = false): string {
   const lightComposerHtml = activeConversation === null ? '' : `
     <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="flex:0 0 auto;display:flex;flex-direction:column;gap:6px;padding:8px 12px;background:#FFFFFF;border-top:1px solid #EAECF0;">
       ${state.chatErrorText && state.chatErrorText !== state.chatOlderMessagesErrorText ? `<div role="alert" style="font-size:12px;font-weight:700;color:#B42318;line-height:1.35;">${escapeHtml(state.chatErrorText)}</div>` : ''}
-      <div style="display:flex;gap:8px;align-items:center;">
+      <div style="display:flex;gap:8px;align-items:flex-end;">
         ${renderChatImagePickerControls(state, activeConversation.friendshipId, false, true)}
-        <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Съобщение..." ${isChatUploading ? 'disabled' : ''} style="height:40px;flex:1;min-width:0;box-sizing:border-box;border-radius:8px;border:1px solid #E4E7EC;background:#F5F7FC;color:#17233C;padding:0 12px;font-family:inherit;font-size:14px;font-weight:600;outline:none;">
+        ${renderPersonalChatComposerTextarea({
+          draft: state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '',
+          placeholder: 'Съобщение...',
+          disabled: isChatUploading,
+          height: 40,
+          style: 'flex:1;min-width:0;border-radius:8px;border:1px solid #E4E7EC;background:#F5F7FC;color:#17233C;padding:0 12px;font-family:inherit;font-size:14px;font-weight:600;outline:none;',
+        })}
         <button type="submit" aria-label="${isChatUploading ? 'Качване…' : 'Изпрати'}" title="${isChatUploading ? 'Качване…' : 'Изпрати'}" ${isChatUploading ? 'disabled' : ''} style="width:40px;height:40px;flex:0 0 40px;border:0;border-radius:8px;background:#7950E8;color:#FFFFFF;display:flex;align-items:center;justify-content:center;padding:0;cursor:${isChatUploading ? 'default' : 'pointer'};opacity:${isChatUploading ? '0.6' : '1'};">${isChatUploading ? CHAT_LIGHT_UPLOADING_ICON : CHAT_LIGHT_SEND_ICON}</button>
       </div>
     </form>
@@ -10635,7 +10732,8 @@ function renderChatPanel(state: LobbyScreenState): string {
               const isActive = activeConversation?.friendshipId === conversation.friendshipId
               const displayName = conversation.friend.displayName?.trim() || 'Играч'
               const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
-              const preview = conversation.lastMessage?.body ?? 'Няма съобщения'
+              // Многоредово съобщение -> превю на един ред.
+              const preview = conversation.lastMessage?.body.replace(/\s+/g, ' ').trim() ?? 'Няма съобщения'
               const isOnline = conversation.friend.isOnline
               // Badge-ът показва самоличността на КОНКРЕТНИЯ participant
               // (conversation.friend), НЕ conversation.kind — kind='pika_support'
@@ -10721,10 +10819,16 @@ function renderChatPanel(state: LobbyScreenState): string {
             `}
           </div>
           <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);flex-shrink:0;">
-            <div style="display:flex;gap:10px;align-items:center;">
+            <div style="display:flex;gap:10px;align-items:flex-end;">
               ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
               ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_PERSONAL, 42)}
-              <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
+              ${renderPersonalChatComposerTextarea({
+                draft: state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '',
+                placeholder: 'Напиши съобщение...',
+                disabled: state.chatUploadingFriendshipIds.has(activeConversation.friendshipId),
+                height: 42,
+                style: 'flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;',
+              })}
               <button type="submit" ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;opacity:${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване…' : 'Изпрати'}</button>
             </div>
           </form>
@@ -13719,12 +13823,12 @@ function renderSupportPopup(state: LobbyScreenState, light = false): string {
           background:#080808;flex-shrink:0;
         ">
           <input name="website" tabindex="-1" autocomplete="off" style="display:none;position:absolute;left:-9999px;">
-          <textarea data-support-composer-text="1" name="body" placeholder="Напиши съобщение..." rows="2" maxlength="2000" style="
+          <textarea data-support-composer-text="1" data-multiline-composer="1" name="body" placeholder="Напиши съобщение..." rows="2" maxlength="2000" style="
             border-radius:8px;border:1px solid rgba(255,255,255,0.15);
             background:#141414;color:#f8fafc;
             padding:10px 12px;font-size:14px;font-weight:600;
             outline:none;resize:none;font-family:inherit;line-height:1.4;
-          ">${escapeHtml(state.supportDraft)}</textarea>
+          ">\n${escapeHtml(state.supportDraft)}</textarea>
           ${renderSupportImagePickerControls(state.supportPendingImage, state.supportSendingLoading, {
             input: 'data-support-image-input="1"',
             pick: 'data-support-image-pick="1"',
@@ -13848,12 +13952,12 @@ function renderSupportPopupLight(state: LobbyScreenState): string {
           background:#FFFFFF;flex-shrink:0;
         ">
           <input name="website" tabindex="-1" autocomplete="off" style="display:none;position:absolute;left:-9999px;">
-          <textarea data-support-composer-text="1" name="body" placeholder="Напиши съобщение..." rows="2" maxlength="2000" style="
+          <textarea data-support-composer-text="1" data-multiline-composer="1" name="body" placeholder="Напиши съобщение..." rows="2" maxlength="2000" style="
             border-radius:8px;border:1px solid #D0D5DD;
             background:#FFFFFF;color:#17233C;
             padding:10px 12px;font-size:16px;font-weight:500;
             outline:none;resize:none;font-family:inherit;line-height:1.4;
-          ">${escapeHtml(state.supportDraft)}</textarea>
+          ">\n${escapeHtml(state.supportDraft)}</textarea>
           ${renderSupportImagePickerControls(state.supportPendingImage, state.supportSendingLoading, {
             input: 'data-support-image-input="1"',
             pick: 'data-support-image-pick="1"',
@@ -14408,12 +14512,12 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
       border-top:1px solid rgba(255,255,255,0.10);
       background:#080808;flex-shrink:0;
     ">
-      <textarea data-support-composer-text="1" name="body" placeholder="Отговор от екипа..." rows="2" maxlength="2000" style="
+      <textarea data-support-composer-text="1" data-multiline-composer="1" name="body" placeholder="Отговор от екипа..." rows="2" maxlength="2000" style="
         border-radius:8px;border:1px solid rgba(255,255,255,0.15);
         background:#141414;color:#f8fafc;
         padding:10px 12px;font-size:14px;font-weight:600;
         outline:none;resize:none;font-family:inherit;line-height:1.4;
-      ">${escapeHtml(adminReplyDraft)}</textarea>
+      ">\n${escapeHtml(adminReplyDraft)}</textarea>
       ${renderSupportImagePickerControls(adminPendingImage, state.adminSupportReplyLoading, {
         input: `data-admin-support-image-input="${escapeHtml(selectedProfileId)}"`,
         pick: `data-admin-support-image-pick="${escapeHtml(selectedProfileId)}"`,
@@ -17678,11 +17782,13 @@ export function renderLobbyScreen(
   // Личният чат се пренарежда изцяло (root.innerHTML) при всяко входящо съобщение,
   // periodic refresh или друго фоново обновяване — без това, недовършена чернова
   // в полето за писане би изчезвала под пръстите на потребителя.
-  const prevChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
+  const prevChatInputEl = root.querySelector<HTMLInputElement | HTMLTextAreaElement>('[data-lobby-chat-message-input="1"]')
   const wasChatInputFocused = prevChatInputEl !== null && document.activeElement === prevChatInputEl
   const savedChatInputSelectionStart = wasChatInputFocused ? prevChatInputEl.selectionStart : null
   const savedChatInputSelectionEnd = wasChatInputFocused ? prevChatInputEl.selectionEnd : null
   const savedChatInputSelectionDirection = wasChatInputFocused ? prevChatInputEl.selectionDirection : null
+  // Многоредова чернова: вътрешният скрол на полето (височината се изчислява наново).
+  const savedChatInputScrollTop = wasChatInputFocused ? prevChatInputEl.scrollTop : 0
   const prevChatMessagesScrollEl = root.querySelector<HTMLElement>('[data-chat-messages-scroll="1"]')
   const wasChatMessagesNearBottom = prevChatMessagesScrollEl === null
     ? true
@@ -19781,13 +19887,19 @@ export function renderLobbyScreen(
     })
   })
 
-  root.querySelectorAll<HTMLInputElement>('[data-lobby-chat-message-input="1"]').forEach((input) => {
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && event.isComposing) {
-        event.preventDefault()
-      }
-    })
+  root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-lobby-chat-message-input="1"]').forEach((input) => {
+    if (input instanceof HTMLTextAreaElement) {
+      // Личният чат: многоредово поле (Enter — според устройството; виж wireMultilineComposerEnter).
+      wireMultilineComposerEnter(input)
+    } else {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && event.isComposing) {
+          event.preventDefault()
+        }
+      })
+    }
     input.addEventListener('input', () => {
+      if (input instanceof HTMLTextAreaElement) syncMultilineComposerHeight(input)
       const friendshipId = input.closest('form')?.dataset.lobbyChatForm?.trim() ?? ''
       if (friendshipId.length > 0) {
         options.onChatDraftChange(friendshipId, input.value)
@@ -22589,8 +22701,12 @@ export function renderLobbyScreen(
     }
   }
 
+  // Многоредовите полета (личен чат, „Поддръжка“): височина според черновата
+  // след всеки rebuild — преди връщането на фокуса/курсора/скрола по-долу.
+  syncAllMultilineComposerHeights(root)
+
   if (wasChatInputFocused) {
-    const newChatInputEl = root.querySelector<HTMLInputElement>('[data-lobby-chat-message-input="1"]')
+    const newChatInputEl = root.querySelector<HTMLInputElement | HTMLTextAreaElement>('[data-lobby-chat-message-input="1"]')
     if (newChatInputEl) {
       // Телефон: само връщане на вече съществуващ фокус след rebuild — без
       // браузърно "scroll into view" (в iOS отмества видимата зона наново при
@@ -22604,6 +22720,7 @@ export function renderLobbyScreen(
           savedChatInputSelectionDirection ?? 'none',
         )
       }
+      newChatInputEl.scrollTop = savedChatInputScrollTop
     }
   }
 
@@ -22654,6 +22771,7 @@ export function renderLobbyScreen(
       if (shouldRestoreSupportInputValue && newSupportInputEl.value !== savedSupportInputValue) {
         newSupportInputEl.value = savedSupportInputValue
       }
+      syncMultilineComposerHeight(newSupportInputEl)
       newSupportInputEl.focus()
       newSupportInputEl.scrollTop = savedSupportInputScrollTop
       if (savedSupportInputSelectionStart !== null && savedSupportInputSelectionEnd !== null) {
@@ -22681,6 +22799,7 @@ export function renderLobbyScreen(
       if (shouldRestoreAdminSupportReplyValue && newAdminSupportReplyEl.value !== savedAdminSupportReplyValue) {
         newAdminSupportReplyEl.value = savedAdminSupportReplyValue
       }
+      syncMultilineComposerHeight(newAdminSupportReplyEl)
       newAdminSupportReplyEl.focus()
       newAdminSupportReplyEl.scrollTop = savedAdminSupportReplyScrollTop
       if (savedAdminSupportReplySelectionStart !== null && savedAdminSupportReplySelectionEnd !== null) {
@@ -22741,9 +22860,10 @@ export function renderLobbyScreen(
     })
 
   const supportTextarea = root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
-  submitTextareaOnEnter(supportTextarea)
+  wireMultilineComposerEnter(supportTextarea)
   supportTextarea
     ?.addEventListener('input', (e) => {
+      syncMultilineComposerHeight(e.currentTarget as HTMLTextAreaElement)
       options.onSupportDraftChange((e.currentTarget as HTMLTextAreaElement).value)
     })
   keepComposerFocusOnPointerSubmit(root.querySelector<HTMLButtonElement>('[data-support-send-form="1"] [data-support-composer-send="1"]'))
@@ -22802,8 +22922,9 @@ export function renderLobbyScreen(
 
     const profileId = form.dataset.adminSupportReplyForm?.trim() ?? ''
     const adminTextarea = form.querySelector<HTMLTextAreaElement>('textarea[name="body"]')
-    submitTextareaOnEnter(adminTextarea)
+    wireMultilineComposerEnter(adminTextarea)
     adminTextarea?.addEventListener('input', (e) => {
+      syncMultilineComposerHeight(e.currentTarget as HTMLTextAreaElement)
       if (profileId) {
         options.onAdminSupportReplyDraftChange(profileId, (e.currentTarget as HTMLTextAreaElement).value)
       }

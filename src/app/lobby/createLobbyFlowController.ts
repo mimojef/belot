@@ -1,5 +1,12 @@
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
+import {
+  PERSONAL_CHAT_MESSAGE_LIMITS,
+  SUPPORT_MESSAGE_LIMITS,
+  describeMultilineMessageLimit,
+  normalizeMultilineMessageBody,
+  type MultilineMessageLimits,
+} from '../../../server/src/shared/multilineMessageBody'
 import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError, formatMarketingDailyGiftLimitError } from './formatGiftLimitError'
 import { mergeIncomingAdCampaignDispatches, dequeueNextAdCampaignPopup } from '../adCampaigns/adCampaignPendingQueue'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
@@ -8074,6 +8081,13 @@ export function createLobbyFlowController(
         if (state.supportSendingLoading) return
         const pendingImage = state.supportPendingImage
         if (body.trim().length === 0 && pendingImage === null) return
+        const limitError = multilineMessageLimitError(body, SUPPORT_MESSAGE_LIMITS)
+        if (limitError !== null) {
+          // Черновата остава; фокусът и курсорът се пазят от render().
+          state.supportErrorText = limitError
+          render()
+          return
+        }
         const previousInput = options.root.querySelector<HTMLTextAreaElement>('[data-support-send-form="1"] textarea[name="body"]')
         const shouldRefocus = previousInput !== null && document.activeElement === previousInput
         const previousSelectionStart = previousInput?.selectionStart ?? 0
@@ -8235,6 +8249,12 @@ export function createLobbyFlowController(
         if (state.adminSupportReplyLoading) return
         const pendingImage = state.adminSupportPendingImageByProfileId[profileId] ?? null
         if (body.trim().length === 0 && pendingImage === null) return
+        const limitError = multilineMessageLimitError(body, SUPPORT_MESSAGE_LIMITS)
+        if (limitError !== null) {
+          state.adminSupportReplyErrorText = limitError
+          render()
+          return
+        }
         const previousInput = options.root.querySelector<HTMLTextAreaElement>(
           `[data-admin-support-reply-form="${selectorEscape(profileId)}"] textarea[name="body"]`,
         )
@@ -18990,6 +19010,16 @@ export function createLobbyFlowController(
     return active === null || active === document.body || active === options.root
   }
 
+  /**
+   * Многоредов текст (личен чат, „Поддръжка“): същото правило като на сървъра.
+   * Над лимита (редове/символи) -> разбираемо съобщение; черновата не се пипа
+   * и нищо не се изпраща (текстът не се отрязва, новите редове остават).
+   */
+  function multilineMessageLimitError(body: string, limits: MultilineMessageLimits): string | null {
+    const checked = normalizeMultilineMessageBody(body, limits)
+    return checked.ok ? null : describeMultilineMessageLimit(checked, limits)
+  }
+
   function selectorEscape(value: string): string {
     return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/["\\]/g, '\\$&')
   }
@@ -19007,7 +19037,7 @@ export function createLobbyFlowController(
 
   function refocusPersonalChatComposer(friendshipId: string, selectionStart: number, selectionEnd = selectionStart, selectionDirection: 'forward' | 'backward' | 'none' | null = 'none'): void {
     if (!isActivePersonalChatConversation(friendshipId)) return
-    const input = options.root.querySelector<HTMLInputElement>(
+    const input = options.root.querySelector<HTMLInputElement | HTMLTextAreaElement>(
       `[data-lobby-chat-form="${selectorEscape(friendshipId)}"] [data-lobby-chat-message-input="1"]`,
     )
     refocusTextControl(input, selectionStart, selectionEnd, selectionDirection)
@@ -19089,7 +19119,16 @@ export function createLobbyFlowController(
       }
     }
 
-    const previousInput = options.root.querySelector<HTMLInputElement>(
+    // Над лимита на редовете/символите: съобщение, черновата остава, без изпращане
+    // (фокусът и курсорът се пазят от render()).
+    const limitError = multilineMessageLimitError(body, PERSONAL_CHAT_MESSAGE_LIMITS)
+    if (limitError !== null) {
+      state.chatErrorText = limitError
+      render()
+      return
+    }
+
+    const previousInput = options.root.querySelector<HTMLInputElement | HTMLTextAreaElement>(
       `[data-lobby-chat-form="${selectorEscape(friendshipId)}"] [data-lobby-chat-message-input="1"]`,
     )
     const shouldRefocus = previousInput !== null && document.activeElement === previousInput
