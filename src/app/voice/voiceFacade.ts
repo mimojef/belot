@@ -40,7 +40,7 @@ const VOICE_SERVER_TYPES = new Set(['voice_presence_result', 'voice_table_update
 
 /** Полетата, които преди зареждането винаги са по подразбиране. */
 const IDLE_FIELDS = {
-  speak: null, microphone: 'off', microphoneHealth: 'ok', microphoneRecovery: 'none', playbackBlocked: false, canRestore: false, microphoneDevicesChanged: false,
+  speak: null, microphone: 'off', microphoneHealth: 'ok', microphoneRecovery: 'none', incomingAudioRestore: { available: false, restoring: false, last: null }, playbackBlocked: false, canRestore: false, microphoneDevicesChanged: false,
   generation: null, locallyMutedProfileIds: [], speakingProfileIds: [],
 } as const
 
@@ -253,6 +253,7 @@ export function createLazyVoiceController(deps: VoiceFacadeDeps & { intent?: Voi
     retryMicrophone: () => (real !== null ? real.retryMicrophone() : join(true)),
     recoverMicrophone: () => real?.recoverMicrophone(),
     unlockAudio: () => real?.unlockAudio(),
+    restoreIncomingAudio: () => real?.restoreIncomingAudio(),
     retryConnection: () => (real !== null ? real.retryConnection() : loadFailed ? join(lastWithMic) : undefined),
     // Преди първото включване участниците в гласа са неизвестни -> no-op.
     muteRemoteParticipant: (profileId) => real?.muteRemoteParticipant(profileId),

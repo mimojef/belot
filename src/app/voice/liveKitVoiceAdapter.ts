@@ -55,6 +55,8 @@ import {
   type VoiceAdapterEvents,
   type VoiceConnectedRoom,
   type VoiceDisconnectCause,
+  type VoiceIncomingAudioRestoreError,
+  type VoiceIncomingAudioRestoreResult,
   type VoiceLiveKitDisconnectReason,
   type VoiceCaptureStallConfirmation,
   type VoiceMediaDiagnosticReport,
@@ -177,7 +179,14 @@ function retainCapture(capture: MediaStreamTrack): VoiceRetainedMicrophone {
 // (volume 0) се пази.
 
 /** Активни таймери/слушатели във всички стаи (тестове за изтичане). */
-const mediaGlobal = { monitorTimers: 0, pageListenerSets: 0, elementListeners: 0, captureListeners: 0, outputTasks: 0, recoveryOps: 0 }
+const mediaGlobal = { monitorTimers: 0, pageListenerSets: 0, elementListeners: 0, captureListeners: 0, outputTasks: 0, recoveryOps: 0, incomingRestoreTimers: 0 }
+
+// H4 (ЕКСПЕРИМЕНТАЛНО, само ръчно — бутон „Възстанови звука“ за изброени профили):
+// всички входящи audio елементи се откачат и премахват, след кратка пауза
+// (браузърът спира изхода си, когато няма активни плейъри) всеки абониран
+// track се закача към НОВ елемент (attachAudio) и се пуска. Микрофонът,
+// абонаментите, връзката и стаята не се пипат; локалното заглушаване се пази.
+const INCOMING_AUDIO_RESTORE_GAP_MS = 300
 
 /** Брояч на кадрите на capture-а (MediaStreamTrack.stats, Chromium) — независим от RTP; null — няма. */
 function captureFrames(capture: MediaStreamTrack): number | null {
@@ -431,6 +440,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         getStatsCalls: 0, getStatsTotalMs: 0, getStatsMaxMs: 0, statsInFlightMax: 0,
         outputChecks: 0, outputRecoveries: 0, outputReattaches: 0, outputLimited: 0, outputGestureRequired: 0, outputPauses: 0,
         outputSkipNotConnected: 0, outputSkipHidden: 0, outputSkipBlocked: 0,
+        // H4: ръчно пресъздаване на входящите елементи.
+        incomingRestores: 0, incomingRestorePlayed: 0, incomingRestoreFailed: 0, incomingRestoreErrors: 0, outputSkipIncomingRestore: 0,
         lastPacketsPerSecond: -1, minPacketsPerSecond: -1, maxPacketsPerSecond: -1,
         micRecoveryAttempts: 0, micRecoveryRecovered: 0, micConfirmations: 0,
         verifyPacketsDelta: -1, verifySourceDelta: -1, verifySenderOk: -1, verifyPolls: 0,
@@ -811,6 +822,11 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         }
       }
 
+      // ─── H4: ръчно пресъздаване на входящите елементи (в ход / отмяна) ─
+      let incomingRestore: Promise<VoiceIncomingAudioRestoreResult> | null = null
+      /** Прекъсва паузата между откачането и новите елементи (затваряне на стаята). */
+      let incomingRestoreCancel: (() => void) | null = null
+
       // ─── H2: входящо аудио ───────────────────────────────────────────
       const outputTask = createCoalescedTask<VoiceMediaTrigger>(
         { setTimeout: (callback, delayMs) => setTimeout(callback, delayMs), clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>), now: monotonic },
@@ -871,6 +887,12 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           media.outputSkipHidden += 1
           return // при връщане на преден план -> нова проверка ('visible')
         }
+        if (incomingRestore !== null) {
+          // H4 пресъздава елементите в момента (вкл. паузата без елементи) —
+          // без паралелно повторно прикачване и без фалшиви element_missing.
+          media.outputSkipIncomingRestore += 1
+          return
+        }
         media.outputChecks += 1
         const trigger = TRIGGER_PRIORITY.find((candidate) => triggers.has(candidate)) ?? 'attach_check'
         for (const participant of [...room.remoteParticipants.values()]) {
@@ -911,6 +933,136 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         }
       }
 
+      // ─── H4: „Възстанови звука“ (ЕКСПЕРИМЕНТАЛНО, само ръчно) ─────────
+
+      function liveRemoteAudio(): Array<{ track: RemoteTrack; participant: RemoteParticipant; sid: string }> {
+        const list: Array<{ track: RemoteTrack; participant: RemoteParticipant; sid: string }> = []
+        for (const participant of room.remoteParticipants.values()) {
+          for (const publication of participant.audioTrackPublications.values()) {
+            const track = publication.track
+            if (track === undefined || track.sid === undefined || track.mediaStreamTrack.readyState !== 'live') continue
+            list.push({ track, participant, sid: track.sid })
+          }
+        }
+        return list
+      }
+
+      async function playForRestore(element: HTMLMediaElement): Promise<VoiceIncomingAudioRestoreError | null> {
+        try {
+          await element.play()
+          return null
+        } catch (error) {
+          const name = (error as { name?: unknown } | null)?.name
+          if (name === 'AbortError' && !element.paused) return null
+          return name === 'NotAllowedError' || name === 'AbortError' || name === 'NotSupportedError' ? name : 'other'
+        }
+      }
+
+      /** Пауза без елементи; прекъсва се при затваряне на стаята (таймерът не остава). */
+      function restoreGap(): Promise<boolean> {
+        return new Promise((resolve) => {
+          mediaGlobal.incomingRestoreTimers += 1
+          let done = false
+          const finish = (completed: boolean): void => {
+            if (done) return
+            done = true
+            clearTimeout(timer)
+            mediaGlobal.incomingRestoreTimers -= 1
+            if (incomingRestoreCancel === cancel) incomingRestoreCancel = null
+            resolve(completed)
+          }
+          const cancel = (): void => finish(false)
+          const timer = setTimeout(() => finish(true), INCOMING_AUDIO_RESTORE_GAP_MS)
+          incomingRestoreCancel = cancel
+        })
+      }
+
+      async function runIncomingAudioRestore(): Promise<VoiceIncomingAudioRestoreResult> {
+        const result: VoiceIncomingAudioRestoreResult = { outcome: 'not_connected', tracks: 0, detached: 0, attached: 0, playing: 0, errors: [] }
+        if (disposed || clientDisconnect || mediaTornDown || room.state !== ConnectionState.Connected) return result
+        const targets = liveRemoteAudio()
+        result.tracks = targets.length
+        if (targets.length === 0) {
+          result.outcome = 'no_tracks'
+          return result
+        }
+        media.incomingRestores += 1
+        // 1. Пълно откачане: първо слушателят за пауза (без фалшиво element_paused),
+        //    после track.detach (пауза + srcObject), DOM и всички препратки.
+        for (const [sid, entry] of [...audioEntries]) {
+          releaseEntry(sid, entry)
+          try {
+            if (entry.track.attachedElements.includes(entry.element)) entry.track.detach(entry.element)
+          } catch { /* откачането продължава */ }
+          if (sink.detach(sid) !== entry.element) entry.element.remove()
+          try { entry.element.srcObject = null } catch { /* вече празен */ }
+          result.detached += 1
+        }
+        // Елементи на същите tracks извън нашия списък (не би трябвало да има).
+        for (const { track } of targets) {
+          for (const element of [...track.attachedElements]) {
+            try { track.detach(element) } catch { /* нищо */ }
+            element.remove()
+          }
+        }
+        // 2. Кратка пауза без нито един плейър — браузърът спира изхода си.
+        const completed = await restoreGap()
+        if (!completed || disposed || clientDisconnect || mediaTornDown) {
+          result.outcome = 'aborted'
+          return result
+        }
+        // 3. Нови елементи — съществуващият attachAudio (локалното заглушаване се прилага там).
+        //    Текущият списък: потоци, абонирани по време на паузата, вече имат нов елемент.
+        const current = liveRemoteAudio()
+        for (const { track, participant, sid } of current) {
+          const existing = audioEntries.get(sid)
+          if (existing !== undefined && existing.track === track) continue
+          attachAudio(track, participant)
+          result.attached += 1
+        }
+        // 4. Пускане (жестът е на бутона; Chrome пази правото за страницата).
+        const errors = await Promise.all(current.map(({ sid }) => {
+          const entry = audioEntries.get(sid)
+          return entry === undefined ? Promise.resolve<VoiceIncomingAudioRestoreError | null>('missing_element') : playForRestore(entry.element)
+        }))
+        for (const error of errors) {
+          if (error === null) result.playing += 1
+          else result.errors.push(error)
+        }
+        if (disposed || clientDisconnect || mediaTornDown) {
+          result.outcome = 'aborted'
+          return result
+        }
+        const total = current.length
+        result.outcome = total > 0 && result.playing === total ? 'played'
+          : result.playing > 0 ? 'partial'
+            : result.errors.includes('NotAllowedError') ? 'gesture_required' : 'failed'
+        if (result.outcome === 'played') media.incomingRestorePlayed += 1
+        else media.incomingRestoreFailed += 1
+        media.incomingRestoreErrors += result.errors.length
+        // Сървърът приема само затворените стойности: reattach + gesture = ръчният H4
+        // (автоматичното H2 никога не праща тази комбинация).
+        reportMedia({
+          event: 'media_recovery',
+          target: 'output',
+          step: 'reattach',
+          result: result.outcome === 'played' ? 'success' : result.outcome === 'gesture_required' ? 'gesture_required' : 'failed',
+          trigger: 'gesture',
+        })
+        // Блокирано от браузъра -> съществуващият бутон „Включи звука“ (H2).
+        if (result.outcome === 'gesture_required') markOutputBlocked()
+        return result
+      }
+
+      function restoreIncomingAudio(): Promise<VoiceIncomingAudioRestoreResult> {
+        if (incomingRestore !== null) return incomingRestore
+        const run = runIncomingAudioRestore().finally(() => {
+          if (incomingRestore === run) incomingRestore = null
+        })
+        incomingRestore = run
+        return run
+      }
+
       const onPageVisibility = (): void => {
         if (pageVisible()) {
           requestOutputCheck('visible')
@@ -931,6 +1083,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       function teardownMedia(): void {
         if (mediaTornDown) return
         mediaTornDown = true
+        incomingRestoreCancel?.()
         stopMonitor()
         outputTask.cancel()
         mediaGlobal.outputTasks -= 1
@@ -1304,9 +1457,11 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         },
         confirmCaptureStall: () => confirmCaptureStall(),
         recoverMicrophone: (options) => recoverMicrophone(options.explicit),
+        restoreIncomingAudio: () => restoreIncomingAudio(),
         debugMedia: () => ({
           ...media,
           micRecoveryRunning: recovery === null ? 0 : 1,
+          incomingRestoreRunning: incomingRestore === null ? 0 : 1,
           micOrphaned: recoveryOrphaned ? 1 : 0,
           captureLive: micCapture !== null && micCapture.readyState === 'live' ? 1 : 0,
           captureMuted: micCapture?.muted === true ? 1 : 0,

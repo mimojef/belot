@@ -200,6 +200,7 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       case 'recover-mic': voice.recoverMicrophone(); return
       case 'retry-connection': voice.retryConnection(); return
       case 'unlock-audio': voice.unlockAudio(); return
+      case 'restore-audio': voice.restoreIncomingAudio(); return
       case 'leave': voice.leaveVoice(); return
       case 'get-vip':
         closePrompt(true)

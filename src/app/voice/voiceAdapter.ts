@@ -189,6 +189,40 @@ export type VoiceConnectedRoom = {
    * (прозорец за разрешение е позволен); иначе само при вече разрешен микрофон.
    */
   recoverMicrophone?: (options: { explicit: boolean }) => Promise<VoiceMicRecoveryResult>
+  /**
+   * Етап H4 (експериментално, САМО ръчно от жест): пресъздава входящите audio
+   * елементи — всички текущи се откачат и премахват, после всеки абониран
+   * отдалечен track се закача към НОВ елемент и се пуска. Микрофонът,
+   * абонаментите, връзката и стаята не се пипат. Успешен play() НЕ доказва,
+   * че звукът реално се чува. Извикване по време на друго връща същото обещание.
+   */
+  restoreIncomingAudio?: () => Promise<VoiceIncomingAudioRestoreResult>
+}
+
+/**
+ * Технически резултат на H4:
+ *   * 'played' — всички нови елементи са пуснати (play() е успял);
+ *   * 'partial' — част от тях;
+ *   * 'gesture_required' — браузърът изисква жест (показва се „Включи звука“);
+ *   * 'failed' — нито един не е пуснат;
+ *   * 'no_tracks' — няма абонирани входящи потоци (нищо не е пипнато);
+ *   * 'not_connected' — стаята не е свързана (нищо не е пипнато);
+ *   * 'aborted' — стаята е затворена по време на възстановяването.
+ */
+export type VoiceIncomingAudioRestoreOutcome = 'played' | 'partial' | 'gesture_required' | 'failed' | 'no_tracks' | 'not_connected' | 'aborted'
+/** Името на грешката от play() (затворен списък — без текст на грешката). */
+export type VoiceIncomingAudioRestoreError = 'NotAllowedError' | 'AbortError' | 'NotSupportedError' | 'missing_element' | 'other'
+export type VoiceIncomingAudioRestoreResult = {
+  outcome: VoiceIncomingAudioRestoreOutcome
+  /** Абонирани входящи потоци при старта. */
+  tracks: number
+  /** Откачени и премахнати стари елементи. */
+  detached: number
+  /** Нови елементи (attachAudio). */
+  attached: number
+  /** Нови елементи с успешен play(). */
+  playing: number
+  errors: VoiceIncomingAudioRestoreError[]
 }
 
 /** Без адреси/IP — само вид и протокол на кандидата и закръглени показатели. */

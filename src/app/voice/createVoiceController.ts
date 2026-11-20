@@ -42,6 +42,7 @@ import {
   type VoiceDiagnosticReport,
   type VoiceDisconnectCause,
   type VoiceFailStage,
+  type VoiceIncomingAudioRestoreResult,
   type VoiceLiveKitDisconnectReason,
   type VoiceMicAttemptFailure,
   type VoiceMicAttemptResult,
@@ -58,6 +59,7 @@ import {
   type VoiceSessionEndReason,
 } from './voiceAdapter'
 import { clearVoiceIntent, markVoiceIntentLeaving, saveVoiceIntent } from './voiceIntentStore'
+import { isVoiceIncomingAudioRestoreAllowed } from './voiceIncomingAudioRestoreConfig'
 
 export type { VoiceMicHealth } from './voiceAdapter'
 
@@ -68,6 +70,20 @@ export type { VoiceMicHealth } from './voiceAdapter'
  *   'failed' — опитът не успя (публикацията е заглушена) — „Възстанови микрофона“.
  */
 export type VoiceMicRecoveryState = 'none' | 'recovering' | 'manual' | 'failed'
+
+/**
+ * Етап H4 (ЕКСПЕРИМЕНТАЛНО): „Възстанови звука“ — пресъздаване на входящите
+ * audio елементи, само ръчно и само за изброени профили (по profile_id).
+ *   available — бутонът се показва (профилът е разрешен и гласът е свързан);
+ *   restoring — тече (повторно натискане се игнорира);
+ *   last — техническият резултат от последния опит в ТЕКУЩАТА стая (успешен
+ *          play() не доказва, че звукът се чува).
+ */
+export type VoiceIncomingAudioRestoreView = {
+  available: boolean
+  restoring: boolean
+  last: VoiceIncomingAudioRestoreResult | null
+}
 
 /** H3 ограничения (решение на собственика, 2026-11-18). */
 export const VOICE_MIC_RECOVERY_COOLDOWN_MS = 60_000
@@ -172,6 +188,8 @@ export type VoiceSnapshot = {
   microphoneHealth: VoiceMicHealth
   /** Етап H3: възстановяване на собствения микрофон ('none', ако не е 'live'). */
   microphoneRecovery: VoiceMicRecoveryState
+  /** Етап H4 (експериментално): „Възстанови звука“ на входящия глас. */
+  incomingAudioRestore: VoiceIncomingAudioRestoreView
   playbackBlocked: boolean
   uiError: VoiceUiError | null
   /** „Възстанови гласовия чат“ — гласът е бил спрян изрично (лоби/магазин), без автоматично връщане. */
@@ -210,6 +228,8 @@ export type VoiceController = {
   /** Етап H3: „Възстанови микрофона“ (жест) — нов capture в същата публикация. */
   recoverMicrophone: () => void
   unlockAudio: () => void
+  /** Етап H4 (жест, само разрешени профили): пресъздава входящите audio елементи. */
+  restoreIncomingAudio: () => void
   retryConnection: () => void
   muteRemoteParticipant: (profileId: string) => void
   unmuteRemoteParticipant: (profileId: string) => void
@@ -241,6 +261,8 @@ export type VoiceControllerDeps = {
    * Липсва/false -> само бутон „Възстанови микрофона“ (production по подразбиране).
    */
   micAutoRecovery?: () => boolean
+  /** Етап H4: кой профил вижда „Възстанови звука“ (по profile_id); по подразбиране voiceIncomingAudioRestoreConfig. */
+  incomingAudioRestoreAllowed?: (profileId: string) => boolean
   createClientInstanceId?: () => string
   timers?: VoiceTimers
   /** Часовник за продължителността на getUserMedia (диагностика); по подразбиране Date.now. */
@@ -394,6 +416,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   let micRequest: MicRequest | null = null
   let micRequestSource: VoiceMicRequestSource = 'initial'
 
+  // ── Етап H4: ръчно пресъздаване на входящите audio елементи ──
+  const incomingAudioRestoreAllowed = deps.incomingAudioRestoreAllowed ?? isVoiceIncomingAudioRestoreAllowed
+  /** Стаята, в която тече възстановяването (null — няма). */
+  let audioRestoreRoom: VoiceConnectedRoom | null = null
+  /** Последният резултат — показва се само докато стаята е същата. */
+  let audioRestoreLast: { room: VoiceConnectedRoom; result: VoiceIncomingAudioRestoreResult } | null = null
+
   // ── присъствие ──
   let renewMs = defaultRenewMs
   let presenceTimer: unknown = null
@@ -423,6 +452,14 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     micReused: 0,
     retainedReleased: 0,
     connectAttempts: 0,
+    audioRestoreRequests: 0,
+    audioRestoreIgnoredBusy: 0,
+    audioRestoreStarted: 0,
+    audioRestorePlayed: 0,
+    audioRestorePartial: 0,
+    audioRestoreFailed: 0,
+    audioRestoreOther: 0,
+    audioRestoreErrors: 0,
   }
   let roomsOpen = 0
 
@@ -1688,6 +1725,13 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     return result
   }
 
+  /** H4: разрешен профил (profile_id от контекста) + свързана стая с поддръжка в адаптера. */
+  function canRestoreIncomingAudio(): boolean {
+    const table = tableContext()
+    return table !== null && room !== null && link === 'connected' && room.restoreIncomingAudio !== undefined
+      && incomingAudioRestoreAllowed(table.selfProfileId)
+  }
+
   function getSnapshot(): VoiceSnapshot {
     if (cachedSnapshot !== null) return cachedSnapshot
     const table = tableContext()
@@ -1701,6 +1745,11 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       microphone,
       microphoneHealth: microphone === 'live' && room !== null && link === 'connected' ? micHealth : 'ok',
       microphoneRecovery: microphone === 'live' && room !== null ? micRecovery : 'none',
+      incomingAudioRestore: {
+        available: canRestoreIncomingAudio(),
+        restoring: audioRestoreRoom !== null,
+        last: audioRestoreLast !== null && audioRestoreLast.room === room ? audioRestoreLast.result : null,
+      },
       playbackBlocked,
       uiError,
       canRestore,
@@ -1897,6 +1946,34 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         () => {},
       )
     },
+    restoreIncomingAudio() {
+      counters.audioRestoreRequests! += 1
+      const current = room
+      if (disposed || current === null || !canRestoreIncomingAudio() || current.restoreIncomingAudio === undefined) return
+      // Без паралелно възстановяване (многократно натискане).
+      if (audioRestoreRoom !== null) {
+        counters.audioRestoreIgnoredBusy! += 1
+        return
+      }
+      audioRestoreRoom = current
+      counters.audioRestoreStarted! += 1
+      log('voice: h4 incoming audio restore started')
+      const finish = (result: VoiceIncomingAudioRestoreResult): void => {
+        if (audioRestoreRoom === current) audioRestoreRoom = null
+        if (result.outcome === 'played') counters.audioRestorePlayed! += 1
+        else if (result.outcome === 'partial') counters.audioRestorePartial! += 1
+        else if (result.outcome === 'failed' || result.outcome === 'gesture_required') counters.audioRestoreFailed! += 1
+        else counters.audioRestoreOther! += 1
+        counters.audioRestoreErrors! += result.errors.length
+        log(`voice: h4 incoming audio restore ${result.outcome} tracks=${result.tracks} playing=${result.playing} errors=${result.errors.join(',') || 'none'}`)
+        if (disposed) return
+        if (room === current) audioRestoreLast = { room: current, result }
+        invalidate()
+      }
+      // Синхронно в жеста: адаптерът откача елементите веднага.
+      current.restoreIncomingAudio().then(finish, () => finish({ outcome: 'failed', tracks: 0, detached: 0, attached: 0, playing: 0, errors: ['other'] }))
+      invalidate()
+    },
     retryConnection() {
       if (failed) {
         failed = false
@@ -1971,6 +2048,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       driving: driving ? 1 : 0,
       micAutoAttempts: micAutoAttempts.length,
       micAutoRecovery: deps.micAutoRecovery?.() === true ? 1 : 0,
+      audioRestoreRunning: audioRestoreRoom === null ? 0 : 1,
       micLastFailureAgoMs: micLastFailureAt === null ? -1 : Math.max(0, nowMs() - micLastFailureAt),
       // Етап H: измерване на натоварването и изтичане (само тестове/диагностика).
       ...Object.fromEntries(Object.entries(room?.debugMedia?.() ?? {}).map(([key, value]) => [`media.${key}`, value])),

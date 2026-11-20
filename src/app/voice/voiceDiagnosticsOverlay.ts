@@ -111,6 +111,8 @@ export function mountVoiceDiagnosticsOverlay(controller: VoiceController, platfo
       getStats: { calls: m('getStatsCalls'), avgMs: m('getStatsCalls') ? Math.round(((m('getStatsTotalMs') ?? 0) / (m('getStatsCalls') ?? 1)) * 100) / 100 : null, maxMs: m('getStatsMaxMs'), concurrentMax: m('statsInFlightMax') },
       recoveries: { attempts: m('micRecoveryAttempts'), recovered: m('micRecoveryRecovered'), autoInWindow: c.micAutoAttempts ?? null },
       output: { elements: audio.length, paused: audio.filter((el) => el.paused).length, blocked: snapshot.playbackBlocked, recoveries: m('outputRecoveries'), pauses: m('outputPauses') },
+      // H4 (експериментално): „Възстанови звука“ — само локални броячи и последният технически резултат.
+      incomingAudioRestore: { available: snapshot.incomingAudioRestore.available, started: c.audioRestoreStarted ?? 0, played: c.audioRestorePlayed ?? 0, failed: c.audioRestoreFailed ?? 0, last: snapshot.incomingAudioRestore.last },
       dtx60s: dtx === null ? null : { samples: dtx.samples.length, done: dtx.done, ...stat(dtx.samples) },
       recentPps: ppsHistory.slice(-10),
     }

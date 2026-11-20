@@ -14,6 +14,7 @@ import {
   type VoiceDisconnectCause,
   type VoiceMicrophoneFailure,
   type VoicePublishErrorKind,
+  type VoiceIncomingAudioRestoreResult,
   type VoiceRetainedMicrophone,
 } from '../../src/app/voice/voiceAdapter'
 import { createLazyVoiceController } from '../../src/app/voice/voiceFacade'
@@ -74,6 +75,8 @@ export type FakeRoom = VoiceConnectedRoom & {
   micLive: boolean
   capture: FakeCapture | null
   publishes: number
+  /** H4: извиквания на restoreIncomingAudio в тази стая. */
+  restores: number
 }
 
 export function createFakeAdapter() {
@@ -94,6 +97,10 @@ export function createFakeAdapter() {
     /** За 'gate_interrupt' / 'gate_fail'. */
     publishGate: null as Promise<void> | null,
     connectGate: null as Promise<void> | null,
+    /** H4: restoreIncomingAudio чака този gate; резултатът е restoreResult (или грешка при restoreThrows). */
+    restoreGate: null as Promise<void> | null,
+    restoreThrows: false,
+    restoreResult: { outcome: 'played', tracks: 2, detached: 2, attached: 2, playing: 2, errors: [] } as VoiceIncomingAudioRestoreResult,
     /** Опити за втора стая, докато предишната не е изключена. */
     prepareRejected: 0,
     activeRooms: () => rooms.filter((r) => r.connected && !r.disconnected).length,
@@ -138,6 +145,7 @@ export function createFakeAdapter() {
         micLive: false,
         capture: null,
         publishes: 0,
+        restores: 0,
         async disconnect() {
           if (room.disconnected) return
           await Promise.resolve()
@@ -209,6 +217,12 @@ export function createFakeAdapter() {
         canPlaybackAudio: () => true,
         listRemoteParticipants: () => [],
         setRemoteIdentityVolume() {},
+        async restoreIncomingAudio() {
+          room.restores += 1
+          if (state.restoreGate !== null) await state.restoreGate
+          if (state.restoreThrows) throw new Error('restore failed')
+          return { ...state.restoreResult, errors: [...state.restoreResult.errors] }
+        },
       }
       rooms.push(room)
       return {
@@ -288,7 +302,7 @@ export type Harness = {
 export type MemoryIntent = { value: { voiceTableId: string; profileId: string; mic: boolean; leftAt?: number } | null; reload: boolean; saves: number }
 export const createMemoryIntent = (): MemoryIntent => ({ value: null, reload: false, saves: 0 })
 
-export function createHarness(options: { facade?: boolean; intent?: MemoryIntent } = {}): Harness {
+export function createHarness(options: { facade?: boolean; intent?: MemoryIntent; selfProfileId?: string; restoreAllowed?: readonly string[] } = {}): Harness {
   const memory = options.intent ?? null
   const clock = createClock()
   const fake = createFakeAdapter()
@@ -332,6 +346,8 @@ export function createHarness(options: { facade?: boolean; intent?: MemoryIntent
     now: clock.now,
     log: () => {},
     reportDiagnostic: (report: VoiceDiagnosticReport) => { reports.push(report) },
+    // H4: без опцията — реалният списък (voiceIncomingAudioRestoreConfig).
+    ...(options.restoreAllowed === undefined ? {} : { incomingAudioRestoreAllowed: (profileId: string) => options.restoreAllowed!.includes(profileId) }),
     ...(memory === null ? { intentStore: { save: () => {}, clear: () => {} } } : {
       intentStore: {
         save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => { memory.value = { ...intent }; memory.saves += 1 },
@@ -362,7 +378,7 @@ export function createHarness(options: { facade?: boolean; intent?: MemoryIntent
     const key = `${snap.status}/${snap.microphone}`
     if (key !== last) { trace.push(key); last = key }
   })
-  const ctx: Harness['ctx'] = (screen = 'waiting', seats = SEATS, tableId = TABLE) => ({ kind: 'table', voiceTableId: tableId, screen, selfProfileId: 'self', seats })
+  const ctx: Harness['ctx'] = (screen = 'waiting', seats = SEATS, tableId = TABLE) => ({ kind: 'table', voiceTableId: tableId, screen, selfProfileId: options.selfProfileId ?? 'self', seats })
   return { voice, clock, fake, backend, reports, presence, events, trace, ctx, lazyLoads: () => lazyLoads }
 }
 

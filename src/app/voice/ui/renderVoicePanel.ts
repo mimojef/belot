@@ -214,6 +214,29 @@ function renderJoinButtons(offer: VoiceJoinOffer, canOpenShop: boolean): string 
   }
 }
 
+/** Технически резултат на H4 — без твърдение, че звукът реално се чува. */
+const INCOMING_AUDIO_RESTORE_TEXT: Record<string, string> = {
+  played: 'Звукът е пуснат отново. Ако още не чувате останалите, натиснете пак.',
+  partial: 'Звукът е пуснат отново само частично. Ако не чувате някого, натиснете пак.',
+  gesture_required: 'Браузърът спря звука — натиснете „Включи звука“.',
+  failed: 'Звукът не можа да бъде пуснат отново. Опитайте пак.',
+  no_tracks: 'В момента няма включен микрофон при останалите — няма какво да се възстанови.',
+  not_connected: 'Гласовата връзка се смени. Опитайте пак.',
+  aborted: 'Гласовата връзка се смени. Опитайте пак.',
+}
+
+/** Етап H4 (експериментално): „Възстанови звука“ — само за разрешени профили, при свързан глас. */
+function renderIncomingAudioRestore(snapshot: VoiceSnapshot): string {
+  const restore = snapshot.incomingAudioRestore
+  if (restore === undefined || !restore.available) return ''
+  const action = restore.restoring
+    ? button('data-voice-action="restore-audio" aria-busy="true"', 'Възстановяване…', 'secondary', voiceIcon.volume(18), true)
+    : button('data-voice-action="restore-audio"', 'Възстанови звука', 'secondary', voiceIcon.volume(18))
+  const last = restore.restoring ? null : restore.last
+  const note = last === null ? '' : `<p class="pvp-note" role="status" data-voice-audio-restore-result="${escapeHtml(last.outcome)}">${escapeHtml(INCOMING_AUDIO_RESTORE_TEXT[last.outcome] ?? '')}</p>`
+  return `${action}${note}`
+}
+
 function renderActions(options: VoicePanelOptions): string {
   const { snapshot, canOpenShop } = options
   if (!isInVoice(snapshot)) {
@@ -245,7 +268,7 @@ function renderActions(options: VoicePanelOptions): string {
   } else {
     mic = button('data-voice-action="mic-on"', 'Включи микрофона', 'primary', voiceIcon.mic(18))
   }
-  return `${mic}${button('data-voice-action="leave"', 'Напусни гласовия чат', 'quiet', voiceIcon.leave(16), snapshot.status === 'disconnecting')}`
+  return `${renderIncomingAudioRestore(snapshot)}${mic}${button('data-voice-action="leave"', 'Напусни гласовия чат', 'quiet', voiceIcon.leave(16), snapshot.status === 'disconnecting')}`
 }
 
 /** Компактният гласов панел (без позициониране — то е на контейнера). */
