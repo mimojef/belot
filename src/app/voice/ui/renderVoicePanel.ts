@@ -237,6 +237,25 @@ function renderIncomingAudioRestore(snapshot: VoiceSnapshot): string {
   return `${action}${note}`
 }
 
+/**
+ * Експериментален аудио режим — само за изброените профили в Android PWA
+ * (voiceExperimentalAudioConfig.ts). Изборът се пази локално и важи при
+ * следващото включване в гласовия чат (текущата стая не се пипа).
+ */
+function renderExperimentalAudio(snapshot: VoiceSnapshot): string {
+  const view = snapshot.experimentalAudio
+  if (view === undefined || !view.available) return ''
+  const on = view.enabled
+  const toggle = button(
+    `data-voice-action="${on ? 'experimental-audio-off' : 'experimental-audio-on'}" role="switch" aria-checked="${on}" data-voice-experimental-audio="${on ? 'on' : 'off'}"`,
+    `Експериментален аудио режим: ${on ? 'включен' : 'изключен'}`,
+    'secondary',
+    voiceIcon.volume(18),
+  )
+  const current = view.active === null ? '' : ` Сега: ${view.active === 'webaudio' ? 'експерименталният' : 'стандартният'} механизъм.`
+  return `<div class="pvp-actions" data-voice-experimental-audio-block="1">${toggle}<p class="pvp-note" data-voice-experimental-audio-note="1">Промяната важи при следващото включване в гласовия чат.${escapeHtml(current)}</p></div>`
+}
+
 function renderActions(options: VoicePanelOptions): string {
   const { snapshot, canOpenShop } = options
   if (!isInVoice(snapshot)) {
@@ -287,6 +306,7 @@ export function renderVoicePanel(options: VoicePanelOptions): string {
       ${renderNotices(options)}
       <ul class="pvp-list">${renderRows(options)}</ul>
       <div class="pvp-actions">${renderActions(options)}</div>
+      ${renderExperimentalAudio(options.snapshot)}
       ${idleNote}
     </section>
   `

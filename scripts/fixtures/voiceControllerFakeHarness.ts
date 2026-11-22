@@ -4,7 +4,7 @@
 // Без браузър, без livekit-client, без мрежа. Ползва се от
 // checkVoiceMicAcquisition.ts и checkVoiceSessionEndDiagnostics.ts.
 
-import { createVoiceController, type VoiceContext, type VoiceController, type VoiceSnapshot } from '../../src/app/voice/createVoiceController'
+import { createVoiceController, type VoiceContext, type VoiceController, type VoiceControllerDeps, type VoiceSnapshot } from '../../src/app/voice/createVoiceController'
 import {
   VoiceMicrophoneError,
   type VoiceAdapter,
@@ -103,6 +103,8 @@ export function createFakeAdapter() {
     restoreResult: { outcome: 'played', tracks: 2, detached: 2, attached: 2, playing: 2, errors: [] } as VoiceIncomingAudioRestoreResult,
     /** Опити за втора стая, докато предишната не е изключена. */
     prepareRejected: 0,
+    /** Експериментален аудио режим: режимът, подаден при всяко prepare (липсва -> 'none'). */
+    prepareModes: [] as string[],
     activeRooms: () => rooms.filter((r) => r.connected && !r.disconnected).length,
     liveCaptures: () => captures.filter((c) => !c.stopped).length,
     /** Публикувани микрофони във всички неизключени стаи (дублирани audio tracks). */
@@ -132,7 +134,8 @@ export function createFakeAdapter() {
       }
       return retainHandle(capture)
     },
-    prepare(events) {
+    prepare(events, _isMuted, prepareOptions) {
+      state.prepareModes.push(prepareOptions?.incomingAudioMode ?? 'none')
       if (rooms.some((r) => !r.disconnected)) {
         // Като реалния адаптер; броим опитите — инвариантът „≤1 стая“ е нарушен.
         state.prepareRejected += 1
@@ -287,6 +290,8 @@ export type Harness = {
     presenceFailure: string | null
     /** Следващите отговори за токен (статус/код); празно -> успех. */
     tokenFailures: Array<{ status: number; code: string }>
+    /** Kill switch в успешния токен; undefined -> полето липсва (стар сървър). */
+    webAudioMix?: unknown
   }
   reports: VoiceDiagnosticReport[]
   /** Всички изпратени voice_presence (вкл. причината при onTableScreen:false). */
@@ -302,7 +307,7 @@ export type Harness = {
 export type MemoryIntent = { value: { voiceTableId: string; profileId: string; mic: boolean; leftAt?: number } | null; reload: boolean; saves: number }
 export const createMemoryIntent = (): MemoryIntent => ({ value: null, reload: false, saves: 0 })
 
-export function createHarness(options: { facade?: boolean; intent?: MemoryIntent; selfProfileId?: string; restoreAllowed?: readonly string[] } = {}): Harness {
+export function createHarness(options: { facade?: boolean; intent?: MemoryIntent; selfProfileId?: string; restoreAllowed?: readonly string[]; experimentalAudio?: VoiceControllerDeps['experimentalAudio'] } = {}): Harness {
   const memory = options.intent ?? null
   const clock = createClock()
   const fake = createFakeAdapter()
@@ -335,7 +340,7 @@ export function createHarness(options: { facade?: boolean; intent?: MemoryIntent
         const failure = backend.tokenFailures.shift()
         if (failure !== undefined) return { status: failure.status, body: { ok: false, code: failure.code } }
         const table = (body as { voiceTableId?: string }).voiceTableId ?? TABLE
-        return { status: 200, body: { ok: true, url: 'wss://voice.test', token: JWT_MARK, identity: 'p_self_1', voiceTableId: table, generation: backend.generation, canSpeak: backend.speak.canSpeak, speak: backend.speak, expiresInSeconds: 600 } }
+        return { status: 200, body: { ok: true, url: 'wss://voice.test', token: JWT_MARK, identity: 'p_self_1', voiceTableId: table, generation: backend.generation, canSpeak: backend.speak.canSpeak, speak: backend.speak, expiresInSeconds: 600, ...(backend.webAudioMix === undefined ? {} : { webAudioMix: backend.webAudioMix }) } }
       }
       return backend.speak.canSpeak
         ? { status: 200, body: { ok: true, canSpeak: true, upgrade: 'updated' } }
@@ -348,6 +353,7 @@ export function createHarness(options: { facade?: boolean; intent?: MemoryIntent
     reportDiagnostic: (report: VoiceDiagnosticReport) => { reports.push(report) },
     // H4: без опцията — реалният списък (voiceIncomingAudioRestoreConfig).
     ...(options.restoreAllowed === undefined ? {} : { incomingAudioRestoreAllowed: (profileId: string) => options.restoreAllowed!.includes(profileId) }),
+    ...(options.experimentalAudio === undefined ? {} : { experimentalAudio: options.experimentalAudio }),
     ...(memory === null ? { intentStore: { save: () => {}, clear: () => {} } } : {
       intentStore: {
         save: (intent: { voiceTableId: string; profileId: string; mic: boolean }) => { memory.value = { ...intent }; memory.saves += 1 },

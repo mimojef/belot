@@ -12,6 +12,13 @@ import { createVoiceAudioSink } from './voiceAudioSink'
 import { classifyVoicePlatform, type VoicePlatform } from './voiceMediaHealth'
 import { isVoiceMicAutoRecoveryEnabled, type VoiceDiagnosticsAccess } from './voiceMicRecoveryConfig'
 import { isVoiceDiagnosticsRequested, mountVoiceDiagnosticsOverlay } from './voiceDiagnosticsOverlay'
+import {
+  isVoiceExperimentalAudioAvailable,
+  readVoiceExperimentalAudioPreference,
+  resolveVoiceIncomingAudioMode,
+  voiceExperimentalAudioStorage,
+  writeVoiceExperimentalAudioPreference,
+} from './voiceExperimentalAudioConfig'
 
 /** Етап H: груба платформа (затворено изброяване) — пълният User-Agent не напуска браузъра. */
 function detectPlatform(): VoicePlatform {
@@ -32,14 +39,25 @@ export type VoiceRuntimeDeps = Pick<VoiceControllerDeps, 'sendPresence' | 'onReq
 }
 
 export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceController {
-  const adapter = createLiveKitVoiceAdapter(createVoiceAudioSink(document))
   const platform = detectPlatform()
+  const adapter = createLiveKitVoiceAdapter(createVoiceAudioSink(document))
   const controller = createVoiceController({
     sendPresence: deps.sendPresence,
     onRequestVip: deps.onRequestVip,
     loadAdapter: () => Promise.resolve(adapter),
     // Етап H3: в production — изключено по подразбиране (само бутон).
     micAutoRecovery: () => isVoiceMicAutoRecoveryEnabled(deps.diagnosticsAccess?.() ?? null),
+    // Експериментален аудио режим (ограничено изпитване): сървърен kill switch с
+    // абсолютен приоритет, само Android PWA, изброен профил (или локален тестов
+    // ключ САМО на localhost). Решава се за всяка нова стая.
+    experimentalAudio: {
+      available: (profileId) => isVoiceExperimentalAudioAvailable(platform, profileId),
+      enabled: () => readVoiceExperimentalAudioPreference(voiceExperimentalAudioStorage()),
+      setEnabled: (enabled) => writeVoiceExperimentalAudioPreference(voiceExperimentalAudioStorage(), enabled),
+      modeFor: (profileId, serverAllowed) => resolveVoiceIncomingAudioMode({
+        serverAllowed, platform, profileId, storage: voiceExperimentalAudioStorage(), hostname: window.location?.hostname ?? null,
+      }),
+    },
     // Етап 6: анонимна диагностика (броячи на сървъра) — best-effort, без
     // retry; грешка/429 никога не влияе на гласа.
     reportDiagnostic: (report) => {

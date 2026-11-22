@@ -33,6 +33,22 @@ export type VoiceChatHttpApiDeps = {
   readJsonBody: (req: IncomingMessage) => Promise<unknown>
   /** Етап 6 — липсващ -> маршрутът не се обслужва (404 от общия router). */
   clientDiagnostics?: VoiceClientDiagnostics
+  /**
+   * Kill switch за експерименталния аудио режим (webAudioMix) — четен при всеки
+   * успешен токен и подаван като `webAudioMix`. Липсващ / грешка / не true -> false
+   * (клиентът тогава ползва стария механизъм за всички).
+   */
+  isWebAudioMixEnabled?: () => boolean
+}
+
+/** true само при изрично true; всяка грешка -> false (стария механизъм). */
+function readWebAudioMixFlag(read: (() => boolean) | undefined): boolean {
+  if (read === undefined) return false
+  try {
+    return read() === true
+  } catch {
+    return false
+  }
 }
 
 const NO_STORE_HEADERS = {
@@ -131,7 +147,12 @@ export function createVoiceChatHttpRequestHandler(
     const respond = (result: VoiceHttpResult): void => send(res, result)
     try {
       if (pathname.endsWith('/token')) {
-        await deps.service.handleTokenRequest({ profileId, ...claim }, respond)
+        // Успешен токен -> + webAudioMix (kill switch); иначе отговорът е непроменен.
+        await deps.service.handleTokenRequest({ profileId, ...claim }, (result) => {
+          respond(result.status === 200 && result.body.ok === true
+            ? { ...result, body: { ...result.body, webAudioMix: readWebAudioMixFlag(deps.isWebAudioMixEnabled) } }
+            : result)
+        })
       } else {
         await deps.service.handleSpeakAccessRequest({ profileId, ...claim }, respond)
       }

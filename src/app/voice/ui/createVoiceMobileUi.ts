@@ -201,6 +201,8 @@ export function createVoiceMobileUi(deps: VoiceMobileUiDeps): VoiceMobileUi {
       case 'retry-connection': voice.retryConnection(); return
       case 'unlock-audio': voice.unlockAudio(); return
       case 'restore-audio': voice.restoreIncomingAudio(); return
+      case 'experimental-audio-on': voice.setExperimentalAudioEnabled(true); return
+      case 'experimental-audio-off': voice.setExperimentalAudioEnabled(false); return
       case 'leave': voice.leaveVoice(); return
       case 'get-vip':
         closePrompt(true)

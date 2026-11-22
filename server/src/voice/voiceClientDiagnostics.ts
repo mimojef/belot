@@ -26,7 +26,7 @@ const RECENT_TRANSPORT_LIMIT = 200
 /** Етап H: последните приети събития (RAM), с UTC минута и груба платформа. */
 export const VOICE_CLIENT_RECENT_LIMIT = 500
 
-export const VOICE_CLIENT_EVENTS = ['connected', 'connect_failed', 'reconnecting', 'reconnected', 'connection_lost', 'reconnect_failed', 'mic_failed', 'transport', 'mic_attempt', 'mic_lost', 'livekit_disconnect', 'session_end', 'media_input', 'media_output', 'media_recovery', 'mic_recovery'] as const
+export const VOICE_CLIENT_EVENTS = ['connected', 'connect_failed', 'reconnecting', 'reconnected', 'connection_lost', 'reconnect_failed', 'mic_failed', 'transport', 'mic_attempt', 'mic_lost', 'livekit_disconnect', 'session_end', 'media_input', 'media_output', 'media_recovery', 'mic_recovery', 'media_context'] as const
 export type VoiceClientEvent = (typeof VOICE_CLIENT_EVENTS)[number]
 
 export const VOICE_CLIENT_FAILURE_REASONS = [
@@ -62,6 +62,11 @@ export const VOICE_MEDIA_RECOVERY_TARGETS = ['output'] as const
 export const VOICE_MEDIA_RECOVERY_STEPS = ['play', 'reattach', 'start_audio'] as const
 export const VOICE_MEDIA_RECOVERY_RESULTS = ['success', 'failed', 'gesture_required', 'limited'] as const
 export const VOICE_MEDIA_TRIGGERS = ['pause', 'visible', 'focus', 'pageshow', 'devicechange', 'attach_check', 'gesture'] as const
+// W1 (експериментално) — входящо аудио през Web Audio: състояние на AudioContext и
+// възстановяването му (виж src/app/voice/voiceWebAudioOutput.ts). Без аудио/устройства.
+export const VOICE_MEDIA_CONTEXT_STATES = ['running', 'suspended', 'interrupted', 'closed', 'unsupported'] as const
+export const VOICE_MEDIA_CONTEXT_ACTIONS = ['start', 'resume', 'replace', 'gesture'] as const
+export const VOICE_MEDIA_CONTEXT_RESULTS = ['success', 'failed', 'blocked', 'limited'] as const
 // Етап H3 — възстановяване на микрофона (нов capture + replaceTrack).
 export const VOICE_MIC_RECOVERY_MODES = ['auto', 'manual'] as const
 export const VOICE_MIC_RECOVERY_OUTCOMES = [
@@ -104,7 +109,7 @@ export type VoiceClientTransport = {
   packetLossPercent: number | null
 }
 
-type DetailedEvent = 'connect_failed' | 'mic_failed' | 'transport' | 'mic_attempt' | 'mic_lost' | 'livekit_disconnect' | 'session_end' | 'media_input' | 'media_output' | 'media_recovery' | 'mic_recovery'
+type DetailedEvent = 'connect_failed' | 'mic_failed' | 'transport' | 'mic_attempt' | 'mic_lost' | 'livekit_disconnect' | 'session_end' | 'media_input' | 'media_output' | 'media_recovery' | 'mic_recovery' | 'media_context'
 
 export type VoiceClientReport =
   | { event: Exclude<VoiceClientEvent, DetailedEvent> }
@@ -124,6 +129,7 @@ export type VoiceClientReport =
       trigger: OneOf<typeof VOICE_MEDIA_TRIGGERS>
     }
   | { event: 'mic_recovery'; mode: OneOf<typeof VOICE_MIC_RECOVERY_MODES>; outcome: OneOf<typeof VOICE_MIC_RECOVERY_OUTCOMES> }
+  | { event: 'media_context'; state: OneOf<typeof VOICE_MEDIA_CONTEXT_STATES>; action: OneOf<typeof VOICE_MEDIA_CONTEXT_ACTIONS>; result: OneOf<typeof VOICE_MEDIA_CONTEXT_RESULTS> }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -187,6 +193,13 @@ export function parseVoiceClientReport(body: unknown): VoiceClientReport | null 
     if (mode === null || outcome === null) return null
     return { event, mode, outcome }
   }
+  if (event === 'media_context') {
+    const state = pickOne(body.state, VOICE_MEDIA_CONTEXT_STATES)
+    const action = pickOne(body.action, VOICE_MEDIA_CONTEXT_ACTIONS)
+    const result = pickOne(body.result, VOICE_MEDIA_CONTEXT_RESULTS)
+    if (state === null || action === null || result === null) return null
+    return { event, state, action, result }
+  }
   if (event === 'media_recovery') {
     const target = pickOne(body.target, VOICE_MEDIA_RECOVERY_TARGETS)
     const step = pickOne(body.step, VOICE_MEDIA_RECOVERY_STEPS)
@@ -248,6 +261,8 @@ function describeReport(report: VoiceClientReport): string {
       return `${report.target}/${report.step}/${report.result}/${report.trigger}`
     case 'mic_recovery':
       return `${report.mode}/${report.outcome}`
+    case 'media_context':
+      return `${report.state}/${report.action}/${report.result}`
     default:
       return ''
   }
@@ -305,6 +320,8 @@ export type VoiceClientDiagnosticsSnapshot = {
     recovery: Record<string, number>
     /** Етап H3: mode:outcome -> брой. */
     micRecovery: Record<string, number>
+    /** W1 (експериментално): state:action:result -> брой (само при входящо аудио през Web Audio). */
+    context: Record<string, number>
     /** Медийни събития по груба платформа. */
     byPlatform: Record<string, number>
   }
@@ -345,6 +362,7 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
   const mediaOutput: Record<string, number> = {}
   const mediaRecovery: Record<string, number> = {}
   const micRecovery: Record<string, number> = {}
+  const mediaContext: Record<string, number> = {}
   const mediaByPlatform: Record<string, number> = {}
   const recentEvents: VoiceClientRecentEvent[] = []
   const bump = (target: Record<string, number>, key: string): void => {
@@ -397,8 +415,9 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
       const platform = parseVoiceClientPlatform(body)
       recentEvents.push({ at: `${new Date(now()).toISOString().slice(0, 16)}Z`, event: report.event, detail: describeReport(report), platform })
       if (recentEvents.length > VOICE_CLIENT_RECENT_LIMIT) recentEvents.splice(0, recentEvents.length - VOICE_CLIENT_RECENT_LIMIT)
-      if (report.event === 'media_input' || report.event === 'media_output' || report.event === 'media_recovery' || report.event === 'mic_recovery') bump(mediaByPlatform, platform)
+      if (report.event === 'media_input' || report.event === 'media_output' || report.event === 'media_recovery' || report.event === 'mic_recovery' || report.event === 'media_context') bump(mediaByPlatform, platform)
       if (report.event === 'mic_recovery') bump(micRecovery, `${report.mode}:${report.outcome}`)
+      if (report.event === 'media_context') bump(mediaContext, `${report.state}:${report.action}:${report.result}`)
       if (report.event === 'media_input') {
         bump(mediaInput, report.state)
         if (report.evidence !== 'none') bump(mediaInputEvidence, report.evidence)
@@ -466,6 +485,7 @@ export function createVoiceClientDiagnostics(deps: { now?: () => number; limitPe
           output: { ...mediaOutput },
           recovery: { ...mediaRecovery },
           micRecovery: { ...micRecovery },
+          context: { ...mediaContext },
           byPlatform: { ...mediaByPlatform },
         },
         recent: recentEvents.slice().reverse().map((entry) => ({ ...entry })),

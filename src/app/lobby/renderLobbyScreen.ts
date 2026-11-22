@@ -12861,6 +12861,9 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // Само fallback докато state.adminSettings се зарежда — консистентен със
     // server DEFAULT_SETTINGS (adminSettingsStore.ts, 180).
     belotRandomTableWaitSeconds: 180,
+    // Само fallback докато state.adminSettings се зарежда — консистентен със
+    // server DEFAULT_SETTINGS (adminSettingsStore.ts, false = стария механизъм).
+    voiceWebAudioMixEnabled: false,
   }
   const adminPackages = state.adminCoinPackages
   const adminBundlePackages = state.adminBundlePackages
@@ -13031,6 +13034,20 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Важи само при Anti Bad Luck праг 0. Вместо ново пълно разбъркване, следващото раздаване започва от събраните взятки на предишното (при всички пас — от ръцете и неразданите карти), размесени с 3–6 прехвърляния на пакети от 6–16 карти. „Случайно вмъкване“ — пакет отгоре или отдолу се вмъква на случайно място в тестето. „Редуване горе–долу“ — пакетите се местят последователно отгоре долу и отдолу горе. Първото раздаване на мача е с обичайното случайно разбъркване; цепенето остава реално. Промяната важи от следващото раздаване, без restart.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;" data-lobby-admin-voice-webaudio-mix="1">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Гласов чат — експериментален аудио режим</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Експериментален аудио режим
+              <select name="voiceWebAudioMixEnabled" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+                <option value="0" ${settings.voiceWebAudioMixEnabled ? '' : 'selected'}>Изключен — стар механизъм за всички</option>
+                <option value="1" ${settings.voiceWebAudioMixEnabled ? 'selected' : ''}>Разрешен — само за профилите в изпитването</option>
+              </select>
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Централен изключвател (kill switch) за входящия глас през Web Audio. „Изключен“ има предимство пред всичко друго: всички получават стария механизъм. „Разрешен“ включва режима само за изброените профили в Android PWA (те могат да го изключат от гласовия панел). Промяната важи от следващото включване в гласовия чат, без deploy и restart; текущите разговори не се прекъсват.</div>
         </div>
 
         <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
@@ -20212,6 +20229,8 @@ export function renderLobbyScreen(
         antiBadLuckThreshold,
         physicalShuffleMode,
         belotRandomTableWaitSeconds,
+        // Само '1' разрешава; всичко друго (вкл. липсващо поле) -> изключен.
+        voiceWebAudioMixEnabled: String(data.get('voiceWebAudioMixEnabled') ?? '0') === '1',
       })
     })
 

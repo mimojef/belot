@@ -20814,7 +20814,23 @@ async function handleAdminSettingsRequest(
       nextPhysicalShuffleMode = rawPhysicalShuffleMode
     }
 
+    // Гласов чат — kill switch за експерименталния аудио режим (webAudioMix):
+    // само JSON boolean. Влиза в сила при следващата заявка за гласов токен.
+    let nextVoiceWebAudioMixEnabled: boolean | undefined
+    if ('voiceWebAudioMixEnabled' in body) {
+      const rawVoiceWebAudioMixEnabled = body.voiceWebAudioMixEnabled
+      if (typeof rawVoiceWebAudioMixEnabled !== 'boolean') {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: 'Полето "voiceWebAudioMixEnabled" трябва да е true или false.',
+        })
+        return true
+      }
+      nextVoiceWebAudioMixEnabled = rawVoiceWebAudioMixEnabled
+    }
+
     const previousAntiBadLuckConfig = antiBadLuckRuntimeConfig
+    const previousVoiceWebAudioMixEnabled = nextVoiceWebAudioMixEnabled === undefined ? undefined : adminSettingsStore.getSettings().voiceWebAudioMixEnabled
     const result = adminSettingsStore.updateSettings({
       signupBonusYellowCoins: getNumberField(body, 'signupBonusYellowCoins') ?? undefined,
       profileNameChangePrice: getNumberField(body, 'profileNameChangePrice') ?? undefined,
@@ -20830,11 +20846,16 @@ async function handleAdminSettingsRequest(
       registrationVerificationMode: nextRegistrationVerificationMode,
       antiBadLuckThreshold: nextAntiBadLuckThreshold,
       physicalShuffleMode: nextPhysicalShuffleMode,
+      voiceWebAudioMixEnabled: nextVoiceWebAudioMixEnabled,
     })
 
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
       return true
+    }
+
+    if (previousVoiceWebAudioMixEnabled !== undefined && previousVoiceWebAudioMixEnabled !== result.settings.voiceWebAudioMixEnabled) {
+      console.log(`[voice-chat] admin profile=${(session.profile.profileId ?? "").slice(0, 8)} changed webAudioMix ${previousVoiceWebAudioMixEnabled ? 'on' : 'off'} -> ${result.settings.voiceWebAudioMixEnabled ? 'on' : 'off'}`)
     }
 
     if (nextAntiBadLuckThreshold !== undefined || nextPhysicalShuffleMode !== undefined) {
@@ -22410,6 +22431,8 @@ const handleCoPlayRestrictionAdminRequest = createCoPlayRestrictionAdminHttpRequ
 // Гласов чат (Етап 2б) — HTTPS: токени и повишаване на правата (никога WS).
 const handleVoiceChatApiRequest = createVoiceChatHttpRequestHandler({
   service: voiceChatService,
+  // Kill switch за експерименталния аудио режим — live от admin_settings при всеки токен.
+  isWebAudioMixEnabled: () => adminSettingsStore.getSettings().voiceWebAudioMixEnabled,
   getSessionProfileId: (req) => authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))?.profile?.profileId ?? null,
   isFullAdminProfile: (profileId) => authStore.getAccountRoleForProfile(profileId) === 'admin',
   isAllowedOrigin: (req) => isAllowedVisitorRequestOrigin(req),

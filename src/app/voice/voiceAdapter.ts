@@ -18,6 +18,14 @@
 //     ротация) — capture-ът се предава на контролера, който го публикува в
 //     новата стая или го освобождава.
 
+import type { VoiceIncomingAudioMode, VoiceMediaContextReport } from './voiceWebAudioOutput'
+
+/** Решения на контролера за конкретната стая (по подразбиране — сегашното поведение). */
+export type VoicePrepareOptions = {
+  /** Входящото аудио: 'element' (по подразбиране) или експерименталният Web Audio режим. */
+  incomingAudioMode?: VoiceIncomingAudioMode
+}
+
 // 'busy' — устройството е заето/недостъпно (NotReadableError); за потребителя
 // същото съобщение като 'unavailable', отделно само в диагностиката.
 // 'interrupted' — публикуването е прекъснато от reconnect на LiveKit SDK;
@@ -139,6 +147,8 @@ export type VoiceMediaDiagnosticReport =
   | { event: 'media_output'; state: VoiceMediaOutputState }
   | { event: 'media_recovery'; target: 'output'; step: VoiceMediaRecoveryStep; result: VoiceMediaRecoveryResult; trigger: VoiceMediaTrigger }
   | { event: 'mic_recovery'; mode: VoiceMicRecoveryMode; outcome: VoiceMicRecoveryOutcome }
+  /** W1 (експериментално): само при входящо аудио през Web Audio (виж voiceWebAudioOutput.ts). */
+  | VoiceMediaContextReport
 
 /**
  * Запазен (непубликуван) микрофонен capture при контролирана ротация — за
@@ -298,7 +308,7 @@ export type VoiceAdapter = {
    * свързване. Най-много една стая на адаптер — предишната трябва да е
    * изключена.
    */
-  prepare: (events: VoiceAdapterEvents, isProfileLocallyMuted: (identity: string) => boolean) => {
+  prepare: (events: VoiceAdapterEvents, isProfileLocallyMuted: (identity: string) => boolean, options?: VoicePrepareOptions) => {
     connect: (url: string, token: string) => Promise<VoiceConnectedRoom>
     /** Отказ преди/по време на connect (идемпотентно). */
     abort: () => Promise<void>

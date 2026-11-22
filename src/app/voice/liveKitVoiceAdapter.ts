@@ -53,6 +53,7 @@ import {
   VoiceMicrophoneError,
   type VoiceAdapter,
   type VoiceAdapterEvents,
+  type VoicePrepareOptions,
   type VoiceConnectedRoom,
   type VoiceDisconnectCause,
   type VoiceIncomingAudioRestoreError,
@@ -72,6 +73,7 @@ import {
 import { classifyPublishError } from './voicePublishErrors'
 import { isMicrophonePermissionGranted } from './voiceIntentStore'
 import type { VoiceAudioSink } from './voiceAudioSink'
+import { createVoiceWebAudioOutput, type VoiceWebAudioOutput } from './voiceWebAudioOutput'
 import { summarizeTransportStats } from './voiceTransportStats'
 import {
   VOICE_MEDIA_SAMPLE_INTERVAL_MS,
@@ -267,9 +269,26 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       if (capture === undefined) throw new VoiceMicrophoneError('not_found')
       return retainCapture(capture)
     },
-    prepare(events: VoiceAdapterEvents, isIdentityLocallyMuted: (identity: string) => boolean) {
+    prepare(events: VoiceAdapterEvents, isIdentityLocallyMuted: (identity: string) => boolean, prepareOptions?: VoicePrepareOptions) {
       if (activeRoom !== null) throw new Error('voice_room_already_active')
-      const room = new Room({
+      // W1 (ЕКСПЕРИМЕНТАЛНО): входящото аудио през НАШ AudioContext (LiveKit
+      // webAudioMix). Решава контролерът за всяка стая (kill switch, профил,
+      // платформа — voiceExperimentalAudioConfig.ts); по подразбиране
+      // елементите. Без AudioContext -> елементите (и отчет 'unsupported').
+      const wantWebAudio = prepareOptions?.incomingAudioMode === 'webaudio'
+      const webAudio: VoiceWebAudioOutput | null = wantWebAudio
+        ? createVoiceWebAudioOutput({
+          AudioContextClass: typeof window !== 'undefined' ? window.AudioContext : undefined,
+          report: (report) => reportMedia(report),
+          onBlockedChange: () => events.onPlaybackStatusChanged(canPlayback()),
+          isRoomConnected: (): boolean => !disposed && !clientDisconnect && room.state === ConnectionState.Connected,
+          incomingRestore: () => incomingRestore,
+          startAudio: (): Promise<void> => room.startAudio(),
+          isPageVisible: () => document.visibilityState === 'visible',
+        })
+        : null
+      const webAudioUnsupported = wantWebAudio && webAudio === null
+      const room: Room = new Room({
         adaptiveStream: false,
         dynacast: false,
         // false: LiveKit не спира сам локалния capture (вкл. при ROOM_DELETED) —
@@ -279,6 +298,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         disconnectOnPageLeave: true,
         audioCaptureDefaults: { ...AUDIO_CAPTURE },
         publishDefaults: { audioPreset: AudioPresets.speech, dtx: true, red: true, stopMicTrackOnMute: true },
+        // W1: СЪЩИЯТ обект за целия живот на стаята (смяната на затворен контекст разчита на това).
+        ...(webAudio !== null ? { webAudioMix: webAudio.settings } : {}),
       })
       activeRoom = room
       let clientDisconnect = false
@@ -457,7 +478,7 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       let mediaTornDown = false
       const monotonic = (): number => performance.now()
       const pageVisible = (): boolean => document.visibilityState === 'visible'
-      const canPlayback = (): boolean => room.canPlaybackAudio && !outputBlocked
+      const canPlayback = (): boolean => room.canPlaybackAudio && !outputBlocked && webAudio?.blocked() !== true
 
       function reportMedia(event: VoiceMediaDiagnosticReport): void {
         try { events.onMediaDiagnostic?.(event) } catch { /* диагностиката никога не влияе на гласа */ }
@@ -1241,6 +1262,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           abortRecovery()
           teardownMedia()
           releaseAllAudio()
+          // W1: умишлено затваряне на нашия контекст — без нов контекст след това.
+          webAudio?.dispose()
           if (activeRoom === room) activeRoom = null
           const cause = mapDisconnectReason(reason, clientDisconnect)
           const detail = describeDisconnectReason(reason, clientDisconnect)
@@ -1285,6 +1308,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         .on(RoomEvent.Reconnected, () => {
           sdkReconnectSignalled = false
           events.onReconnected()
+          // W1: отложена смяна на контекст, затворен по време на reconnect.
+          webAudio?.onConnected(false)
           // Официалният пълен reconnect публикува същия track наново; ако не е
           // успял — capture-ът не остава активен без публикация.
           if (micCapture !== null && micTrack()?.mediaStreamTrack !== micCapture) loseMicrophone('republish_failed')
@@ -1352,6 +1377,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           teardownMedia()
           await stopLocalMicrophone()
           releaseAllAudio()
+          // W1: умишлено затваряне (вкл. abort на неосъществена стая) — без нов контекст.
+          webAudio?.dispose()
           await room.disconnect(true).catch(() => {})
           disposed = true
           if (activeRoom === room) activeRoom = null
@@ -1427,6 +1454,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
               if (broken) attachAudio(track, participant)
             }
           }
+          // W1: жест — затворен контекст -> смяна, спрян -> resume (една операция наведнъж).
+          await webAudio?.gesture()
           // Жест (или след собствен capture): SDK-то пуска всички прикачени елементи.
           await room.startAudio()
           let allPlaying = true
@@ -1457,7 +1486,9 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
         },
         confirmCaptureStall: () => confirmCaptureStall(),
         recoverMicrophone: (options) => recoverMicrophone(options.explicit),
-        restoreIncomingAudio: () => restoreIncomingAudio(),
+        // W1: H4 (непроменено) започва чак след текущото възстановяване на контекста;
+        // обратното (възстановяването изчаква H4) е във voiceWebAudioOutput.
+        restoreIncomingAudio: () => (webAudio === null ? restoreIncomingAudio() : webAudio.idle().then(() => restoreIncomingAudio())),
         debugMedia: () => ({
           ...media,
           micRecoveryRunning: recovery === null ? 0 : 1,
@@ -1478,6 +1509,8 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
           outputMaxConcurrent: outputTask.stats().maxConcurrent,
           outputPending: outputTask.pending() ? 1 : 0,
           roomState: room.state === ConnectionState.Connected ? 1 : 0,
+          // W1: режим (0 елементи, 1 Web Audio) и състояние/възстановяване на контекста.
+          ...(webAudio?.debug() ?? { audioMode: 0 }),
         }),
         async getTransportInfo() {
           // Отдалечено аудио (subscriber връзката) или собственият микрофон (publisher).
@@ -1503,6 +1536,9 @@ export function createLiveKitVoiceAdapter(sink: VoiceAudioSink): VoiceAdapter {
       return {
         async connect(url, token) {
           await room.connect(url, token, { autoSubscribe: true })
+          // W1: еднократни отчети за режима (само при поискан Web Audio).
+          if (webAudioUnsupported) reportMedia({ event: 'media_context', state: 'unsupported', action: 'start', result: 'failed' })
+          webAudio?.onConnected(true)
           return connected
         },
         async abort() {
