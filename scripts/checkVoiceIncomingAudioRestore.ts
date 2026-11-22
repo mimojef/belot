@@ -1,12 +1,11 @@
 /**
- * checkVoiceIncomingAudioRestore.ts — Етап H4 (ЕКСПЕРИМЕНТАЛНО): бутон
- * „Възстанови звука“ (пресъздаване на входящите audio елементи) — контролер,
- * allowlist по profile_id, интерфейс и сървърната диагностика (без промени по
- * сървъра). Реалният адаптер с LiveKit: scripts/checkVoiceIncomingAudioRestoreE2E.ts.
+ * checkVoiceIncomingAudioRestore.ts — Етап H4: бутон „Възстанови звука“
+ * (пресъздаване на входящите audio елементи) — контролер, достъп за всеки
+ * участник, интерфейс и сървърната диагностика (без промени по сървъра). Реалният адаптер с LiveKit: scripts/checkVoiceIncomingAudioRestoreE2E.ts.
  *
- *   [A1] allowlist: точно Divaka655 и DILEIDI, само по profile_id (не по nickname)
- *   [A2] неразрешен профил: без бутон и без действие, дори свързан
- *   [A3] разрешен: бутонът — само при свързан глас (чакалня и игра); не преди
+ *   [A1] без списък по profile_id: модулът с разрешени профили е премахнат
+ *   [A2] всеки профил (произволен, бивши разрешени) вижда бутона при свързан глас
+ *   [A3] бутонът — само при свързан глас (чакалня и игра); не преди
  *        включване, не при свързване, не след напускане
  *   [A4] натискане: едно извикване на адаптера; микрофонът, getUserMedia,
  *        стаите, токените и присъствието не се пипат; локалното заглушаване остава
@@ -23,7 +22,7 @@
  */
 
 import type { VoiceSnapshot } from '../src/app/voice/createVoiceController'
-import { VOICE_INCOMING_AUDIO_RESTORE_PROFILE_IDS, isVoiceIncomingAudioRestoreAllowed } from '../src/app/voice/voiceIncomingAudioRestoreConfig'
+import { existsSync } from 'node:fs'
 import { renderVoicePanel } from '../src/app/voice/ui/renderVoicePanel'
 import { SEATS, createHarness, flush, joinWithMic, rotate, snap, type Harness } from './fixtures/voiceControllerFakeHarness'
 import { parseVoiceClientReport } from '../server/src/voice/voiceClientDiagnostics'
@@ -69,40 +68,35 @@ async function joinListener(h: Harness, screen: 'waiting' | 'game' = 'waiting'):
 
 console.log('\ncheckVoiceIncomingAudioRestore\n')
 
-await check('[A1] allowlist: точно Divaka655 и DILEIDI, само по profile_id (не по nickname); празно/друго — не', () => {
-  assert(VOICE_INCOMING_AUDIO_RESTORE_PROFILE_IDS.length === 2 && [...VOICE_INCOMING_AUDIO_RESTORE_PROFILE_IDS].sort().join(',') === [DIVAKA, DILEIDI].sort().join(','), 'точно Divaka655 и DILEIDI')
-  for (const id of [DIVAKA, DILEIDI]) {
-    assert(isVoiceIncomingAudioRestoreAllowed(id), `profile_id ${id}`)
-    assert(isVoiceIncomingAudioRestoreAllowed(id.toUpperCase()), 'UUID без значение за регистъра')
-  }
-  for (const value of ['Divaka655', 'divaka655', 'DILEIDI', 'dileidi', '', null, undefined, `${DIVAKA} `, DIVAKA.slice(0, -1), '29925128-167c-408b-9a33-620d2d8f9a96', DILEIDI.slice(1), '90e3e375-1d21-4ce2-9ff5-e341bd91eea5']) {
-    assert(!isVoiceIncomingAudioRestoreAllowed(value as string | null | undefined), `не: ${String(value)}`)
-  }
+await check('[A1] без списък по profile_id: модулът с разрешени профили е премахнат', () => {
+  assert(!existsSync('src/app/voice/voiceIncomingAudioRestoreConfig.ts'), 'voiceIncomingAudioRestoreConfig.ts не съществува')
 })
 
-await check('[A2] неразрешен профил: без бутон и без действие, дори със свързан глас', async () => {
-  const h = createHarness() // реалният списък; профилът на теста е 'self'
+await check('[A2] всеки профил вижда бутона и може да го ползва (произволен профил с микрофон)', async () => {
+  const h = createHarness() // профилът на теста е 'self' — никога не е бил в списък
   await joinWithMic(h, h.ctx('game'))
   assertEqual(snap(h).status, 'connected_speaking', 'свързан')
-  assertEqual(restoreState(h).available, false, 'без бутон')
-  h.voice.restoreIncomingAudio()
-  await flush()
-  assertEqual(h.fake.state.last().restores, 0, 'адаптерът не е извикан')
-  assertEqual(counter(h, 'audioRestoreStarted'), 0, 'не е започнало')
-})
-
-await check('[A2b] реалният списък: профилът на Divaka655 (по profile_id) вижда бутона', async () => {
-  const h = createHarness({ selfProfileId: DIVAKA })
-  h.voice.setContext(h.ctx('waiting', [{ profileId: DIVAKA, isBot: false }, ...SEATS.slice(1)]))
-  await flush()
-  h.voice.joinAsListener()
-  await flush(30)
-  assertEqual(snap(h).status, 'connected_listening', 'свързан')
   assertEqual(restoreState(h).available, true, 'бутон')
+  h.voice.restoreIncomingAudio()
+  await flush(20)
+  assertEqual(h.fake.state.last().restores, 1, 'адаптерът е извикан')
+  assertEqual(counter(h, 'audioRestoreStarted'), 1, 'започнало')
 })
 
-await check('[A3] разрешен: бутонът само при свързан глас — чакалня и игра; не преди/при свързване, не след напускане', async () => {
-  const h = createHarness({ restoreAllowed: ['self'] })
+await check('[A2b] бившите разрешени и произволен UUID — еднакво (слушатели в чакалнята)', async () => {
+  for (const id of [DIVAKA, DILEIDI, '0f0e0d0c-0b0a-4908-8706-050403020100']) {
+    const h = createHarness({ selfProfileId: id })
+    h.voice.setContext(h.ctx('waiting', [{ profileId: id, isBot: false }, ...SEATS.slice(1)]))
+    await flush()
+    h.voice.joinAsListener()
+    await flush(30)
+    assertEqual(snap(h).status, 'connected_listening', `свързан ${id}`)
+    assertEqual(restoreState(h).available, true, `бутон ${id}`)
+  }
+})
+
+await check('[A3] бутонът само при свързан глас — чакалня и игра; не преди/при свързване, не след напускане', async () => {
+  const h = createHarness()
   h.voice.setContext(h.ctx('waiting'))
   await flush()
   assertEqual(restoreState(h).available, false, 'преди включване')
@@ -127,7 +121,7 @@ await check('[A3] разрешен: бутонът само при свърза�
 })
 
 await check('[A4] натискане: едно извикване; микрофон, getUserMedia, стаи, токени, присъствие и заглушаване — непокътнати', async () => {
-  const h = createHarness({ restoreAllowed: ['self'] })
+  const h = createHarness()
   await joinWithMic(h, h.ctx('game'))
   h.voice.muteRemoteParticipant('alice')
   await flush()
@@ -160,7 +154,7 @@ await check('[A4] натискане: едно извикване; микроф�
 })
 
 await check('[A5] многократно натискане: едно възстановяване наведнъж; след края — отново достъпно', async () => {
-  const h = createHarness({ restoreAllowed: ['self'] })
+  const h = createHarness()
   await joinListener(h)
   const release = gate(h)
   for (let i = 0; i < 4; i += 1) h.voice.restoreIncomingAudio()
@@ -178,7 +172,7 @@ await check('[A5] многократно натискане: едно възст
 })
 
 await check('[A6] грешка от адаптера: резултат „failed“, без висящо „в ход“', async () => {
-  const h = createHarness({ restoreAllowed: ['self'] })
+  const h = createHarness()
   await joinListener(h)
   h.fake.state.restoreThrows = true
   h.voice.restoreIncomingAudio()
@@ -190,7 +184,7 @@ await check('[A6] грешка от адаптера: резултат „failed
 })
 
 await check('[A7] ротация по време на възстановяване: резултатът не се пренася в новата стая; без висящо „в ход“', async () => {
-  const h = createHarness({ restoreAllowed: ['self'] })
+  const h = createHarness()
   await joinListener(h)
   const release = gate(h)
   h.voice.restoreIncomingAudio()
@@ -207,7 +201,7 @@ await check('[A7] ротация по време на възстановяван
 })
 
 await check('[A8] напускане по време на възстановяване: без грешка и без нова стая', async () => {
-  const h = createHarness({ restoreAllowed: ['self'] })
+  const h = createHarness()
   await joinListener(h)
   const release = gate(h)
   h.voice.restoreIncomingAudio()
@@ -223,7 +217,7 @@ await check('[A8] напускане по време на възстановяв
 })
 
 await check('[A9] интерфейс: бутон само при available; „Възстановяване…“ (заключен); технически резултат без твърдение за чуване', async () => {
-  const h = createHarness({ restoreAllowed: ['self'] })
+  const h = createHarness()
   await joinListener(h)
   const render = (snapshot: VoiceSnapshot) => renderVoicePanel({ snapshot, seats: [], theme: 'dark', joinOffer: 'speak', canOpenShop: false })
   const base = snap(h)

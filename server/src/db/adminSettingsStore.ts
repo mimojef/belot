@@ -83,16 +83,6 @@ export type AdminSettingsSnapshot = {
    */
   physicalShuffleMode: ServerPhysicalShuffleMode
   /**
-   * Гласов чат — централен kill switch за експерименталния аудио режим
-   * (LiveKit webAudioMix, src/app/voice/voiceWebAudioOutput.ts). SERVER-
-   * AUTHORITATIVE, четено live при всяка заявка за гласов токен (без рестарт,
-   * без кеш) и подавано на клиента в отговора на токена. false (default,
-   * липсващ ред или невалидна стойност) -> стария механизъм за ВСИЧКИ
-   * (абсолютен приоритет пред профилния и локалния флаг на клиента).
-   * Влиза в сила при следващото включване в гласовия чат.
-   */
-  voiceWebAudioMixEnabled: boolean
-  /**
    * "Белот — изчакване на случайна маса" (Admin -> Настройки) —
    * SERVER-AUTHORITATIVE, цели секунди 20..600, default 180. Чете се САМО при
    * създаване на нова случайна маса (join_matchmaking в index.ts) — вече
@@ -174,9 +164,6 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // Липсващ ред (не е нужна seed migration) или невалидна запазена стойност
   // → RANDOM_INSERT („Случайно вмъкване“ е методът по подразбиране).
   physicalShuffleMode: SERVER_PHYSICAL_SHUFFLE_DEFAULT_MODE,
-  // Липсващ ред (не е нужна seed migration) или стойност различна от '1' →
-  // изключено (стария аудио механизъм). Никога не се включва от deploy.
-  voiceWebAudioMixEnabled: false,
   // Липсващ ред (не е нужна seed migration) → 180 сек. Трябва да остане
   // РАВЕН на MATCHMAKING_WAIT_MS (matchmaking/matchmakingTypes.ts).
   belotRandomTableWaitSeconds: 180,
@@ -194,7 +181,6 @@ const SETTING_KEYS = {
   registrationVerificationMode: 'registration_verification_mode',
   antiBadLuckThreshold: 'anti_bad_luck_threshold',
   physicalShuffleMode: 'physical_shuffle_mode',
-  voiceWebAudioMixEnabled: 'voice_webaudio_mix_enabled',
   belotRandomTableWaitSeconds: 'belot_random_table_wait_seconds',
 } as const
 
@@ -323,8 +309,7 @@ export async function createAdminSettingsStore(
       'registration_verification_mode',
       'anti_bad_luck_threshold',
       'physical_shuffle_mode',
-      'belot_random_table_wait_seconds',
-      'voice_webaudio_mix_enabled'
+      'belot_random_table_wait_seconds'
     );
   `)
 
@@ -400,7 +385,6 @@ export async function createAdminSettingsStore(
       belotRandomTableWaitSeconds: parseStoredBelotRandomTableWaitSeconds(
         values.get(SETTING_KEYS.belotRandomTableWaitSeconds),
       ),
-      voiceWebAudioMixEnabled: values.get(SETTING_KEYS.voiceWebAudioMixEnabled) === '1',
     }
   }
 
@@ -461,12 +445,6 @@ export async function createAdminSettingsStore(
       input.physicalShuffleMode === undefined
         ? undefined
         : normalizePhysicalShuffleMode(input.physicalShuffleMode)
-    const nextVoiceWebAudioMixEnabled =
-      input.voiceWebAudioMixEnabled === undefined
-        ? undefined
-        : typeof input.voiceWebAudioMixEnabled === 'boolean'
-          ? input.voiceWebAudioMixEnabled
-          : null
     const nextBelotRandomTableWaitSeconds =
       input.belotRandomTableWaitSeconds === undefined
         ? undefined
@@ -553,13 +531,6 @@ export async function createAdminSettingsStore(
       }
     }
 
-    if (input.voiceWebAudioMixEnabled !== undefined && nextVoiceWebAudioMixEnabled === null) {
-      return {
-        ok: false,
-        message: 'Експерименталният аудио режим трябва да е true или false.',
-      }
-    }
-
     if (input.belotRandomTableWaitSeconds !== undefined && nextBelotRandomTableWaitSeconds === null) {
       return {
         ok: false,
@@ -633,10 +604,6 @@ export async function createAdminSettingsStore(
 
       if (nextBelotRandomTableWaitSeconds !== undefined) {
         upsertSettingStatement.run(SETTING_KEYS.belotRandomTableWaitSeconds, String(nextBelotRandomTableWaitSeconds))
-      }
-
-      if (nextVoiceWebAudioMixEnabled !== undefined && nextVoiceWebAudioMixEnabled !== null) {
-        upsertSettingStatement.run(SETTING_KEYS.voiceWebAudioMixEnabled, nextVoiceWebAudioMixEnabled ? '1' : '0')
       }
 
       database.exec('COMMIT;')

@@ -225,7 +225,7 @@ const INCOMING_AUDIO_RESTORE_TEXT: Record<string, string> = {
   aborted: 'Гласовата връзка се смени. Опитайте пак.',
 }
 
-/** Етап H4 (експериментално): „Възстанови звука“ — само за разрешени профили, при свързан глас. */
+/** Етап H4: „Възстанови звука“ — за всеки участник при свързан глас. */
 function renderIncomingAudioRestore(snapshot: VoiceSnapshot): string {
   const restore = snapshot.incomingAudioRestore
   if (restore === undefined || !restore.available) return ''
@@ -235,25 +235,6 @@ function renderIncomingAudioRestore(snapshot: VoiceSnapshot): string {
   const last = restore.restoring ? null : restore.last
   const note = last === null ? '' : `<p class="pvp-note" role="status" data-voice-audio-restore-result="${escapeHtml(last.outcome)}">${escapeHtml(INCOMING_AUDIO_RESTORE_TEXT[last.outcome] ?? '')}</p>`
   return `${action}${note}`
-}
-
-/**
- * Експериментален аудио режим — само за изброените профили в Android PWA
- * (voiceExperimentalAudioConfig.ts). Изборът се пази локално и важи при
- * следващото включване в гласовия чат (текущата стая не се пипа).
- */
-function renderExperimentalAudio(snapshot: VoiceSnapshot): string {
-  const view = snapshot.experimentalAudio
-  if (view === undefined || !view.available) return ''
-  const on = view.enabled
-  const toggle = button(
-    `data-voice-action="${on ? 'experimental-audio-off' : 'experimental-audio-on'}" role="switch" aria-checked="${on}" data-voice-experimental-audio="${on ? 'on' : 'off'}"`,
-    `Експериментален аудио режим: ${on ? 'включен' : 'изключен'}`,
-    'secondary',
-    voiceIcon.volume(18),
-  )
-  const current = view.active === null ? '' : ` Сега: ${view.active === 'webaudio' ? 'експерименталният' : 'стандартният'} механизъм.`
-  return `<div class="pvp-actions" data-voice-experimental-audio-block="1">${toggle}<p class="pvp-note" data-voice-experimental-audio-note="1">Промяната важи при следващото включване в гласовия чат.${escapeHtml(current)}</p></div>`
 }
 
 function renderActions(options: VoicePanelOptions): string {
@@ -306,7 +287,6 @@ export function renderVoicePanel(options: VoicePanelOptions): string {
       ${renderNotices(options)}
       <ul class="pvp-list">${renderRows(options)}</ul>
       <div class="pvp-actions">${renderActions(options)}</div>
-      ${renderExperimentalAudio(options.snapshot)}
       ${idleNote}
     </section>
   `

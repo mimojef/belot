@@ -525,8 +525,6 @@ export type AdminSettingsSnapshot = {
   physicalShuffleMode: 'RANDOM_INSERT' | 'ALTERNATING_ENDS'
   /** "Белот — изчакване на случайна маса" — цели секунди 20..600, default 180. SERVER-AUTHORITATIVE (валидация в server/src/db/adminSettingsStore.ts); важи само за НОВИ случайни маси — чакащите пазят своя таймер. */
   belotRandomTableWaitSeconds: number
-  /** Гласов чат — kill switch за експерименталния аудио режим (webAudioMix). false (default) = стария механизъм за всички; true = разрешен само за профилите в изпитването (src/app/voice/voiceExperimentalAudioConfig.ts). SERVER-AUTHORITATIVE, четено при всеки гласов токен — без deploy и restart; важи при следващото включване в гласовия чат. */
-  voiceWebAudioMixEnabled: boolean
 }
 
 export type AdminPaymentPeriodStats = {

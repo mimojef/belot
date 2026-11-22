@@ -58,9 +58,7 @@ import {
   type VoiceRetainedMicrophone,
   type VoiceSessionEndReason,
 } from './voiceAdapter'
-import type { VoiceIncomingAudioMode } from './voiceWebAudioOutput'
 import { clearVoiceIntent, markVoiceIntentLeaving, saveVoiceIntent } from './voiceIntentStore'
-import { isVoiceIncomingAudioRestoreAllowed } from './voiceIncomingAudioRestoreConfig'
 
 export type { VoiceMicHealth } from './voiceAdapter'
 
@@ -74,25 +72,13 @@ export type VoiceMicRecoveryState = 'none' | 'recovering' | 'manual' | 'failed'
 
 /**
  * Етап H4 (ЕКСПЕРИМЕНТАЛНО): „Възстанови звука“ — пресъздаване на входящите
- * audio елементи, само ръчно и само за изброени профили (по profile_id).
- *   available — бутонът се показва (профилът е разрешен и гласът е свързан);
+ * audio елементи, само ръчно; достъпно за всеки участник в гласовия чат
+ * (без ограничение по профил, платформа или VIP статус).
+ *   available — бутонът се показва (гласът е свързан на маса);
  *   restoring — тече (повторно натискане се игнорира);
  *   last — техническият резултат от последния опит в ТЕКУЩАТА стая (успешен
  *          play() не доказва, че звукът се чува).
  */
-/**
- * Ограничено изпитване на експерименталния аудио режим (Web Audio): настройката
- * в панела само за изброените профили в Android PWA (voiceExperimentalAudioConfig.ts).
- */
-export type VoiceExperimentalAudioView = {
-  /** Настройката се показва (изброен профил + Android PWA). */
-  available: boolean
-  /** Изборът на профила (по подразбиране включен); важи при следващото включване. */
-  enabled: boolean
-  /** Режимът на ТЕКУЩАТА стая; null — няма стая. */
-  active: VoiceIncomingAudioMode | null
-}
-
 export type VoiceIncomingAudioRestoreView = {
   available: boolean
   restoring: boolean
@@ -204,8 +190,6 @@ export type VoiceSnapshot = {
   microphoneRecovery: VoiceMicRecoveryState
   /** Етап H4 (експериментално): „Възстанови звука“ на входящия глас. */
   incomingAudioRestore: VoiceIncomingAudioRestoreView
-  /** Експериментален аудио режим (само изброени профили в Android PWA). */
-  experimentalAudio: VoiceExperimentalAudioView
   playbackBlocked: boolean
   uiError: VoiceUiError | null
   /** „Възстанови гласовия чат“ — гласът е бил спрян изрично (лоби/магазин), без автоматично връщане. */
@@ -244,10 +228,8 @@ export type VoiceController = {
   /** Етап H3: „Възстанови микрофона“ (жест) — нов capture в същата публикация. */
   recoverMicrophone: () => void
   unlockAudio: () => void
-  /** Етап H4 (жест, само разрешени профили): пресъздава входящите audio елементи. */
+  /** Етап H4 (жест, всеки участник): пресъздава входящите audio елементи. */
   restoreIncomingAudio: () => void
-  /** „Експериментален аудио режим“ (само ако е наличен); важи при следващото включване. */
-  setExperimentalAudioEnabled: (enabled: boolean) => void
   retryConnection: () => void
   muteRemoteParticipant: (profileId: string) => void
   unmuteRemoteParticipant: (profileId: string) => void
@@ -279,19 +261,6 @@ export type VoiceControllerDeps = {
    * Липсва/false -> само бутон „Възстанови микрофона“ (production по подразбиране).
    */
   micAutoRecovery?: () => boolean
-  /** Етап H4: кой профил вижда „Възстанови звука“ (по profile_id); по подразбиране voiceIncomingAudioRestoreConfig. */
-  incomingAudioRestoreAllowed?: (profileId: string) => boolean
-  /**
-   * Експериментален аудио режим (voiceExperimentalAudioConfig.ts). Липсва ->
-   * винаги 'element' и без настройка в панела. serverAllowed е kill switch-ът от
-   * отговора на последния гласов токен (липсващ/невалиден -> false).
-   */
-  experimentalAudio?: {
-    available: (profileId: string) => boolean
-    enabled: () => boolean
-    setEnabled: (enabled: boolean) => void
-    modeFor: (profileId: string, serverAllowed: boolean) => VoiceIncomingAudioMode
-  }
   createClientInstanceId?: () => string
   timers?: VoiceTimers
   /** Часовник за продължителността на getUserMedia (диагностика); по подразбиране Date.now. */
@@ -347,8 +316,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 type Connector = { connect: (url: string, token: string) => Promise<VoiceConnectedRoom>; abort: () => Promise<void> }
-/** Подготвена (още несвързана) стая и режимът на входящото аудио, с който е създадена. */
-type PreparedSlot = { owner: object; connector: Connector; mode: VoiceIncomingAudioMode }
 type MicRequest = { source: VoiceMicRequestSource; startedAt: number; interruption: VoiceMicInterruption; gum: VoiceMicGumBucket }
 
 export function createVoiceController(deps: VoiceControllerDeps): VoiceController {
@@ -406,7 +373,7 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   /** Идентичност на текущата стая за събитията от адаптера (остарели се игнорират). */
   let roomOwner: object | null = null
   /** Подготвена в потребителския жест (autoplay) стая — ползва се от двигателя. */
-  let preparedSlot: PreparedSlot | null = null
+  let preparedSlot: { owner: object; connector: Connector } | null = null
   let closing: Promise<void> = Promise.resolve()
   /** Затваряния в ход — докато има такива, нова стая не се подготвя. */
   let closingJobs = 0
@@ -448,31 +415,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
   let micRequestSource: VoiceMicRequestSource = 'initial'
 
   // ── Етап H4: ръчно пресъздаване на входящите audio елементи ──
-  const incomingAudioRestoreAllowed = deps.incomingAudioRestoreAllowed ?? isVoiceIncomingAudioRestoreAllowed
   /** Стаята, в която тече възстановяването (null — няма). */
   let audioRestoreRoom: VoiceConnectedRoom | null = null
   /** Последният резултат — показва се само докато стаята е същата. */
   let audioRestoreLast: { room: VoiceConnectedRoom; result: VoiceIncomingAudioRestoreResult } | null = null
-
-  // ── Експериментален аудио режим (ограничено изпитване; voiceExperimentalAudioConfig.ts) ──
-  /** Kill switch от отговора на ПОСЛЕДНИЯ гласов токен; до първия токен — изключен. */
-  let serverWebAudioMix = false
-  /** Режимът, с който е създадена всяка свързана стая (за панела/диагностиката). */
-  const roomAudioModes = new WeakMap<VoiceConnectedRoom, VoiceIncomingAudioMode>()
-  const experimentalAudioAvailable = (profileId: string): boolean => {
-    try {
-      return deps.experimentalAudio?.available(profileId) === true
-    } catch {
-      return false
-    }
-  }
-  const experimentalAudioEnabled = (): boolean => {
-    try {
-      return deps.experimentalAudio?.enabled() === true
-    } catch {
-      return false
-    }
-  }
 
   // ── присъствие ──
   let renewMs = defaultRenewMs
@@ -1095,26 +1041,15 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     }
   }
 
-  /** Режимът на входящото аудио за следващата стая (kill switch от последния токен). */
-  function desiredAudioMode(): VoiceIncomingAudioMode {
-    const table = tableContext()
-    if (table === null || deps.experimentalAudio === undefined) return 'element'
-    try {
-      return deps.experimentalAudio.modeFor(table.selfProfileId, serverWebAudioMix) === 'webaudio' ? 'webaudio' : 'element'
-    } catch {
-      return 'element'
-    }
-  }
-
-  function prepareRoom(loaded: VoiceAdapter, mode: VoiceIncomingAudioMode = desiredAudioMode()): PreparedSlot | null {
+  function prepareRoom(loaded: VoiceAdapter): { owner: object; connector: Connector } | null {
     const owner = {}
     try {
       const connector = loaded.prepare(adapterEvents(owner), (identity) => {
         const profileId = profileIdFromVoiceIdentity(identity)
         return profileId !== null && locallyMuted.has(profileId)
-      }, { incomingAudioMode: mode })
+      })
       counters.roomsCreated! += 1
-      return { owner, connector, mode }
+      return { owner, connector }
     } catch {
       return null
     }
@@ -1339,22 +1274,10 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       return
     }
     const token = body as unknown as VoiceTokenSuccess
-    // Kill switch (експериментален аудио режим): само изричното true; важи за ТАЗИ и следващите стаи.
-    serverWebAudioMix = (body as { webAudioMix?: unknown }).webAudioMix === true
     // Старата стая е напълно затворена преди новата (≤1 LiveKit връзка).
     await closing
     if (stale()) return
-    // Стаята, подготвена в жеста, е с режима от ПРЕДИШНИЯ токен; ако kill switch-ът
-    // или изборът са се променили — затваря се (една стая на адаптер) и се подготвя нова.
-    const mode = desiredAudioMode()
-    if (preparedSlot !== null && preparedSlot.mode !== mode) {
-      const outdated = preparedSlot
-      preparedSlot = null
-      counters.audioModeReprepared = (counters.audioModeReprepared ?? 0) + 1
-      await outdated.connector.abort().catch(() => {})
-      if (stale()) return
-    }
-    const slot = preparedSlot ?? prepareRoom(loaded, mode)
+    const slot = preparedSlot ?? prepareRoom(loaded)
     preparedSlot = null
     if (slot === null) {
       scheduleRetry(null)
@@ -1383,7 +1306,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       return
     }
     room = connected
-    roomAudioModes.set(connected, slot.mode)
     link = 'connected'
     micHealth = 'ok'
     resetMicRecovery()
@@ -1800,11 +1722,9 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
     return result
   }
 
-  /** H4: разрешен профил (profile_id от контекста) + свързана стая с поддръжка в адаптера. */
+  /** H4: всеки участник при свързан глас на маса и поддръжка в адаптера. */
   function canRestoreIncomingAudio(): boolean {
-    const table = tableContext()
-    return table !== null && room !== null && link === 'connected' && room.restoreIncomingAudio !== undefined
-      && incomingAudioRestoreAllowed(table.selfProfileId)
+    return tableContext() !== null && room !== null && link === 'connected' && room.restoreIncomingAudio !== undefined
   }
 
   function getSnapshot(): VoiceSnapshot {
@@ -1820,11 +1740,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
       microphone,
       microphoneHealth: microphone === 'live' && room !== null && link === 'connected' ? micHealth : 'ok',
       microphoneRecovery: microphone === 'live' && room !== null ? micRecovery : 'none',
-      experimentalAudio: {
-        available: table !== null && experimentalAudioAvailable(table.selfProfileId),
-        enabled: table !== null && experimentalAudioAvailable(table.selfProfileId) && experimentalAudioEnabled(),
-        active: room !== null ? (roomAudioModes.get(room) ?? 'element') : null,
-      },
       incomingAudioRestore: {
         available: canRestoreIncomingAudio(),
         restoring: audioRestoreRoom !== null,
@@ -2025,18 +1940,6 @@ export function createVoiceController(deps: VoiceControllerDeps): VoiceControlle
         },
         () => {},
       )
-    },
-    setExperimentalAudioEnabled(enabled) {
-      const table = tableContext()
-      if (disposed || table === null || deps.experimentalAudio === undefined || !experimentalAudioAvailable(table.selfProfileId)) return
-      // Само изборът — текущата стая не се пипа; важи при следващото включване.
-      try {
-        deps.experimentalAudio.setEnabled(enabled === true)
-      } catch {
-        /* изборът не можа да се запише — панелът показва действителното състояние */
-      }
-      log(`voice: experimental audio preference ${enabled === true ? 'on' : 'off'}`)
-      invalidate()
     },
     restoreIncomingAudio() {
       counters.audioRestoreRequests! += 1

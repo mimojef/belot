@@ -1,14 +1,14 @@
 /**
- * checkVoiceIncomingAudioRestoreE2E.ts — Етап H4 (ЕКСПЕРИМЕНТАЛНО): „Възстанови
- * звука“ с РЕАЛНИЯ LiveKit адаптер.
+ * checkVoiceIncomingAudioRestoreE2E.ts — Етап H4: „Възстанови звука“ с РЕАЛНИЯ
+ * LiveKit адаптер.
  *
  * PRODUCTION build (vite build + preview), реален LiveKit 1.13.11, изолиран
- * сървър, реалният интерфейс. Трима с включен микрофон на една маса: H (домакин),
- * R (разрешен профил — в build-а на теста profile_id-то на Divaka655 в
- * voiceIncomingAudioRestoreConfig.ts е заменено с това на R), O (неразрешен).
+ * сървър, реалният интерфейс. Трима с включен микрофон на една маса: H (домакин,
+ * admin, desktop), R (обикновен играч, Android), O (обикновен играч, desktop) —
+ * бутонът е достъпен за всички (без списък по profile_id).
  * R е заглушил O локално. Чуването се мери с RMS на получения звук (WebAudio).
  *
- *   [E1] бутонът е само при R; натискане (вкл. бързо многократно) -> старите
+ *   [E1] бутонът е при H, R и O; натискане (при R) (вкл. бързо многократно) -> старите
  *        елементи са откачени/премахнати, нови са закачени и пуснати, R чува H;
  *        локалното заглушаване на O остава; микрофонът на R е същият (без
  *        getUserMedia, без нов track/PeerConnection), H го чува; LiveKit: една
@@ -40,6 +40,7 @@ if (!existsSync(LIVEKIT_BIN)) {
   process.exit(0)
 }
 const DIVAKA = '29925128-167c-408b-9a33-620d2d8f9a95'
+const DILEIDI = '90e3e375-1d21-4ce2-9ff5-e341bd91eea4'
 
 const freePort = () => new Promise<number>((resolve, reject) => {
   const server = createNetServer()
@@ -86,8 +87,7 @@ async function makeProfile(tag: string, role: 'admin' | 'player'): Promise<TestP
   return profile
 }
 
-// Разрешените профили (R1, R2) трябва да съществуват преди build-а: тестовият
-// build заменя profile_id-то на Divaka655 в allowlist-а с тези на R1/R2.
+// Профилите на R (по един за всеки сценарий) — обикновени играчи.
 const allowedProfiles = [await makeProfile('h4r1', 'player'), await makeProfile('h4r2', 'player')]
 
 const backendPort = new URL(h.backendOrigin).port
@@ -100,26 +100,17 @@ await build({
     const file = id.replaceAll('\\', '/')
     if (!file.includes('/src/')) return null
     let next = code.includes(':3001') ? code.replaceAll(':3001', `:${backendPort}`) : code
-    if (file.endsWith('/src/app/voice/voiceIncomingAudioRestoreConfig.ts')) {
-      next = next.replace(`'${DIVAKA}', //`, `${allowedProfiles.map((p) => `'${p.profileId}'`).join(', ')}, //`)
-    }
     return next === code ? null : next
   } }],
 })
 process.env.NODE_ENV = previousNodeEnv
 {
-  // Контрола: тестовият allowlist е влязъл в lazy chunk-а, не в основния bundle.
+  // Контрола: в build-а няма останал списък по profile_id (бившите разрешени профили).
   const assets = await readdir(join(outDir, 'assets'))
-  let inVoiceChunk = false
-  let inMain = false
   for (const name of assets.filter((n) => n.endsWith('.js'))) {
     const code = await readFile(join(outDir, 'assets', name), 'utf8')
-    if (code.includes(allowedProfiles[0]!.profileId)) {
-      if (name.startsWith('voice')) inVoiceChunk = true
-      else inMain = true
-    }
+    if (code.includes(DIVAKA) || code.includes(DILEIDI)) throw new Error(`profile_id в build-а: ${name}`)
   }
-  if (!inVoiceChunk || inMain) throw new Error(`allowlist: voice chunk=${inVoiceChunk}, другаде=${inMain}`)
 }
 const previewServer: PreviewServer = await preview({ root: process.cwd(), logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: await freePort(), strictPort: true } })
 const appOrigin = previewServer.resolvedUrls!.local[0]!.replace(/\/$/, '')
@@ -303,12 +294,12 @@ try {
       const heardBefore = await waitHeard(r, 2)
       assert(heardBefore.elements === 2 && heardBefore.perElement.every((v) => v > HEARD_RMS), `R чува двамата преди (${JSON.stringify(heardBefore)})`)
       assert((await heardRms(host)).max > HEARD_RMS, 'H чува преди')
-      // Бутонът — само при разрешения профил.
+      // Бутонът — при всички (admin/desktop, играч/Android, играч/desktop).
       await openPanel(host)
       await openPanel(o)
       assert(await r.page.locator(`${PANEL} [data-voice-action="restore-audio"]`).count() === 1, 'R: бутон')
-      assert(await host.page.locator('[data-voice-action="restore-audio"]').count() === 0, 'H: без бутон')
-      assert(await o.page.locator('[data-voice-action="restore-audio"]').count() === 0, 'O: без бутон')
+      assert(await host.page.locator('[data-voice-action="restore-audio"]').count() >= 1, 'H: бутон')
+      assert(await o.page.locator('[data-voice-action="restore-audio"]').count() >= 1, 'O: бутон')
 
       const before = await sink(r, true)
       const oBefore = await sink(o, true)
