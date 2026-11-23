@@ -24,7 +24,8 @@
 
 import { buildSvaraPotLayers } from '../engine/svaraPots.js'
 import type { SvaraBettingAction, SvaraBettingOptions, SvaraBlindStatus } from '../engine/svaraBetting.js'
-import type { SvaraCardCode } from '../engine/svaraCards.js'
+import { parseSvaraCardCode, type SvaraCardCode } from '../engine/svaraCards.js'
+import { evaluateSvaraHand } from '../engine/svaraHandEvaluation.js'
 import {
   createSvaraMatchPlayerView,
   describeSvaraMatchOptions,
@@ -230,6 +231,8 @@ export type SvaraMatchSnapshotMessage = {
     svaraDecision: 'joined' | 'declined' | 'undecided' | null
     /** Собствените карти — само след „поглеждане“; иначе null. */
     cards: SvaraCardCode[] | null
+    /** Бройките на собствените карти (същата оценка като при сравняване) — само когато `cards` са видими. */
+    handPoints: number | null
     /** Позволените действия в наддаването (само за зрителя, само на негов ход). */
     betting: SvaraBettingOptions | null
     /** 2Б.3.7.1: само за самия победител, докато изборът чака решение. */
@@ -410,6 +413,7 @@ export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMat
         : !round.closed && state.status[viewerId] === 'active' && state.stacks[viewerId]! >= round.fee &&
           !state.lockedPots.find((p) => p.potId === round.potId)?.eligible.includes(viewerId) ? 'undecided' : null,
       cards: view.ownCards ? [...view.ownCards] : null,
+      handPoints: view.ownCards ? evaluateSvaraHand(view.ownCards.map(parseSvaraCardCode)).points : null,
       betting: options
         ? {
             canAct: options.canAct,

@@ -1464,6 +1464,8 @@ export type SvaraMatchSnapshotMessage = {
     svaraDecision: 'joined' | 'declined' | 'undecided' | null
     /** Собствените карти — само след „поглеждане“/автоматично разкриване; иначе null. */
     cards: SvaraCardCode[] | null
+    /** Бройките на собствените карти (сървърната оценка) — само когато `cards` са видими. */
+    handPoints?: number | null
     betting: SvaraBettingOptions | null
     /** Само за самия победител, докато изборът „Покажи“/„Скрий“ чака. */
     revealChoice: { canDecide: boolean } | null

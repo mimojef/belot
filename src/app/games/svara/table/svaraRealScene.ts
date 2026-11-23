@@ -58,7 +58,18 @@ const DEALER_BADGE_HTML = '<span data-svara-dealer-badge="1" title="Дилър" 
 const CHIP_COLORS: SvaraChipColor[] = ['red', 'blue', 'green']
 const MAX_STACK_CHIPS = 10
 /** Истинската маса: огледални купчинки отляво/отдясно (над аватара). */
-const REAL_LAYOUT_OPTIONS = { mirroredSideChips: true } as const
+const REAL_LAYOUT_OPTIONS = { mirroredSideChips: true, ownCardsFirstOnPortrait: true } as const
+/** Последното собствено обръщане приключва: 2 стъпки + полетът (виж svaraOwnRevealMove). */
+const OWN_REVEAL_DONE_MS = 2 * SVARA_SCENE_TIMING.revealStaggerMs + SVARA_SCENE_TIMING.revealFlightMs
+/** Показ на бройките: ~0.2 s поява, ~0.65 s задържане, ~0.3 s избледняване (≈1 s видимо). */
+const OWN_POINTS_SHOW_MS = 1350
+/** Сравняване: стъпка между ръцете при обръщането. */
+const SHOWDOWN_HAND_STAGGER_MS = 120
+/** Значките при сравняване: поява / изчезване при прибирането. */
+const COMPARE_BADGE_IN_MS = 320
+const COMPARE_BADGE_OUT_MS = 200
+/** Телефон: място под сукното за рамката и лентата с действия (до 3 реда). */
+const PHONE_ACTION_BAR_RESERVE_PX = 140
 /** Отстъп между ръба на купчинката (при максимална височина) и баджа на залога. */
 const BET_BADGE_GAP_PX = 5
 
@@ -163,6 +174,119 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   // Звукът на раздаването: през общата система (настройката „Звуци в
   // играта“; грешките при блокирано от браузъра аудио се поглъщат тихо).
   // Файлът се зарежда предварително, за да звучи точно при излитането.
+  // ── Бройките върху собствените карти след „Погледни“ ────────────────────
+  let ownPointsEl: HTMLElement | null = null
+  function removeOwnPoints(): void {
+    ownPointsEl?.getAnimations().forEach((animation) => animation.cancel())
+    ownPointsEl?.remove()
+    ownPointsEl = null
+  }
+  /** Значка с бройки (общ стил: златна рамка, тъмен полупрозрачен фон), центрирана в (x, y). */
+  function pointsBadge(points: number, x: number, y: number, fontPx: number): HTMLElement {
+    const el = document.createElement('div')
+    el.setAttribute('aria-hidden', 'true')
+    el.textContent = String(points)
+    el.style.cssText = 'position:absolute;left:0;top:0;transform:translate(-50%,-50%);pointer-events:none;z-index:5;'
+      + 'min-width:1.6em;padding:.06em .34em;border-radius:999px;text-align:center;line-height:1.1;'
+      + 'background:rgba(10,14,12,.78);border:2px solid #f5d06f;color:#ffe49a;font-weight:900;'
+      + 'text-shadow:0 2px 4px rgba(0,0,0,.8);box-shadow:0 6px 18px rgba(0,0,0,.55);opacity:0;will-change:transform,opacity;'
+    el.style.left = `${Math.round(x)}px`
+    el.style.top = `${Math.round(y)}px`
+    el.style.fontSize = `${Math.round(fontPx)}px`
+    shell.hudLayer.appendChild(el)
+    return el
+  }
+  /** Размер на значката върху голямото собствено ветрило (както след „Погледни“). */
+  function ownBadgeFontPx(): number {
+    return Math.max(22, Math.min(44, layout!.cardHeight * layout!.revealScale * 0.3))
+  }
+  /** Лек показ (появяване с мащаб → задържане → избледняване), центриран върху ветрилото. */
+  function showOwnPoints(points: number): void {
+    if (!layout || !input?.animations) return
+    removeOwnPoints()
+    // Центърът на ветрилото = средната карта (същото състояние като в обръщането).
+    const center = svaraOwnRevealCardState(layout, 1, 0)
+    const el = pointsBadge(points, center.x, center.y, ownBadgeFontPx())
+    el.dataset.svaraOwnPoints = String(points)
+    ownPointsEl = el
+    const animation = el.animate([
+      { opacity: 0, transform: 'translate(-50%,-50%) scale(.6)' },
+      { opacity: 1, transform: 'translate(-50%,-50%) scale(1.08)', offset: 0.16 },
+      { opacity: 1, transform: 'translate(-50%,-50%) scale(1)', offset: 0.26 },
+      { opacity: 1, transform: 'translate(-50%,-50%) scale(1)', offset: 0.78 },
+      { opacity: 0, transform: 'translate(-50%,-50%) scale(1.04)' },
+    ], { duration: OWN_POINTS_SHOW_MS, easing: 'ease-out', fill: 'forwards' })
+    animation.finished.then(() => { if (ownPointsEl === el) removeOwnPoints() }, () => {})
+  }
+
+  // ── Бройките при сравняване: върху всяка сравнявана ръка, до прибирането ──
+  const compareBadges = new Map<number, HTMLElement>() // по място в сцената
+  let compareRoundId: string | null = null
+  function clearCompareBadges(): void {
+    for (const el of compareBadges.values()) { el.getAnimations().forEach((a) => a.cancel()); el.remove() }
+    compareBadges.clear()
+    compareRoundId = null
+  }
+  /** Картите на мястото започват да се прибират — значката изчезва с тях. */
+  function fadeCompareBadge(sceneSeat: number, delayMs: number): void {
+    const el = compareBadges.get(sceneSeat)
+    if (!el) return
+    compareBadges.delete(sceneSeat)
+    if (!input?.animations) { el.remove(); return }
+    el.getAnimations().forEach((a) => a.cancel())
+    el.style.opacity = '1'
+    el.animate([{ opacity: 1, transform: 'translate(-50%,-50%) scale(1)' }, { opacity: 0, transform: 'translate(-50%,-50%) scale(.85)' }],
+      { duration: COMPARE_BADGE_OUT_MS, delay: delayMs, easing: 'ease-in', fill: 'forwards' })
+      .finished.then(() => el.remove(), () => el.remove())
+  }
+  /** Центърът на ветрилото (средната карта) и размерът на значката за мястото. */
+  function compareBadgeAnchor(sceneSeat: number, ownReveal: boolean): { x: number; y: number; font: number } {
+    if (sceneSeat === 0 && ownReveal) {
+      const c = svaraOwnRevealCardState(layout!, 1, 0)
+      return { x: c.x, y: c.y, font: ownBadgeFontPx() }
+    }
+    const seat = layout!.seats[sceneSeat]!
+    const c = fanState(sceneSeat, 1, 3, 0)
+    const cardH = layout!.cardHeight * c.scale
+    // Леко навътре от средата на ветрилото — далеч от аватара.
+    const shift = cardH * 0.12
+    return { x: c.x + seat.inward.x * shift, y: c.y + seat.inward.y * shift, font: Math.max(14, Math.min(36, cardH * 0.32)) }
+  }
+  /**
+   * Значки за всички сравнявани (само `comparedPlayers`, бройките са сървърните
+   * `comparisonPoints`). `appearInMs` = кога се появяват анимирано; null = веднага, без анимация.
+   */
+  function showCompareBadges(round: Extract<NonNullable<SvaraMatchSnapshotMessage['round']>, { kind: 'showdown-display' }>, appearInMs: number | null): void {
+    if (!layout) return
+    clearCompareBadges()
+    compareRoundId = round.roundId
+    const entries: Array<{ sceneSeat: number; points: number }> = []
+    for (const playerId of round.comparedPlayers) {
+      const points = round.comparisonPoints[playerId]
+      const seat = seatOfPlayer(playerId)
+      if (typeof points !== 'number' || !seat) continue
+      entries.push({ sceneSeat: sceneSeatOf(seat.seatIndex), points })
+    }
+    const render = (animate: boolean) => {
+      if (compareRoundId !== round.roundId) return
+      for (const { sceneSeat, points } of entries) {
+        const at = compareBadgeAnchor(sceneSeat, hands.get(sceneSeat)?.revealed ?? false)
+        const el = pointsBadge(points, at.x, at.y, at.font)
+        el.dataset.svaraComparePoints = String(points)
+        el.dataset.svaraCompareSeat = String(sceneSeat)
+        compareBadges.set(sceneSeat, el)
+        if (!animate) { el.style.opacity = '1'; continue }
+        el.animate([
+          { opacity: 0, transform: 'translate(-50%,-50%) scale(.6)' },
+          { opacity: 1, transform: 'translate(-50%,-50%) scale(1.08)', offset: 0.6 },
+          { opacity: 1, transform: 'translate(-50%,-50%) scale(1)' },
+        ], { duration: COMPARE_BADGE_IN_MS, easing: 'ease-out', fill: 'forwards' })
+      }
+    }
+    if (appearInMs === null || !input?.animations) render(false)
+    else later(appearInMs, () => render(true))
+  }
+
   let dealSoundPreloaded = false
   let lastDealSoundAt = -Infinity
   function playDealSound(): void {
@@ -195,7 +319,15 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     const fullscreen = document.fullscreenElement !== null && document.fullscreenElement.contains(target)
     // Място за бутоните за действие и рамката (и заглавката, ако не е цял екран).
     const available = viewportHeight - (fullscreen ? 90 : 160)
-    const wanted = width < 560 ? width * 1.35 : width * 0.6
+    if (width >= 560) return { width, height: Math.round(Math.max(240, Math.min(width * 0.6, available))) }
+    // Телефон: сукното расте (до 1.5× ширината) само докато под него остава
+    // място за лентата с действия (до 3 реда бутони) — никога по-ниско от
+    // досегашното 1.35×.
+    // Позиция в оформлението (независимо от превъртането).
+    let stageTop = 0
+    for (let el: HTMLElement | null = target; el; el = el.offsetParent as HTMLElement | null) stageTop += el.offsetTop
+    const room = viewportHeight - stageTop - PHONE_ACTION_BAR_RESERVE_PX
+    const wanted = Math.max(width * 1.35, Math.min(width * 1.5, room))
     return { width, height: Math.round(Math.max(240, Math.min(wanted, available))) }
   }
 
@@ -395,6 +527,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     const hand = hands.get(sceneSeat)
     if (!hand || !layout) return
     hands.delete(sceneSeat)
+    fadeCompareBadge(sceneSeat, delayMs)
     // Прибиращите се карти вече не принадлежат на място (маркерите се махат).
     for (const id of hand.ids) {
       const el = shell.spritesHost.querySelector<HTMLElement>(`[data-svara-sprite="${id}"]`)
@@ -477,6 +610,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     renderer.cancel()
     for (const timer of timers) window.clearTimeout(timer)
     timers.clear()
+    removeOwnPoints()
+    clearCompareBadges()
     busySeats.clear()
     const round = snapshot.round
     const betting = round && (round.kind === 'ordinary' || round.kind === 'svara') ? round : null
@@ -510,6 +645,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       setNow(settledHandStates(sceneSeat, hand))
     }
     for (const [sceneSeat, hand] of [...hands]) if (!keep.has(sceneSeat)) { remove(hand.ids); hands.delete(sceneSeat) }
+    // Сравняване: бройките върху сравняваните ръце (текущо състояние, без анимация).
+    if (round?.kind === 'showdown-display') showCompareBadges(round, null)
     // Купчинки на играчите.
     for (const seat of snapshot.seats) reconcileStack(sceneSeatOf(seat.seatIndex), stackCount(seat.stack), false)
     // Банка: по малка купчинка на всяко място с вноска; заключените — отделно.
@@ -591,6 +728,14 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
         setHandFaces(own, snapshot.you.cards.map((c) => svaraCardCodeToFaceSrc(c)))
         own.revealed = true
         play(own.ids.map((id, slot) => svaraOwnRevealMove(layout!, id, slot, 150 + slot)))
+        // Бройките върху обърнатите карти — веднъж за раздаването, след
+        // последното обръщане (не при refresh/reconnect: тогава няма събитие).
+        const roundId = betting?.roundId
+        const points = snapshot.you.handPoints ?? null
+        if (roundId && points !== null && input?.animations && !done.has(`points:${roundId}`)) {
+          done.add(`points:${roundId}`)
+          later(OWN_REVEAL_DONE_MS, () => showOwnPoints(points))
+        }
       }
     }
 
@@ -620,16 +765,22 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
         setHandFaces(hand, faces)
         if (hand.revealed) return
         hand.revealed = true
-        const delay = order * 120
+        const delay = order * SHOWDOWN_HAND_STAGGER_MS
         play(hand.ids.map((id, slot) => sceneSeat === 0
           ? svaraOwnRevealMove(layout!, id, slot, 150 + slot, delay + slot * SVARA_SCENE_TIMING.revealStaggerMs)
           : svaraFlipInPlaceMove(layout!, id, fanState(sceneSeat, slot, 3, 100 + sceneSeat * 3 + slot), slot, delay + slot * SVARA_SCENE_TIMING.revealStaggerMs)), elapsed)
       })
+      // Бройките: едновременно, след като се обърне последната сравнявана ръка.
+      const appearAt = Math.max(0, round.comparedPlayers.length - 1) * SHOWDOWN_HAND_STAGGER_MS + OWN_REVEAL_DONE_MS
+      showCompareBadges(round, appearAt > elapsed ? appearAt - elapsed : null)
       if (round.svaraTie && elapsed < SVARA_SHOWDOWN_MS - 300) {
         shell.playBanner(SVARA_SHOWDOWN_MS - 200, elapsed)
         play(pot.map((chip, idx) => svaraSvarkaHopMove(layout!, chip.id, states[chip.id]!, idx, 3)), elapsed)
       }
     }
+
+    // Сравняването вече е показано (напр. свързване по време на изплащането) — значките без анимация.
+    if (round?.kind === 'showdown-display' && done.has(`show:${round.roundId}`) && compareRoundId !== round.roundId) showCompareBadges(round, null)
 
     // Изплащане на стъпка (основна, после страничните).
     const pay = input.resultVisual.payout
@@ -795,7 +946,15 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     }
     status.style.left = `${layout.potLabel.x}px`
     status.style.width = `${Math.round(Math.min(320, layout.width * 0.5))}px`
-    status.style.top = `${layout.potLabel.y + Math.max(14, layout.chipSize * 0.45)}px`
+    // Телефон (портрет): под етикета „Банка“ са собствените карти, затова
+    // видимото „СВАРА!“ (при изключени анимации) е над купчинките на банката.
+    if (layout.isPortrait) {
+      status.style.top = `${layout.pot.y - layout.chipSize * 0.9 - 6}px`
+      status.style.transform = 'translate(-50%,-100%)'
+    } else {
+      status.style.top = `${layout.potLabel.y + Math.max(14, layout.chipSize * 0.45)}px`
+      status.style.transform = 'translate(-50%,0)'
+    }
     if (status.dataset.html !== input.statusHtml) { status.innerHTML = input.statusHtml; status.dataset.html = input.statusHtml }
   }
 
@@ -842,6 +1001,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   }
 
   function clearAll(): void {
+    removeOwnPoints()
+    clearCompareBadges()
     renderer.cancel()
     remove(renderer.spriteIds())
     states = {}
