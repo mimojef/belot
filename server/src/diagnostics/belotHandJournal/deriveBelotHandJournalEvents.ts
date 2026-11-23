@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto'
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom, type Team } from '../../core/serverTypes.js'
-import { computeServerSweepEligibility } from '../../game/computeServerSweepEligibility.js'
+import { computeServerSweepOfferEligibility } from '../../game/computeServerSweepPublicGuarantee.js'
 import { createServerDeck } from '../../game/createServerDeck.js'
 import { dealServerCardsInPackets } from '../../game/dealServerCardsInPackets.js'
 import { scoreServerDeclarations } from '../../game/declarations/scoreServerDeclarations.js'
@@ -695,11 +695,12 @@ function checkAddedPlays(params: {
 // ─── „Долу картите“ ─────────────────────────────────────────────────────────
 
 const SWEEP_SERVER_RULE = {
-  rule: 'guaranteed_sweep_universal_double_dummy_v1',
+  rule: 'guaranteed_sweep_public_information_v2',
   description:
     'Предложението се прави на победителя в току-що приключилата взятка, ако не е отказвал в това раздаване, ' +
     'има поне 2 карти и при ВСЕКИ негов ход и ВСЕКИ легален отговор на останалите трима гарантирано печели всички оставащи взятки ' +
-    '(computeServerSweepEligibility).',
+    '(computeServerSweepEligibility) — и то при ВСЯКО разпределение на неизвестните карти, съвместимо с публичната му ' +
+    'информация: собствени карти, изиграни карти, законни ходове, обявен Белот (computeServerSweepPublicGuarantee).',
   minRemainingCards: 2,
 } as const
 
@@ -894,7 +895,16 @@ export function buildBelotSweepAcceptRejectedEvents(params: {
   // току-що е направил същото търсене, затова цената е приемлива.
   const recheckEligible =
     state !== null && offer !== null && offer.seat === seat
-      ? computeServerSweepEligibility({ sweepSeat: seat, hands: state.hands, winningBid: state.bidding.winningBid })
+      ? computeServerSweepOfferEligibility({
+          sweepSeat: seat,
+          hands: state.hands,
+          winningBid: state.bidding.winningBid,
+          publicInfo: {
+            completedTricks: state.playing?.completedTricks ?? [],
+            currentTrickPlays: state.playing?.currentTrick.plays ?? [],
+            declarations: state.declarations,
+          },
+        })
       : null
   return [
     createEvent({

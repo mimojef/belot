@@ -20,7 +20,7 @@ import {
   createServerPlayingTimerState,
   getServerTimerNow,
 } from './serverTimerStateHelpers.js'
-import { computeServerSweepEligibility } from './computeServerSweepEligibility.js'
+import { computeServerSweepOfferEligibility } from './computeServerSweepPublicGuarantee.js'
 
 const TRICKS_PER_ROUND = 8
 
@@ -123,10 +123,17 @@ export function submitServerSweepDecision(
 
   // decision === 'accept' — re-validate server-authoritatively against the
   // CURRENT hands (never trust the client's earlier snapshot of eligibility).
-  const stillEligible = computeServerSweepEligibility({
+  // Същото решение като при предлагането: double-dummy И гаранция от
+  // публичната информация на заявяващия.
+  const stillEligible = computeServerSweepOfferEligibility({
     sweepSeat: seat,
     hands: state.hands,
     winningBid: state.bidding.winningBid,
+    publicInfo: {
+      completedTricks: playing.completedTricks,
+      currentTrickPlays: playing.currentTrick.plays,
+      declarations: state.declarations,
+    },
   })
 
   if (!stillEligible) {

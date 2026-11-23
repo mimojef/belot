@@ -337,6 +337,7 @@
     "check:friend-acceptance": "tsx scripts/checkFriendAcceptanceNotifications.ts",
     "check:round-capot-mission": "tsx scripts/checkRoundCapotMission.ts",
     "check:sweep-down-the-cards": "tsx scripts/checkSweepDownTheCards.ts",
+    "check:sweep-public-guarantee": "tsx scripts/checkSweepPublicGuarantee.ts",
     "check:belot-hand-journal": "tsx scripts/checkBelotHandJournal.ts",
     "check:belot-tie-carry-over": "tsx scripts/checkBelotTieCarryOverAccumulation.ts",
     "check:belot-scoring-carry-over-row": "tsx scripts/checkBelotScoringCarryOverRow.ts",

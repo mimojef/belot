@@ -193,13 +193,17 @@ function baseState(params: {
   }
 }
 
-function fillerTrick(trickIndex: number, winnerSeat: Seat): any {
+// `suit` — мастта на филър картите. Историята трябва да е ЗАКОННА спрямо
+// останалите ръце (публичната проверка извежда ограничения от нея и отказва
+// при противоречие): филър в маст, която неизвестните ръце държат по-висока,
+// би означавал незаконно ненадиграване при всичко коз.
+function fillerTrick(trickIndex: number, winnerSeat: Seat, suit: Suit = 'clubs'): any {
   return {
     trickIndex,
     leaderSeat: winnerSeat,
     winnerSeat,
     winningTeam: teamBySeat(winnerSeat),
-    plays: SEATS.map((seat) => ({ seat, card: card('clubs', '7', `-filler-${trickIndex}-${seat}`) })),
+    plays: SEATS.map((seat) => ({ seat, card: card(suit, '7', `-filler-${trickIndex}-${seat}`) })),
   }
 }
 
@@ -353,7 +357,9 @@ function buildScoringFixture(options: {
     assert(pointCards.length <= 4, `test fixture bug: prior trick ${i}'s ${t.points} points need more than 4 cards`)
     const allCards = [
       ...pointCards,
-      ...Array.from({ length: 4 - pointCards.length }, (_, j) => card('clubs', '7', `-prior-${i}-pad-${j}`)),
+      // Пълнеж ♦7 (0 т.) — маст, която останалите ръце (♣8) не държат, за да е
+      // историята законна (иначе: ход ♣7 и ♥ отговор при държана ♣8).
+      ...Array.from({ length: 4 - pointCards.length }, (_, j) => card('diamonds', '7', `-prior-${i}-pad-${j}`)),
     ]
     return {
       trickIndex: i,
@@ -551,7 +557,9 @@ function buildBeloteFixture(options: {
       : [card('diamonds', '7', '-left'), card('diamonds', '8', '-left')],
   }
 
-  const completedTricks = Array.from({ length: 6 }, (_, i) => fillerTrick(i, 'right'))
+  // Филър в ♠ (никоя неизвестна ръка не държи ♠) — законна история при
+  // всичко коз; с ♣ филър right/top би трябвало да надиграе с ♣Q/♣K.
+  const completedTricks = Array.from({ length: 6 }, (_, i) => fillerTrick(i, 'right', 'spades'))
 
   return baseState({
     hands,

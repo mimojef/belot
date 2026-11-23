@@ -30,7 +30,7 @@ function handsKey(hands: ServerSweepEligibilityHands): string {
 // are read by getServerValidPlayCards, so this cast is safe and guarantees
 // zero rule drift from live gameplay. (Няма ESLint конфигурация в този
 // repo, която да забранява такъв cast — проверено преди да се добави тук.)
-function legalCardsFor(
+export function legalCardsFor(
   seat: Seat,
   hand: ServerCard[],
   plays: { seat: Seat; card: ServerCard }[],
@@ -101,7 +101,7 @@ function notifyObserver(observation: ServerSweepEligibilityObservation): void {
 const TRUMP_ORDER_POWER: Record<ServerCard['rank'], number> = { '7': 0, '8': 1, Q: 2, K: 3, '10': 4, A: 5, '9': 6, J: 7 }
 const PLAIN_ORDER_POWER: Record<ServerCard['rank'], number> = { '7': 0, '8': 1, '9': 2, J: 3, Q: 4, K: 5, '10': 6, A: 7 }
 
-function rootLeadStrength(card: ServerCard, winningBid: ServerWinningBid): number {
+export function rootLeadStrength(card: ServerCard, winningBid: ServerWinningBid): number {
   const isTrump =
     winningBid !== null &&
     (winningBid.contract === 'all-trumps' || (winningBid.contract === 'suit' && card.suit === winningBid.trumpSuit))

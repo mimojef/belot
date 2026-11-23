@@ -16,7 +16,7 @@ import { getTeamBySeat } from './serverStateHelpers.js'
 import { getServerTrickWinner } from './getServerTrickWinner.js'
 import { getServerValidPlayCards } from './getServerValidPlayCards.js'
 import { createServerDeclarationRecord } from './serverDeclarationRecordHelpers.js'
-import { computeServerSweepEligibility } from './computeServerSweepEligibility.js'
+import { computeServerSweepOfferEligibility } from './computeServerSweepPublicGuarantee.js'
 import {
   addDeclarationsToMatchMissionCounts,
   addDeclarationsToMatchMissionCountsBySeat,
@@ -227,10 +227,13 @@ function applyTrickCompletion(
   const isSweepEligible =
     !isRoundComplete &&
     !alreadyDeclinedSweep &&
-    computeServerSweepEligibility({
+    computeServerSweepOfferEligibility({
       sweepSeat: winnerSeat,
       hands: state.hands,
       winningBid: state.bidding.winningBid,
+      // Само публичната информация на заявяващия (виж
+      // computeServerSweepPublicGuarantee.ts), вкл. току-що приключилата взятка.
+      publicInfo: { completedTricks: nextCompletedTricks, currentTrickPlays: [], declarations: state.declarations },
     })
 
   const nextPlaying: ServerPlayingState = {
