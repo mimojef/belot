@@ -66,7 +66,23 @@ export function svaraSceneSeatIndexOf(slot: SvaraSceneSlot): SvaraSeatIndex {
   return SVARA_SCENE_SLOTS.indexOf(slot) as SvaraSeatIndex
 }
 
-export function computeSvaraSceneLayout(width: number, height: number): SvaraSceneLayout {
+/** Колко излиза пръстенът на хода извън аватара (виж ringSvg: inset:-9px). */
+const TURN_RING_OUTSET = 9
+/** Минимален отстъп между купчинката и пръстена/аватара. */
+const SIDE_CHIP_GAP = 4
+/** Височина на етикета с името (11px шрифт + отстъп); виси с 45% под аватара. */
+const NAME_LABEL_HEIGHT = 17
+
+export type SvaraSceneLayoutOptions = {
+  /**
+   * Истинската игра: купчинките на лявото И дясното място са над аватара
+   * (огледално), с отстъп от пръстена на хода — никога под/върху аватара.
+   * Демото не подава опцията и пази оригиналното си оформление.
+   */
+  mirroredSideChips?: boolean
+}
+
+export function computeSvaraSceneLayout(width: number, height: number, options: SvaraSceneLayoutOptions = {}): SvaraSceneLayout {
   const w = Math.max(240, width)
   const h = Math.max(240, height)
   const isPortrait = h > w * 0.9
@@ -125,6 +141,15 @@ export function computeSvaraSceneLayout(width: number, height: number): SvaraSce
     seats: seatBase.map((seat, index) => {
       const tangent = { x: -seat.inward.y, y: seat.inward.x }
       const side = avatarSize * 0.98
+      const isSideSeat = seat.inward.y === 0
+      // Горе/долу: основата е малко под центъра на аватара (както в демото), но
+      // в истинската игра никога толкова ниско, че чипът да опре етикета с
+      // името (той виси под аватара и може да е по-широк от него).
+      const nameTop = avatarSize * 0.5 - NAME_LABEL_HEIGHT * 0.55
+      const rowDrop = options.mirroredSideChips ? Math.min(chipSize * 0.2, nameTop - SIDE_CHIP_GAP - chipSize * 0.5) : chipSize * 0.2
+      const chipStack = options.mirroredSideChips && isSideSeat
+        ? { x: seat.avatar.x, y: seat.avatar.y - (avatarSize * 0.5 + TURN_RING_OUTSET + SIDE_CHIP_GAP + chipSize * 0.5) }
+        : { x: seat.avatar.x - tangent.x * side, y: seat.avatar.y - tangent.y * side + rowDrop }
       return {
         index: index as SvaraSeatIndex,
         slot: SVARA_SCENE_SLOTS[index]!,
@@ -132,7 +157,7 @@ export function computeSvaraSceneLayout(width: number, height: number): SvaraSce
         inward: seat.inward,
         tangent,
         cardRotation: seat.cardRotation,
-        chipStack: { x: seat.avatar.x - tangent.x * side, y: seat.avatar.y - tangent.y * side + chipSize * 0.2 },
+        chipStack,
       }
     }),
   }

@@ -29,6 +29,7 @@ import {
   type SvaraSceneLayout,
 } from '../scene/svaraSceneLayout'
 import { createSvaraSceneShell } from '../scene/svaraSceneShell'
+import { playGameSound } from '../../../audio/gameSoundSettings'
 import { getSvaraVisualSlot } from './svaraSeatLayout'
 import { svaraCardCodeToFaceSrc } from './svaraTableAssets'
 import { svaraDealingAnimationMs } from './svaraTableAnimation'
@@ -46,9 +47,20 @@ export function svaraRealDealDurationMs(participants: number): number {
 export const SVARA_REAL_PAYOUT_STEP_TARGET_MS = 1800
 
 const DECK_SPRITES = 20
+// Звукът на раздаването — същият файл и сила като в демото (svaraDemoScript.ts).
+const DEAL_SOUND_SRC = '/audio/card-sfx/card-move.mp3'
+const DEAL_SOUND_VOLUME = 0.35
+/** Две карти по-близо от това не звучат двойно (без натрупване/усилване). */
+const DEAL_SOUND_MIN_GAP_MS = 90
+/** Закъсняла карта (таймерът е изпълнен късно) все още звучи, ако е излетяла преди толкова. */
+const DEAL_SOUND_LATE_MS = 40
 const DEALER_BADGE_HTML = '<span data-svara-dealer-badge="1" title="Дилър" style="position:absolute;right:-4px;top:-4px;width:18px;height:18px;border-radius:50%;background:#d4a520;color:#1a1200;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #0b0b0b;z-index:2;">Д</span>'
 const CHIP_COLORS: SvaraChipColor[] = ['red', 'blue', 'green']
 const MAX_STACK_CHIPS = 10
+/** Истинската маса: огледални купчинки отляво/отдясно (над аватара). */
+const REAL_LAYOUT_OPTIONS = { mirroredSideChips: true } as const
+/** Отстъп между ръба на купчинката (при максимална височина) и баджа на залога. */
+const BET_BADGE_GAP_PX = 5
 
 export type SvaraRealSceneInput = {
   snapshot: SvaraMatchSnapshotMessage
@@ -146,6 +158,26 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     preloaded.add(src)
     const img = new Image()
     img.src = src
+  }
+
+  // Звукът на раздаването: през общата система (настройката „Звуци в
+  // играта“; грешките при блокирано от браузъра аудио се поглъщат тихо).
+  // Файлът се зарежда предварително, за да звучи точно при излитането.
+  let dealSoundPreloaded = false
+  let lastDealSoundAt = -Infinity
+  function playDealSound(): void {
+    if (!input?.animations) return
+    const now = performance.now()
+    if (now - lastDealSoundAt < DEAL_SOUND_MIN_GAP_MS) return
+    lastDealSoundAt = now
+    playGameSound(DEAL_SOUND_SRC, { volume: DEAL_SOUND_VOLUME })
+  }
+  function preloadDealSound(): void {
+    if (dealSoundPreloaded || typeof Audio === 'undefined') return
+    dealSoundPreloaded = true
+    const audio = new Audio()
+    audio.preload = 'auto'
+    audio.src = DEAL_SOUND_SRC
   }
 
   // ── Места ───────────────────────────────────────────────────────────────
@@ -432,6 +464,9 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       ids.push(id)
       z.set(id, 100 + k)
       counts.set(sceneSeat, ids)
+      // Звук при излитането на картата (като в демото). При превъртане след
+      // reconnect вече излетелите карти не звучат отново.
+      if (launch >= elapsed - DEAL_SOUND_LATE_MS) later(Math.max(0, launch - elapsed), playDealSound)
     }
     play(inputs, elapsed)
   }
@@ -697,20 +732,36 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       if (node.avatar.style.filter !== filter) node.avatar.style.filter = filter
       if (hud.dim) node.node.dataset.svaraSeatDim = hud.dim; else delete node.node.dataset.svaraSeatDim
       // Сумата на текущия залог — до купчинката чипове, откъм външната ѝ страна.
+      // Закача се за РЪБА на купчинката при максимална височина (не за центъра),
+      // така че чиповете никога не я застъпват, независимо от ширината на числото:
+      // отляво/отдясно — над купчинката; горе/долу — встрани от нея.
       let bet = node.node.querySelector<HTMLElement>('[data-svara-seat-bet]')
       if (hud.bet > 0) {
         if (!bet) {
           bet = document.createElement('span')
           bet.dataset.svaraSeatBet = '1'
           bet.title = 'Текущ залог'
-          bet.style.cssText = 'position:absolute;transform:translate(-50%,-50%);padding:1px 6px;border-radius:999px;background:rgba(0,0,0,.72);border:1px solid rgba(245,208,111,.7);color:#ffe49a;font-size:11px;font-weight:900;white-space:nowrap;pointer-events:none;z-index:3;'
+          bet.style.cssText = 'position:absolute;padding:1px 6px;border-radius:999px;background:rgba(0,0,0,.72);border:1px solid rgba(245,208,111,.7);color:#ffe49a;font-size:11px;font-weight:900;white-space:nowrap;pointer-events:none;z-index:3;'
           node.node.appendChild(bet)
         }
-        const len = Math.hypot(dx, dy) || 1
-        const reach = layout.chipSize * 0.95
         const half = layout.avatarSize / 2
-        bet.style.left = `${Math.round(half - dx - (dx / len) * reach)}px`
-        bet.style.top = `${Math.round(half - dy - (dy / len) * reach)}px`
+        const chipHalf = layout.chipSize / 2
+        const stackX = half - dx, stackY = half - dy
+        let left: number, top: number, transform: string
+        if (Math.abs(dy) >= Math.abs(dx)) {
+          // Купчинката е над/под аватара: баджът над най-горния възможен чип.
+          left = stackX
+          top = stackY - (MAX_STACK_CHIPS - 1) * layout.chipStep - chipHalf - BET_BADGE_GAP_PX
+          transform = 'translate(-50%,-100%)'
+        } else {
+          const outward = dx > 0 ? -1 : 1
+          left = stackX + outward * (chipHalf + BET_BADGE_GAP_PX)
+          top = stackY
+          transform = outward < 0 ? 'translate(-100%,-50%)' : 'translate(0,-50%)'
+        }
+        bet.style.left = `${Math.round(left)}px`
+        bet.style.top = `${Math.round(top)}px`
+        if (bet.style.transform !== transform) bet.style.transform = transform
         if (bet.textContent !== String(hud.bet)) bet.textContent = String(hud.bet)
       } else bet?.remove()
       if (hudCache.get(sceneSeat) !== hud.infoHtml) {
@@ -784,7 +835,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     const key = `${size.width}x${size.height}`
     if (key === sizeKey) return false
     sizeKey = key
-    layout = computeSvaraSceneLayout(size.width, size.height)
+    layout = computeSvaraSceneLayout(size.width, size.height, REAL_LAYOUT_OPTIONS)
     shell.applyLayout(layout)
     renderer.setLayout(layout)
     return true
@@ -832,8 +883,9 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       }
       if (!mounted) {
         mounted = true
-        layout = computeSvaraSceneLayout(Math.max(240, target.clientWidth), 400)
+        layout = computeSvaraSceneLayout(Math.max(240, target.clientWidth), 400, REAL_LAYOUT_OPTIONS)
         void renderer.mount(shell.spritesHost, [], layout)
+        preloadDealSound()
       }
       const resized = relayout(target)
       const snapshot = next.snapshot
