@@ -29,6 +29,8 @@ import {
   type SvaraSceneLayout,
 } from '../scene/svaraSceneLayout'
 import { createSvaraSceneShell } from '../scene/svaraSceneShell'
+import { renderSvaraBelotSeatCardHtml, svaraBelotCardScale, svaraBelotCardSize, SVARA_BELOT_CARD_EDGE_MARGIN_PX } from './svaraBelotSeatCard'
+import { SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
 import { playGameSound } from '../../../audio/gameSoundSettings'
 import { getSvaraVisualSlot } from './svaraSeatLayout'
 import { svaraCardCodeToFaceSrc } from './svaraTableAssets'
@@ -54,7 +56,6 @@ const DEAL_SOUND_VOLUME = 0.35
 const DEAL_SOUND_MIN_GAP_MS = 90
 /** Закъсняла карта (таймерът е изпълнен късно) все още звучи, ако е излетяла преди толкова. */
 const DEAL_SOUND_LATE_MS = 40
-const DEALER_BADGE_HTML = '<span data-svara-dealer-badge="1" title="Дилър" style="position:absolute;right:-4px;top:-4px;width:18px;height:18px;border-radius:50%;background:#d4a520;color:#1a1200;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #0b0b0b;z-index:2;">Д</span>'
 const CHIP_COLORS: SvaraChipColor[] = ['red', 'blue', 'green']
 const MAX_STACK_CHIPS = 10
 /** Истинската маса: огледални купчинки отляво/отдясно (над аватара). */
@@ -127,7 +128,7 @@ export function svaraSceneVisibleFaces(snapshot: SvaraMatchSnapshotMessage | nul
 }
 
 export function createSvaraRealScene(options: { onOpenProfile?: (playerId: string) => void } = {}): SvaraRealScene {
-  const shell = createSvaraSceneShell({ bannerText: 'СВАРА!', avatarSrcs: [], names: [], frameless: true })
+  const shell = createSvaraSceneShell({ bannerText: 'СВАРА!', avatarSrcs: [], names: [], frameless: true, seatStyle: 'card' })
   shell.stage.dataset.svaraRealScene = '1'
   // Кликовете (профил) минават през слоя със спрайтовете към местата.
   shell.spritesHost.style.pointerEvents = 'none'
@@ -161,7 +162,10 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   let reconcileTimer: number | null = null
   const timers = new Set<number>()
   const hudCache = new Map<number, string>()
-  const extraCache = new Map<number, string>()
+  /** Последно нарисуваното профилно каре по място (ключ на входните данни). */
+  const cardCache = new Map<number, string>()
+  /** Мащабът на профилните карета от Белот (CSS px на сцената). */
+  let cardScale = 1
 
   // Лицата на картите се зареждат предварително (публични файлове — никакво
   // разкриване): обръщането не чака мрежата.
@@ -869,9 +873,24 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       node.node.style.pointerEvents = 'auto'
       node.avatar.dataset.svaraAvatar = String(hud.seatIndex)
       if (node.avatar.getAttribute('src') !== hud.avatarSrc) node.avatar.setAttribute('src', hud.avatarSrc)
-      node.name.textContent = hud.name
-      node.name.style.color = hud.isBot ? '#9fd0ff' : '#fff'
+      if (node.name.textContent !== hud.name) node.name.textContent = hud.name
       if (hud.isBot) node.name.dataset.svaraBotBadge = '1'; else delete node.name.dataset.svaraBotBadge
+      if (hud.isToAct) node.node.dataset.svaraToAct = '1'; else delete node.node.dataset.svaraToAct
+      // Профилното каре от Белот (същият компонент, мащаб и таймер в полето с името).
+      const slot = layout.seats[sceneSeat]!.slot
+      const cardKey = JSON.stringify([slot, hud.name, hud.avatarSrc, hud.isBot, hud.isLocal, hud.isDealer, hud.isToAct, hud.turnTimer?.deadlineAt ?? null, cardScale])
+      if (node.card && cardCache.get(sceneSeat) !== cardKey) {
+        cardCache.set(sceneSeat, cardKey)
+        node.card.innerHTML = renderSvaraBelotSeatCardHtml({
+          slot, name: hud.name, avatarSrc: hud.avatarSrc, isBot: hud.isBot, isLocal: hud.isLocal, isDealer: hud.isDealer,
+          turn: hud.turnTimer ? { remainingMs: hud.turnTimer.fraction * SVARA_DEADLINE_TOTAL_MS.turn, totalMs: SVARA_DEADLINE_TOTAL_MS.turn, key: String(hud.turnTimer.deadlineAt) } : null,
+          scale: cardScale,
+        })
+      }
+      // Отпаднал/отсъстващ: затъмнено каре вместо надпис.
+      const filter = hud.dim === 'eliminated' ? 'grayscale(1) brightness(.45)' : hud.dim === 'absent' ? 'grayscale(.6) brightness(.7)' : ''
+      const dimTarget = node.card ?? node.avatar
+      if (dimTarget.style.filter !== filter) dimTarget.style.filter = filter
       // Информацията (баланс, залог, статуси) — от другата страна на купчинката чипове.
       const seatLayout = layout.seats[sceneSeat]!
       const dx = seatLayout.avatar.x - seatLayout.chipStack.x, dy = seatLayout.avatar.y - seatLayout.chipStack.y
@@ -883,20 +902,11 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
         node.info.style.cssText = 'position:absolute;display:flex;flex-direction:column;gap:2px;white-space:nowrap;pointer-events:none;z-index:3;' + (
           side === 'right' ? 'left:calc(100% + 10px);top:50%;transform:translate(0,-50%);align-items:flex-start;'
             : side === 'left' ? 'right:calc(100% + 10px);top:50%;transform:translate(0,-50%);align-items:flex-end;'
-              : (side.startsWith('below') ? 'top:calc(100% + 14px);' : 'bottom:calc(100% + 8px);') + (
-                side.endsWith('start') ? 'left:-6px;align-items:flex-start;' : side.endsWith('end') ? 'right:-6px;align-items:flex-end;' : 'left:50%;transform:translate(-50%,0);align-items:center;'))
-      }
-      const extra = `${hud.turnRingHtml}${hud.isDealer ? DEALER_BADGE_HTML : ''}`
-      if (extraCache.get(sceneSeat) !== extra) {
-        extraCache.set(sceneSeat, extra)
-        node.node.querySelectorAll('[data-svara-turn-ring],[data-svara-dealer-badge]').forEach((el) => el.remove())
-        node.node.insertAdjacentHTML('beforeend', extra)
+              : (side.startsWith('below') ? 'top:calc(100% + 6px);' : 'bottom:calc(100% + 8px);') + (
+                side.endsWith('start') ? 'left:0;align-items:flex-start;' : side.endsWith('end') ? 'right:0;align-items:flex-end;' : 'left:50%;transform:translate(-50%,0);align-items:center;'))
       }
       // Собственото място (без „(ти)“ в името).
       if (hud.isLocal) node.node.dataset.svaraLocalSeat = '1'; else delete node.node.dataset.svaraLocalSeat
-      // Отпаднал/отсъстващ: затъмнен аватар вместо надпис.
-      const filter = hud.dim === 'eliminated' ? 'grayscale(1) brightness(.45)' : hud.dim === 'absent' ? 'grayscale(.6) brightness(.7)' : ''
-      if (node.avatar.style.filter !== filter) node.avatar.style.filter = filter
       if (hud.dim) node.node.dataset.svaraSeatDim = hud.dim; else delete node.node.dataset.svaraSeatDim
       // Сумата на текущия залог — до купчинката чипове, откъм външната ѝ страна.
       // Закача се за РЪБА на купчинката при максимална височина (не за центъра),
@@ -911,9 +921,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
           bet.style.cssText = 'position:absolute;padding:1px 6px;border-radius:999px;background:rgba(0,0,0,.72);border:1px solid rgba(245,208,111,.7);color:#ffe49a;font-size:11px;font-weight:900;white-space:nowrap;pointer-events:none;z-index:3;'
           node.node.appendChild(bet)
         }
-        const half = layout.avatarSize / 2
         const chipHalf = layout.chipSize / 2
-        const stackX = half - dx, stackY = half - dy
+        const stackX = seatLayout.box.w / 2 - dx, stackY = seatLayout.box.h / 2 - dy
         let left: number, top: number, transform: string
         if (Math.abs(dy) >= Math.abs(dx)) {
           // Купчинката е над/под аватара: баджът над най-горния възможен чип.
@@ -943,13 +952,15 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     for (let i = 0; i < 4; i += 1) {
       if (visible.includes(i)) continue
       const seat = shell.seats[i]!
-      for (const key of ['svaraSeatIndex', 'svaraSeatAnchor', 'svaraSceneProfile', 'svaraLocalSeat', 'svaraSeatDim'] as const) delete seat.node.dataset[key]
+      for (const key of ['svaraSeatIndex', 'svaraSeatAnchor', 'svaraSceneProfile', 'svaraLocalSeat', 'svaraSeatDim', 'svaraToAct'] as const) delete seat.node.dataset[key]
+      if (seat.card) seat.card.innerHTML = ''
+      cardCache.delete(i)
       delete seat.avatar.dataset.svaraAvatar
       seat.avatar.style.filter = ''
       seat.node.querySelector('[data-svara-seat-bet]')?.remove()
-      seat.node.querySelectorAll('[data-svara-turn-ring],[data-svara-dealer-badge]').forEach((el) => el.remove())
+      seat.node.querySelectorAll('[data-svara-dealer-badge]').forEach((el) => el.remove())
       seat.info.innerHTML = ''
-      hudCache.delete(i); extraCache.delete(i)
+      hudCache.delete(i)
     }
     shell.applyLayout(layout, visible)
     shell.setPot(input.potTotal, false)
@@ -1007,10 +1018,17 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
 
   function relayout(target: HTMLElement): boolean {
     const size = stageSize(target)
-    const key = `${size.width}x${size.height}`
+    const rect = target.getBoundingClientRect()
+    const zoom = target.offsetWidth > 0 ? rect.width / target.offsetWidth : 1
+    const scale = svaraBelotCardScale(size.width, size.height, zoom)
+    const key = `${size.width}x${size.height}@${scale.toFixed(4)}`
     if (key === sizeKey) return false
     sizeKey = key
-    layout = computeSvaraSceneLayout(size.width, size.height, REAL_LAYOUT_OPTIONS)
+    cardScale = scale
+    layout = computeSvaraSceneLayout(size.width, size.height, {
+      ...REAL_LAYOUT_OPTIONS,
+      seatCards: { side: svaraBelotCardSize('left', scale), bottom: svaraBelotCardSize('bottom', scale), margin: SVARA_BELOT_CARD_EDGE_MARGIN_PX },
+    })
     shell.applyLayout(layout)
     renderer.setLayout(layout)
     return true
@@ -1029,7 +1047,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     done.clear()
     busySeats.clear()
     hudCache.clear()
-    extraCache.clear()
+    cardCache.clear()
     pendingBets = []
     pendingLook = false
     for (const timer of timers) window.clearTimeout(timer)
@@ -1060,7 +1078,10 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       }
       if (!mounted) {
         mounted = true
-        layout = computeSvaraSceneLayout(Math.max(240, target.clientWidth), 400, REAL_LAYOUT_OPTIONS)
+        layout = computeSvaraSceneLayout(Math.max(240, target.clientWidth), 400, {
+          ...REAL_LAYOUT_OPTIONS,
+          seatCards: { side: svaraBelotCardSize('left', cardScale), bottom: svaraBelotCardSize('bottom', cardScale), margin: SVARA_BELOT_CARD_EDGE_MARGIN_PX },
+        })
         void renderer.mount(shell.spritesHost, [], layout)
         preloadDealSound()
       }

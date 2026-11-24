@@ -13,6 +13,8 @@ export type SvaraSceneSeatNode = {
   ring: HTMLElement
   avatar: HTMLImageElement
   name: HTMLElement
+  /** Контейнер за профилното каре от Белот (само 'card'; рисува го истинската игра). */
+  card: HTMLElement | null
   /** Допълнителна информация под името (истинската игра: баланс, залог, статус). */
   info: HTMLElement
 }
@@ -44,7 +46,33 @@ const FRAMED_FELT_STYLE = 'inset:7px;border-radius:17px;background:radial-gradie
 const FRAMELESS_STAGE_STYLE = 'border-radius:0;background:#0c4d2a;'
 const FRAMELESS_FELT_STYLE = 'inset:0;background:radial-gradient(circle at 50% 45%,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 34%,rgba(0,0,0,0) 58%),radial-gradient(ellipse at 50% 45%,#22985a 0%,#157240 55%,#0c4d2a 100%);box-shadow:inset 0 0 60px rgba(0,0,0,0.5);'
 
-export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs: readonly string[]; names: readonly string[]; frameless?: boolean }): SvaraSceneShell {
+/**
+ * Вид на местата: 'round' — кръгъл аватар с етикет за името (демото);
+ * 'card' — профилното каре от Белот (истинската игра; съдържанието му се
+ * рисува от svaraRealScene.ts с компонента на Белот). Аватарът и етикетът
+ * остават в DOM-а скрити, за да не се променят данните за проверките.
+ */
+export type SvaraSceneSeatStyle = 'round' | 'card'
+
+function seatInnerHtml(style: SvaraSceneSeatStyle, avatarSrc: string): string {
+  if (style === 'round') {
+    return `
+      <div data-ring style="position:absolute;inset:-7px;border-radius:50%;border:3px solid #f5d06f;box-shadow:0 0 18px rgba(245,208,111,0.85);opacity:0;will-change:transform,opacity;"></div>
+      <img data-avatar src="${avatarSrc}" alt="" draggable="false" style="display:block;width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid rgba(212,165,32,0.85);background:#0b0b0b;box-sizing:border-box;">
+      <div data-name style="position:absolute;left:50%;bottom:0;transform:translate(-50%,45%);padding:1px 8px;border-radius:999px;background:rgba(0,0,0,0.72);color:#fff;font-size:11px;font-weight:800;white-space:nowrap;"></div>
+      <div data-info style="position:absolute;left:50%;top:100%;transform:translate(-50%,10px);display:flex;flex-direction:column;align-items:center;gap:2px;white-space:nowrap;pointer-events:none;"></div>
+    `
+  }
+  return `
+      <div data-ring style="position:absolute;inset:-6px;border-radius:16px;border:3px solid #f5d06f;box-shadow:0 0 18px rgba(245,208,111,0.85);opacity:0;will-change:transform,opacity;"></div>
+      <div data-svara-seat-card style="position:absolute;inset:0;"></div>
+      <img data-avatar src="${avatarSrc}" alt="" draggable="false" style="display:none;">
+      <div data-name style="display:none;"></div>
+      <div data-info style="position:absolute;left:50%;top:100%;transform:translate(-50%,10px);display:flex;flex-direction:column;align-items:center;gap:2px;white-space:nowrap;pointer-events:none;"></div>
+    `
+}
+
+export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs: readonly string[]; names: readonly string[]; frameless?: boolean; seatStyle?: SvaraSceneSeatStyle }): SvaraSceneShell {
   const stage = document.createElement('div')
   stage.dataset.svaraSceneStage = '1'
   if (options.frameless) stage.dataset.svaraSceneFrameless = '1'
@@ -76,16 +104,11 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
     const node = document.createElement('div')
     node.dataset.svaraSceneSeat = String(i)
     node.style.cssText = 'position:absolute;left:0;top:0;transform:translate(-50%,-50%);'
-    node.innerHTML = `
-      <div data-ring style="position:absolute;inset:-7px;border-radius:50%;border:3px solid #f5d06f;box-shadow:0 0 18px rgba(245,208,111,0.85);opacity:0;will-change:transform,opacity;"></div>
-      <img data-avatar src="${options.avatarSrcs[i] ?? ''}" alt="" draggable="false" style="display:block;width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid rgba(212,165,32,0.85);background:#0b0b0b;box-sizing:border-box;">
-      <div data-name style="position:absolute;left:50%;bottom:0;transform:translate(-50%,45%);padding:1px 8px;border-radius:999px;background:rgba(0,0,0,0.72);color:#fff;font-size:11px;font-weight:800;white-space:nowrap;"></div>
-      <div data-info style="position:absolute;left:50%;top:100%;transform:translate(-50%,10px);display:flex;flex-direction:column;align-items:center;gap:2px;white-space:nowrap;pointer-events:none;"></div>
-    `
+    node.innerHTML = seatInnerHtml(options.seatStyle ?? 'round', options.avatarSrcs[i] ?? '')
     const name = node.querySelector<HTMLElement>('[data-name]')!
     name.textContent = options.names[i] ?? ''
     seatsLayer.appendChild(node)
-    seats.push({ node, ring: node.querySelector<HTMLElement>('[data-ring]')!, avatar: node.querySelector<HTMLImageElement>('[data-avatar]')!, name, info: node.querySelector<HTMLElement>('[data-info]')! })
+    seats.push({ node, ring: node.querySelector<HTMLElement>('[data-ring]')!, avatar: node.querySelector<HTMLImageElement>('[data-avatar]')!, name, card: node.querySelector<HTMLElement>('[data-svara-seat-card]'), info: node.querySelector<HTMLElement>('[data-info]')! })
   }
 
   function track(animation: Animation): void {
@@ -103,8 +126,8 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
         const node = seats[i]!.node
         node.style.left = `${seat.avatar.x}px`
         node.style.top = `${seat.avatar.y}px`
-        node.style.width = `${next.avatarSize}px`
-        node.style.height = `${next.avatarSize}px`
+        node.style.width = `${seat.box.w}px`
+        node.style.height = `${seat.box.h}px`
         node.style.display = !visibleSeats || visibleSeats.includes(i) ? '' : 'none'
       })
       potLabel.style.left = `${next.potLabel.x}px`
@@ -144,7 +167,7 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
       const seat = layout.seats[seatIndex]!
       winLabel.textContent = `+${amount}`
       winLabel.style.left = `${seat.avatar.x}px`
-      winLabel.style.top = `${seat.avatar.y - layout.avatarSize * 0.9}px`
+      winLabel.style.top = `${seat.avatar.y - seat.box.h / 2 - layout.avatarSize * 0.4}px`
       track(winLabel.animate(
         [
           { transform: 'translate(-50%,-50%) translateY(8px) scale(0.7)', opacity: 0 },

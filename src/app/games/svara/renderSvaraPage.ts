@@ -55,13 +55,13 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
   // Активна маса (само в „Истинска игра“): сукното заема цялата ширина на
   // игровия екран — без горната граница на страницата, а на телефон и без
   // страничните отстъпи (заглавието и връзката „Обратно“ остават подравнени).
-  // На телефон при активна маса „← Обратно към Игри“ се скрива — изходът е
-  // иконата в горния бар на масата.
+  // При активна маса „← Обратно към Игри“ се скрива (на всяка резолюция) —
+  // изходът е иконата в горния бар на масата.
   const realSection = `
     <style data-svara-page-style="1">
       [data-svara-page="granted"]:has([data-svara-table]) { max-width:none !important; }
-      ${useMobileLayout ? `[data-svara-page="granted"] > [data-svara-lobby-mount]:has([data-svara-table]) { margin-left:-${MOBILE_EDGE_INSET_PX}px; margin-right:-${MOBILE_EDGE_INSET_PX}px; }
-      [data-svara-page="granted"]:has([data-svara-table]) > [data-svara-back-to-games] { display:none !important; }` : ''}
+      [data-svara-page="granted"]:has([data-svara-table]) > [data-svara-back-to-games] { display:none !important; }
+      ${useMobileLayout ? `[data-svara-page="granted"] > [data-svara-lobby-mount]:has([data-svara-table]) { margin-left:-${MOBILE_EDGE_INSET_PX}px; margin-right:-${MOBILE_EDGE_INSET_PX}px; }` : ''}
     </style>
     <div data-svara-lobby-mount="1"></div>
   `

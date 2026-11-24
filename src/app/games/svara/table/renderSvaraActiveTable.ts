@@ -101,8 +101,8 @@ export type SvaraSceneSeatHud = {
   isLocal: boolean
   isDealer: boolean
   isToAct: boolean
-  /** Пръстенът на хода (SVG) или ''. */
-  turnRingHtml: string
+  /** Таймерът за хода (в полето с името, както в Белот): оставаща част 0..1; null — не е на ход. */
+  turnTimer: { fraction: number; isDanger: boolean; deadlineAt: number } | null
   /** Информацията до аватара: САМО наличният баланс (статусите/точките — за четци на екрана). */
   infoHtml: string
   /** Сумата на текущия залог (вноската в раздаването) — до чиповете; 0 = няма. */
@@ -113,16 +113,6 @@ export type SvaraSceneSeatHud = {
 
 /** Визуално скрито, но достъпно за четци на екрана (и за проверките). */
 const SR_ONLY = 'position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;'
-
-function ringSvg(fraction: number, isDanger: boolean): string {
-  const circumference = 2 * Math.PI * 18
-  const offset = circumference * (1 - Math.min(1, Math.max(0, fraction)))
-  const color = isDanger ? '#ef4444' : '#f4c95b'
-  return `<svg viewBox="0 0 40 40" data-svara-turn-ring="1" style="position:absolute;inset:-9px;width:calc(100% + 18px);height:calc(100% + 18px);transform:rotate(-90deg);pointer-events:none;">
-    <circle cx="20" cy="20" r="18" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="2.4" />
-    <circle cx="20" cy="20" r="18" fill="none" stroke="${color}" stroke-width="2.4" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}" stroke-linecap="round" style="transition:stroke-dashoffset .2s linear,stroke .2s;" />
-  </svg>`
-}
 
 function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean, lastBetLabel: string | null, joiningStatus: string | null, matchFinished = false): string {
   // Приключил/прекратен мач: статусите „отсъстващ“/„връща се“ вече нямат
@@ -169,10 +159,10 @@ export function renderSvaraSceneSeatHuds(rawInput: RenderSvaraActiveTableInput):
     const isBot = player?.isBot === true
     const lastBet = getLastSvaraBetBadge(round, seat.playerId)
     const foldEffect = input.activeFoldEffects.find((e) => e.seatIndex === seat.seatIndex) ?? null
-    let turnRingHtml = ''
+    let turnTimer: SvaraSceneSeatHud['turnTimer'] = null
     if (seat.isToAct && turnDeadline) {
       const state = computeSvaraRingState(turnDeadline.deadlineAt, SVARA_DEADLINE_TOTAL_MS.turn, input.serverNow)
-      turnRingHtml = ringSvg(state.fraction, state.isDanger)
+      turnTimer = { fraction: Math.min(1, Math.max(0, state.fraction)), isDanger: state.isDanger, deadlineAt: turnDeadline.deadlineAt }
     }
     const compared = round?.kind === 'showdown-display' && round.comparedPlayers.includes(seat.playerId) && visual.showCards
     const revealedWinner = round?.kind === 'reveal-choice' && round.decision === 'revealed' && round.winnerId === seat.playerId && visual.showCards
@@ -200,7 +190,7 @@ export function renderSvaraSceneSeatHuds(rawInput: RenderSvaraActiveTableInput):
       isLocal,
       isDealer: seat.isDealer,
       isToAct: seat.isToAct,
-      turnRingHtml,
+      turnTimer,
       infoHtml,
       bet: betting && !snapshot.result.finished ? seat.roundContribution : 0,
       dim: seat.status === 'eliminated' ? 'eliminated' : seat.status === 'absent' && !snapshot.result.finished ? 'absent' : null,
