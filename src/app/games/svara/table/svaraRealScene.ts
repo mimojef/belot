@@ -50,7 +50,7 @@ export function svaraRealDealDurationMs(participants: number): number {
 export const SVARA_REAL_PAYOUT_STEP_TARGET_MS = 1800
 
 const DECK_SPRITES = 20
-// Звукът на раздаването — същият файл и сила като в демото (svaraDemoScript.ts).
+// Звукът на раздаването (същият файл и сила като в премахнатото демо).
 const DEAL_SOUND_SRC = '/audio/card-sfx/card-move.mp3'
 const DEAL_SOUND_VOLUME = 0.35
 /** Две карти по-близо от това не звучат двойно (без натрупване/усилване). */

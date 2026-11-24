@@ -1,6 +1,6 @@
 /**
- * Свара — измерване на плавността на истинската маса срещу тестови ботове
- * (и на демото за сравнение). Изолиран компилиран backend + Chromium.
+ * Свара — измерване на плавността на истинската маса срещу тестови ботове.
+ * Изолиран компилиран backend + Chromium.
  *
  *   --skip-build        без tsc/vite build
  *   --throttle=4        CPU забавяне (симулация на телефон), по подразбиране 1
@@ -139,21 +139,6 @@ try {
       await page.goto(`${origin}/games/svara`, { waitUntil: 'domcontentloaded' })
       await page.waitForSelector('[data-svara-lobby="1"]')
       await page.getByText('Приеми всички').click({ timeout: 1500 }).catch(() => {})
-
-      // Демо (визуалният еталон) — само веднъж на viewport.
-      if (capacity === 2) {
-        const demoTab = page.getByRole('button', { name: 'Демо' })
-        if (await demoTab.count()) {
-          await demoTab.first().click()
-          await page.waitForSelector('[data-svara-demo-stage][data-svara-demo-status="running"]', { timeout: 15_000 }).catch(() => {})
-          await resetMeter(page)
-          await page.waitForSelector('[data-svara-demo-stage][data-svara-demo-status="done"]', { timeout: 30_000 }).catch(() => {})
-          const demoMetrics = await page.locator('[data-svara-demo-stats]').getAttribute('data-svara-demo-metrics')
-          ;(report.results as Record<string, unknown>)[`${viewport.name}/demo`] = { page: await readMeter(page, 5_000), demo: demoMetrics ? JSON.parse(demoMetrics).stats : null }
-          await page.getByRole('button', { name: 'Истинска игра' }).first().click()
-          await page.waitForSelector('[data-svara-create-open]')
-        }
-      }
 
       const offset = frames.length
       await page.click('[data-svara-create-open]')

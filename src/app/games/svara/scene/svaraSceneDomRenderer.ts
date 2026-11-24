@@ -1,12 +1,12 @@
 // Свара — обща визуална сцена: DOM + Web Animations API renderer.
 //
-// Това е renderer-ът на анимационното демо (досегашният
-// demo/svaraDemoDomRenderer.ts), използван НЕПРОМЕНЕН и от истинската игра.
+// Първоначално renderer-ът на анимационното демо (премахнато); сега го ползва
+// истинската игра.
 //
 // Анимират се САМО transform и opacity → браузърът ги изпълнява на
 // compositor нишката. Всеки спрайт получава ЕДНА анимация на пътечка
 // (всички движения на спрайта в една заявка), семплирана на 60 Hz от
-// sampleSvaraTrack() — същото движение като PixiJS. Сенките са отделен слой
+// sampleSvaraTrack(). Сенките са отделен слой
 // под спрайтовете. В покой няма анимации.
 //
 // Добавено за истинската игра (демото не ги ползва): динамични спрайтове,
@@ -21,9 +21,9 @@ import type { SvaraSceneLayout } from './svaraSceneLayout'
 export const SVARA_SCENE_CARD_BACK_SRC = '/images/cards/card-back.webp'
 
 export type SvaraSceneStates = Record<string, SvaraSpriteState>
-export type SvaraRendererKind = 'dom' | 'pixi'
+export type SvaraRendererKind = 'dom'
 
-/** Общ интерфейс на renderer-ите (демото поддържа DOM/WAAPI и PixiJS). */
+/** Общ интерфейс на renderer-а на сцената (DOM/WAAPI). */
 export interface SvaraSceneRendererBase {
   readonly kind: SvaraRendererKind
   mount(host: HTMLElement, sprites: SvaraSpriteDef[], layout: SvaraSceneLayout): Promise<void>

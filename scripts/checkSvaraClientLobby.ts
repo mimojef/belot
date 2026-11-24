@@ -25,7 +25,7 @@
 //   U6. (2Б.3.7.3 REGRESSION, намерена и поправена чрез реална browser QA)
 //       snapshot, пристигнал ПРЕДИ controller-ът да се mount-не (автоматичния
 //       reconnect push), никога не блокира permanentно идентичен следващ
-//       snapshot след mount; unmount/remount цикъл (Демо<->Истинска игра)
+//       snapshot след mount; unmount/remount цикъл (напускане и връщане към страницата)
 //       не оставя новия controller instance "гладен" заради tracked
 //       revision от ПРЕДИШНИЯ (вече destroy-нат) instance.
 //

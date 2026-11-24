@@ -33,11 +33,11 @@ function disableServiceWorkerCodeSplitting(options: InlineConfig): void {
   }
 }
 
-// Свара (Етап 2А): всички chunks с модули от анимационния прототип или от
-// pixi.js получават префикс "svara-", за да се изключат от PWA precache-а
-// (виж globIgnores по-долу) — графичните зависимости се свалят само при
-// отваряне на Свара, не от всеки посетител чрез service worker-а.
-const SVARA_CHUNK_MODULE_PATTERN = /[\\/](?:src[\\/]app[\\/]games[\\/]svara[\\/]demo|node_modules[\\/](?:pixi\.js|@pixi))[\\/]/
+// Свара: всички chunks с модули от src/app/games/svara/demo (споделеното
+// ядро на движенията на сцената) получават префикс "svara-", за да се изключат
+// от PWA precache-а (виж globIgnores по-долу) — свалят се само при отваряне на
+// Свара, не от всеки посетител чрез service worker-а.
+const SVARA_CHUNK_MODULE_PATTERN = /[\\/]src[\\/]app[\\/]games[\\/]svara[\\/]demo[\\/]/
 
 function isSvaraChunk(moduleIds: readonly string[]): boolean {
   return moduleIds.some((id) => SVARA_CHUNK_MODULE_PATTERN.test(id))
@@ -59,8 +59,7 @@ export default defineConfig({
   build: {
     rolldownOptions: {
       output: {
-        // facadeModuleId покрива и фасадните re-export chunks на pixi.js
-        // (WebGLRenderer/WebGPURenderer), които нямат собствени модули.
+        // facadeModuleId покрива и фасадните re-export chunks без собствени модули.
         chunkFileNames: (chunk) => {
           const moduleIds = [...chunk.moduleIds, chunk.facadeModuleId ?? '']
           if (isSvaraChunk(moduleIds)) return 'assets/svara-[name]-[hash].js'

@@ -1,12 +1,12 @@
 // Свара — обща визуална сцена: хореография.
 //
 // Параметрите на движенията са изнесени ДОСЛОВНО от анимационното демо
-// (demo/svaraDemoScript.ts): същите продължителности, easing функции,
-// траектории (curve), височина (lift/liftPeak/raisePx), завъртане (spinDeg) и
-// отскок. Демото и истинската игра строят движенията само чрез тези функции.
+// (премахнато): същите продължителности, easing функции, траектории (curve),
+// височина (lift/liftPeak/raisePx), завъртане (spinDeg) и отскок. Истинската
+// игра строи движенията само чрез тези функции.
 //
-// Важно за детерминизма на демото: `jitter` се вика в същия ред, както в
-// оригиналния скрипт (първо крайното завъртане, после кривата, после spin).
+// `jitter` се вика в постоянен ред (първо крайното завъртане, после кривата,
+// после spin), за да е движението детерминистично при еднакъв seed.
 
 import type { SvaraEasingName, SvaraMove, SvaraSpriteState } from '../demo/svaraDemoMotion'
 import { svaraChipOnStack, svaraOwnRevealCardState, svaraSeatFanState, type SvaraPoint, type SvaraSceneLayout, type SvaraSeatLayout } from './svaraSceneLayout'

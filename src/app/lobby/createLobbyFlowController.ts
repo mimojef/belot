@@ -2212,8 +2212,6 @@ type InternalLobbyFlowState = {
   bundlePurchaseMessageText: string | null
   /** /games/svara — 'granted' едва след потвърждение от сървъра (виж showSvaraPage). */
   svaraPageStatus: SvaraPageStatus
-  /** Етап 2Б.3.7.2 — toggle между реалния WS мултиплейър и запазеното анимационно демо. */
-  svaraViewMode: 'real' | 'demo'
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -3093,7 +3091,6 @@ function createInitialState(): InternalLobbyFlowState {
     bundlePurchaseActionPackageId: null,
     bundlePurchaseMessageText: null,
     svaraPageStatus: 'checking',
-    svaraViewMode: 'real',
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -4035,15 +4032,6 @@ export function createLobbyFlowController(
     if (target.closest('[data-svara-back-to-games="1"]')) {
       event.preventDefault()
       showMoreGamesPage()
-      return
-    }
-    const viewTab = target.closest('[data-svara-view-tab]')
-    if (viewTab instanceof HTMLElement) {
-      const nextMode = viewTab.getAttribute('data-svara-view-tab')
-      if (nextMode === 'real' || nextMode === 'demo') {
-        state.svaraViewMode = nextMode
-        render()
-      }
       return
     }
     if (!target.closest('[data-svara-play-button="1"]')) return
@@ -5966,7 +5954,6 @@ export function createLobbyFlowController(
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       canShowSvaraEntry: canShowSvaraEntry(authSession),
       svaraPageStatus: state.svaraPageStatus,
-      svaraViewMode: state.svaraViewMode,
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
       lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
@@ -8863,69 +8850,27 @@ export function createLobbyFlowController(
     }
 
     if (state.currentScreen === 'svara' && state.svaraPageStatus === 'granted') {
-      if (state.svaraViewMode === 'real') {
-        destroySvaraAnimationDemo()
-        if (_svaraLobbyController) {
-          const mountRoot = options.root.querySelector<HTMLElement>('[data-svara-lobby-mount="1"]')
-          if (mountRoot && mountRoot.childElementCount === 0) {
-            // Mirror на Ludo lobby re-mount guard-а по-горе — unrelated
-            // re-render може да презапише root.innerHTML и да остави
-            // controller-а orphaned (destroy-нат subtree без DOM presence).
-            // ЗАДЪЛЖИТЕЛНО през closeSvaraLobbyOverlay() (не директен
-            // .destroy()) — доказан реален бъг в real-browser QA: директен
-            // .destroy() тук пропускаше нулирането на
-            // _svaraLastSnapshotRevision, оставяйки guard-а да отхвърля
-            // ПЪРВИЯ (валиден) snapshot след remount-а завинаги, защото все
-            // още сочи към ревизията на ПРЕДИШНИЯ (вече унищожен) instance.
-            closeSvaraLobbyOverlay()
-            void openSvaraLobbyOverlay()
-          }
-        } else {
+      if (_svaraLobbyController) {
+        const mountRoot = options.root.querySelector<HTMLElement>('[data-svara-lobby-mount="1"]')
+        if (mountRoot && mountRoot.childElementCount === 0) {
+          // Mirror на Ludo lobby re-mount guard-а по-горе — unrelated
+          // re-render може да презапише root.innerHTML и да остави
+          // controller-а orphaned (destroy-нат subtree без DOM presence).
+          // ЗАДЪЛЖИТЕЛНО през closeSvaraLobbyOverlay() (не директен
+          // .destroy()) — доказан реален бъг в real-browser QA: директен
+          // .destroy() тук пропускаше нулирането на
+          // _svaraLastSnapshotRevision, оставяйки guard-а да отхвърля
+          // ПЪРВИЯ (валиден) snapshot след remount-а завинаги, защото все
+          // още сочи към ревизията на ПРЕДИШНИЯ (вече унищожен) instance.
+          closeSvaraLobbyOverlay()
           void openSvaraLobbyOverlay()
         }
       } else {
-        closeSvaraLobbyOverlay()
-        void ensureSvaraAnimationDemo()
+        void openSvaraLobbyOverlay()
       }
     } else {
-      destroySvaraAnimationDemo()
       closeSvaraLobbyOverlay()
     }
-  }
-
-  // Свара анимационен прототип (Етап 2А) — зарежда се с dynamic import САМО
-  // след потвърден от сървъра достъп. Живее в data-svara-demo-mount
-  // placeholder-а; при unrelated re-render на root.innerHTML същият DOM
-  // възел се премества в новия placeholder (без рестарт/загуба на WebGL).
-  let _svaraAnimationDemo: { element: HTMLElement; destroy(): void } | null = null
-  let _isLoadingSvaraAnimationDemo = false
-  async function ensureSvaraAnimationDemo(): Promise<void> {
-    const mount = options.root.querySelector<HTMLElement>('[data-svara-demo-mount="1"]')
-    if (!mount) return
-    if (_svaraAnimationDemo) {
-      if (_svaraAnimationDemo.element.parentElement !== mount) mount.appendChild(_svaraAnimationDemo.element)
-      return
-    }
-    if (_isLoadingSvaraAnimationDemo) return
-    _isLoadingSvaraAnimationDemo = true
-    try {
-      const { createSvaraAnimationDemo } = await import('../games/svara/demo/createSvaraAnimationDemo')
-      if (state.currentScreen !== 'svara' || state.svaraPageStatus !== 'granted' || _svaraAnimationDemo) return
-      const liveMount = options.root.querySelector<HTMLElement>('[data-svara-demo-mount="1"]')
-      if (!liveMount) return
-      _svaraAnimationDemo = createSvaraAnimationDemo()
-      liveMount.appendChild(_svaraAnimationDemo.element)
-    } catch (error) {
-      console.warn('[svara-demo] failed to load', error)
-    } finally {
-      _isLoadingSvaraAnimationDemo = false
-    }
-  }
-
-  function destroySvaraAnimationDemo(): void {
-    if (!_svaraAnimationDemo) return
-    _svaraAnimationDemo.destroy()
-    _svaraAnimationDemo = null
   }
 
   async function submitPresetAvatar(avatarUrl: string): Promise<void> {

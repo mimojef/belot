@@ -8,8 +8,6 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "check:ludo-track-geometry": "npx tsx scripts/checkLudoTrackGeometry.ts",
-    "check:svara-animation-demo": "npx tsx scripts/checkSvaraAnimationDemo.ts",
-    "check:svara-animation-demo-browser": "npx tsx scripts/checkSvaraAnimationDemoBrowser.ts --project-root=.",
     "check:svara-client-lobby": "npx tsx scripts/checkSvaraClientLobby.ts",
     "check:svara-table-layout": "npx tsx scripts/checkSvaraTableLayout.ts",
     "check:svara-betting-actions": "npx tsx scripts/checkSvaraBettingActions.ts",
@@ -172,7 +170,6 @@
     }
   },
   "dependencies": {
-    "livekit-client": "2.23.0",
-    "pixi.js": "8.22.0"
+    "livekit-client": "2.23.0"
   }
 }
