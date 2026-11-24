@@ -743,6 +743,18 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     const handStillShown = round?.kind === 'showdown-display' || round?.kind === 'reveal-choice'
     if (!handStillShown) {
       for (const [sceneSeat, hand] of [...hands]) if (!betting || hand.key !== handKey(betting.roundId)) collectHand(sceneSeat)
+    } else if (round) {
+      // Последният отказ приключва залагането направо в „Покажи/Скрий“ (или в
+      // сравняване): в този snapshot сървърът вече не пази folded (само
+      // cardCount 0), затова засичането на отказ по-долу не го хваща. На масата
+      // остават само показваните ръце — останалите се прибират с анимация
+      // (махат се от сцената едва след нея, виж collectHand).
+      const shown = new Set(round.kind === 'reveal-choice' ? [round.winnerId] : round.kind === 'showdown-display' ? round.comparedPlayers : [])
+      for (const seat of snapshot.seats) {
+        if (shown.has(seat.playerId)) continue
+        const sceneSeat = sceneSeatOf(seat.seatIndex)
+        if (hands.has(sceneSeat)) collectHand(sceneSeat)
+      }
     }
     if (betting && prevRound?.roundId !== betting.roundId) shell.hideWinner()
 
@@ -965,6 +977,14 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
           left = stackX
           top = stackY + chipHalf + BET_BADGE_GAP_PX
           transform = 'translate(-50%,0)'
+        } else if (Math.abs(dy) >= Math.abs(dx) && (seatLayout.slot === 'left' || seatLayout.slot === 'right')) {
+          // Лявото/дясното място (купчинката е над карето): огледално до основата
+          // на купчинката — отляво долу вдясно, отдясно долу вляво. Основата не се
+          // мести при повече чипове (те растат нагоре), затова позицията е стабилна.
+          const inward = seatLayout.slot === 'left' ? 1 : -1
+          left = stackX + inward * (chipHalf + BET_BADGE_GAP_PX)
+          top = stackY + chipHalf
+          transform = inward > 0 ? 'translate(0,-100%)' : 'translate(-100%,-100%)'
         } else if (Math.abs(dy) >= Math.abs(dx)) {
           // Купчинката е над/под аватара: баджът над най-горния възможен чип.
           left = stackX
