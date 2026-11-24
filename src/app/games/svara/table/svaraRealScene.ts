@@ -25,10 +25,11 @@ import {
 } from '../scene/svaraSceneChoreography'
 import { createSvaraSceneDomRenderer } from '../scene/svaraSceneDomRenderer'
 import {
-  computeSvaraSceneLayout, svaraChipOnStack, svaraDeckCardState, svaraOwnRevealCardState, svaraSceneSeatIndexOf, svaraSeatFanState,
+  computeSvaraSceneLayout, svaraBelotRevealCardState, svaraChipOnStack, svaraDeckCardState, svaraOwnRevealCardState, svaraSceneSeatIndexOf, svaraSeatFanState,
   type SvaraSceneLayout,
 } from '../scene/svaraSceneLayout'
-import { createSvaraSceneShell } from '../scene/svaraSceneShell'
+import { createSvaraSceneShell, svaraSceneStageZ } from '../scene/svaraSceneShell'
+import { svaraBelotHandsSpec } from './svaraBelotHands'
 import { renderSvaraBelotSeatCardHtml, svaraBelotCardScale, svaraBelotCardSize, SVARA_BELOT_CARD_EDGE_MARGIN_PX } from './svaraBelotSeatCard'
 import { SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
 import { playGameSound } from '../../../audio/gameSoundSettings'
@@ -131,7 +132,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   shell.stage.dataset.svaraRealScene = '1'
   // Кликовете (профил) минават през слоя със спрайтовете към местата.
   shell.spritesHost.style.pointerEvents = 'none'
-  const renderer = createSvaraSceneDomRenderer()
+  // Картите като в Белот: спрайтовете се подреждат по z заедно с профилните карета.
+  const renderer = createSvaraSceneDomRenderer({ stageZ: svaraSceneStageZ })
   let mounted = false
   let layout: SvaraSceneLayout | null = null
   let sizeKey = ''
@@ -205,13 +207,25 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   function ownBadgeFontPx(): number {
     return Math.max(22, Math.min(44, layout!.cardHeight * layout!.revealScale * 0.3))
   }
+  /**
+   * Къде е значката върху собствените обърнати карти. Като в Белот картите са
+   * зад долното каре — значката е във видимата им част над него.
+   */
+  function ownPointsAnchor(): { x: number; y: number; font: number } {
+    const center = svaraOwnRevealCardState(layout!, 1, 0)
+    if (!layout!.belotHands) return { x: center.x, y: center.y, font: ownBadgeFontPx() }
+    const seat = layout!.seats[0]!
+    const visibleTop = center.y - layout!.belotHands.ownCard.h / 2
+    const visibleBottom = seat.avatar.y - seat.box.h / 2
+    return { x: center.x, y: (visibleTop + visibleBottom) / 2, font: Math.max(18, Math.min(32, (visibleBottom - visibleTop) * 0.42)) }
+  }
   /** Лек показ (появяване с мащаб → задържане → избледняване), центриран върху ветрилото. */
   function showOwnPoints(points: number): void {
     if (!layout || !input?.animations) return
     removeOwnPoints()
     // Центърът на ветрилото = средната карта (същото състояние като в обръщането).
-    const center = svaraOwnRevealCardState(layout, 1, 0)
-    const el = pointsBadge(points, center.x, center.y, ownBadgeFontPx())
+    const center = ownPointsAnchor()
+    const el = pointsBadge(points, center.x, center.y, center.font)
     el.dataset.svaraOwnPoints = String(points)
     ownPointsEl = el
     const animation = el.animate([
@@ -246,13 +260,15 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   }
   /** Центърът на ветрилото (средната карта) и размерът на значката за мястото. */
   function compareBadgeAnchor(sceneSeat: number, ownReveal: boolean): { x: number; y: number; font: number } {
-    if (sceneSeat === 0 && ownReveal) {
-      const c = svaraOwnRevealCardState(layout!, 1, 0)
-      return { x: c.x, y: c.y, font: ownBadgeFontPx() }
-    }
+    if (sceneSeat === 0 && ownReveal) return ownPointsAnchor()
     const seat = layout!.seats[sceneSeat]!
+    if (layout!.belotHands) {
+      // Като в Белот: върху разкритите карти (пред карето), по средата на ветрилото.
+      const c = revealedState(sceneSeat, 1)
+      return { x: c.x, y: c.y, font: Math.max(14, Math.min(30, layout!.belotHands.oppCard.h * 0.22)) }
+    }
     const c = fanState(sceneSeat, 1, 3, 0)
-    const cardH = layout!.cardHeight * c.scale
+    const cardH = layout!.cardSprite.h * c.scale
     // Леко навътре от средата на ветрилото — далеч от аватара.
     const shift = cardH * 0.12
     return { x: c.x + seat.inward.x * shift, y: c.y + seat.inward.y * shift, font: Math.max(14, Math.min(36, cardH * 0.32)) }
@@ -519,13 +535,25 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   function fanState(sceneSeat: number, slot: number, count: number, z: number): SvaraSpriteState {
     return svaraSeatFanState(layout!, layout!.seats[sceneSeat]!, slot, count, z)
   }
+  /**
+   * Разкритите карти на противник: като в Белот — изправени, върху карето му
+   * (пред него); иначе обърнатото ветрило на мястото.
+   */
+  function revealedState(sceneSeat: number, slot: number): SvaraSpriteState {
+    const z = 100 + sceneSeat * 3 + slot
+    return layout!.belotHands
+      ? svaraBelotRevealCardState(layout!, layout!.seats[sceneSeat]!, slot, 150 + z)
+      : { ...fanState(sceneSeat, slot, 3, z), faceUp: true }
+  }
   /** Крайно положение на ръката: ветрило; собствените обърнати — голямото ветрило на демото. */
   function settledHandStates(sceneSeat: number, hand: CardHand): Record<string, SvaraSpriteState> {
     const out: Record<string, SvaraSpriteState> = {}
     hand.ids.forEach((id, slot) => {
       out[id] = hand.revealed && sceneSeat === 0
         ? svaraOwnRevealCardState(layout!, slot, 150 + slot)
-        : { ...fanState(sceneSeat, slot, hand.ids.length, 100 + sceneSeat * 3 + slot), faceUp: hand.revealed }
+        : hand.revealed
+          ? revealedState(sceneSeat, slot)
+          : { ...fanState(sceneSeat, slot, hand.ids.length, 100 + sceneSeat * 3 + slot), faceUp: false }
     })
     return out
   }
@@ -554,7 +582,13 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       delete el.dataset.svaraCardSeat; delete el.dataset.svaraCardIndex; delete el.dataset.svaraOwnCard
       el.dataset.svaraCardCollecting = '1'
     }
-    const inputs = hand.ids.map((id, i) => svaraCollectCardMove(layout!, id, i, !!states[id]?.faceUp, jitter, delayMs + i * SVARA_SCENE_TIMING.collectCardsStaggerMs))
+    const inputs = hand.ids.map((id, i) => {
+      const move = svaraCollectCardMove(layout!, id, i, !!states[id]?.faceUp, jitter, delayMs + i * SVARA_SCENE_TIMING.collectCardsStaggerMs)
+      // Картите като в Белот: скритите карти излизат иззад карето и остават под
+      // каретата по пътя (иначе в началото на хода изскачат пред карето).
+      const z = states[id]?.z
+      return z !== undefined && z < 0 ? { ...move, to: { ...move.to, z } } : move
+    })
     const remaining = play(inputs)
     later(remaining + 30, () => remove(hand.ids))
   }
@@ -787,7 +821,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
         const delay = order * SHOWDOWN_HAND_STAGGER_MS
         play(hand.ids.map((id, slot) => sceneSeat === 0
           ? svaraOwnRevealMove(layout!, id, slot, 150 + slot, delay + slot * SVARA_SCENE_TIMING.revealStaggerMs)
-          : svaraFlipInPlaceMove(layout!, id, fanState(sceneSeat, slot, 3, 100 + sceneSeat * 3 + slot), slot, delay + slot * SVARA_SCENE_TIMING.revealStaggerMs)), elapsed)
+          : svaraFlipInPlaceMove(layout!, id, revealedState(sceneSeat, slot), slot, delay + slot * SVARA_SCENE_TIMING.revealStaggerMs)), elapsed)
       })
       // Бройките: едновременно, след като се обърне последната сравнявана ръка.
       const appearAt = Math.max(0, round.comparedPlayers.length - 1) * SHOWDOWN_HAND_STAGGER_MS + OWN_REVEAL_DONE_MS
@@ -830,7 +864,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
         const sceneSeat = sceneSeatOf(seat.seatIndex)
         setHandFaces(hand, round.cards.map((c) => svaraCardCodeToFaceSrc(c)))
         hand.revealed = true
-        play(hand.ids.map((id, slot) => sceneSeat === 0 ? svaraOwnRevealMove(layout!, id, slot, 150 + slot) : svaraFlipInPlaceMove(layout!, id, fanState(sceneSeat, slot, 3, 100 + sceneSeat * 3 + slot), slot)))
+        play(hand.ids.map((id, slot) => sceneSeat === 0 ? svaraOwnRevealMove(layout!, id, slot, 150 + slot) : svaraFlipInPlaceMove(layout!, id, revealedState(sceneSeat, slot), slot)))
       }
     }
 
@@ -896,12 +930,15 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       const vertical = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'below' : 'above')
       // Местата отляво/отдясно: информацията е подравнена навътре (не излиза извън сукното).
       const side = vertical === 'below' || vertical === 'above' ? `${vertical}-${seatLayout.slot === 'left' ? 'start' : seatLayout.slot === 'right' ? 'end' : 'center'}` : vertical
-      if (node.info.dataset.side !== side) {
-        node.info.dataset.side = side
+      // Отстъп от карето: картите като в Белот се подават иззад него — балансът е извън тях.
+      const gapX = Math.round(seatLayout.infoGap ?? 10), gapBelow = Math.round(seatLayout.infoGap ?? 6)
+      const sideKey = `${side}:${gapX}`
+      if (node.info.dataset.side !== sideKey) {
+        node.info.dataset.side = sideKey
         node.info.style.cssText = 'position:absolute;display:flex;flex-direction:column;gap:2px;white-space:nowrap;pointer-events:none;z-index:3;' + (
-          side === 'right' ? 'left:calc(100% + 10px);top:50%;transform:translate(0,-50%);align-items:flex-start;'
-            : side === 'left' ? 'right:calc(100% + 10px);top:50%;transform:translate(0,-50%);align-items:flex-end;'
-              : (side.startsWith('below') ? 'top:calc(100% + 6px);' : 'bottom:calc(100% + 8px);') + (
+          side === 'right' ? `left:calc(100% + ${gapX}px);top:50%;transform:translate(0,-50%);align-items:flex-start;`
+            : side === 'left' ? `right:calc(100% + ${gapX}px);top:50%;transform:translate(0,-50%);align-items:flex-end;`
+              : (side.startsWith('below') ? `top:calc(100% + ${gapBelow}px);` : 'bottom:calc(100% + 8px);') + (
                 side.endsWith('start') ? 'left:0;align-items:flex-start;' : side.endsWith('end') ? 'right:0;align-items:flex-end;' : 'left:50%;transform:translate(-50%,0);align-items:center;'))
       }
       // Собственото място (без „(ти)“ в името).
@@ -923,7 +960,12 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
         const chipHalf = layout.chipSize / 2
         const stackX = seatLayout.box.w / 2 - dx, stackY = seatLayout.box.h / 2 - dy
         let left: number, top: number, transform: string
-        if (Math.abs(dy) >= Math.abs(dx)) {
+        if (seatLayout.betBadgeBelow) {
+          // Под основата на купчинката (встрани е баджът на съседното място).
+          left = stackX
+          top = stackY + chipHalf + BET_BADGE_GAP_PX
+          transform = 'translate(-50%,0)'
+        } else if (Math.abs(dy) >= Math.abs(dx)) {
           // Купчинката е над/под аватара: баджът над най-горния възможен чип.
           left = stackX
           top = stackY - (MAX_STACK_CHIPS - 1) * layout.chipStep - chipHalf - BET_BADGE_GAP_PX
@@ -1027,6 +1069,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     layout = computeSvaraSceneLayout(size.width, size.height, {
       ...REAL_LAYOUT_OPTIONS,
       seatCards: { side: svaraBelotCardSize('left', scale), bottom: svaraBelotCardSize('bottom', scale), margin: SVARA_BELOT_CARD_EDGE_MARGIN_PX },
+      // Картите като в Белот (оформлението ги прилага само в портрет — телефон).
+      belotHands: svaraBelotHandsSpec(scale, scale * zoom),
     })
     shell.applyLayout(layout)
     renderer.setLayout(layout)

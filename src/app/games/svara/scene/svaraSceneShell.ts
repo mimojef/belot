@@ -54,6 +54,17 @@ const FRAMELESS_FELT_STYLE = 'inset:0;background:radial-gradient(circle at 50% 4
  */
 export type SvaraSceneSeatStyle = 'round' | 'card'
 
+/** Истинската игра: z-index на слоевете в сцената (спрайтовете — виж svaraSceneStageZ). */
+export const SVARA_STAGE_Z = { behindSeats: 50, seats: 100, sprites: 200, labels: 5000, hud: 5100, banner: 5200 } as const
+
+/**
+ * z на спрайт → z-index в сцената: отрицателните (картите зад каретата, виж
+ * SVARA_BEHIND_SEAT_Z) са под слоя с каретата; всички останали — над него.
+ */
+export function svaraSceneStageZ(z: number): number {
+  return z < 0 ? Math.max(1, SVARA_STAGE_Z.behindSeats + z) : SVARA_STAGE_Z.sprites + z
+}
+
 function seatInnerHtml(style: SvaraSceneSeatStyle, avatarSrc: string): string {
   if (style === 'round') {
     return `
@@ -94,9 +105,21 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
   const winLabel = q<HTMLElement>('[data-svara-scene-win]')
   const banner = q<HTMLElement>('[data-svara-scene-banner]')
   banner.textContent = options.bannerText
+  if (options.seatStyle === 'card') {
+    // Истинската игра: спрайтовете се подреждат по z заедно със слоевете на
+    // сцената (картите — зад каретата или пред тях; виж svaraSceneStageZ).
+    // Сцената е собствен stacking context, за да не излиза z извън нея.
+    stage.style.isolation = 'isolate'
+    seatsLayer.style.zIndex = String(SVARA_STAGE_Z.seats)
+    potLabel.style.zIndex = String(SVARA_STAGE_Z.labels)
+    winLabel.style.zIndex = String(SVARA_STAGE_Z.labels + 1)
+    hudLayer.style.zIndex = String(SVARA_STAGE_Z.hud)
+    banner.style.zIndex = String(SVARA_STAGE_Z.banner)
+  }
 
   const hudAnimations = new Set<Animation>()
   let layout: SvaraSceneLayout | null = null
+  let potLabelLines: 1 | 2 = 1
 
   // ── Места и аватари (статичен DOM) ───────────────────────────────────────
   const seats: SvaraSceneSeatNode[] = []
@@ -133,13 +156,18 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
       potLabel.style.left = `${next.potLabel.x}px`
       potLabel.style.top = `${next.potLabel.y}px`
       potLabel.style.fontSize = `${Math.round(Math.max(12, next.chipSize * 0.5))}px`
+      // Телефон с ръце като в Белот: „Банка“ / сумата на 2 реда (по-тесен блок в центъра).
+      potLabelLines = next.potLabelLines
+      potLabel.style.textAlign = potLabelLines === 2 ? 'center' : ''
+      potLabel.style.lineHeight = potLabelLines === 2 ? '1.15' : ''
       winLabel.style.fontSize = `${Math.round(Math.max(18, next.chipSize * 0.9))}px`
       // Банерът е над банката, за да не скрива чиповете.
       banner.style.top = `${Math.max(next.height * 0.2, next.pot.y - next.chipSize * 2.8)}px`
     },
 
     setPot(value, pulse, text) {
-      potLabel.textContent = text ?? `Банка: ${value}`
+      if (text === undefined && potLabelLines === 2) potLabel.innerHTML = `<span style="display:block;">Банка</span><span style="display:block;">${Number(value)}</span>`
+      else potLabel.textContent = text ?? `Банка: ${value}`
       potLabel.style.opacity = value > 0 ? '1' : '0'
       if (pulse && value > 0) {
         track(potLabel.animate(

@@ -125,7 +125,7 @@ export function svaraFlipInPlaceMove(layout: SvaraSceneLayout, id: string, at: S
 export function svaraCollectCardMove(layout: SvaraSceneLayout, id: string, index: number, faceUp: boolean, jitter: SvaraJitter, delayMs = index * SVARA_SCENE_TIMING.collectCardsStaggerMs): SvaraMoveInput {
   return {
     id,
-    to: { x: layout.deck.x, y: layout.deck.y, rotation: -4 + jitter(6), scale: 1, alpha: 0, z: 60 + index, faceUp },
+    to: { x: layout.deck.x, y: layout.deck.y, rotation: -4 + jitter(6), scale: layout.cardUnit, alpha: 0, z: 60 + index, faceUp },
     delayMs,
     durationMs: SVARA_SCENE_TIMING.collectCardsMs,
     easing: 'inOutCubic',

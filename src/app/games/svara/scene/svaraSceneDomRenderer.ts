@@ -57,7 +57,18 @@ export interface SvaraSceneRenderer extends SvaraSceneRendererBase {
 
 type DomSprite = SvaraWaapiSprite & { def: SvaraSpriteDef; animations: Animation[]; timers: number[]; token: number }
 
-export function createSvaraSceneDomRenderer(): SvaraSceneRenderer {
+export type SvaraSceneDomRendererOptions = {
+  /**
+   * Истинската игра: спрайтовете се подреждат по z заедно с останалите слоеве на
+   * сцената (слоят им не е отделен stacking context) — така картите могат да са
+   * зад профилните карета и пред тях. Функцията превежда z на спрайта в z-index
+   * на сцената. Демото не подава опцията (без промяна).
+   */
+  stageZ?: (z: number) => number
+}
+
+export function createSvaraSceneDomRenderer(options: SvaraSceneDomRendererOptions = {}): SvaraSceneRenderer {
+  const zIndexOf = (z: number) => String(options.stageZ ? options.stageZ(z) : z)
   let layer: HTMLElement | null = null
   let shadowLayer: HTMLElement | null = null
   let spriteLayer: HTMLElement | null = null
@@ -70,12 +81,13 @@ export function createSvaraSceneDomRenderer(): SvaraSceneRenderer {
   function sizeOf(def: SvaraSpriteDef): { width: number; height: number } {
     if (!layout) return { width: 0, height: 0 }
     return def.kind === 'card'
-      ? { width: layout.cardWidth, height: layout.cardHeight }
+      ? { width: layout.cardSprite.w, height: layout.cardSprite.h }
       : { width: layout.chipSize, height: layout.chipSize }
   }
 
   function setStatic(sprite: DomSprite, s: SvaraSampledState, z: number): void {
     applySvaraSpriteStatic(sprite, s, z)
+    if (options.stageZ) sprite.root.style.zIndex = zIndexOf(z)
   }
 
   function createSprite(def: SvaraSpriteDef): DomSprite {
@@ -134,10 +146,10 @@ export function createSvaraSceneDomRenderer(): SvaraSceneRenderer {
     // z-index не е compositor свойство — сменя се с таймер в началото на всеки ход.
     for (const move of track.moves) {
       const at = move.delayMs - elapsedMs
-      if (at <= 0) { sprite.root.style.zIndex = String(move.to.z); continue }
+      if (at <= 0) { sprite.root.style.zIndex = zIndexOf(move.to.z); continue }
       const timer = window.setTimeout(() => {
         timers.delete(timer)
-        if (alive()) sprite.root.style.zIndex = String(move.to.z)
+        if (alive()) sprite.root.style.zIndex = zIndexOf(move.to.z)
       }, at)
       timers.add(timer)
       sprite.timers.push(timer)
@@ -190,7 +202,9 @@ export function createSvaraSceneDomRenderer(): SvaraSceneRenderer {
       layout = nextLayout
       layer = document.createElement('div')
       layer.dataset.svaraRenderer = 'dom'
-      layer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;contain:strict;'
+      layer.style.cssText = options.stageZ
+        ? 'position:absolute;inset:0;overflow:hidden;pointer-events:none;contain:size style;'
+        : 'position:absolute;inset:0;overflow:hidden;pointer-events:none;contain:strict;'
       shadowLayer = document.createElement('div')
       shadowLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;'
       spriteLayer = document.createElement('div')
