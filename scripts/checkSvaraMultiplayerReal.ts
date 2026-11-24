@@ -161,7 +161,9 @@ async function game(count: 2 | 3 | 4) {
     await sync([p])
   }
   async function remount(p: Peer) {
-    await p.page.click('[data-svara-back-to-games]')
+    // При активна маса „← Обратно към Игри“ е скрит (изходът е иконата в горния
+    // бар) — същата SPA навигация се задейства с програмен клик по връзката.
+    await p.page.$eval('[data-svara-back-to-games]', (link) => (link as HTMLElement).click())
     await p.page.waitForURL(/\/games$/)
     await p.page.click('[data-svara-play-button]')
     await p.page.waitForSelector('[data-svara-diagnostics]')
@@ -336,6 +338,8 @@ async function game(count: 2 | 3 | 4) {
     const exit = async (p: Peer) => {
       const offset = p.frames.length
       await p.page.locator('[data-svara-table-leave]').click()
+      // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
+      if (await p.page.locator('[data-svara-exit-confirm]').count()) await p.page.click('[data-svara-exit-confirm]')
       await wait('actual UI leave command sent', () => p.sent.some((f) => f.type === 'leave_svara_table' && f.matchId === matchId), 5000)
       const request = p.sent.findLast((f) => f.type === 'leave_svara_table' && f.matchId === matchId)!
       requests.push(request)
@@ -539,6 +543,8 @@ try {
     await wait('original native snapshot and timing held', () => p.page.evaluate(() => (globalThis as any).__svaraHeld.length === 2), 2000)
     await p.page.evaluate(() => { (globalThis as any).__svaraHold = false })
     await p.page.click('[data-svara-table-leave]')
+    // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
+    if (await p.page.locator('[data-svara-exit-confirm]').count()) await p.page.click('[data-svara-exit-confirm]')
     await wait('real exit cleared old table', async () => await p.page.locator('[data-svara-diagnostics]').count() === 0, 3000)
     await p.page.click('[data-svara-create-open]'); await p.page.click('[data-svara-create-form] button[type="submit"]')
     await p.page.waitForSelector('[data-svara-table-leave]')
@@ -557,10 +563,10 @@ try {
     await g.restart(crash)
     await g.allInToEnd(); await g.leave()
   })
-  await scenario('2 players: x2/x3/x4/x5, duplicate/revision/identity guards, reveal/hide/timeout', 2, async (g) => {
+  await scenario('2 players: x5/x10/x20/x50, duplicate/revision/identity guards, reveal/hide/timeout', 2, async (g) => {
     const hands = ['AS KS QS', 'AH 8D 9C']
     await g.start([0, 1, 0, 1, 0].map((dealer) => g.deck(hands, dealer)))
-    for (const [i, factor] of [2, 3, 4, 5].entries()) {
+    for (const [i, factor] of [5, 10, 20, 50].entries()) {
       await g.betting()
       const actor = g.actor()
       if (i > 0) await g.action('look')
@@ -625,20 +631,22 @@ try {
     const decided = ['KH QH JH', 'AD 8H 9S', 'AS KS QS', 'AC 10D JS']
     const tie = ['AS 8H 9D', 'AH 8D 9C', 'AD 8C 9H', 'AC 10D JS']
     await g.start([g.deck(warmup), g.deck(allinTie ? tie : decided, 1), ...(allinTie ? [g.deck(decided, -1)] : [])])
-    await g.betting(); await g.action('look'); await g.action('x4'); await g.action('pay'); await g.action('fold'); await g.action('fold')
+    await g.betting(); await g.action('look'); await g.action('x5'); await g.action('pay'); await g.action('fold'); await g.action('fold')
     await g.results(); await g.betting()
-    assert.deepEqual(g.peers.map((p) => g.stored().state.stacks[p.id]), [490, 530, 470, 490])
+    // ×5 от минимума 5 = 25 (досега ×4 = 20): победителят и платилият са с ±5 повече.
+    assert.deepEqual(g.peers.map((p) => g.stored().state.stacks[p.id]), [490, 535, 465, 490])
     for (let i = 0; i < 4; i++) {
       if (!g.snapshot(g.actor()).you.looked) await g.action('look')
       await g.action('all-in')
     }
     const settled = g.stored(), round = settled.state.round
     assert(round?.kind === 'showdown-display')
-    assert.deepEqual(round.record!.pots.map((p) => p.amount), [1900, 60, 40])
+    // Слоевете следват стековете след ×5: 470 × 4, 25 × 3 и непокрити 45.
+    assert.deepEqual(round.record!.pots.map((p) => p.amount), [1880, 75, 45])
     assert.deepEqual(round.record!.pots.map((p) => p.eligible.length), [4, 3, 1])
     assert.equal(round.record!.pots[2]!.outcome.kind, 'uncalled-return')
     if (allinTie) {
-      assert.deepEqual(settled.state.lockedPots.map((p) => [p.kind, p.amount]), [['allin', 1900], ['allin', 60]])
+      assert.deepEqual(settled.state.lockedPots.map((p) => [p.kind, p.amount]), [['allin', 1880], ['allin', 75]])
       for (const p of g.peers) {
         assert.equal(await p.page.locator('[data-svara-decision-window="joining"]').count(), 0)
         assert.equal(await p.page.locator('[data-svara-tie]').count(), 1)
@@ -648,10 +656,10 @@ try {
       assert(display?.kind === 'showdown-display')
       assert.equal(resolved.state.history.at(-1)!.kind, 'allin-svara')
       assert.equal(resolved.state.lockedPots.length, 0)
-      assert.deepEqual(display.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[1900, g.peers[2]!.id], [60, g.peers[0]!.id]])
+      assert.deepEqual(display.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[1880, g.peers[2]!.id], [75, g.peers[0]!.id]])
     } else {
       assert.equal(settled.state.lockedPots.length, 0)
-      assert.deepEqual(round.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[1900, g.peers[2]!.id], [60, g.peers[0]!.id]])
+      assert.deepEqual(round.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[1880, g.peers[2]!.id], [75, g.peers[0]!.id]])
     }
     await g.queue([g.deck(['AH 8D 9C', 'AD 8H 9S', 'AS KS QS', 'AC 10D JS'], 2, [0, 1, 2])])
     await g.results({ showdownReconnect: g.peers[2], payoutReconnect: g.peers[0] })

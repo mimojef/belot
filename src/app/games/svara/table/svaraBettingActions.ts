@@ -6,34 +6,36 @@
 // разрешените опции в конкретни бутони/суми, по модела на заданието §3:
 //
 //   "Плати" = call (ако има какво да се плаща) ИЛИ отваря на минимума
-//   ×2..×5  = множители на МИНИМУМА на текущия залог/повишаване (НЕ на Входа,
-//             НЕ на остатъка) — bet.min/blindBet.min * N, клампнати до max
+//   ×5/×10/×20/×50 = множители на МИНИМУМА на текущия залог/повишаване (НЕ на
+//             Входа, НЕ на остатъка) — bet.min/blindBet.min * N; над max (наличните
+//             чипове) бутонът е неактивен — по-голяма сума се прави само с Ол-ин
 //   Ол-ин   = реалната цел (voluntary + stack), директно от сървъра
 //   Бягам   = fold
 //   Без залог = само когато allowNoBet (специалното 4-то раздаване)
-//   Погледни  = само когато играчът е на ход и още не е погледнал
+//   Виж     = („Погледни“) само когато играчът е на ход и още не е погледнал
 //
 // Сървърът валидира всяка команда независимо — тези бутони са само удобство,
 // никога извор на истина за позволеността на действието.
 
 import type { SvaraBettingOptions, SvaraParticipantCommand } from '../../../network/createGameServerClient'
 
-export type SvaraActionButtonKind = 'look' | 'pay' | 'x2' | 'x3' | 'x4' | 'x5' | 'all-in' | 'no-bet' | 'fold'
+export type SvaraMultiplierKind = 'x5' | 'x10' | 'x20' | 'x50'
+export type SvaraActionButtonKind = 'look' | 'pay' | SvaraMultiplierKind | 'all-in' | 'no-bet' | 'fold'
 
 export type SvaraActionButton = {
   kind: SvaraActionButtonKind
   label: string
-  /** Сумата (целево ниво), показана в бутона — null за Бягам/Погледни/Без залог. */
+  /** Сумата (целево ниво) на действието — null за Бягам/Виж/Без залог. */
   amount: number | null
   command: SvaraParticipantCommand
   disabled: boolean
 }
 
-const MULTIPLIERS: ReadonlyArray<{ kind: 'x2' | 'x3' | 'x4' | 'x5'; factor: 2 | 3 | 4 | 5 }> = [
-  { kind: 'x2', factor: 2 },
-  { kind: 'x3', factor: 3 },
-  { kind: 'x4', factor: 4 },
+export const SVARA_MULTIPLIERS: ReadonlyArray<{ kind: SvaraMultiplierKind; factor: 5 | 10 | 20 | 50 }> = [
   { kind: 'x5', factor: 5 },
+  { kind: 'x10', factor: 10 },
+  { kind: 'x20', factor: 20 },
+  { kind: 'x50', factor: 50 },
 ]
 
 /**
@@ -44,12 +46,12 @@ export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, lo
   if (!betting || !betting.canAct) return []
   const buttons: SvaraActionButton[] = []
 
-  // Погледни — само на ход, само преди първото поглеждане (задание §6).
+  // Виж — само на ход, само преди първото поглеждане (задание §6).
   // Веднъж тъмната фаза приключи (или никога не е била приложима), сървърът
   // автоматично разкрива картите (revealUnlookedHands) и looked вече е true,
   // затова бутонът естествено изчезва без допълнителна проверка на фазата.
   if (!looked) {
-    buttons.push({ kind: 'look', label: 'Погледни', amount: null, command: { type: 'look' }, disabled: false })
+    buttons.push({ kind: 'look', label: 'Виж', amount: null, command: { type: 'look' }, disabled: false })
   }
 
   // bet/blindBet са взаимно изключващи се в SvaraBettingOptions (виж
@@ -77,7 +79,7 @@ export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, lo
   }
 
   if (raiseOption) {
-    for (const { kind, factor } of MULTIPLIERS) {
+    for (const { kind, factor } of SVARA_MULTIPLIERS) {
       const total = raiseOption.min * factor
       buttons.push({
         kind,
@@ -93,7 +95,7 @@ export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, lo
   if (betting.allIn !== null) {
     buttons.push({
       kind: 'all-in',
-      label: `Ол-ин · ${betting.allIn}`,
+      label: 'Ол-ин',
       amount: betting.allIn,
       command: { type: 'act', action: { kind: 'all-in' } },
       disabled: false,

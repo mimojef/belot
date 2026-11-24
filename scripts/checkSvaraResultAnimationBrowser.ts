@@ -63,7 +63,8 @@ try {
       }).filter((d): d is { x: number; y: number } => d !== null)
       const avatarCenter = (seat: number) => {
         const felt = root.querySelector<HTMLElement>('[data-svara-felt]')!.getBoundingClientRect()
-        const r = root.querySelector<HTMLElement>(`[data-svara-avatar="${seat}"]`)!.getBoundingClientRect()
+        // Мястото (профилното каре от Белот) — аватарът на сцената вече е в карето.
+        const r = root.querySelector<HTMLElement>(`[data-svara-avatar="${seat}"]`)!.closest<HTMLElement>('[data-svara-scene-seat]')!.getBoundingClientRect()
         return { x: r.left + r.width / 2 - felt.left, y: r.top + r.height / 2 - felt.top }
       }
       const near = (a: { x: number; y: number }, b: { x: number; y: number }, tolerance: number) => Math.hypot(a.x - b.x, a.y - b.y) < tolerance
@@ -275,16 +276,13 @@ try {
     controller.setSnapshot(input.snapshot)
     controller.setTiming(input.timing)
     await new Promise<void>((done) => requestAnimationFrame(() => done()))
-    // prefers-reduced-motion НЕ изключва анимациите на Свара (само настройката „Анимации“).
+    // prefers-reduced-motion НЕ изключва анимациите на Свара (те са винаги включени).
     if (!root.textContent!.includes('Печеля 1250!') || !root.querySelector('[data-svara-sprite-kind="chip"][data-moving="1"]')) throw new Error('prefers-reduced-motion must keep the award AND the chip flight')
-    root.querySelector<HTMLElement>('[data-svara-animations-toggle]')!.click()
-    await new Promise<void>((done) => requestAnimationFrame(() => done()))
-    if (!root.textContent!.includes('Печеля 1250!') || root.querySelector('[data-svara-sprite-kind="chip"][data-moving="1"]') || !root.querySelector('[data-svara-sprite-kind="chip"]')) throw new Error('animations OFF: exact award, visible chips, no flight')
-    root.querySelector<HTMLElement>('[data-svara-animations-toggle]')!.click()
+    if (root.querySelector('[data-svara-animations-toggle]')) throw new Error('the „Анимации“ setting must not exist')
     controller.destroy()
     sharedServerClock.reset()
   })
-  console.log('  ok prefers-reduced-motion keeps animations; the Svara setting turns them off')
+  console.log('  ok prefers-reduced-motion keeps animations; there is no setting to turn them off')
   assert.deepEqual(errors, [], 'no uncaught Chromium errors')
   await writeFile(resolve(outDir, 'report.json'), JSON.stringify({ kind: 'Chromium component fixtures; not auth/WS integration', report, errors }, null, 2))
   console.log(`Screenshots and report: ${outDir}`)

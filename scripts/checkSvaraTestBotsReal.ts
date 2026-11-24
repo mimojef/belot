@@ -174,6 +174,8 @@ async function exitAndVerifyRelease(humans: Peer[], matchId: string) {
   for (const [index, h] of playing.entries()) {
     const offset = h.frames.length
     await h.page.click('[data-svara-table-leave]')
+    // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
+    if (await h.page.locator('[data-svara-exit-confirm]').count()) await h.page.click('[data-svara-exit-confirm]')
     await wait('back in the Svara lobby', () => h.frames.slice(offset).some((f) => f.type === 'svara_table_left' && f.matchId === matchId), 5_000)
     // Сървърът отговаря със svara_table_left СЛЕД прекратяването в същата заявка —
     // затова мачът трябва вече да е приключил, без да чакаме бот/дисплей таймери.

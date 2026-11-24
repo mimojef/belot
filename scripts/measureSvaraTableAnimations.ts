@@ -195,6 +195,7 @@ try {
       ;(report.results as Record<string, unknown>)[`${viewport.name}/${capacity}p`] = { ...metrics, measuredMs: elapsed, faults }
       console.log(`${viewport.name} ${capacity}p:`, JSON.stringify(metrics))
       await page.click('[data-svara-table-leave]').catch(() => {})
+      await page.click('[data-svara-exit-confirm]', { timeout: 2_000 }).catch(() => {})
       await pause(500)
       await context.close()
     }

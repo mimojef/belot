@@ -4,8 +4,8 @@
  * + тестови ботове + Chromium. Проверява реално поведение в DOM-а:
  *   • тестето е видимо само по време на раздаване; картите летят от него;
  *   • точно 3 карти на участник след раздаването (без дублиране);
- *   • настройката „Анимации“: вкл. по подразбиране и при prefers-reduced-motion;
- *     изкл. — без движение, но тестето/картите/чиповете са видими;
+ *   • анимациите са винаги включени: няма настройка „Анимации“, а
+ *     prefers-reduced-motion и стара записана „изкл.“ настройка не ги спират;
  *   • обръщане (собствено „Погледни“ и при сравняване) като спрайт;
  *   • чипове (анте, залози) в банката; изплащане към победителя;
  *   • „СВАРА!“ банерът при равенство; заключената банка остава на масата;
@@ -197,15 +197,12 @@ async function createWithBots(p: Peer, capacity: 2 | 3 | 4): Promise<string> {
 async function leave(p: Peer, matchId: string) {
   const offset = p.frames.length
   await p.page.click('[data-svara-table-leave]')
+  // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
+  if (await p.page.locator('[data-svara-exit-confirm]').count()) await p.page.click('[data-svara-exit-confirm]')
   await wait('left', () => p.frames.slice(offset).some((f) => f.type === 'svara_table_left' && f.matchId === matchId), 5_000)
   await p.page.waitForSelector('[data-svara-create-open]', { timeout: 5_000 })
 }
 
-async function setAnimations(p: Peer, on: boolean) {
-  const label = await p.page.textContent('[data-svara-animations-toggle]')
-  if ((label?.includes('вкл.') ?? false) !== on) await p.page.click('[data-svara-animations-toggle]')
-  await p.page.waitForFunction((want) => document.querySelector('[data-svara-animations-toggle]')?.textContent?.includes(want ? 'вкл.' : 'изкл.'), on)
-}
 
 try {
   backend = await startIsolatedSvaraBackend(isolated, { deckControl: true, extraEnv: { SVARA_TEST_BOTS_ENABLED: '1' } })
@@ -223,7 +220,10 @@ try {
     await backend.queueDecks([tie(['b', 'h']), human(['b', 'h']), human(['b', 'h']), human(['b', 'h'])])
     const matchId = await createWithBots(p, 2)
     assert.equal(await p.page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true)
-    assert.match((await p.page.textContent('[data-svara-animations-toggle]')) ?? '', /вкл\./, 'animations ON by default')
+    await p.page.click('[data-svara-settings-toggle]')
+    assert.equal(await p.page.locator('[data-svara-animations-toggle]').count(), 0, 'no „Анимации“ setting in the menu')
+    assert.equal(await p.page.locator('[data-svara-sounds-toggle]').count(), 1, '„Звуци в играта“ stays')
+    await p.page.click('[data-svara-settings-close]')
     const sent = new Set<number>()
     const facts = await observe(p, matchId, 75_000, humanPolicy(p, matchId, sent), (f) => f.banner && f.payoutSeen && f.dealOk >= 2)
     if (screenshotDir) await p.page.screenshot({ path: join(screenshotDir, 'scene-2p.png') })
@@ -241,18 +241,16 @@ try {
     assert.deepEqual(p.faults, [])
     ok(`2 играча при prefers-reduced-motion=reduce: анимациите работят; тесте само при раздаване, 3 карти, обръщане, чипове, „СВАРА!“, ${svaraSeen ? 'заключена банка в Свара, ' : ''}изплащане (${facts.deals} раздавания, макс. ${facts.maxAnimations} анимации, ${facts.maxSprites} спрайта)`)
 
-    // Настройка „Анимации: изкл.“ — без движение; картите/чиповете остават видими; изборът се помни.
-    await setAnimations(p, false)
-    const offFacts = await observe(p, matchId, 12_000, humanPolicy(p, matchId, sent), (f) => f.deals >= 1 && f.dealOk >= 1)
-    const still = await probe(p)
-    assert.equal(offFacts.cardsMovingSeen || offFacts.chipsMovingSeen, false, 'no motion with animations OFF')
-    assert(still.chips > 0, 'graphic chips visible with animations OFF')
-    assert.deepEqual(offFacts.violations, [])
+    // Стара записана настройка „Анимации: изкл.“ вече не влияе: след refresh
+    // анимациите продължават, а ключът се изчиства.
+    await p.page.evaluate(() => localStorage.setItem('pika.svara.animations', 'off'))
     await p.page.reload({ waitUntil: 'domcontentloaded' })
-    await p.page.waitForSelector('[data-svara-animations-toggle]')
-    assert.match((await p.page.textContent('[data-svara-animations-toggle]')) ?? '', /изкл\./, 'setting remembered locally')
-    await setAnimations(p, true)
-    ok('„Анимации: изкл.“: без движение, тесте/карти/чипове видими, изборът се помни след refresh')
+    await p.page.waitForSelector('[data-svara-real-scene]')
+    assert.equal(await p.page.evaluate(() => localStorage.getItem('pika.svara.animations')), null, 'old setting cleared')
+    const onFacts = await observe(p, matchId, 30_000, humanPolicy(p, matchId, sent), (f) => f.deals >= 1 && f.dealOk >= 1 && f.cardsMovingSeen)
+    assert(onFacts.cardsMovingSeen, `cards still move after an old „off“ setting (deals=${onFacts.deals}, ok=${onFacts.dealOk}, maxAnimations=${onFacts.maxAnimations}, phase=${latest(p, matchId)?.phase}, trace=${onFacts.trace.join(' → ')})`)
+    assert.deepEqual(onFacts.violations, [])
+    ok('стара „Анимации: изкл.“ настройка не спира анимациите и се изчиства; няма превключвател')
     await leave(p, matchId)
     const after = await probe(p)
     assert.equal(after.sprites + after.stage, 0, 'no sprites left in the lobby')

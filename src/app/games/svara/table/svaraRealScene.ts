@@ -36,7 +36,7 @@ import { getSvaraVisualSlot } from './svaraSeatLayout'
 import { svaraCardCodeToFaceSrc } from './svaraTableAssets'
 import { svaraDealingAnimationMs } from './svaraTableAnimation'
 import { SVARA_PAYOUT_STEP_MS, SVARA_SHOWDOWN_MS, type SvaraResultVisualState } from './svaraResultAnimation'
-import type { SvaraSceneSeatHud } from './renderSvaraActiveTable'
+import { SVARA_ACTION_PANEL_HEIGHT_DESKTOP_PX, SVARA_ACTION_PANEL_HEIGHT_PHONE_PX, type SvaraSceneSeatHud } from './renderSvaraActiveTable'
 
 // ── Одобрени времена (сцена) ────────────────────────────────────────────────
 /** Анте — преди раздаването (= сървърния прозорец „Вход“). */
@@ -69,10 +69,9 @@ const SHOWDOWN_HAND_STAGGER_MS = 120
 /** Значките при сравняване: поява / изчезване при прибирането. */
 const COMPARE_BADGE_IN_MS = 320
 const COMPARE_BADGE_OUT_MS = 200
-/** Телефон: място под сукното за рамката и лентата с действия (до 3 реда). */
-const PHONE_ACTION_BAR_RESERVE_PX = 140
-/** Desktop: един ред бутони за действие под сукното + отстъп. */
-const DESKTOP_ACTION_BAR_RESERVE_PX = 60
+/** Място под сукното за постоянния панел с бутоните (телефон: 2 реда; desktop: 1 ред) + отстъп. */
+const PHONE_ACTION_BAR_RESERVE_PX = SVARA_ACTION_PANEL_HEIGHT_PHONE_PX + 4
+const DESKTOP_ACTION_BAR_RESERVE_PX = SVARA_ACTION_PANEL_HEIGHT_DESKTOP_PX + 8
 /** Отстъп между ръба на купчинката (при максимална височина) и баджа на залога. */
 const BET_BADGE_GAP_PX = 5
 
@@ -81,7 +80,7 @@ export type SvaraRealSceneInput = {
   timing: SvaraMatchTimingMessage | null
   serverNow: number
   localProfileId: string
-  /** Настройката „Анимации“ в Свара (системното prefers-reduced-motion НЕ я изключва). */
+  /** Игровите анимации (истинската игра винаги подава true; prefers-reduced-motion НЕ ги изключва). */
   animations: boolean
   table: SvaraPublicTable
   resultVisual: SvaraResultVisualState
@@ -340,7 +339,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       return { width, height: Math.round(Math.max(240, Math.min(width * 0.6, room))) }
     }
     // Телефон: сукното расте (до 1.5× ширината) само докато под него остава
-    // място за лентата с действия (до 3 реда бутони) — никога по-ниско от
+    // място за постоянния панел с бутоните (2 реда) — никога по-ниско от
     // 1.2× (сукното е по цялата ширина на екрана, затова собствените карти
     // остават поне толкова големи, колкото бяха в рамката при 1.35×).
     // Позиция в оформлението (независимо от превъртането).

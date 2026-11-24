@@ -774,7 +774,7 @@ try {
     await compareBrowserToAuthoritativeSnapshot(otherSession.page, actor.label === 'A' ? userB.profileId : userA.profileId)
   })
 
-  await check('[T15] Реално повишаване (×2) от следващия играч -> точната сума (min×2), не приблизителна', async () => {
+  await check('[T15] Реално повишаване (×5) от следващия играч -> точната сума (min×5), не приблизителна', async () => {
     const actor = await findActor()
     if (actor.label === actorLabel) throw new Error('turn must have moved to the OTHER player after a valid bet')
     const before = await readSeatTotals(actor.page)
@@ -783,15 +783,15 @@ try {
       await actor.page.click('[data-svara-action-button="look"]')
       await sleep(300)
     }
-    await actor.page.waitForSelector('[data-svara-action-button="x2"]:not([disabled])', { timeout: 10_000 })
-    const x2Label = await actor.page.locator('[data-svara-action-button="x2"]').textContent()
-    await actor.page.click('[data-svara-action-button="x2"]')
+    await actor.page.waitForSelector('[data-svara-action-button="x5"]:not([disabled])', { timeout: 10_000 })
+    const x5Label = await actor.page.locator('[data-svara-action-button="x5"]').textContent()
+    await actor.page.click('[data-svara-action-button="x5"]')
     await actor.page.waitForFunction(() => (document.querySelector('[data-svara-lobby="1"]')?.textContent ?? '').length > 0, undefined, { timeout: 5_000 })
     await sleep(600)
     const after = await readSeatTotals(actor.page)
-    if (before.selfStack === null || after.selfStack === null) throw new Error(`could not read stacks around ×2 raise (x2 label was "${x2Label}")`)
+    if (before.selfStack === null || after.selfStack === null) throw new Error(`could not read stacks around ×5 raise (x5 label was "${x5Label}")`)
     const actuallyAdded = before.selfStack - after.selfStack
-    if (actuallyAdded <= 0) throw new Error(`×2 raise did not actually deduct any chips (before=${before.selfStack}, after=${after.selfStack})`)
+    if (actuallyAdded <= 0) throw new Error(`×5 raise did not actually deduct any chips (before=${before.selfStack}, after=${after.selfStack})`)
     await compareBrowserToAuthoritativeSnapshot(actor.page, actor.label === 'A' ? userA.profileId : userB.profileId)
     await compareBrowserToAuthoritativeSnapshot(other(actor.label).page, actor.label === 'A' ? userB.profileId : userA.profileId)
     assert(sentCommands.get(sessionA.page)!.some((frame) => frame.command?.type === 'act'))

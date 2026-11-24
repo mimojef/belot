@@ -3,7 +3,7 @@
 // Самата маса (сукно, места, аватари, тесте, карти, чипове, банка, банер,
 // пръстен, спечелена сума) е ОБЩАТА визуална сцена на демото
 // (../scene/, управлявана от svaraRealScene.ts). Тук остават:
-//   • горният бар: Изход, цял екран и меню „Настройки“ (Звуци в играта, Анимации);
+//   • горният бар: Изход, цял екран и меню „Настройки“ (Звуци в играта);
 //   • домакинът на сцената (data-svara-scene-host) — НЕ се преизгражда;
 //   • бутоните за действие, прозорците за решения, банерът при край на мача;
 //   • чист HTML на HUD-а за сцената: информация за мястото (баланс, залог,
@@ -59,8 +59,9 @@ export type RenderSvaraActiveTableInput = {
   /** Активно обръщане на собствените карти. */
   activeLookEffect: SvaraActiveLookEffect | null
   /**
-   * true = игровите анимации са ИЗКЛЮЧЕНИ от настройката „Анимации“ в Свара
-   * (не от системното prefers-reduced-motion — то не ги изключва).
+   * true = рисуване без игрови анимации (само за тестовите фикстури)
+   * (не от системното prefers-reduced-motion — то не ги изключва). Истинската
+   * игра винаги подава false: анимациите в Свара са винаги включени.
    */
   reducedMotion: boolean
   /** Internal presentation sample; callers may omit it. */
@@ -69,6 +70,8 @@ export type RenderSvaraActiveTableInput = {
   decisionMessage?: string
   /** Отворено ли е менюто „Настройки“ от горния бар. */
   settingsOpen?: boolean
+  /** Отворен ли е прозорецът за потвърждение на напускането (иконата за изход). */
+  exitConfirmOpen?: boolean
   /** Общата настройка „Звуци в играта“ (gameSoundSettings.ts). */
   gameSoundsEnabled?: boolean
 }
@@ -306,17 +309,80 @@ function actionButtonVariant(kind: SvaraActionButton['kind']): 'default' | 'prim
   return 'default'
 }
 
-function actionBarHtml(buttons: SvaraActionButton[], actionPending: boolean, showReturn: boolean): string {
-  if (buttons.length === 0 && !showReturn) return ''
-  const buttonsHtml = buttons.map((b) => `<button
-      data-svara-action-button="${b.kind}"
-      ${b.disabled || actionPending ? 'disabled' : ''}
-      style="min-height:38px;min-width:54px;padding:0 10px;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;${ACTION_BUTTON_STYLE[actionButtonVariant(b.kind)]}${b.disabled || actionPending ? 'opacity:.4;cursor:not-allowed;' : ''}"
-    >${esc(b.label)}</button>`).join('')
-  const returnButton = showReturn
-    ? `<button data-svara-action-button="request-return" ${actionPending ? 'disabled' : ''} style="min-height:38px;min-width:54px;padding:0 10px;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;${ACTION_BUTTON_STYLE.default}${actionPending ? 'opacity:.4;cursor:not-allowed;' : ''}">Върни се</button>`
-    : ''
-  return `<div data-svara-action-bar="1" style="flex:0 0 auto;display:flex;flex-wrap:wrap;justify-content:center;gap:5px;padding:3px 2px 1px;">${buttonsHtml}${returnButton}</div>`
+// ── Постоянен долен панел с бутоните ───────────────────────────────────────
+//
+// Винаги на мястото си под сукното и с постоянна височина (масата не
+// подскача): 8 фиксирани места —
+//   Виж | Плати X | ×5 | ×10
+//   ×20 | ×50 | Ол-ин | Бягам
+// (телефон: 2 реда по 4; desktop: един ред). Недостъпното действие е
+// неактивен бутон на същото място. Винаги точно 8 места (телефон: никога
+// повече от 4 на ред). „Без залог“ (специалното 4-то раздаване на двама) и
+// „Върни се“ заемат мястото на „Виж“, когато то не е нужно. „Без залог“ не
+// изключва „Плати“ (там то открива с минимума), затова в единственото
+// решение, в което „Без залог“ и „Виж“ са нужни едновременно (преди „Виж“),
+// „Без залог“ заема мястото на „×50“.
+
+/** Телефон: ширина на екрана, до която панелът е 2 реда по 4 (виж stageSize в svaraRealScene.ts). */
+export const SVARA_ACTION_PANEL_PHONE_MAX_WIDTH_PX = 559
+const ACTION_BUTTON_HEIGHT_PX = 40
+const ACTION_PANEL_GAP_PX = 6
+const ACTION_PANEL_PAD_PX = 6
+/** Постоянната височина на панела: телефон (2 реда) и desktop (1 ред). */
+export const SVARA_ACTION_PANEL_HEIGHT_PHONE_PX = 2 * ACTION_BUTTON_HEIGHT_PX + ACTION_PANEL_GAP_PX + 2 * ACTION_PANEL_PAD_PX
+export const SVARA_ACTION_PANEL_HEIGHT_DESKTOP_PX = ACTION_BUTTON_HEIGHT_PX + 2 * ACTION_PANEL_PAD_PX
+
+const ACTION_SLOTS: ReadonlyArray<{ kind: SvaraActionButton['kind']; label: string }> = [
+  { kind: 'look', label: 'Виж' },
+  { kind: 'pay', label: 'Плати' },
+  { kind: 'x5', label: '×5' },
+  { kind: 'x10', label: '×10' },
+  { kind: 'x20', label: '×20' },
+  { kind: 'x50', label: '×50' },
+  { kind: 'all-in', label: 'Ол-ин' },
+  { kind: 'fold', label: 'Бягам' },
+]
+
+const ACTION_BUTTON_BASE = `box-sizing:border-box;width:100%;height:${ACTION_BUTTON_HEIGHT_PX}px;min-width:0;padding:0 4px;border-radius:9px;font-size:12px;font-weight:800;line-height:1.1;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;`
+const DISABLED_STYLE = 'opacity:.4;cursor:not-allowed;'
+
+function actionButtonContent(label: string, amount: number | null, kind: SvaraActionButton['kind']): string {
+  // Ол-ин: сумата от сървъра на втори ред (надписът остава „Ол-ин“).
+  return kind === 'all-in' && amount !== null
+    ? `${esc(label)}<span style="display:block;font-size:10px;font-weight:700;opacity:.85;">${amount}</span>`
+    : esc(label)
+}
+
+export function renderSvaraActionPanelHtml(buttons: SvaraActionButton[], actionPending: boolean, showReturn: boolean): string {
+  const byKind = new Map(buttons.map((b) => [b.kind, b]))
+  const real = (b: SvaraActionButton) => {
+    const disabled = b.disabled || actionPending
+    return `<button type="button" data-svara-action-button="${b.kind}" ${disabled ? 'disabled' : ''} style="${ACTION_BUTTON_BASE}${ACTION_BUTTON_STYLE[actionButtonVariant(b.kind)]}${disabled ? DISABLED_STYLE : ''}">${actionButtonContent(b.label, b.amount, b.kind)}</button>`
+  }
+  const placeholder = (kind: SvaraActionButton['kind'], label: string) =>
+    `<button type="button" data-svara-action-slot="${kind}" disabled aria-disabled="true" style="${ACTION_BUTTON_BASE}${ACTION_BUTTON_STYLE[actionButtonVariant(kind)]}${DISABLED_STYLE}">${esc(label)}</button>`
+  const returnButton = `<button type="button" data-svara-action-button="request-return" ${actionPending ? 'disabled' : ''} style="${ACTION_BUTTON_BASE}${ACTION_BUTTON_STYLE.default}${actionPending ? DISABLED_STYLE : ''}">Върни се</button>`
+  const noBet = byKind.get('no-bet')
+  const noBetSlot = noBet ? (byKind.has('look') ? 'x50' : 'look') : null
+  const cells = ACTION_SLOTS.map((slot, i) => {
+    if (noBet && slot.kind === noBetSlot) return real(noBet)
+    const button = byKind.get(slot.kind)
+    if (button) return real(button)
+    if (i === 0 && showReturn) return returnButton
+    return placeholder(slot.kind, slot.label)
+  })
+  const phoneColumns = ACTION_SLOTS.length / 2
+  return `<div data-svara-action-bar="1" style="flex:0 0 auto;box-sizing:border-box;padding:${ACTION_PANEL_PAD_PX}px;background:#030303;">
+    <style data-svara-action-panel-style="1">
+      [data-svara-action-bar] { height:${SVARA_ACTION_PANEL_HEIGHT_DESKTOP_PX}px; }
+      [data-svara-action-grid] { grid-template-columns:repeat(${cells.length},minmax(0,1fr)); }
+      @media (max-width:${SVARA_ACTION_PANEL_PHONE_MAX_WIDTH_PX}px) {
+        [data-svara-action-bar] { height:${SVARA_ACTION_PANEL_HEIGHT_PHONE_PX}px; }
+        [data-svara-action-grid] { grid-template-columns:repeat(${phoneColumns},minmax(0,1fr)); max-width:none; }
+      }
+    </style>
+    <div data-svara-action-grid="1" style="display:grid;grid-auto-rows:${ACTION_BUTTON_HEIGHT_PX}px;gap:${ACTION_PANEL_GAP_PX}px;max-width:860px;margin:0 auto;">${cells.join('')}</div>
+  </div>`
 }
 
 // ── Горен бар (в стила на Белот: златни икони без фон и рамка) ─────────────
@@ -335,7 +401,8 @@ const TOP_BAR_STYLE = `<style data-svara-top-bar-style="1">
 const TOP_ICON_BUTTON = `width:${TOP_ICON_HIT_PX}px;height:${TOP_ICON_HIT_PX}px;box-sizing:border-box;border:0;outline:0;padding:0;margin:0;display:flex;align-items:center;justify-content:center;background:transparent;box-shadow:none;color:#f6d36b;cursor:pointer;-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;`
 
 const svgIcon = (body: string, size = 24) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
-const EXIT_ICON = svgIcon('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line>')
+// Изход — стрелката сочи наляво (връщане), вратата е вдясно.
+const EXIT_ICON = svgIcon('<path d="M15 21h4a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-4"></path><polyline points="8 17 3 12 8 7"></polyline><line x1="3" y1="12" x2="15" y2="12"></line>')
 // Същата икона като „Настройки“ в Белот (renderActiveRoomActionBar.ts).
 const GEAR_ICON = svgIcon('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>', 22)
 const FULLSCREEN_ON_ICON = svgIcon('<polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line>', 20)
@@ -347,7 +414,7 @@ function topBarHtml(input: RenderSvaraActiveTableInput): string {
     ? `<button type="button" data-svara-top-icon="fullscreen" data-svara-fullscreen-toggle="1" title="${input.isFullscreen ? 'Изход от цял екран' : 'Цял екран'}" aria-label="${input.isFullscreen ? 'Изход от цял екран' : 'Цял екран'}" style="${TOP_ICON_BUTTON}">${input.isFullscreen ? FULLSCREEN_OFF_ICON : FULLSCREEN_ON_ICON}</button>`
     : ''
   return `<div data-svara-top-bar="1" style="flex:0 0 auto;height:${SVARA_TOP_BAR_HEIGHT_PX}px;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;padding:0 4px;background:#000;">
-    <button type="button" data-svara-top-icon="leave" data-svara-table-leave="1" title="Напусни масата" aria-label="Напусни масата" ${input.leavePending ? 'disabled' : ''} style="${TOP_ICON_BUTTON}${input.leavePending ? 'opacity:.5;cursor:wait;' : ''}">${EXIT_ICON}</button>
+    <button type="button" data-svara-top-icon="leave" data-svara-table-leave="1" title="Напусни масата" aria-label="Напусни масата" aria-haspopup="dialog" ${input.leavePending ? 'disabled' : ''} style="${TOP_ICON_BUTTON}${input.leavePending ? 'opacity:.5;cursor:wait;' : ''}">${EXIT_ICON}</button>
     <div style="display:flex;align-items:center;gap:2px;">
       ${fullscreen}
       <button type="button" data-svara-top-icon="settings" data-svara-settings-toggle="1" title="Настройки" aria-label="Настройки" aria-haspopup="dialog" aria-expanded="${settingsOpen}" style="${TOP_ICON_BUTTON}">${GEAR_ICON}</button>
@@ -371,12 +438,32 @@ function settingsToggleHtml(row: SvaraSettingsRow): string {
   </div>`
 }
 
+/**
+ * Потвърждение за напускане (стилът на потвърдителните прозорци в Pika.bg,
+ * виж renderLudoExitConfirmPopup.ts); затворено — празен контейнер.
+ */
+function exitConfirmMountHtml(input: RenderSvaraActiveTableInput): string {
+  if (input.exitConfirmOpen !== true) return '<div data-svara-exit-confirm-mount="1"></div>'
+  const leaving = input.leavePending
+  return `<div data-svara-exit-confirm-mount="1">
+    <div data-svara-exit-confirm-backdrop="1" style="position:fixed;inset:0;z-index:70;background:rgba(2,6,23,0.68);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;">
+      <div role="dialog" aria-modal="true" aria-labelledby="svara-exit-confirm-title" aria-describedby="svara-exit-confirm-text" data-svara-exit-confirm-dialog="1" style="width:min(390px, 100%);box-sizing:border-box;background:rgba(15,23,42,0.98);border:1px solid rgba(212,165,32,0.4);border-radius:20px;padding:26px 22px 22px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.55);">
+        <div id="svara-exit-confirm-title" style="color:#f4f8ff;font-size:18px;font-weight:800;line-height:1.45;">Напускане на масата</div>
+        <div id="svara-exit-confirm-text" style="margin-top:12px;color:rgba(248,250,252,0.82);font-size:14px;font-weight:600;line-height:1.5;">Сигурни ли сте, че искате да напуснете масата?</div>
+        <div style="display:flex;justify-content:center;gap:10px;margin-top:24px;flex-wrap:wrap;">
+          <button type="button" data-svara-exit-cancel="1" ${leaving ? 'disabled' : ''} style="min-width:112px;min-height:42px;padding:10px 20px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:#080808;color:#f8fafc;font-size:14px;font-weight:800;cursor:${leaving ? 'default' : 'pointer'};opacity:${leaving ? '0.55' : '1'};">Отказ</button>
+          <button type="button" data-svara-exit-confirm="1" ${leaving ? 'disabled' : ''} style="min-width:112px;min-height:42px;padding:10px 20px;border:1px solid rgba(248,113,113,0.7);border-radius:8px;background:rgba(127,29,29,0.88);color:#fee2e2;font-size:14px;font-weight:900;cursor:${leaving ? 'wait' : 'pointer'};opacity:${leaving ? '0.7' : '1'};">${leaving ? 'Напускане...' : 'Напусни'}</button>
+        </div>
+      </div>
+    </div>
+  </div>`
+}
+
 /** Менюто „Настройки“ (стилът на панела от Белот); затворено — празен контейнер. */
 function settingsMountHtml(input: RenderSvaraActiveTableInput): string {
   if (input.settingsOpen !== true) return '<div data-svara-settings-mount="1"></div>'
   const rows: SvaraSettingsRow[] = [
     { attr: 'data-svara-sounds-toggle', label: 'Звуци в играта', enabled: input.gameSoundsEnabled !== false },
-    { attr: 'data-svara-animations-toggle', label: 'Анимации', enabled: !input.reducedMotion },
   ]
   return `<div data-svara-settings-mount="1">
     <div data-svara-settings-backdrop="1" style="position:fixed;inset:0;z-index:59;background:transparent;"></div>
@@ -411,7 +498,7 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   const actionButtons = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false)
   // Приключил мач: няма към какво да се върнеш — само „Изход“.
   const showReturnButton = snapshot?.result.finished !== true && snapshot?.you.status === 'absent' && snapshot?.you.returnPending === false
-  const actionBar = actionBarHtml(actionButtons, input.actionPending, showReturnButton)
+  const actionBar = renderSvaraActionPanelHtml(actionButtons, input.actionPending, showReturnButton)
   const decisionWindow = getSvaraDecisionWindow(snapshot, timing, input.serverNow, input.localProfileId)
   const decisionPending = input.decisionPending ?? input.actionPending
   const decisionMessage = input.decisionMessage ?? ''
@@ -427,5 +514,6 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
     ${actionBar}
     <div data-svara-decision-mount="1" data-structure-key="${esc(svaraDecisionStructureKey(decisionWindow, decisionPending, decisionMessage))}" style="position:absolute;inset:${SVARA_TOP_BAR_HEIGHT_PX + 2}px 6px 6px;display:grid;place-items:center;pointer-events:none;z-index:40;">${renderSvaraDecisionWindow(decisionWindow, decisionPending, decisionMessage)}</div>
     ${settingsMountHtml(input)}
+    ${exitConfirmMountHtml(input)}
   </div>`
 }

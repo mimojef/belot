@@ -150,6 +150,8 @@ function assertFinishedView(v: View, label: string, expectedText: string) {
 async function exit(p: Peer, matchId: string, selector: string) {
   const sentOffset = p.sent.length, offset = p.frames.length
   await p.page.click(selector)
+  // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
+  if (await p.page.locator('[data-svara-exit-confirm]').count()) await p.page.click('[data-svara-exit-confirm]')
   await wait('exit reply', () => p.frames.slice(offset).some((f) => (f.type === 'svara_table_left' && f.matchId === matchId)
     || f.type === 'svara_lobby_error' || f.type === 'svara_command_error'), 8_000)
   const sent = p.sent.slice(sentOffset).filter((f) => String(f.type).includes('svara'))

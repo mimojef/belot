@@ -123,19 +123,19 @@ export function createSvaraLobbyController(options: Options) {
   type ActiveFoldEffectState = { seatIndex: number; voluntary: boolean; startedAtServerMs: number }
   let activeFoldEffects: ActiveFoldEffectState[] = []
   let activeLookEffectStartedAtServerMs: number | null = null
-  // Настройка „Анимации“ в Свара — включена по подразбиране, НЕЗАВИСИМО от
-  // prefers-reduced-motion/системните настройки; изборът се помни локално.
-  // Изключена: сцената показва крайните състояния директно (играта остава
-  // напълно функционална; тестето, картите и чиповете остават видими).
-  const ANIMATIONS_STORAGE_KEY = 'pika.svara.animations'
-  let reducedMotion = (() => { try { return window.localStorage.getItem(ANIMATIONS_STORAGE_KEY) === 'off' } catch { return false } })()
-  function setAnimationsEnabled(enabled: boolean): void {
-    reducedMotion = !enabled
-    try { window.localStorage.setItem(ANIMATIONS_STORAGE_KEY, enabled ? 'on' : 'off') } catch { /* личен режим — само за сесията */ }
+  // Игровите анимации в истинската Свара са ВИНАГИ включени — без настройка и
+  // независимо от prefers-reduced-motion (без тях действията не са разбираеми).
+  // Старата локална настройка „Анимации: изкл.“ не се чете; премахва се.
+  try { window.localStorage.removeItem('pika.svara.animations') } catch { /* личен режим */ }
+  // Менюто „Настройки“ от горния бар на масата (Звуци в играта).
+  let settingsOpen = false
+  // Потвърждението за напускане от иконата за изход (само при активна маса).
+  let exitConfirmOpen = false
+  function setExitConfirmOpen(open: boolean): void {
+    if (exitConfirmOpen === open) return
+    exitConfirmOpen = open
     render()
   }
-  // Менюто „Настройки“ от горния бар на масата (Звуци в играта, Анимации).
-  let settingsOpen = false
   function setSettingsOpen(open: boolean): void {
     if (settingsOpen === open) return
     settingsOpen = open
@@ -412,10 +412,11 @@ export function createSvaraLobbyController(options: Options) {
       dealingVisual,
       activeFoldEffects: showingResult() ? [] : activeFoldEffectsInput,
       activeLookEffect: showingResult() ? null : activeLookEffectInput,
-      reducedMotion,
+      reducedMotion: false,
       decisionPending: actionPending || (pendingDecision !== null && pendingDecision.key === currentDecision()?.key),
       decisionMessage: message,
       settingsOpen,
+      exitConfirmOpen,
       gameSoundsEnabled: isGameSoundsEnabled(),
     }
   }
@@ -427,7 +428,7 @@ export function createSvaraLobbyController(options: Options) {
     const liveTiming = timing?.matchId === snapshot.matchId ? timing : null
     const tableInput = activeTableInput(myTable)
     tableScene.update(host, {
-      snapshot, timing: liveTiming, serverNow, localProfileId: options.localProfileId, animations: !reducedMotion, table: myTable,
+      snapshot, timing: liveTiming, serverNow, localProfileId: options.localProfileId, animations: true, table: myTable,
       resultVisual: computeSvaraResultVisualState(snapshot, liveTiming, serverNow),
       seatHuds: renderSvaraSceneSeatHuds(tableInput),
       statusHtml: renderSvaraSceneStatusHtml(tableInput),
@@ -439,7 +440,6 @@ export function createSvaraLobbyController(options: Options) {
   // Балончето „Бягам!“/„Времето изтече!“ — една WAAPI анимация спрямо
   // сървърния момент на отказа; обновяване на масата не я рестартира.
   function animateFoldBubbles(serverNow: number): void {
-    if (reducedMotion) return
     for (const el of options.root.querySelectorAll<HTMLElement>('[data-svara-fold-bubble]')) {
       const start = el.dataset.svaraFoldStart ? Number(el.dataset.svaraFoldStart) : NaN
       if (el.dataset.svaraFoldAnimated || !Number.isFinite(start)) continue
@@ -459,7 +459,7 @@ export function createSvaraLobbyController(options: Options) {
   function regionKey(el: Element, index: number): string {
     const data = (el as HTMLElement).dataset
     if (data.svaraSeatIndex !== undefined) return `seat:${data.svaraSeatIndex}`
-    for (const name of ['svaraFelt', 'svaraFeltCenter', 'svaraResultOverlay', 'svaraResultBanner', 'svaraDiagnostics', 'svaraActionBar', 'svaraDecisionMount', 'svaraTopBar', 'svaraSettingsMount'] as const) {
+    for (const name of ['svaraFelt', 'svaraFeltCenter', 'svaraResultOverlay', 'svaraResultBanner', 'svaraDiagnostics', 'svaraActionBar', 'svaraDecisionMount', 'svaraTopBar', 'svaraSettingsMount', 'svaraExitConfirmMount'] as const) {
       if (data[name] !== undefined) return name
     }
     return `#${index}`
@@ -667,7 +667,17 @@ export function createSvaraLobbyController(options: Options) {
       render()
       options.onJoin(matchId)
     }))
-    on(options.root.querySelector('[data-svara-table-leave]'), 'click', () => requestExit())
+    // Активна маса: иконата за изход първо иска потвърждение; в чакалнята
+    // („Напусни“) напускането е веднага, както досега.
+    on(options.root.querySelector('[data-svara-table-leave]'), 'click', () => {
+      if (myTable && myTable.phase !== 'lobby') { if (!leavePending) { settingsOpen = false; setExitConfirmOpen(true) } } else requestExit()
+    })
+    on(options.root.querySelector('[data-svara-exit-cancel]'), 'click', () => { if (!leavePending) setExitConfirmOpen(false) })
+    on(options.root.querySelector('[data-svara-exit-confirm-backdrop]'), 'click', (event) => {
+      if (event.target === event.currentTarget && !leavePending) setExitConfirmOpen(false)
+    })
+    // „Напусни“ — съществуващата логика; requestExit() пази от двойно изпращане (leavePending).
+    on(options.root.querySelector('[data-svara-exit-confirm]'), 'click', () => requestExit())
     // Бутонът „Изход“ в банера на приключил/прекратен мач — същото leave_svara_table.
     on(options.root.querySelector('[data-svara-result-exit]'), 'click', () => requestExit())
     on(options.root.querySelector('[data-svara-table-start]'), 'click', () => { if (myTable) options.onStart(myTable.matchId) })
@@ -713,7 +723,6 @@ export function createSvaraLobbyController(options: Options) {
     })
     tableElementRef = options.root.querySelector<HTMLElement>('[data-svara-table="1"]')
     on(options.root.querySelector('[data-svara-fullscreen-toggle]'), 'click', () => { void toggleFullscreen() })
-    on(options.root.querySelector('[data-svara-animations-toggle]'), 'click', () => setAnimationsEnabled(reducedMotion))
     on(options.root.querySelector('[data-svara-settings-toggle]'), 'click', () => setSettingsOpen(!settingsOpen))
     on(options.root.querySelector('[data-svara-settings-close]'), 'click', () => setSettingsOpen(false))
     on(options.root.querySelector('[data-svara-settings-backdrop]'), 'click', () => setSettingsOpen(false))
@@ -765,6 +774,11 @@ export function createSvaraLobbyController(options: Options) {
     }
   }
   if (fullscreenSupported) document.addEventListener('fullscreenchange', handleFullscreenChange)
+  // Escape затваря потвърждението за напускане (освен докато напускането тече).
+  function handleExitConfirmKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && exitConfirmOpen && !leavePending) setExitConfirmOpen(false)
+  }
+  document.addEventListener('keydown', handleExitConfirmKeydown)
 
   function requestExit(): void {
     if (leavePending || myTable === null) return
@@ -798,7 +812,7 @@ export function createSvaraLobbyController(options: Options) {
     },
     /** myTable===null напуска локално (lobby list); иначе актуализира текущата маса (lobby или активна фаза). */
     setMyTable(table: SvaraPublicTable | null) {
-      if (table?.matchId !== myTable?.matchId) settingsOpen = false
+      if (table?.matchId !== myTable?.matchId) { settingsOpen = false; exitConfirmOpen = false }
       myTable = table
       if (table === null) { snapshot = null; timing = null; pendingDecision = null; actionPending = false; pendingActionCommandId = null }
       leavePending = false
@@ -858,6 +872,7 @@ export function createSvaraLobbyController(options: Options) {
       if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }
       tableScene.destroy()
       if (fullscreenSupported) document.removeEventListener('fullscreenchange', handleFullscreenChange)
+      document.removeEventListener('keydown', handleExitConfirmKeydown)
       if (fullscreenSupported && document.fullscreenElement === tableElementRef && tableElementRef !== null) {
         void document.exitFullscreen().catch(() => {})
       }
