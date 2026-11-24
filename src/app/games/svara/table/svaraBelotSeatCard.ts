@@ -12,7 +12,7 @@
 // Дизайнът на Белот не се променя.
 
 import type { RoomSeatSnapshot, Seat } from '../../../network/createGameServerClient'
-import { createCuttingSeatPanelHtml } from '../../../activeRoom/cutting/renderCuttingSeatPanels'
+import { createCuttingSeatPanelHtml, renderBidBubble } from '../../../activeRoom/cutting/renderCuttingSeatPanels'
 import {
   ACTIVE_ROOM_MAX_STAGE_SCALE,
   ACTIVE_ROOM_MIN_STAGE_SCALE,
@@ -68,6 +68,34 @@ export type SvaraBelotSeatCardInput = {
   scale: number
 }
 
+/** Позицията на котвата на Белот, центрирана в мястото на сцената (видимото каре е в центъра). */
+function svaraBelotAnchorPositionCss(slot: Seat, scale: number): string {
+  const size = slot === 'bottom' ? BELOT_BOTTOM_CARD : BELOT_SIDE_CARD
+  const shrinkX = (size.w * (1 - size.innerScale)) / 2
+  const shrinkY = (size.h * (1 - size.innerScale)) / 2
+  const offset = slot === 'bottom' ? { x: 0, y: shrinkY } : slot === 'top' ? { x: 0, y: -shrinkY } : slot === 'left' ? { x: -shrinkX, y: 0 } : { x: shrinkX, y: 0 }
+  const left = `calc(50% - ${(offset.x * scale).toFixed(2)}px)`
+  const top = `calc(50% - ${(offset.y * scale).toFixed(2)}px)`
+  return `position:absolute;left:${left};top:${top};transform:translate(-50%,-50%) scale(${scale});transform-origin:center center;`
+}
+
+/**
+ * Колко живее балончето за обява на Белот (addBidBubble в biddingUiState.ts:
+ * премахва го след 1600 ms; самата анимация в renderBidBubble е 1500 ms).
+ */
+export const SVARA_BELOT_BID_BUBBLE_LIFETIME_MS = 1600
+
+/**
+ * Балонче за обява (напр. „Плащам 200“) — САМОТО балонче на Белот при
+ * обявяване (renderBidBubble: време, появяване/изчезване, позиция спрямо
+ * карето), в празна котва със същия размер, позиция и мащаб като карето на
+ * мястото. Рисува се в слоя над картите, затова не се скрива от тях.
+ */
+export function renderSvaraBelotSpeechBubbleHtml(slot: Seat, scale: number, label: string): string {
+  const size = slot === 'bottom' ? BELOT_BOTTOM_CARD : BELOT_SIDE_CARD
+  return `<div data-svara-speech-anchor="1" style="${svaraBelotAnchorPositionCss(slot, scale)}width:${size.w}px;height:${size.h}px;pointer-events:none;">${renderBidBubble(slot, { label, elapsedMs: 0 }, esc)}</div>`
+}
+
 export function renderSvaraBelotSeatCardHtml(input: SvaraBelotSeatCardInput): string {
   const seat: RoomSeatSnapshot = {
     seat: input.slot,
@@ -116,12 +144,7 @@ export function renderSvaraBelotSeatCardHtml(input: SvaraBelotSeatCardInput): st
   // спрямо него точно както в Белот); котвата се отмества така, че видимото
   // каре да е центрирано в мястото.
   const size = input.slot === 'bottom' ? BELOT_BOTTOM_CARD : BELOT_SIDE_CARD
-  const shrinkX = (size.w * (1 - size.innerScale)) / 2
-  const shrinkY = (size.h * (1 - size.innerScale)) / 2
-  const offset = input.slot === 'bottom' ? { x: 0, y: shrinkY } : input.slot === 'top' ? { x: 0, y: -shrinkY } : input.slot === 'left' ? { x: -shrinkX, y: 0 } : { x: shrinkX, y: 0 }
-  const left = `calc(50% - ${(offset.x * input.scale).toFixed(2)}px)`
-  const top = `calc(50% - ${(offset.y * input.scale).toFixed(2)}px)`
-  anchor.style.cssText = `position:absolute;left:${left};top:${top};transform:translate(-50%,-50%) scale(${input.scale});transform-origin:center center;z-index:4;pointer-events:none;`
+  anchor.style.cssText = `${svaraBelotAnchorPositionCss(input.slot, input.scale)}z-index:4;pointer-events:none;`
   // Индикаторът за дилър (renderCuttingDealerBadge — „D“ на Белот). Долу е на
   // мястото си от Белот; горе/отстрани под карето са картите на мястото в
   // Свара, затова там е на горния външен ъгъл на карето.

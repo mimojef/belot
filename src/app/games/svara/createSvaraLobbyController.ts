@@ -9,13 +9,14 @@
 import type {
   SvaraMatchSnapshotMessage,
   SvaraMatchTimingMessage,
+  SvaraPlayerLookedMessage,
   SvaraParticipantCommand,
   SvaraPublicTable,
   SvaraSeatStatus,
   SvaraStartMode,
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
-import { isGameSoundsEnabled, playGameSound, setGameSoundsEnabled } from '../../audio/gameSoundSettings'
+import { isGameSoundsEnabled, setGameSoundsEnabled } from '../../audio/gameSoundSettings'
 import {
   renderSvaraActiveTable,
   patchSvaraResultPresentation,
@@ -30,11 +31,13 @@ import {
   type RenderSvaraActiveTableInput,
 } from './table/renderSvaraActiveTable'
 import { deriveSvaraActionButtons } from './table/svaraBettingActions'
-import { createSvaraBetAnimationTracker, detectSvaraFinalCall } from './table/svaraBetAnimationTracker'
-import { createSvaraFoldAnimationTracker } from './table/svaraFoldAnimationTracker'
+import { createSvaraBetAnimationTracker, detectSvaraFinalCall, svaraRaiseAmount, type SvaraNewBetEntry } from './table/svaraBetAnimationTracker'
+import { createSvaraFoldAnimationTracker, detectSvaraFinalFold } from './table/svaraFoldAnimationTracker'
 import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTracker'
+import { playSvaraLookVoice, preloadSvaraLookVoice } from './table/svaraLookVoice'
 import { computeSvaraDealingVisualState } from './table/svaraTableAnimation'
-import { playSvaraFoldVoice } from './table/svaraFoldVoice'
+import { playSvaraFoldVoice, preloadSvaraFoldVoice } from './table/svaraFoldVoice'
+import { playSvaraBlindVoice, playSvaraPayVoice, playSvaraRaiseVoice, preloadSvaraPayVoice } from './table/svaraPayVoice'
 import { getSvaraDecisionWindow, patchSvaraDecisionWindow } from './table/svaraDecisionWindows'
 import { fetchSvaraTableCreationOptions, type SvaraTableCreationOptions } from './svaraAccess'
 import { createSvaraRealScene } from './table/svaraRealScene'
@@ -546,13 +549,8 @@ export function createSvaraLobbyController(options: Options) {
     }
   }
 
-  // Задание §13 — кратък системен звук при потвърден залог; реизползва
-  // съществуващия Белот sound-settings hook (уважава mute настройката,
-  // никаква нова аудио зависимост). Ако липсва подходящ файл в бъдеще,
-  // смени само src-а тук — asset hook-ът остава същият.
-  function playBetSound(): void {
-    playGameSound('/audio/game-sounds/coins.mp3', { volume: 0.5 })
-  }
+  // Звукът на чиповете е в сцената, при КАЦАНЕТО им (svaraRealScene.ts:
+  // betChipsWithLandingSound — играч → банка; payout — банка → спечелил).
 
   // Последното „Плати“, приключило наддаването направо в сравняване (виж
   // detectSvaraFinalCall): „+N“ и звукът както при всяко „Плати“; чиповете
@@ -567,10 +565,47 @@ export function createSvaraLobbyController(options: Options) {
     finalCallsShown.add(`${snapshot.matchId}:${finalCall.roundId}`)
     const seat = snapshot.seats.find((s) => s.playerId === finalCall.playerId)
     if (seat) playBetFlash(seat.seatIndex, finalCall.added)
-    playBetSound()
+    if (seat && finalCall.call) announcePay(seat.seatIndex, finalCall.added)
+  }
+
+  // „Плати“ (call, без повишаване): гласът „Плащам!“, балончето „Плащам N“ и
+  // „+N“ над банката (същото като при „Вдигам“) тръгват заедно; N е реално
+  // внесеното с това действие. Вика се само за
+  // нови действия (виж betAnimationTracker / finalCallsShown) — без повторение
+  // при reconnect или дублиран snapshot.
+  function announcePay(seatIndex: number, added: number): void {
+    tableScene.showSpeech(seatIndex, `Плащам ${formatAmount(added)}`)
+    tableScene.showPotRaise(formatAmount(added))
+    playSvaraPayVoice()
+  }
+
+  // Повишаване (обикновен залог над текущия, вкл. ×5/×10/×20/×50): гласът
+  // „Вдигам!“, балончето „Вдигам +N“ и „+N“ над банката тръгват заедно.
+  // N = увеличението на текущия залог (новото ниво минус предишното), не
+  // внесената сума. Видовете повишаване — виж svaraRaiseAmount (обикновен
+  // залог, Ол-ин и на тъмно над текущия залог); „Плати“ (call) не е.
+  //
+  // Залог на тъмно (blind-bet или Ол-ин без поглеждане) — вместо „Вдигам“: гласът „Тъмни!“ и балончето
+  // „Тъмни N“ (N = реално внесеното с действието), а „+N“ над банката само
+  // ако реално вдига текущия залог (N там = увеличението, като при „Вдигам“).
+  function announceRaiseIfAny(seatIndex: number, entry: SvaraNewBetEntry): void {
+    const amount = snapshot ? svaraRaiseAmount(entry, snapshot.table.entryChips) : null
+    // Ол-ин без поглеждане: сървърът го записва с blind: true (само тогава).
+    if (entry.kind === 'blind-bet' || (entry.kind === 'all-in' && entry.blind)) {
+      tableScene.showSpeech(seatIndex, `Тъмни ${formatAmount(entry.added)}`)
+      if (amount !== null) tableScene.showPotRaise(formatAmount(amount))
+      playSvaraBlindVoice()
+      return
+    }
+    if (amount === null) return
+    const raise = formatAmount(amount)
+    tableScene.showSpeech(seatIndex, `Вдигам +${raise}`)
+    tableScene.showPotRaise(raise)
+    playSvaraRaiseVoice()
   }
 
   function flushBetAnimations(): void {
+    if (snapshot) { preloadSvaraPayVoice(); preloadSvaraFoldVoice(); preloadSvaraLookVoice() }
     flushFinalCall()
     const round = snapshot?.round ?? null
     const newEntries = betAnimationTracker.detectNewEntries(round)
@@ -578,13 +613,14 @@ export function createSvaraLobbyController(options: Options) {
     for (const entry of newEntries) {
       const seat = snapshot.seats.find((s) => s.playerId === entry.playerId)
       if (seat) playBetFlash(seat.seatIndex, entry.added)
+      if (seat && entry.kind === 'call') announcePay(seat.seatIndex, entry.added)
+      if (seat) announceRaiseIfAny(seat.seatIndex, entry)
     }
     tableScene.onBets(newEntries.flatMap((entry) => {
       const seat = snapshot?.seats.find((s) => s.playerId === entry.playerId)
       return seat ? [{ seatIndex: seat.seatIndex, added: entry.added }] : []
     }))
     syncTableMotion()
-    playBetSound()
   }
 
   // Задание §9/§10/§11/§13/§14 — открива РЕАЛНО нови (неанимирани досега)
@@ -593,6 +629,30 @@ export function createSvaraLobbyController(options: Options) {
   // при първо виждане на даден roundId (reconnect/remount) никога не
   // анимира тук — виж самите tracker файлове. Гласът „Бягам!“ се пуска
   // ТОЧНО за доброволните откази, никога за forced-fold (задание §13).
+  // Доброволно „Бягам“: гласът „Бягам!“ и балончето „Бягам!“ (балончето от
+  // Белот, като при „Плащам“/„Вдигам“) тръгват заедно; без „+N“ над банката.
+  // Само за нови откази — без повторение при reconnect/дублиран snapshot.
+  const finalFoldsShown = new Set<string>()
+  // „Виж“ на всеки играч — по изричното сървърно събитие 'svara_player_looked'
+  // (праща се само след успешна команда look, след snapshot-а със същата
+  // revision; не се повтаря при reconnect). Гласът „Поглеждам!“ и балончето
+  // „Поглеждам!“ тръгват заедно; без „+N“. Обръщането на картите не се пипа.
+  const looksShown = new Set<string>()
+  function announceLook(event: SvaraPlayerLookedMessage): void {
+    if (!snapshot || snapshot.matchId !== event.matchId || event.revision < snapshot.revision) return
+    const key = `${event.matchId}:${event.revision}:${event.playerId}`
+    if (looksShown.has(key)) return
+    looksShown.add(key)
+    const seat = snapshot.seats.find((s) => s.playerId === event.playerId)
+    if (!seat) return
+    tableScene.showSpeech(seat.seatIndex, 'Поглеждам!')
+    playSvaraLookVoice()
+  }
+  function announceFold(seatIndex: number): void {
+    tableScene.showSpeech(seatIndex, 'Бягам!')
+    playSvaraFoldVoice()
+  }
+
   function flushFoldAndLookAnimations(): void {
     if (!snapshot) return
     const round = snapshot.round
@@ -603,8 +663,17 @@ export function createSvaraLobbyController(options: Options) {
         const seat = snapshot.seats.find((s) => s.playerId === fold.playerId)
         if (!seat) continue
         activeFoldEffects.push({ seatIndex: seat.seatIndex, voluntary: fold.voluntary, startedAtServerMs: nowServer })
-        if (fold.voluntary) playSvaraFoldVoice(null)
+        if (fold.voluntary) announceFold(seat.seatIndex)
       }
+    }
+    // Последното „Бягам“ (наддаването приключва направо в „Покажи/Скрий“ или
+    // сравняване). previousSnapshotForBets все още е предишният snapshot —
+    // обновява се след това във flushFinalCall (виж setSnapshot).
+    const finalFold = detectSvaraFinalFold(previousSnapshotForBets, snapshot)
+    if (finalFold && !finalFoldsShown.has(`${snapshot.matchId}:${finalFold.roundId}`)) {
+      finalFoldsShown.add(`${snapshot.matchId}:${finalFold.roundId}`)
+      const seat = snapshot.seats.find((s) => s.playerId === finalFold.playerId)
+      if (seat) announceFold(seat.seatIndex)
     }
     const newLook = lookAnimationTracker.detectNewLook(round?.roundId ?? null, snapshot.you.looked)
     if (newLook) { activeLookEffectStartedAtServerMs = sharedServerClock.getServerNow(); tableScene.onLook() }
@@ -858,6 +927,7 @@ export function createSvaraLobbyController(options: Options) {
     // Задание §15 — само СЪЩАТА (или вече изчистената) commandId освобождава
     // бутоните; закъснял отговор за по-стара/отменена команда никога не
     // засяга по-новото pending действие.
+    onPlayerLooked(event: SvaraPlayerLookedMessage) { announceLook(event) },
     onCommandResult(commandId: string) {
       if (pendingActionCommandId !== commandId) return
       actionPending = false

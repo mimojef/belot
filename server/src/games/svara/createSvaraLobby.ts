@@ -97,7 +97,7 @@ export function createSvaraLobby(deps: {
       const before = runtime.getPublicTable(matchId)
       runtime.executeParticipantCommand(matchId, { playerId: botId }, randomUUID(), command, expectedRevision)
       lifecycle.refresh(matchId)
-      publish(matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId)))
+      publish(matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId)), lookedEvent(matchId, botId, command))
       progress(matchId)
     },
   }, clock) ?? null
@@ -195,7 +195,11 @@ export function createSvaraLobby(deps: {
     deliver(transport, serializeSvaraSnapshotForClient(runtime.getPlayerSnapshot(matchId, { playerId })))
     deliver(transport, lifecycle.timing(matchId))
   }
-  function publish(matchId: string, previousPlayers: string[], publicChanged = true) {
+  /** Събитието „Виж“ след успешна команда look (на човек или бот) — виж 'svara_player_looked'. */
+  function lookedEvent(matchId: string, playerId: string, command: { type: string }): SvaraLobbyServerMessage | undefined {
+    return command.type === 'look' ? { type: 'svara_player_looked', matchId, playerId, revision: runtime.getMatchRevision(matchId) } : undefined
+  }
+  function publish(matchId: string, previousPlayers: string[], publicChanged = true, event?: SvaraLobbyServerMessage) {
     if (recoveryState !== 'ready') return
     const table = runtime.getPublicTable(matchId)
     const tables = publicChanged ? publicTables() : []
@@ -209,6 +213,7 @@ export function createSvaraLobby(deps: {
       if (player && player.status !== 'exited' && !finishedDismissals.get(matchId)?.has(playerId)) {
         if (publicChanged) deliver(transport, { type: 'svara_table_updated', table })
         snapshot(transport, matchId, playerId)
+        if (event && !finishedDismissals.get(matchId)?.has(playerId)) deliver(transport, event)
       } else if (previousPlayers.includes(playerId)) {
         if (publicChanged) deliver(transport, { type: 'svara_table_left', matchId })
       }
@@ -322,7 +327,8 @@ export function createSvaraLobby(deps: {
             return
           }
           const after = runtime.getPublicTable(message.matchId)
-          publish(message.matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(after))
+          publish(message.matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(after),
+            abortBotMatch ? undefined : lookedEvent(message.matchId, playerId, message.command))
           progress(message.matchId)
           return
         }

@@ -968,7 +968,7 @@ function getPhraseBubblePlacement(
   return getBubblePlacement(visualSeat, offsetIndex).wrapperStyle
 }
 
-function renderBidBubble(
+export function renderBidBubble(
   visualSeat: Seat,
   bubble: SeatBidBubble,
   escapeHtml: EscapeHtml,

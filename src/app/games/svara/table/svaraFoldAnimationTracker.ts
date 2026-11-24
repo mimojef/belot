@@ -23,6 +23,37 @@ export type SvaraFoldAnimationTracker = {
   reset: () => void
 }
 
+type SvaraSnapshotForFinalFold = {
+  matchId: string
+  revision: number
+  toActId: string | null
+  round: SvaraSnapshotRound | null
+  seats: ReadonlyArray<{ playerId: string; status: string }>
+}
+
+/**
+ * Последното доброволно „Бягам“, което приключва наддаването: сървърът минава
+ * направо в „Покажи/Скрий“ или в сравняване и в този snapshot вече няма
+ * журнал на действията, затова detectNewFolds не го вижда. Познава се по
+ * прехода от непосредствено предишния snapshot: играчът на ход не е сред
+ * показваните, а статусът му остава 'active' (принудителният отказ — изтекло
+ * време/изход — го прави 'absent'/'exited'). Без предишен snapshot
+ * (reconnect) — нищо.
+ */
+export function detectSvaraFinalFold(prev: SvaraSnapshotForFinalFold | null, next: SvaraSnapshotForFinalFold | null): { playerId: string; roundId: string } | null {
+  if (!prev || !next || prev.matchId !== next.matchId || next.revision !== prev.revision + 1) return null
+  const before = prev.round
+  const after = next.round
+  if (!before || (before.kind !== 'ordinary' && before.kind !== 'svara')) return null
+  if (!after || (after.kind !== 'reveal-choice' && after.kind !== 'showdown-display')) return null
+  const actor = prev.toActId
+  if (!actor) return null
+  const shown = after.kind === 'reveal-choice' ? [after.winnerId] : after.comparedPlayers
+  if (shown.includes(actor)) return null
+  if (next.seats.find((seat) => seat.playerId === actor)?.status !== 'active') return null
+  return { playerId: actor, roundId: before.roundId }
+}
+
 export function createSvaraFoldAnimationTracker(): SvaraFoldAnimationTracker {
   const seenCountByRoundId = new Map<string, number>()
 

@@ -181,6 +181,7 @@ import type {
   SvaraPublicTable,
   SvaraMatchSnapshotMessage,
   SvaraMatchTimingMessage,
+  SvaraPlayerLookedMessage,
   SvaraParticipantCommand,
 } from '../network/createGameServerClient'
 import type { NicknameHighlightRole } from './roleNicknameColor'
@@ -3962,6 +3963,7 @@ export function createLobbyFlowController(
     isInActiveMatch: () => boolean
     onCommandResult: (commandId: string) => void
     onCommandError: (message: string, commandId?: string) => void
+    onPlayerLooked: (event: SvaraPlayerLookedMessage) => void
     requestExit: () => void
   } | null = null
   let _isOpeningSvaraLobbyOverlay = false
@@ -22482,6 +22484,13 @@ export function createLobbyFlowController(
       // у него state. onCommandError() вече покрива showMessage()'s ефект
       // (message + render), включително за lobby-level грешки без commandId.
       _svaraLobbyController?.onCommandError(message.message, message.commandId)
+      return true
+    }
+    if (message.type === 'svara_player_looked') {
+      // Еднократно събитие „Виж“ — само към mount-натия контролер (не се кешира
+      // и не се replay-ва: при reconnect/remount не се повтаря).
+      if (_svaraDismissedMatches.has(message.matchId)) return true
+      _svaraLobbyController?.onPlayerLooked(message)
       return true
     }
     if (message.type === 'svara_match_timing') {

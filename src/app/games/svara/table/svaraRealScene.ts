@@ -31,7 +31,7 @@ import {
 import { createSvaraSceneShell, svaraSceneStageZ } from '../scene/svaraSceneShell'
 import { svaraBelotHandsSpec } from './svaraBelotHands'
 import { detectSvaraFinalCall } from './svaraBetAnimationTracker'
-import { renderSvaraBelotSeatCardHtml, svaraBelotCardScale, svaraBelotCardSize, SVARA_BELOT_CARD_EDGE_MARGIN_PX } from './svaraBelotSeatCard'
+import { renderSvaraBelotSeatCardHtml, renderSvaraBelotSpeechBubbleHtml, svaraBelotCardScale, svaraBelotCardSize, SVARA_BELOT_BID_BUBBLE_LIFETIME_MS, SVARA_BELOT_CARD_EDGE_MARGIN_PX } from './svaraBelotSeatCard'
 import { SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
 import { playGameSound } from '../../../audio/gameSoundSettings'
 import { getSvaraVisualSlot } from './svaraSeatLayout'
@@ -53,6 +53,12 @@ export const SVARA_REAL_PAYOUT_STEP_TARGET_MS = 1800
 const DECK_SPRITES = 20
 // Звукът на раздаването (същият файл и сила като в премахнатото демо).
 const DEAL_SOUND_SRC = '/audio/card-sfx/card-move.mp3'
+/** „Свара!“ (женски глас + сигнализация, вече смесени) — заедно с надписа „СВАРА!“. */
+const SVARA_ANNOUNCE_SOUND_SRC = '/audio/game-sounds/svara-announce.mp3'
+/** Кацане на чиповете: играч → банка (залог) и банка → спечелил (изплащане). */
+const CHIPS_TO_POT_SOUND_SRC = '/audio/game-sounds/svara-chips-land.wav'
+const CHIPS_TO_WINNER_SOUND_SRC = '/audio/game-sounds/coins.mp3'
+const CHIPS_SOUND_VOLUME = 0.5
 const DEAL_SOUND_VOLUME = 0.35
 /** Две карти по-близо от това не звучат двойно (без натрупване/усилване). */
 const DEAL_SOUND_MIN_GAP_MS = 90
@@ -97,6 +103,10 @@ export type SvaraRealScene = {
   update(host: HTMLElement, input: SvaraRealSceneInput): void
   onBets(entries: Array<{ seatIndex: number; added: number }>): void
   onLook(): void
+  /** Балонче за обява до карето на мястото (напр. „Плащам 200“) — балончето от Белот. */
+  showSpeech(seatIndex: number, label: string): void
+  /** „+N“ над банката при повишаване — само визуален ефект (не пипа банката). */
+  showPotRaise(amount: string): void
   reset(): void
   destroy(): void
   debug(): { sprites: number; animations: number; pot: number; deck: boolean }
@@ -325,9 +335,11 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   function preloadDealSound(): void {
     if (dealSoundPreloaded || typeof Audio === 'undefined') return
     dealSoundPreloaded = true
-    const audio = new Audio()
-    audio.preload = 'auto'
-    audio.src = DEAL_SOUND_SRC
+    for (const src of [DEAL_SOUND_SRC, SVARA_ANNOUNCE_SOUND_SRC, CHIPS_TO_POT_SOUND_SRC, CHIPS_TO_WINNER_SOUND_SRC]) {
+      const audio = new Audio()
+      audio.preload = 'auto'
+      audio.src = src
+    }
   }
 
   // ── Места ───────────────────────────────────────────────────────────────
@@ -497,6 +509,12 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     markBusy(sceneSeat, remaining)
     return remaining
   }
+  /** Залог: чиповете на играча летят към банката; един звук, когато купчинката кацне (само при реална анимация). */
+  function betChipsWithLandingSound(sceneSeat: number, k: number, delayMs: number): number {
+    const remaining = betChips(sceneSeat, k, delayMs)
+    if (remaining > 0) later(remaining, () => playGameSound(CHIPS_TO_POT_SOUND_SRC, { volume: CHIPS_SOUND_VOLUME }))
+    return remaining
+  }
 
   /** Демо: събиране в банката → каскада към купчинката на победителя/ите (там остават). */
   function payout(recipients: number[], share: number, windowMs: number, elapsedMs: number, amounts: Map<number, number>): void {
@@ -529,6 +547,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     for (const sceneSeat of recipients) markBusy(sceneSeat, remaining)
     later(Math.max(0, remaining - 40), () => {
       for (const sceneSeat of recipients) shell.showWinner(sceneSeat, amounts.get(sceneSeat) ?? 0, !!input?.animations)
+      // Чиповете от банката стигат до спечелилия — един звук на стъпка (само при реална анимация).
+      if (remaining > 0) playGameSound(CHIPS_TO_WINNER_SOUND_SRC, { volume: CHIPS_SOUND_VOLUME })
     })
   }
 
@@ -817,7 +837,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       pendingBets = []
       bets.forEach((bet, order) => {
         const k = bet.added <= snapshot.table.entryChips ? 1 : bet.added <= 4 * snapshot.table.entryChips ? 2 : 3
-        betChips(sceneSeatOf(bet.seatIndex), k, order * SVARA_SCENE_TIMING.betSeatStaggerMs)
+        betChipsWithLandingSound(sceneSeatOf(bet.seatIndex), k, order * SVARA_SCENE_TIMING.betSeatStaggerMs)
       })
     }
 
@@ -831,7 +851,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       if (payer) {
         const entry = snapshot.table.entryChips
         const k = finalCall.added <= entry ? 1 : finalCall.added <= 4 * entry ? 2 : 3
-        finalCallLandsAt = performance.now() + betChips(sceneSeatOf(payer.seatIndex), k, 0)
+        finalCallLandsAt = performance.now() + betChipsWithLandingSound(sceneSeatOf(payer.seatIndex), k, 0)
       }
     }
 
@@ -865,6 +885,10 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       if (round.svaraTie && elapsed < SVARA_SHOWDOWN_MS - 300) {
         const startTie = () => {
           shell.playBanner(SVARA_SHOWDOWN_MS - 200 - waitForChips, elapsed)
+          // Звукът „Свара!“ — в същия момент като надписа. Този блок минава
+          // веднъж на сравняване (done 'show:'); при reconnect/remount
+          // сравняването се маркира като показано без надпис, затова и без звук.
+          playGameSound(SVARA_ANNOUNCE_SOUND_SRC)
           play(pot.map((chip, idx) => svaraSvarkaHopMove(layout!, chip.id, states[chip.id]!, idx, 3)), elapsed)
         }
         if (waitForChips > 0) later(waitForChips, startTie); else startTie()
@@ -1131,7 +1155,70 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     return true
   }
 
+  // ── Балончета за обява (в слоя над картите, до карето на мястото) ───────
+  const speechBubbles = new Map<number, { el: HTMLElement; timer: number }>()
+  function clearSpeech(sceneSeat: number): void {
+    const bubble = speechBubbles.get(sceneSeat)
+    if (!bubble) return
+    window.clearTimeout(bubble.timer)
+    bubble.el.remove()
+    speechBubbles.delete(sceneSeat)
+  }
+  function showSpeech(seatIndex: number, label: string): void {
+    if (!layout) return
+    const sceneSeat = sceneSeatOf(seatIndex)
+    const seatHost = shell.seats[sceneSeat]?.infoHost
+    const slot = layout.seats[sceneSeat]?.slot
+    if (!seatHost || !slot) return
+    // Нова обява на същото място замества предишната (както в Белот).
+    clearSpeech(sceneSeat)
+    const el = document.createElement('div')
+    el.dataset.svaraSpeechBubble = String(seatIndex)
+    el.innerHTML = renderSvaraBelotSpeechBubbleHtml(slot, cardScale, label)
+    seatHost.appendChild(el)
+    speechBubbles.set(sceneSeat, { el, timer: window.setTimeout(() => clearSpeech(sceneSeat), SVARA_BELOT_BID_BUBBLE_LIFETIME_MS) })
+  }
+
+  // ── „+N“ над банката при повишаване ─────────────────────────────────────
+  // Стилът и движението на „+сумата“ при печалба (shell.showWinner:
+  // издигане и изчезване за 1300 ms), златисто-оранжево и по-едро. Само
+  // визуален етикет над купчинката на банката: не променя сумата ѝ, не
+  // задейства изплащане и изчезва сам, без да закрива трайно „Банка“.
+  const potRaiseLabels = new Set<HTMLElement>()
+  function clearPotRaises(): void {
+    for (const el of potRaiseLabels) { el.getAnimations().forEach((animation) => animation.cancel()); el.remove() }
+    potRaiseLabels.clear()
+  }
+  function showPotRaise(amount: string): void {
+    if (!layout) return
+    clearPotRaises()
+    const el = document.createElement('div')
+    el.dataset.svaraPotRaise = '1'
+    el.setAttribute('aria-hidden', 'true')
+    el.textContent = `+${amount}`
+    const fontPx = Math.round(Math.max(26, layout.chipSize * 1.25))
+    // Над най-високата част на купчинката чипове в банката.
+    const top = layout.pot.y - layout.chipSize * 1.5
+    el.style.cssText = `position:absolute;left:${layout.pot.x}px;top:${top}px;transform:translate(-50%,-50%);opacity:0;pointer-events:none;white-space:nowrap;font-size:${fontPx}px;font-weight:900;color:#ffad2f;-webkit-text-stroke:1px rgba(90,40,0,0.55);text-shadow:0 2px 6px rgba(0,0,0,0.75);will-change:transform,opacity;`
+    shell.hudLayer.appendChild(el)
+    potRaiseLabels.add(el)
+    const animation = el.animate(
+      [
+        { transform: 'translate(-50%,-50%) translateY(8px) scale(0.7)', opacity: 0 },
+        { transform: 'translate(-50%,-50%) translateY(0) scale(1.08)', opacity: 1, offset: 0.25 },
+        { transform: 'translate(-50%,-50%) translateY(-6px) scale(1)', opacity: 1, offset: 0.7 },
+        { transform: 'translate(-50%,-50%) translateY(-18px) scale(1)', opacity: 0 },
+      ],
+      { duration: 1300, easing: 'ease-out' },
+    )
+    const finish = () => { el.remove(); potRaiseLabels.delete(el) }
+    animation.onfinish = finish
+    animation.oncancel = finish
+  }
+
   function clearAll(): void {
+    clearPotRaises()
+    for (const sceneSeat of [...speechBubbles.keys()]) clearSpeech(sceneSeat)
     removeOwnPoints()
     clearCompareBadges()
     renderer.cancel()
@@ -1237,6 +1324,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     },
     onBets(entries) { pendingBets.push(...entries) },
     onLook() { pendingLook = true },
+    showSpeech,
+    showPotRaise,
     reset() { clearAll(); matchKey = null; shell.stage.remove(); host = null; resizeObserver?.disconnect(); resizeObserver = null },
     destroy() { clearAll(); resizeObserver?.disconnect(); renderer.destroy(); shell.destroy() },
     debug() { const s = renderer.stats(); return { ...s, pot: pot.length, deck: deckVisible } },

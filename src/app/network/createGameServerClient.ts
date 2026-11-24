@@ -2335,6 +2335,13 @@ export type SvaraMatchTimingMessage = {
   serverNow: number
   deadlines: SvaraDeadlineInfo[]
 }
+/** Еднократно събитие: playerId погледна собствените си карти с „Виж“ (без карти/бройки; не се повтаря при reconnect). */
+export type SvaraPlayerLookedMessage = {
+  type: 'svara_player_looked'
+  matchId: string
+  playerId: string
+  revision: number
+}
 export type SvaraCommandResultMessage = {
   type: 'svara_command_result'
   matchId: string
@@ -3538,6 +3545,7 @@ export type ServerMessage =
   | PrivateRoomsListMessage
   | MatchmakingWaitingCountsMessage
   | SvaraMatchTimingMessage
+  | SvaraPlayerLookedMessage
   | SvaraCommandResultMessage
   | SvaraCommandErrorMessage
   | SvaraTablesListMessage

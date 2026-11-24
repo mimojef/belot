@@ -39,6 +39,13 @@ export type SvaraLobbyServerMessage =
   | { type: 'svara_table_updated'; table: SvaraPublicTable; requestId?: string }
   | { type: 'svara_table_left'; matchId: string; requestId?: string }
   | { type: 'svara_lobby_error'; code: SvaraLobbyErrorCode; message: string; requestId?: string }
+  /**
+   * Еднократно събитие: playerId успешно погледна СОБСТВЕНИТЕ си карти с „Виж“
+   * (не автоматично разкриване). Праща се на всички на масата веднага след
+   * snapshot-а със същата revision; без карти/бройки, не се пази и не се
+   * повтаря при reconnect.
+   */
+  | { type: 'svara_player_looked'; matchId: string; playerId: string; revision: number }
   | SvaraMatchSnapshotMessage
 
 export const SVARA_LOBBY_MESSAGE_TYPES: ReadonlySet<string> = new Set([
