@@ -23,9 +23,13 @@ import {
 /** Каретата в createCuttingSeatPanelHtml: вертикално (горе/ляво/дясно) и хоризонтално (долу) + вътрешният им scale. */
 const BELOT_SIDE_CARD = { w: 186, h: 234, innerScale: 0.9 }
 const BELOT_BOTTOM_CARD = { w: 360, h: 138, innerScale: 0.8 }
-/** Значката за дилър (renderCuttingDealerBadge): 28px, излиза 12px извън карето. */
-const DEALER_BADGE_SIZE = 28
-const DEALER_BADGE_OVERHANG = 12
+/**
+ * Значката за дилър: стилът на renderCuttingDealerBadge (Белот: 28px, шрифт 14px),
+ * в Свара по-голяма, за да се разпознава лесно; излиза малко извън карето.
+ */
+const DEALER_BADGE_SIZE = 42
+const DEALER_BADGE_FONT = 22
+const DEALER_BADGE_OVERHANG = 14
 /** Отстъп на каретата от ръба (getCuttingSeatPanelAnchorStyle: 5px). */
 export const SVARA_BELOT_CARD_EDGE_MARGIN_PX = 5
 
@@ -126,7 +130,8 @@ export function renderSvaraBelotSeatCardHtml(input: SvaraBelotSeatCardInput): st
       if (!(child instanceof HTMLElement) || child.textContent?.trim() !== 'D') continue
       child.dataset.svaraDealerBadge = '1'
       child.title = 'Дилър'
-      if (input.slot === 'bottom') continue
+      Object.assign(child.style, { width: `${DEALER_BADGE_SIZE}px`, height: `${DEALER_BADGE_SIZE}px`, fontSize: `${DEALER_BADGE_FONT}px`, border: '2px solid #13253d', boxSizing: 'border-box' })
+      if (input.slot === 'bottom') { child.style.right = `${-DEALER_BADGE_OVERHANG}px`; continue }
       const k = size.innerScale
       const card = input.slot === 'top'
         ? { l: (size.w * (1 - k)) / 2, r: (size.w * (1 + k)) / 2, t: 0 }

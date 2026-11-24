@@ -30,7 +30,7 @@ import {
   type RenderSvaraActiveTableInput,
 } from './table/renderSvaraActiveTable'
 import { deriveSvaraActionButtons } from './table/svaraBettingActions'
-import { createSvaraBetAnimationTracker } from './table/svaraBetAnimationTracker'
+import { createSvaraBetAnimationTracker, detectSvaraFinalCall } from './table/svaraBetAnimationTracker'
 import { createSvaraFoldAnimationTracker } from './table/svaraFoldAnimationTracker'
 import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTracker'
 import { computeSvaraDealingVisualState } from './table/svaraTableAnimation'
@@ -554,7 +554,24 @@ export function createSvaraLobbyController(options: Options) {
     playGameSound('/audio/game-sounds/coins.mp3', { volume: 0.5 })
   }
 
+  // Последното „Плати“, приключило наддаването направо в сравняване (виж
+  // detectSvaraFinalCall): „+N“ и звукът както при всяко „Плати“; чиповете
+  // ги пуска сцената (там е и редът спрямо обръщането на картите).
+  let previousSnapshotForBets: SvaraMatchSnapshotMessage | null = null
+  const finalCallsShown = new Set<string>()
+  function flushFinalCall(): void {
+    const prev = previousSnapshotForBets
+    previousSnapshotForBets = snapshot
+    const finalCall = detectSvaraFinalCall(prev, snapshot)
+    if (!finalCall || !snapshot || finalCallsShown.has(`${snapshot.matchId}:${finalCall.roundId}`)) return
+    finalCallsShown.add(`${snapshot.matchId}:${finalCall.roundId}`)
+    const seat = snapshot.seats.find((s) => s.playerId === finalCall.playerId)
+    if (seat) playBetFlash(seat.seatIndex, finalCall.added)
+    playBetSound()
+  }
+
   function flushBetAnimations(): void {
+    flushFinalCall()
     const round = snapshot?.round ?? null
     const newEntries = betAnimationTracker.detectNewEntries(round)
     if (newEntries.length === 0 || !snapshot) return

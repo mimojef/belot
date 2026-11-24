@@ -114,6 +114,12 @@ export type SvaraSceneSeatHud = {
   dim: 'eliminated' | 'absent' | null
 }
 
+/**
+ * Наличността на играча — по-голяма и отличима от останалите баджове (син фон,
+ * дебел златист бордър, бял текст), за да се разпознава веднага.
+ */
+const SEAT_TOTAL_STYLE = 'display:inline-block;padding:2px 10px;border-radius:999px;background:linear-gradient(180deg,#2563eb 0%,#1e3a8a 100%);border:2px solid #f5d06f;color:#fff;font-size:14px;font-weight:900;line-height:1.15;text-shadow:0 1px 2px rgba(0,0,0,.6);box-shadow:0 2px 6px rgba(0,0,0,.45);'
+
 /** Визуално скрито, но достъпно за четци на екрана (и за проверките). */
 const SR_ONLY = 'position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;'
 
@@ -175,7 +181,7 @@ export function renderSvaraSceneSeatHuds(rawInput: RenderSvaraActiveTableInput):
     // „Печеля X!“ остават достъпни за четци на екрана, без да се виждат
     // (сцената показва същото графично: прибрани карти, пръстен, „+X“).
     const infoHtml = `<div data-svara-seat-flash-mount="1" style="position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;">
-      <span data-svara-seat-total="1" title="Баланс" style="padding:1px 7px;border-radius:999px;background:rgba(0,0,0,.62);color:#f5d06f;font-size:11px;font-weight:900;">${seat.stack}</span>
+      <span data-svara-seat-total="1" title="Баланс" style="${SEAT_TOTAL_STYLE}">${seat.stack}</span>
       <div data-svara-seat-sr="1" style="${SR_ONLY}">
         ${foldEffect ? foldSpeechBubbleHtml(foldEffect, input.reducedMotion) : ''}
         ${points === null ? '' : `<span data-svara-${compared ? 'showdown' : 'reveal'}-points="1">${points}</span> `}

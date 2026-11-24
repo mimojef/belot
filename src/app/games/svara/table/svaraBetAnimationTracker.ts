@@ -23,6 +23,39 @@ export type SvaraBetAnimationTracker = {
   reset: () => void
 }
 
+type SvaraSnapshotForFinalCall = {
+  matchId: string
+  revision: number
+  toActId: string | null
+  round: SvaraSnapshotRound | null
+  seats: ReadonlyArray<{ playerId: string; stack: number }>
+}
+
+/**
+ * Последното „Плати“, което приключва наддаването: сървърът минава направо
+ * в сравняване (showdown-display) и в този snapshot вече няма действия, а
+ * стековете включват и изплащането — затова вноската не се вижда като ново
+ * действие. Познава се по прехода: предишният snapshot е залагане, играчът на
+ * ход е сред сравняваните; сумата е до текущия залог (без досегашните му
+ * доброволни вноски), най-много колкото е имал. Само при жив преход в
+ * сесията (не при reconnect: тогава няма предишен snapshot).
+ */
+export function detectSvaraFinalCall(prev: SvaraSnapshotForFinalCall | null, next: SvaraSnapshotForFinalCall | null): { playerId: string; added: number; roundId: string } | null {
+  // Само непосредствено следващият snapshot: ако междинен е пропуснат, играчът
+  // „на ход“ в предишния може да не е последният платил — тогава без анимация.
+  if (!prev || !next || prev.matchId !== next.matchId || next.revision !== prev.revision + 1) return null
+  const before = prev.round
+  const after = next.round
+  if (!before || (before.kind !== 'ordinary' && before.kind !== 'svara')) return null
+  if (!after || after.kind !== 'showdown-display' || after.displayPhase !== 'showdown') return null
+  const actor = prev.toActId
+  if (!actor || !after.comparedPlayers.includes(actor)) return null
+  const voluntary = before.actions.filter((entry) => entry.playerId === actor).reduce((sum, entry) => sum + entry.added, 0)
+  const stack = prev.seats.find((seat) => seat.playerId === actor)?.stack ?? 0
+  const added = Math.min(Math.max(0, before.currentBet - voluntary), stack)
+  return added > 0 ? { playerId: actor, added, roundId: before.roundId } : null
+}
+
 export function createSvaraBetAnimationTracker(): SvaraBetAnimationTracker {
   const seenCountByRoundId = new Map<string, number>()
 

@@ -16,6 +16,12 @@ export type SvaraSceneSeatNode = {
   name: HTMLElement
   /** Контейнер за профилното каре от Белот (само 'card'; рисува го истинската игра). */
   card: HTMLElement | null
+  /**
+   * Истинската игра: огледален контейнер на мястото (същата позиция и размер)
+   * в слоя над картите — в него е информацията (наличността), за да е винаги
+   * пред картите, вкл. при сравняване. null — информацията е в самото място.
+   */
+  infoHost: HTMLElement | null
   /** Допълнителна информация под името (истинската игра: баланс, залог, статус). */
   info: HTMLElement
 }
@@ -56,7 +62,7 @@ const FRAMELESS_FELT_STYLE = 'inset:0;background:radial-gradient(circle at 50% 4
 export type SvaraSceneSeatStyle = 'round' | 'card'
 
 /** Истинската игра: z-index на слоевете в сцената (спрайтовете — виж svaraSceneStageZ). */
-export const SVARA_STAGE_Z = { behindSeats: 50, seats: 100, sprites: 200, labels: 5000, hud: 5100, banner: 5200 } as const
+export const SVARA_STAGE_Z = { behindSeats: 50, seats: 100, sprites: 200, seatInfo: 3000, labels: 5000, hud: 5100, banner: 5200 } as const
 
 /**
  * z на спрайт → z-index в сцената: отрицателните (картите зад каретата, виж
@@ -93,6 +99,7 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
     <div data-svara-scene-felt style="position:absolute;${options.frameless ? FRAMELESS_FELT_STYLE : FRAMED_FELT_STYLE}"></div>
     <div data-svara-scene-seats style="position:absolute;inset:0;"></div>
     <div data-svara-scene-sprites style="position:absolute;inset:0;"></div>
+    <div data-svara-scene-seat-info style="position:absolute;inset:0;pointer-events:none;"></div>
     <div data-svara-scene-pot style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);padding:4px 11px;border-radius:999px;background:rgba(0,0,0,0.55);border:1px solid rgba(212,165,32,0.55);color:#f5d06f;font-weight:900;white-space:nowrap;opacity:0;transition:opacity 200ms ease;will-change:transform;">Банка: 0</div>
     <div data-svara-scene-win style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);opacity:0;pointer-events:none;color:#ffe08a;font-weight:900;text-shadow:0 2px 6px rgba(0,0,0,0.7);white-space:nowrap;will-change:transform,opacity;">+0</div>
     <div data-svara-scene-hud style="position:absolute;inset:0;pointer-events:none;"></div>
@@ -100,6 +107,7 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
   `
   const q = <T extends HTMLElement>(selector: string) => stage.querySelector<T>(selector)!
   const seatsLayer = q<HTMLElement>('[data-svara-scene-seats]')
+  const seatInfoLayer = q<HTMLElement>('[data-svara-scene-seat-info]')
   const spritesHost = q<HTMLElement>('[data-svara-scene-sprites]')
   const hudLayer = q<HTMLElement>('[data-svara-scene-hud]')
   const potLabel = q<HTMLElement>('[data-svara-scene-pot]')
@@ -112,6 +120,8 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
     // Сцената е собствен stacking context, за да не излиза z извън нея.
     stage.style.isolation = 'isolate'
     seatsLayer.style.zIndex = String(SVARA_STAGE_Z.seats)
+    // Наличността на играчите — в отделен слой над всички карти и чипове.
+    seatInfoLayer.style.zIndex = String(SVARA_STAGE_Z.seatInfo)
     potLabel.style.zIndex = String(SVARA_STAGE_Z.labels)
     winLabel.style.zIndex = String(SVARA_STAGE_Z.labels + 1)
     hudLayer.style.zIndex = String(SVARA_STAGE_Z.hud)
@@ -132,7 +142,17 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
     const name = node.querySelector<HTMLElement>('[data-name]')!
     name.textContent = options.names[i] ?? ''
     seatsLayer.appendChild(node)
-    seats.push({ node, ring: node.querySelector<HTMLElement>('[data-ring]')!, avatar: node.querySelector<HTMLImageElement>('[data-avatar]')!, name, card: node.querySelector<HTMLElement>('[data-svara-seat-card]'), info: node.querySelector<HTMLElement>('[data-info]')! })
+    const info = node.querySelector<HTMLElement>('[data-info]')!
+    // Истинската игра: информацията се премества в огледален контейнер в слоя над картите.
+    let infoHost: HTMLElement | null = null
+    if (options.seatStyle === 'card') {
+      infoHost = document.createElement('div')
+      infoHost.dataset.svaraSceneSeatInfo = String(i)
+      infoHost.style.cssText = 'position:absolute;left:0;top:0;transform:translate(-50%,-50%);pointer-events:none;'
+      infoHost.appendChild(info)
+      seatInfoLayer.appendChild(infoHost)
+    }
+    seats.push({ node, ring: node.querySelector<HTMLElement>('[data-ring]')!, avatar: node.querySelector<HTMLImageElement>('[data-avatar]')!, name, card: node.querySelector<HTMLElement>('[data-svara-seat-card]'), infoHost, info })
   }
 
   function track(animation: Animation): void {
@@ -153,6 +173,14 @@ export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs:
         node.style.width = `${seat.box.w}px`
         node.style.height = `${seat.box.h}px`
         node.style.display = !visibleSeats || visibleSeats.includes(i) ? '' : 'none'
+        const infoHost = seats[i]!.infoHost
+        if (infoHost) {
+          infoHost.style.left = node.style.left
+          infoHost.style.top = node.style.top
+          infoHost.style.width = node.style.width
+          infoHost.style.height = node.style.height
+          infoHost.style.display = node.style.display
+        }
       })
       potLabel.style.left = `${next.potLabel.x}px`
       potLabel.style.top = `${next.potLabel.y}px`

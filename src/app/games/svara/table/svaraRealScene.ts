@@ -30,6 +30,7 @@ import {
 } from '../scene/svaraSceneLayout'
 import { createSvaraSceneShell, svaraSceneStageZ } from '../scene/svaraSceneShell'
 import { svaraBelotHandsSpec } from './svaraBelotHands'
+import { detectSvaraFinalCall } from './svaraBetAnimationTracker'
 import { renderSvaraBelotSeatCardHtml, svaraBelotCardScale, svaraBelotCardSize, SVARA_BELOT_CARD_EDGE_MARGIN_PX } from './svaraBelotSeatCard'
 import { SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
 import { playGameSound } from '../../../audio/gameSoundSettings'
@@ -75,6 +76,8 @@ const PHONE_ACTION_BAR_RESERVE_PX = SVARA_ACTION_PANEL_HEIGHT_PHONE_PX + 4
 const DESKTOP_ACTION_BAR_RESERVE_PX = SVARA_ACTION_PANEL_HEIGHT_DESKTOP_PX + 8
 /** Отстъп между ръба на купчинката (при максимална височина) и баджа на залога. */
 const BET_BADGE_GAP_PX = 5
+/** Наличността на играча — отстъп от профилното каре. */
+const BALANCE_GAP_PX = 4
 
 export type SvaraRealSceneInput = {
   snapshot: SvaraMatchSnapshotMessage
@@ -159,6 +162,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   const done = new Set<string>()
   const busySeats = new Map<number, number>() // място → момент (performance.now), до който купчинката е „заета“
   let pendingBets: Array<{ seatIndex: number; added: number }> = []
+  /** Кога кацат чиповете от последното „Плати“ (performance.now); сравняването изчаква дотогава. */
+  let finalCallLandsAt = 0
   let pendingLook = false
   let reconcileTimer: number | null = null
   const timers = new Set<number>()
@@ -789,7 +794,9 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     if (pendingLook || (snapshot.you.cards && !prev.you.cards && betting)) {
       pendingLook = false
       const own = hands.get(0)
-      if (own && snapshot.you.cards && !own.revealed) {
+      // При сравняване собствените карти (игра на тъмно) ги обръща сравняването
+      // по общия ред — след чиповете от последното „Плати“, заедно с другите.
+      if (own && snapshot.you.cards && !own.revealed && round?.kind !== 'showdown-display') {
         setHandFaces(own, snapshot.you.cards.map((c) => svaraCardCodeToFaceSrc(c)))
         own.revealed = true
         play(own.ids.map((id, slot) => svaraOwnRevealMove(layout!, id, slot, 150 + slot)))
@@ -814,11 +821,28 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       })
     }
 
+    // Последното „Плати“ приключва наддаването направо в сравняване — вноската
+    // не идва като действие (виж detectSvaraFinalCall): чиповете летят към
+    // банката със същата анимация, а сравняването тръгва след като кацнат.
+    const finalCall = detectSvaraFinalCall(prev, snapshot)
+    if (finalCall && !done.has(`finalcall:${finalCall.roundId}`)) {
+      done.add(`finalcall:${finalCall.roundId}`)
+      const payer = seatOfPlayer(finalCall.playerId)
+      if (payer) {
+        const entry = snapshot.table.entryChips
+        const k = finalCall.added <= entry ? 1 : finalCall.added <= 4 * entry ? 2 : 3
+        finalCallLandsAt = performance.now() + betChips(sceneSeatOf(payer.seatIndex), k, 0)
+      }
+    }
+
     // Сравняване: картите се обръщат (като в демото); при равенство — „СВАРА!“.
     if (round?.kind === 'showdown-display' && round.displayPhase === 'showdown' && !done.has(`show:${round.roundId}`) && synced) {
       done.add(`show:${round.roundId}`)
       const deadline = synced.deadlines.find((d) => d.kind === 'showdown-display')
-      const elapsed = deadline ? Math.max(0, input.serverNow - (deadline.deadlineAt - SVARA_SHOWDOWN_MS)) : 0
+      // Чиповете от последното „Плати“ още летят: сравняването започва визуално
+      // след като кацнат (иначе — превъртяно по сървърния срок, напр. при reconnect).
+      const waitForChips = Math.max(0, finalCallLandsAt - performance.now())
+      const elapsed = waitForChips > 0 ? 0 : deadline ? Math.max(0, input.serverNow - (deadline.deadlineAt - SVARA_SHOWDOWN_MS)) : 0
       round.comparedPlayers.forEach((playerId, order) => {
         const seat = seatOfPlayer(playerId)
         if (!seat) return
@@ -830,17 +854,20 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
         setHandFaces(hand, faces)
         if (hand.revealed) return
         hand.revealed = true
-        const delay = order * SHOWDOWN_HAND_STAGGER_MS
+        const delay = waitForChips + order * SHOWDOWN_HAND_STAGGER_MS
         play(hand.ids.map((id, slot) => sceneSeat === 0
           ? svaraOwnRevealMove(layout!, id, slot, 150 + slot, delay + slot * SVARA_SCENE_TIMING.revealStaggerMs)
           : svaraFlipInPlaceMove(layout!, id, revealedState(sceneSeat, slot), slot, delay + slot * SVARA_SCENE_TIMING.revealStaggerMs)), elapsed)
       })
       // Бройките: едновременно, след като се обърне последната сравнявана ръка.
-      const appearAt = Math.max(0, round.comparedPlayers.length - 1) * SHOWDOWN_HAND_STAGGER_MS + OWN_REVEAL_DONE_MS
+      const appearAt = waitForChips + Math.max(0, round.comparedPlayers.length - 1) * SHOWDOWN_HAND_STAGGER_MS + OWN_REVEAL_DONE_MS
       showCompareBadges(round, appearAt > elapsed ? appearAt - elapsed : null)
       if (round.svaraTie && elapsed < SVARA_SHOWDOWN_MS - 300) {
-        shell.playBanner(SVARA_SHOWDOWN_MS - 200, elapsed)
-        play(pot.map((chip, idx) => svaraSvarkaHopMove(layout!, chip.id, states[chip.id]!, idx, 3)), elapsed)
+        const startTie = () => {
+          shell.playBanner(SVARA_SHOWDOWN_MS - 200 - waitForChips, elapsed)
+          play(pot.map((chip, idx) => svaraSvarkaHopMove(layout!, chip.id, states[chip.id]!, idx, 3)), elapsed)
+        }
+        if (waitForChips > 0) later(waitForChips, startTie); else startTie()
       }
     }
 
@@ -912,6 +939,9 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       visible.push(sceneSeat)
       const node = shell.seats[sceneSeat]!
       node.node.dataset.svaraSeatIndex = String(hud.seatIndex)
+      // Наличността е в огледалния контейнер над картите — със същия индекс на мястото
+      // (`[data-svara-seat-index] [data-svara-seat-flash-mount]` го намира и там).
+      if (node.infoHost) node.infoHost.dataset.svaraSeatIndex = String(hud.seatIndex)
       node.node.dataset.svaraSeatAnchor = layout.seats[sceneSeat]!.slot === 'left' ? 'left' : layout.seats[sceneSeat]!.slot === 'right' ? 'right' : layout.seats[sceneSeat]!.slot
       node.node.dataset.svaraSceneProfile = hud.playerId
       node.node.style.cursor = hud.isBot ? 'default' : 'pointer'
@@ -943,13 +973,16 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       // Местата отляво/отдясно: информацията е подравнена навътре (не излиза извън сукното).
       const side = vertical === 'below' || vertical === 'above' ? `${vertical}-${seatLayout.slot === 'left' ? 'start' : seatLayout.slot === 'right' ? 'end' : 'center'}` : vertical
       // Отстъп от карето: картите като в Белот се подават иззад него — балансът е извън тях.
-      const gapX = Math.round(seatLayout.infoGap ?? 10), gapBelow = Math.round(seatLayout.infoGap ?? 6)
-      const sideKey = `${side}:${gapX}`
+      // Наличността е плътно до карето (може да застъпва малко от картите зад него).
+      const gapX = seatLayout.infoGap !== undefined ? BALANCE_GAP_PX : 10, gapBelow = seatLayout.infoGap !== undefined ? BALANCE_GAP_PX : 6
+      // Долното място: до горния ръб на карето (в долния му ъгъл е значката за дилър).
+      const besideY = seatLayout.slot === 'bottom' && seatLayout.infoGap !== undefined ? 'top:0;' : 'top:50%;transform:translate(0,-50%);'
+      const sideKey = `${side}:${gapX}:${besideY}`
       if (node.info.dataset.side !== sideKey) {
         node.info.dataset.side = sideKey
         node.info.style.cssText = 'position:absolute;display:flex;flex-direction:column;gap:2px;white-space:nowrap;pointer-events:none;z-index:3;' + (
-          side === 'right' ? `left:calc(100% + ${gapX}px);top:50%;transform:translate(0,-50%);align-items:flex-start;`
-            : side === 'left' ? `right:calc(100% + ${gapX}px);top:50%;transform:translate(0,-50%);align-items:flex-end;`
+          side === 'right' ? `left:calc(100% + ${gapX}px);${besideY}align-items:flex-start;`
+            : side === 'left' ? `right:calc(100% + ${gapX}px);${besideY}align-items:flex-end;`
               : (side.startsWith('below') ? `top:calc(100% + ${gapBelow}px);` : 'bottom:calc(100% + 8px);') + (
                 side.endsWith('start') ? 'left:0;align-items:flex-start;' : side.endsWith('end') ? 'right:0;align-items:flex-end;' : 'left:50%;transform:translate(-50%,0);align-items:center;'))
       }
@@ -966,7 +999,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
           bet = document.createElement('span')
           bet.dataset.svaraSeatBet = '1'
           bet.title = 'Текущ залог'
-          bet.style.cssText = 'position:absolute;padding:1px 6px;border-radius:999px;background:rgba(0,0,0,.72);border:1px solid rgba(245,208,111,.7);color:#ffe49a;font-size:11px;font-weight:900;white-space:nowrap;pointer-events:none;z-index:3;'
+          bet.style.cssText = 'position:absolute;padding:2px 9px;border-radius:999px;background:rgba(0,0,0,.78);border:2px solid rgba(245,208,111,.85);color:#ffe49a;font-size:14px;font-weight:900;line-height:1.15;white-space:nowrap;pointer-events:none;z-index:3;'
           node.node.appendChild(bet)
         }
         const chipHalf = layout.chipSize / 2
@@ -1014,6 +1047,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       if (visible.includes(i)) continue
       const seat = shell.seats[i]!
       for (const key of ['svaraSeatIndex', 'svaraSeatAnchor', 'svaraSceneProfile', 'svaraLocalSeat', 'svaraSeatDim', 'svaraToAct'] as const) delete seat.node.dataset[key]
+      if (seat.infoHost) delete seat.infoHost.dataset.svaraSeatIndex
       if (seat.card) seat.card.innerHTML = ''
       cardCache.delete(i)
       delete seat.avatar.dataset.svaraAvatar
