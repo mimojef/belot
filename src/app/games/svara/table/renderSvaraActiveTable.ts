@@ -3,7 +3,7 @@
 // Самата маса (сукно, места, аватари, тесте, карти, чипове, банка, банер,
 // пръстен, спечелена сума) е ОБЩАТА визуална сцена на демото
 // (../scene/, управлявана от svaraRealScene.ts). Тук остават:
-//   • рамката на масата: Обнови / Изход / Анимации / цял екран;
+//   • горният бар: Изход, цял екран и меню „Настройки“ (Звуци в играта, Анимации);
 //   • домакинът на сцената (data-svara-scene-host) — НЕ се преизгражда;
 //   • бутоните за действие, прозорците за решения, банерът при край на мача;
 //   • чист HTML на HUD-а за сцената: информация за мястото (баланс, залог,
@@ -27,6 +27,7 @@ import { formatSvaraLastBetBadge, getLastSvaraBetBadge } from './svaraBettingBad
 import { svaraDealingAnimationMs, type SvaraDealingVisualState } from './svaraTableAnimation'
 import { computeSvaraResultVisualState, type SvaraResultVisualState } from './svaraResultAnimation'
 import { getSvaraDecisionWindow, renderSvaraDecisionWindow, svaraJoiningStatus, svaraDecisionStructureKey } from './svaraDecisionWindows'
+import { renderGameSoundsToggleState } from '../../../activeRoom/renderActiveRoomActionBar'
 
 /** Активно балонче при отказ (voluntary/forced), по seatIndex. */
 export type SvaraActiveFoldEffect = { seatIndex: number; voluntary: boolean; elapsedMs: number; startedAtServerMs?: number }
@@ -66,6 +67,10 @@ export type RenderSvaraActiveTableInput = {
   resultVisual?: SvaraResultVisualState
   decisionPending?: boolean
   decisionMessage?: string
+  /** Отворено ли е менюто „Настройки“ от горния бар. */
+  settingsOpen?: boolean
+  /** Общата настройка „Звуци в играта“ (gameSoundSettings.ts). */
+  gameSoundsEnabled?: boolean
 }
 
 /** Общата видима продължителност на fold балончето — контролерът спира да подава ефекта след това. */
@@ -297,7 +302,7 @@ export function patchSvaraResultPresentation(_root: HTMLElement, rawInput: Rende
   return isResultRound(safeResultInput(rawInput))
 }
 
-// ── Бутони и рамка ──────────────────────────────────────────────────────────
+// ── Бутони за действие ──────────────────────────────────────────────────────
 
 const ACTION_BUTTON_STYLE: Record<'default' | 'primary' | 'danger', string> = {
   default: 'background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.22);color:#f4c95b;',
@@ -324,7 +329,76 @@ function actionBarHtml(buttons: SvaraActionButton[], actionPending: boolean, sho
   return `<div data-svara-action-bar="1" style="flex:0 0 auto;display:flex;flex-wrap:wrap;justify-content:center;gap:5px;padding:3px 2px 1px;">${buttonsHtml}${returnButton}</div>`
 }
 
-const TOP_BUTTON = 'min-height:28px;padding:0 9px;border-radius:7px;border:1px solid rgba(255,255,255,.22);background:rgba(0,0,0,.6);color:#f4c95b;font-size:10px;font-weight:700;cursor:pointer;'
+// ── Горен бар (в стила на Белот: златни икони без фон и рамка) ─────────────
+
+/** Височина на горния бар; прозорците за решения започват под него. */
+export const SVARA_TOP_BAR_HEIGHT_PX = 40
+const TOP_ICON_HIT_PX = 40
+
+const TOP_BAR_STYLE = `<style data-svara-top-bar-style="1">
+  [data-svara-top-icon] svg { display:block; transition:transform 140ms ease, color 140ms ease, filter 140ms ease; }
+  @media (hover:hover) { [data-svara-top-icon]:not(:disabled):hover svg { color:#ffe08a; transform:scale(1.1); } }
+  [data-svara-top-icon]:not(:disabled):active svg, [data-svara-top-icon][aria-expanded="true"] svg { color:#ffe08a; transform:scale(0.94); }
+  [data-svara-top-icon]:focus-visible svg { filter:drop-shadow(0 0 4px rgba(246,211,107,0.85)); }
+</style>`
+
+const TOP_ICON_BUTTON = `width:${TOP_ICON_HIT_PX}px;height:${TOP_ICON_HIT_PX}px;box-sizing:border-box;border:0;outline:0;padding:0;margin:0;display:flex;align-items:center;justify-content:center;background:transparent;box-shadow:none;color:#f6d36b;cursor:pointer;-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;`
+
+const svgIcon = (body: string, size = 24) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
+const EXIT_ICON = svgIcon('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line>')
+// Същата икона като „Настройки“ в Белот (renderActiveRoomActionBar.ts).
+const GEAR_ICON = svgIcon('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>', 22)
+const FULLSCREEN_ON_ICON = svgIcon('<polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line>', 20)
+const FULLSCREEN_OFF_ICON = svgIcon('<polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line>', 20)
+
+function topBarHtml(input: RenderSvaraActiveTableInput): string {
+  const settingsOpen = input.settingsOpen === true
+  const fullscreen = input.fullscreenSupported
+    ? `<button type="button" data-svara-top-icon="fullscreen" data-svara-fullscreen-toggle="1" title="${input.isFullscreen ? 'Изход от цял екран' : 'Цял екран'}" aria-label="${input.isFullscreen ? 'Изход от цял екран' : 'Цял екран'}" style="${TOP_ICON_BUTTON}">${input.isFullscreen ? FULLSCREEN_OFF_ICON : FULLSCREEN_ON_ICON}</button>`
+    : ''
+  return `<div data-svara-top-bar="1" style="flex:0 0 auto;height:${SVARA_TOP_BAR_HEIGHT_PX}px;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;padding:0 4px;background:#000;">
+    <button type="button" data-svara-top-icon="leave" data-svara-table-leave="1" title="Напусни масата" aria-label="Напусни масата" ${input.leavePending ? 'disabled' : ''} style="${TOP_ICON_BUTTON}${input.leavePending ? 'opacity:.5;cursor:wait;' : ''}">${EXIT_ICON}</button>
+    <div style="display:flex;align-items:center;gap:2px;">
+      ${fullscreen}
+      <button type="button" data-svara-top-icon="settings" data-svara-settings-toggle="1" title="Настройки" aria-label="Настройки" aria-haspopup="dialog" aria-expanded="${settingsOpen}" style="${TOP_ICON_BUTTON}">${GEAR_ICON}</button>
+    </div>
+    ${TOP_BAR_STYLE}
+  </div>`
+}
+
+/**
+ * Ред в менюто „Настройки“. Менюто се строи от списък, за да могат по-късно
+ * да се добавят настройки на гласовия чат (напр. микрофон, звук на гласовете)
+ * — само когато наистина работят; засега няма неработещи опции.
+ */
+type SvaraSettingsRow = { attr: string; label: string; enabled: boolean }
+
+function settingsToggleHtml(row: SvaraSettingsRow): string {
+  const toggle = renderGameSoundsToggleState(row.enabled)
+  return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+    <span style="font-size:14px;font-weight:700;line-height:1.3;">${esc(row.label)}</span>
+    <button type="button" role="switch" ${row.attr}="1" aria-checked="${row.enabled}" style="flex-shrink:0;min-width:64px;height:34px;padding:0 10px;border-radius:8px;border:2px solid ${toggle.borderColor};background:${toggle.background};color:${toggle.color};font-size:14px;font-weight:900;cursor:pointer;">${toggle.label}</button>
+  </div>`
+}
+
+/** Менюто „Настройки“ (стилът на панела от Белот); затворено — празен контейнер. */
+function settingsMountHtml(input: RenderSvaraActiveTableInput): string {
+  if (input.settingsOpen !== true) return '<div data-svara-settings-mount="1"></div>'
+  const rows: SvaraSettingsRow[] = [
+    { attr: 'data-svara-sounds-toggle', label: 'Звуци в играта', enabled: input.gameSoundsEnabled !== false },
+    { attr: 'data-svara-animations-toggle', label: 'Анимации', enabled: !input.reducedMotion },
+  ]
+  return `<div data-svara-settings-mount="1">
+    <div data-svara-settings-backdrop="1" style="position:fixed;inset:0;z-index:59;background:transparent;"></div>
+    <div data-svara-settings-panel="1" role="dialog" aria-label="Настройки" style="position:absolute;top:${SVARA_TOP_BAR_HEIGHT_PX + 4}px;right:6px;z-index:60;width:min(280px, calc(100% - 12px));box-sizing:border-box;padding:12px 14px 14px;background:rgba(15,23,42,0.98);border:1px solid rgba(212,165,32,0.45);border-radius:14px;box-shadow:0 16px 40px rgba(0,0,0,0.55);color:#f4f8ff;font-family:inherit;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:16px;font-weight:900;color:#f6d36b;">Настройки</div>
+        <button type="button" data-svara-settings-close="1" aria-label="Затвори" style="width:28px;height:28px;border:0;border-radius:8px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.75);font-size:18px;font-weight:700;line-height:1;cursor:pointer;">&times;</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">${rows.map(settingsToggleHtml).join('')}</div>
+    </div>
+  </div>`
+}
 
 export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): string {
   const { table } = input
@@ -342,10 +416,6 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
       </div>`
     : ''
 
-  const fullscreenButton = input.fullscreenSupported
-    ? `<button data-svara-fullscreen-toggle="1" title="${input.isFullscreen ? 'Изход от цял екран' : 'Цял екран'}" style="min-height:28px;min-width:28px;border-radius:7px;border:1px solid rgba(255,255,255,.22);background:rgba(0,0,0,.6);color:#f4c95b;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;">${input.isFullscreen ? '⤡' : '⤢'}</button>`
-    : ''
-
   // Реалните разрешени действия ТОЧНО от you.betting; „Върни се“ е независим
   // от betting.canAct, докато статусът е 'absent' и няма заявен return.
   const actionButtons = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false)
@@ -355,22 +425,17 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   const decisionWindow = getSvaraDecisionWindow(snapshot, timing, input.serverNow, input.localProfileId)
   const decisionPending = input.decisionPending ?? input.actionPending
   const decisionMessage = input.decisionMessage ?? ''
-  const animationsOn = !input.reducedMotion
 
-  return `<div data-svara-table="1" style="position:relative;box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:4px;background:#050505;border-radius:16px;border:2px solid rgba(212,165,32,.4);padding:4px;touch-action:manipulation;">
-    <div style="flex:0 0 auto;display:flex;justify-content:space-between;align-items:center;gap:6px;padding:2px 2px 0;">
-      <div style="display:flex;gap:6px;">
-        <button data-svara-table-refresh="1" style="${TOP_BUTTON}">Обнови</button>
-        <button data-svara-table-leave="1" ${input.leavePending ? 'disabled' : ''} style="${TOP_BUTTON}${input.leavePending ? 'opacity:.55;cursor:wait;' : ''}">${input.leavePending ? '…' : 'Изход'}</button>
-        <button data-svara-animations-toggle="1" aria-pressed="${animationsOn}" title="Игрови анимации" style="${TOP_BUTTON}">Анимации: ${animationsOn ? 'вкл.' : 'изкл.'}</button>
-      </div>
-      ${fullscreenButton}
-    </div>
-    <div data-svara-felt="1" data-svara-scene-host="1" style="position:relative;flex:0 0 auto;min-height:240px;border-radius:12px;">
+  // Без рамка: компактен горен бар и зелено сукно през цялата ширина (като
+  // масата в Белот); под сукното остава мястото за бутоните за действие.
+  return `<div data-svara-table="1" style="position:relative;box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:0;background:#030303;touch-action:manipulation;">
+    ${topBarHtml(input)}
+    <div data-svara-felt="1" data-svara-scene-host="1" style="position:relative;flex:0 0 auto;min-height:240px;">
       ${resultBanner}
       <div data-svara-diagnostics="1" style="${SR_ONLY}">rev ${snapshot?.revision ?? '—'}</div>
     </div>
     ${actionBar}
-    <div data-svara-decision-mount="1" data-structure-key="${esc(svaraDecisionStructureKey(decisionWindow, decisionPending, decisionMessage))}" style="position:absolute;inset:42px 6px 6px;display:grid;place-items:center;pointer-events:none;z-index:40;">${renderSvaraDecisionWindow(decisionWindow, decisionPending, decisionMessage)}</div>
+    <div data-svara-decision-mount="1" data-structure-key="${esc(svaraDecisionStructureKey(decisionWindow, decisionPending, decisionMessage))}" style="position:absolute;inset:${SVARA_TOP_BAR_HEIGHT_PX + 2}px 6px 6px;display:grid;place-items:center;pointer-events:none;z-index:40;">${renderSvaraDecisionWindow(decisionWindow, decisionPending, decisionMessage)}</div>
+    ${settingsMountHtml(input)}
   </div>`
 }

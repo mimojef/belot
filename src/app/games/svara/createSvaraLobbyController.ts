@@ -15,7 +15,7 @@ import type {
   SvaraStartMode,
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
-import { playGameSound } from '../../audio/gameSoundSettings'
+import { isGameSoundsEnabled, playGameSound, setGameSoundsEnabled } from '../../audio/gameSoundSettings'
 import {
   renderSvaraActiveTable,
   patchSvaraResultPresentation,
@@ -134,6 +134,13 @@ export function createSvaraLobbyController(options: Options) {
     try { window.localStorage.setItem(ANIMATIONS_STORAGE_KEY, enabled ? 'on' : 'off') } catch { /* личен режим — само за сесията */ }
     render()
   }
+  // Менюто „Настройки“ от горния бар на масата (Звуци в играта, Анимации).
+  let settingsOpen = false
+  function setSettingsOpen(open: boolean): void {
+    if (settingsOpen === open) return
+    settingsOpen = open
+    render()
+  }
 
   const button = 'border:1px solid rgba(212,165,32,.55);border-radius:7px;background:#0b0b0b;color:#f4c95b;min-height:40px;padding:0 16px;font-weight:800;cursor:pointer;'
   const panel = 'background:#090909;border:1px solid rgba(212,165,32,.35);border-radius:8px;padding:16px;'
@@ -148,8 +155,10 @@ export function createSvaraLobbyController(options: Options) {
     // без прекомерно разтягане, виж заданието §11/§12) — списъкът/чакащата
     // маса остават в по-тесния 860px panel layout от 2Б.3.7.2.
     const flashes = Array.from(options.root.querySelectorAll<HTMLElement>('[data-svara-bet-flash]'))
-    const html = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:clamp(10px,2.4vw,32px);overflow-x:hidden;">
-      <div style="max-width:${isActiveTable ? '1100px' : '860px'};margin:0 auto;">
+    // Активната маса заема цялата налична ширина (сукното е без рамка, като
+    // в Белот); списъкът/чакащата маса остават в 860px panel layout.
+    const html = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:${isActiveTable ? '0' : 'clamp(10px,2.4vw,32px)'};overflow-x:hidden;">
+      <div style="max-width:${isActiveTable ? 'none' : '860px'};margin:0 auto;">
         ${myTable ? '' : `<div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button data-svara-create-open="1" style="${createButtonStyle}">+ Създай игра</button></div>`}
         ${message ? `<div style="margin-bottom:12px;color:#f4c95b;font-weight:700;">${esc(message)}</div>` : ''}
         ${body}
@@ -406,6 +415,8 @@ export function createSvaraLobbyController(options: Options) {
       reducedMotion,
       decisionPending: actionPending || (pendingDecision !== null && pendingDecision.key === currentDecision()?.key),
       decisionMessage: message,
+      settingsOpen,
+      gameSoundsEnabled: isGameSoundsEnabled(),
     }
   }
 
@@ -448,7 +459,7 @@ export function createSvaraLobbyController(options: Options) {
   function regionKey(el: Element, index: number): string {
     const data = (el as HTMLElement).dataset
     if (data.svaraSeatIndex !== undefined) return `seat:${data.svaraSeatIndex}`
-    for (const name of ['svaraFelt', 'svaraFeltCenter', 'svaraResultOverlay', 'svaraResultBanner', 'svaraDiagnostics', 'svaraActionBar', 'svaraDecisionMount'] as const) {
+    for (const name of ['svaraFelt', 'svaraFeltCenter', 'svaraResultOverlay', 'svaraResultBanner', 'svaraDiagnostics', 'svaraActionBar', 'svaraDecisionMount', 'svaraTopBar', 'svaraSettingsMount'] as const) {
       if (data[name] !== undefined) return name
     }
     return `#${index}`
@@ -703,6 +714,12 @@ export function createSvaraLobbyController(options: Options) {
     tableElementRef = options.root.querySelector<HTMLElement>('[data-svara-table="1"]')
     on(options.root.querySelector('[data-svara-fullscreen-toggle]'), 'click', () => { void toggleFullscreen() })
     on(options.root.querySelector('[data-svara-animations-toggle]'), 'click', () => setAnimationsEnabled(reducedMotion))
+    on(options.root.querySelector('[data-svara-settings-toggle]'), 'click', () => setSettingsOpen(!settingsOpen))
+    on(options.root.querySelector('[data-svara-settings-close]'), 'click', () => setSettingsOpen(false))
+    on(options.root.querySelector('[data-svara-settings-backdrop]'), 'click', () => setSettingsOpen(false))
+    // Общата настройка „Звуци в играта“ (запазва се в gameSoundSettings.ts;
+    // изключването спира и вече звучащите игрови звуци).
+    on(options.root.querySelector('[data-svara-sounds-toggle]'), 'click', () => { setGameSoundsEnabled(!isGameSoundsEnabled()); render() })
     options.root.querySelectorAll<HTMLElement>('[data-svara-action-button]').forEach((el) => on(el, 'click', () => {
       const kind = el.dataset.svaraActionButton
       if (kind === 'request-return') { submitParticipantCommand({ type: 'request-return' }); return }
@@ -781,6 +798,7 @@ export function createSvaraLobbyController(options: Options) {
     },
     /** myTable===null напуска локално (lobby list); иначе актуализира текущата маса (lobby или активна фаза). */
     setMyTable(table: SvaraPublicTable | null) {
+      if (table?.matchId !== myTable?.matchId) settingsOpen = false
       myTable = table
       if (table === null) { snapshot = null; timing = null; pendingDecision = null; actionPending = false; pendingActionCommandId = null }
       leavePending = false

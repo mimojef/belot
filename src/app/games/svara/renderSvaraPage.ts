@@ -8,6 +8,13 @@
 
 import type { SvaraAccessCheckResult } from './svaraAccess'
 
+/**
+ * Телефон: отстъпът от ръба на екрана до съдържанието на масата —
+ * <main style="padding:12px"> на мобилното лоби (renderLobbyScreen.ts) +
+ * страничният padding на тази страница (12px).
+ */
+const MOBILE_EDGE_INSET_PX = 24
+
 export type SvaraPageStatus = 'checking' | SvaraAccessCheckResult
 export type SvaraViewMode = 'real' | 'demo'
 
@@ -45,7 +52,17 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
     color:${active ? '#f5d06f' : 'rgba(255,255,255,0.65)'};
   `
 
+  // Активна маса (само в „Истинска игра“): сукното заема цялата ширина на
+  // игровия екран — без горната граница на страницата, а на телефон и без
+  // страничните отстъпи (заглавието и връзката „Обратно“ остават подравнени).
+  // На телефон при активна маса „← Обратно към Игри“ се скрива — изходът е
+  // иконата в горния бар на масата.
   const realSection = `
+    <style data-svara-page-style="1">
+      [data-svara-page="granted"]:has([data-svara-table]) { max-width:none !important; }
+      ${useMobileLayout ? `[data-svara-page="granted"] > [data-svara-lobby-mount]:has([data-svara-table]) { margin-left:-${MOBILE_EDGE_INSET_PX}px; margin-right:-${MOBILE_EDGE_INSET_PX}px; }
+      [data-svara-page="granted"]:has([data-svara-table]) > [data-svara-back-to-games] { display:none !important; }` : ''}
+    </style>
     <div data-svara-lobby-mount="1"></div>
   `
   const demoSection = `

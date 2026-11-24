@@ -70,6 +70,8 @@ const COMPARE_BADGE_IN_MS = 320
 const COMPARE_BADGE_OUT_MS = 200
 /** Телефон: място под сукното за рамката и лентата с действия (до 3 реда). */
 const PHONE_ACTION_BAR_RESERVE_PX = 140
+/** Desktop: един ред бутони за действие под сукното + отстъп. */
+const DESKTOP_ACTION_BAR_RESERVE_PX = 60
 /** Отстъп между ръба на купчинката (при максимална височина) и баджа на залога. */
 const BET_BADGE_GAP_PX = 5
 
@@ -125,7 +127,7 @@ export function svaraSceneVisibleFaces(snapshot: SvaraMatchSnapshotMessage | nul
 }
 
 export function createSvaraRealScene(options: { onOpenProfile?: (playerId: string) => void } = {}): SvaraRealScene {
-  const shell = createSvaraSceneShell({ bannerText: 'СВАРА!', avatarSrcs: [], names: [] })
+  const shell = createSvaraSceneShell({ bannerText: 'СВАРА!', avatarSrcs: [], names: [], frameless: true })
   shell.stage.dataset.svaraRealScene = '1'
   // Кликовете (профил) минават през слоя със спрайтовете към местата.
   shell.spritesHost.style.pointerEvents = 'none'
@@ -319,15 +321,29 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     const fullscreen = document.fullscreenElement !== null && document.fullscreenElement.contains(target)
     // Място за бутоните за действие и рамката (и заглавката, ако не е цял екран).
     const available = viewportHeight - (fullscreen ? 90 : 160)
-    if (width >= 560) return { width, height: Math.round(Math.max(240, Math.min(width * 0.6, available))) }
+    if (width >= 560) {
+      // Сукното е по цялата ширина — височината е мястото от горния му ръб до
+      // долния край на екрана, без лентата с бутоните за действие (до 0.6×
+      // ширината, както досега).
+      // Позиция в оформлението, независимо от превъртането.
+      let scrolled = fullscreen ? 0 : window.scrollY
+      for (let el = target.parentElement; el; el = el.parentElement) {
+        scrolled += el.scrollTop
+        if (el === document.fullscreenElement) break
+      }
+      const top = (rect.top + scrolled) / (zoom || 1)
+      const room = viewportHeight - top - DESKTOP_ACTION_BAR_RESERVE_PX
+      return { width, height: Math.round(Math.max(240, Math.min(width * 0.6, room))) }
+    }
     // Телефон: сукното расте (до 1.5× ширината) само докато под него остава
     // място за лентата с действия (до 3 реда бутони) — никога по-ниско от
-    // досегашното 1.35×.
+    // 1.2× (сукното е по цялата ширина на екрана, затова собствените карти
+    // остават поне толкова големи, колкото бяха в рамката при 1.35×).
     // Позиция в оформлението (независимо от превъртането).
     let stageTop = 0
     for (let el: HTMLElement | null = target; el; el = el.offsetParent as HTMLElement | null) stageTop += el.offsetTop
     const room = viewportHeight - stageTop - PHONE_ACTION_BAR_RESERVE_PX
-    const wanted = Math.max(width * 1.35, Math.min(width * 1.5, room))
+    const wanted = Math.max(width * 1.2, Math.min(width * 1.5, room))
     return { width, height: Math.round(Math.max(240, Math.min(wanted, available))) }
   }
 

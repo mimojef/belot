@@ -38,12 +38,19 @@ export type SvaraSceneShell = {
   destroy(): void
 }
 
-export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs: readonly string[]; names: readonly string[] }): SvaraSceneShell {
+/** Сукното на демото: дървена рамка; на истинската маса — без рамка, по цялата ширина (като в Белот). */
+const FRAMED_STAGE_STYLE = 'border-radius:22px;background:linear-gradient(180deg,#5b3a1c,#3a2410);box-shadow:0 10px 30px rgba(0,0,0,0.45);'
+const FRAMED_FELT_STYLE = 'inset:7px;border-radius:17px;background:radial-gradient(ellipse at 50% 45%,#22985a 0%,#157240 55%,#0c4d2a 100%);box-shadow:inset 0 0 40px rgba(0,0,0,0.45);'
+const FRAMELESS_STAGE_STYLE = 'border-radius:0;background:#0c4d2a;'
+const FRAMELESS_FELT_STYLE = 'inset:0;background:radial-gradient(circle at 50% 45%,rgba(255,255,255,0.05) 0%,rgba(255,255,255,0.02) 34%,rgba(0,0,0,0) 58%),radial-gradient(ellipse at 50% 45%,#22985a 0%,#157240 55%,#0c4d2a 100%);box-shadow:inset 0 0 60px rgba(0,0,0,0.5);'
+
+export function createSvaraSceneShell(options: { bannerText: string; avatarSrcs: readonly string[]; names: readonly string[]; frameless?: boolean }): SvaraSceneShell {
   const stage = document.createElement('div')
   stage.dataset.svaraSceneStage = '1'
-  stage.style.cssText = 'position:relative;width:100%;border-radius:22px;overflow:hidden;background:linear-gradient(180deg,#5b3a1c,#3a2410);box-shadow:0 10px 30px rgba(0,0,0,0.45);user-select:none;-webkit-user-select:none;touch-action:manipulation;'
+  if (options.frameless) stage.dataset.svaraSceneFrameless = '1'
+  stage.style.cssText = `position:relative;width:100%;overflow:hidden;${options.frameless ? FRAMELESS_STAGE_STYLE : FRAMED_STAGE_STYLE}user-select:none;-webkit-user-select:none;touch-action:manipulation;`
   stage.innerHTML = `
-    <div style="position:absolute;inset:7px;border-radius:17px;background:radial-gradient(ellipse at 50% 45%,#22985a 0%,#157240 55%,#0c4d2a 100%);box-shadow:inset 0 0 40px rgba(0,0,0,0.45);"></div>
+    <div data-svara-scene-felt style="position:absolute;${options.frameless ? FRAMELESS_FELT_STYLE : FRAMED_FELT_STYLE}"></div>
     <div data-svara-scene-seats style="position:absolute;inset:0;"></div>
     <div data-svara-scene-sprites style="position:absolute;inset:0;"></div>
     <div data-svara-scene-pot style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);padding:4px 11px;border-radius:999px;background:rgba(0,0,0,0.55);border:1px solid rgba(212,165,32,0.55);color:#f5d06f;font-weight:900;white-space:nowrap;opacity:0;transition:opacity 200ms ease;will-change:transform;">Банка: 0</div>
