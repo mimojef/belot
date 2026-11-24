@@ -1069,8 +1069,8 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     layout = computeSvaraSceneLayout(size.width, size.height, {
       ...REAL_LAYOUT_OPTIONS,
       seatCards: { side: svaraBelotCardSize('left', scale), bottom: svaraBelotCardSize('bottom', scale), margin: SVARA_BELOT_CARD_EDGE_MARGIN_PX },
-      // Картите като в Белот (оформлението ги прилага само в портрет — телефон).
-      belotHands: svaraBelotHandsSpec(scale, scale * zoom),
+      // Картите като в Белот: телефонните ветрила в портрет, тези за desktop — хоризонтално.
+      belotHands: svaraBelotHandsSpec(scale, scale * zoom, size.height > size.width * 0.9),
     })
     shell.applyLayout(layout)
     renderer.setLayout(layout)

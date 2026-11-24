@@ -142,8 +142,8 @@ export type SvaraSceneLayoutOptions = {
   seatCards?: { side: { w: number; h: number }; bottom: { w: number; h: number }; margin: number }
   /**
    * Истинската игра: картите като в Белот — противниците зад каретата, собствените
-   * зад долното каре, разкриването върху карето. Прилага се само в портрет
-   * (телефон) заедно с `seatCards`; иначе се ползват ветрилата на демото.
+   * зад долното каре, разкриването върху карето. Прилага се заедно с `seatCards`
+   * (портрет — телефонните ветрила, хоризонтално — тези за desktop).
    */
   belotHands?: SvaraBelotHandsSpec
 }
@@ -195,8 +195,8 @@ export function computeSvaraSceneLayout(width: number, height: number, options: 
   const isPortrait = h > w * 0.9
   const avatarSize = clamp(Math.min(w, h) * 0.14, 44, 84)
   const cardWidth = clamp(Math.min(w * 0.125, h * 0.13), 38, 96)
-  // Картите като в Белот — само в портрет с каретата от Белот.
-  const belot = isPortrait && options.seatCards && options.belotHands ? options.belotHands : null
+  // Картите като в Белот — с каретата от Белот (портрет: телефон; хоризонтално: desktop).
+  const belot = options.seatCards && options.belotHands ? options.belotHands : null
   // (пропорциите на картата на Белот: 284 / 195)
   const cardHeight = belot ? cardWidth * (belot.oppCard.h / belot.oppCard.w) : cardWidth * 1.4
   const chipSize = clamp(cardWidth * 0.5, 22, 46)
@@ -261,7 +261,51 @@ export function computeSvaraSceneLayout(width: number, height: number, options: 
   const infoGaps: Array<number | undefined> = [undefined, undefined, undefined, undefined]
   const revealCenters: Array<SvaraPoint | undefined> = [undefined, undefined, undefined, undefined]
   let topChipSide: number | null = null
-  if (belot && cards) {
+  if (belot && cards && !isPortrait) {
+    // ── Desktop, ръце като в Белот ─────────────────────────────────────────
+    // Каретата са на местата си; противниците — с картите зад каретата, при
+    // сравняване — върху него; собствените — зад долното каре. Тестето и
+    // банката са в средата между горните и собствените карти (както досега).
+    const side = cards.side, bottom = cards.bottom
+    const topY = edge
+    const bottomY = h - bottomEdge
+    const own = fanBounds(belot.ownFan, belot.ownCard, belot.fanRotation.bottom, 3)
+    const ownTop = bottomY + belot.fanCenter.bottom.y + own.t
+    const ownHalfWidth = Math.max(-own.l, own.r)
+    const topFan = fanBounds(belot.oppFan, belot.oppCard, belot.fanRotation.top, 3)
+    const topFanBottom = topY + belot.fanCenter.top.y + topFan.b
+    const topFanHalfWidth = Math.max(-topFan.l, topFan.r)
+    const sideFan = fanBounds(belot.oppFan, belot.oppCard, belot.fanRotation.left, 3)
+    const sidePeekAbove = Math.max(0, -(belot.fanCenter.left.y + sideFan.t) - side.h / 2)
+    const sidePeekBelow = Math.max(0, belot.fanCenter.left.y + sideFan.b - side.h / 2)
+    const reveal = fanBounds(belot.revealFan, belot.oppCard, 0, 3)
+    const revealHalfWidth = Math.max(-reveal.l, reveal.r)
+    const revealHeight = reveal.b - reveal.t
+    const revealAbove = Math.max(0, -reveal.t - side.h / 2)
+    const revealBelow = Math.max(0, reveal.b - side.h / 2)
+    const topRevealTop = Math.max(REVEAL_EDGE, topY + reveal.t)
+    revealCenters[2] = { x: cx, y: topRevealTop - reveal.t }
+    const topRevealBottom = topRevealTop + revealHeight
+    // Страничните: разкритите карти върху карето, в сукното (по ширина и височина).
+    const sideX = edgeOf(1), sideY = seatBase[1]!.avatar.y
+    const sideRevealLeft = Math.max(REVEAL_EDGE, sideX + reveal.l)
+    const sideRevealY = Math.min(h - REVEAL_EDGE - reveal.b, Math.max(REVEAL_EDGE - reveal.t, sideY))
+    revealCenters[1] = { x: sideRevealLeft - reveal.l, y: sideRevealY }
+    revealCenters[3] = { x: w - (sideRevealLeft - reveal.l), y: sideRevealY }
+    // Тестето и банката: средата между горните карти (скрити/разкрити) и собствените.
+    const midY = (Math.max(topFanBottom, topRevealBottom) + ownTop) / 2
+    deck = { x: deck.x, y: midY }
+    pot = { x: pot.x, y: midY }
+    // Чиповете и информацията — извън картите, които се подават иззад каретата.
+    bottomChipX = cx - Math.max(bottom.w / 2, ownHalfWidth) - SIDE_CHIP_GAP - chipSize * 0.5
+    topChipSide = Math.max(side.w / 2, topFanHalfWidth, revealHalfWidth) + SIDE_CHIP_GAP + chipSize * 0.5
+    infoGaps[0] = Math.max(10, ownHalfWidth - bottom.w / 2 + 6)
+    infoGaps[2] = Math.max(10, Math.max(topFanHalfWidth, revealHalfWidth) - side.w / 2 + 6)
+    infoGaps[1] = infoGaps[3] = Math.max(6, sidePeekBelow + 4, revealBelow + 4)
+    revealScale = belot.ownCard.w / belot.oppCard.w
+    revealLift = 0
+    mirroredChipClearance = Math.max(sidePeekAbove, revealAbove)
+  } else if (belot && cards) {
     // ── Телефон, ръце като в Белот ─────────────────────────────────────────
     // Противниците: картите са зад каретата (подават се малко); при сравняване
     // излизат ВЪРХУ карето. Собствените: зад долното каре, горната им част се
@@ -458,7 +502,7 @@ export function computeSvaraSceneLayout(width: number, height: number, options: 
         ...(infoGaps[index] !== undefined ? { infoGap: infoGaps[index] } : {}),
         ...(revealCenters[index] ? { revealCenter: revealCenters[index] } : {}),
         // Горното място при ръце като в Белот: встрани от купчинката е баджът на страничното място.
-        ...(belot && index === 2 ? { betBadgeBelow: true } : {}),
+        ...(belot && isPortrait && index === 2 ? { betBadgeBelow: true } : {}),
       }
     }),
     // Белот: спрайтът е с реалния размер на картата на противника (иначе увеличената
