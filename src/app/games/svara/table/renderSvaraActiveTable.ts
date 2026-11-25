@@ -355,7 +355,14 @@ const ACTION_SLOTS: ReadonlyArray<{ kind: SvaraActionButton['kind']; label: stri
 const ACTION_BUTTON_BASE = `box-sizing:border-box;width:100%;height:${ACTION_BUTTON_HEIGHT_PX}px;min-width:0;padding:0 4px;border-radius:9px;font-size:12px;font-weight:800;line-height:1.1;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;`
 const DISABLED_STYLE = 'opacity:.4;cursor:not-allowed;'
 
+const actionAmountFormatter = new Intl.NumberFormat('bg-BG', { useGrouping: 'always' })
+
 function actionButtonContent(label: string, amount: number | null, kind: SvaraActionButton['kind']): string {
+  // „Плати“: винаги на два реда — „Плати“ и цялата сума отдолу (иначе при
+  // големи суми се изрязва в тесния бутон, особено на телефон).
+  if (kind === 'pay' && amount !== null) {
+    return `Плати<span data-svara-pay-amount="1" style="display:block;">${esc(actionAmountFormatter.format(amount))}</span>`
+  }
   // Ол-ин: сумата от сървъра на втори ред (надписът остава „Ол-ин“).
   return kind === 'all-in' && amount !== null
     ? `${esc(label)}<span style="display:block;font-size:10px;font-weight:700;opacity:.85;">${amount}</span>`

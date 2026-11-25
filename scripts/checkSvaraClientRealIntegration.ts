@@ -442,7 +442,7 @@ try {
     assert(snapshot && stored)
     assert.equal(snapshot.you.playerId, profileId)
     assert.deepEqual(snapshot, createSvaraMatchSnapshotMessage(snapshot.matchId, stored.state, profileId))
-    const seats = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('[data-svara-seat-index]')).map((anchor) => ({
+    const seats = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('[data-svara-scene-seat-info][data-svara-seat-index]')).map((anchor) => ({
       index: Number(anchor.dataset.svaraSeatIndex),
       stack: Number(/^(\d+)/.exec(anchor.querySelector('[data-svara-seat-total]')?.textContent?.trim() ?? '')?.[1]),
       // Картите са спрайтове на общата сцена, маркирани с мястото си.
@@ -629,14 +629,17 @@ try {
   async function readSeatTotalsOnce(page: Page): Promise<{ bank: number | null; selfStack: number | null; selfTotal: number | null; selfBadge: string | null; bottomAnchorPresent: boolean }> {
     return page.evaluate(() => {
       const feltText = document.querySelector('[data-svara-scene-pot]')?.textContent ?? ''
-      const bankMatch = /Банка:\s*(\d+)/.exec(feltText)
+      // „Банка: N“ (1 ред) или „Банка“ / N (2 реда на телефон).
+      const bankMatch = /Банка:?\s*(\d+)/.exec(feltText)
       const bottomAnchor = document.querySelector('[data-svara-seat-anchor="bottom"]')
-      const totalEl = bottomAnchor?.querySelector('[data-svara-seat-total]')
+      // Наличността и скритите статуси са в слоя над картите — контейнерът със същия индекс на мястото.
+      const bottomInfo = bottomAnchor ? document.querySelector(`[data-svara-scene-seat-info][data-svara-seat-index="${bottomAnchor.getAttribute('data-svara-seat-index')}"]`) : null
+      const totalEl = bottomInfo?.querySelector('[data-svara-seat-total]')
       const totalText = totalEl?.textContent ?? ''
       const stackMatch = /^(\d+)/.exec(totalText.trim())
       // Текущият залог (вноската в раздаването) е числото до чиповете.
       const contribMatch = /^(\d+)$/.exec(bottomAnchor?.querySelector('[data-svara-seat-bet]')?.textContent?.trim() ?? '')
-      const badgeEl = bottomAnchor?.querySelector('[data-svara-seat-badges]')
+      const badgeEl = bottomInfo?.querySelector('[data-svara-seat-badges]')
       return {
         bank: bankMatch ? Number(bankMatch[1]) : null,
         selfStack: stackMatch ? Number(stackMatch[1]) : null,
@@ -751,12 +754,17 @@ try {
     actorLabel = actor.label
     const before = await readSeatTotals(actor.page)
     await actor.page.waitForSelector('[data-svara-action-button="pay"]:not([disabled])', { timeout: 10_000 })
-    const payLabel = await actor.page.locator('[data-svara-action-button="pay"]').textContent()
-    const payAmount = Number(/\d+/.exec(payLabel ?? '')?.[0] ?? NaN)
+    // Сумата е на втория ред на бутона (data-svara-pay-amount), с интервали между хилядите.
+    const payLabel = await actor.page.locator('[data-svara-action-button="pay"] [data-svara-pay-amount]').textContent()
+    const payDigits = (payLabel ?? '').replace(/\D/g, '')
+    const payAmount = payDigits ? Number(payDigits) : NaN
     if (!Number.isFinite(payAmount)) throw new Error(`could not parse the "Плати" amount from label "${payLabel}"`)
     await actor.page.click('[data-svara-action-button="pay"]')
     await actor.page.waitForFunction(
-      (expected) => document.querySelector('[data-svara-seat-anchor="bottom"] [data-svara-seat-badges]')?.textContent?.includes(String(expected)) ?? false,
+      (expected) => {
+        const index = document.querySelector('[data-svara-seat-anchor="bottom"]')?.getAttribute('data-svara-seat-index')
+        return document.querySelector(`[data-svara-scene-seat-info][data-svara-seat-index="${index}"] [data-svara-seat-badges]`)?.textContent?.includes(String(expected)) ?? false
+      },
       payAmount, { timeout: 10_000 },
     )
     const after = await readSeatTotals(actor.page)
@@ -767,7 +775,7 @@ try {
     // Реалният бюджет се вижда еднакво и от ДВАМАТА (real-time, без manual refresh) — вкл. банката.
     const otherSession = other(actor.label)
     await otherSession.page.waitForFunction(
-      (expected) => (document.querySelector('[data-svara-scene-pot]')?.textContent ?? '').includes(`Банка: ${expected}`),
+      (expected) => new RegExp(`Банка:?\\s*${expected}(?!\\d)`).test(document.querySelector('[data-svara-scene-pot]')?.textContent ?? ''),
       (before.bank ?? 0) + payAmount, { timeout: 10_000 },
     )
     await compareBrowserToAuthoritativeSnapshot(actor.page, actor.label === 'A' ? userA.profileId : userB.profileId)
@@ -888,7 +896,9 @@ try {
   })
 
   await check('[T6] navigating away from /games/svara mid-match does NOT exit the game; returning restores the SAME active table', async () => {
-    await sessionA.page.click('[data-svara-back-to-games]')
+    // „← Обратно към Игри“ умишлено е скрит по време на мач — напускаме с „Назад“
+    // на браузъра: същата SPA навигация към /games (popstate), без презареждане.
+    await sessionA.page.goBack()
     await sessionA.page.waitForURL(/\/games$/, { timeout: 10_000 })
     await sleep(1_500) // give any (incorrect) auto-exit command time to reach the server, if it existed
 
