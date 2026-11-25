@@ -360,9 +360,9 @@ const actionAmountFormatter = new Intl.NumberFormat('bg-BG', { useGrouping: 'alw
 function actionButtonContent(label: string, amount: number | null, kind: SvaraActionButton['kind']): string {
   // „Плати“: винаги на два реда — „Плати“ и цялата сума отдолу (иначе при
   // големи суми се изрязва в тесния бутон, особено на телефон).
-  // Първият ред е действието от надписа („Плати“ или „Тъмни“ — виж svaraBettingActions).
+  // Първият ред е действието от надписа („Плати“, „Тъмни“ или „Заложи“ — виж svaraBettingActions).
   if (kind === 'pay' && amount !== null) {
-    const title = label.startsWith('Тъмни') ? 'Тъмни' : 'Плати'
+    const title = label.startsWith('Тъмни') ? 'Тъмни' : label.startsWith('Заложи') ? 'Заложи' : 'Плати'
     return `${title}<span data-svara-pay-amount="1" style="display:block;">${esc(actionAmountFormatter.format(amount))}</span>`
   }
   // Ол-ин: сумата от сървъра на втори ред (надписът остава „Ол-ин“).
@@ -513,7 +513,7 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
 
   // Реалните разрешени действия ТОЧНО от you.betting; „Върни се“ е независим
   // от betting.canAct, докато статусът е 'absent' и няма заявен return.
-  const actionButtons = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false)
+  const actionButtons = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false, snapshot?.table.entryChips)
   // Приключил мач: няма към какво да се върнеш — само „Изход“.
   const showReturnButton = snapshot?.result.finished !== true && snapshot?.you.status === 'absent' && snapshot?.you.returnPending === false
   const actionBar = renderSvaraActionPanelHtml(actionButtons, input.actionPending, showReturnButton)

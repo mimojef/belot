@@ -512,9 +512,9 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     markBusy(sceneSeat, remaining)
     return remaining
   }
-  /** Залог: чиповете на играча летят към банката; един звук, когато купчинката кацне (само при реална анимация). */
-  function betChipsWithLandingSound(sceneSeat: number, k: number, delayMs: number): number {
-    const remaining = betChips(sceneSeat, k, delayMs)
+  /** Залог/Вход: чиповете на играча летят към банката; един звук, когато купчинката кацне (само при реална анимация). */
+  function betChipsWithLandingSound(sceneSeat: number, k: number, delayMs: number, elapsedMs = 0): number {
+    const remaining = betChips(sceneSeat, k, delayMs, elapsedMs)
     if (remaining > 0) later(remaining, () => playSvaraSound(CHIPS_TO_POT_SOUND_SRC, { volume: CHIPS_SOUND_VOLUME }))
     return remaining
   }
@@ -644,11 +644,13 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       setDeck(true, 0, elapsed)
       later(Math.max(0, lastLanding - elapsed), () => setDeck(false))
     } else setDeck(false)
-    // Анте: по един чип от купчинката на всяко платило място (в прозореца „Вход“).
+    // Анте: по един чип от купчинката на всяко платило място (в прозореца „Вход“);
+    // звук при кацането на всяка купчинка — само ако полетът реално още тече
+    // (превъртяно след reconnect/remount → вече кацнали, без звук).
     participants.forEach((playerId, order) => {
       const seat = snapshot.seats.find((s) => s.playerId === playerId)
       if (!seat || seat.roundContribution <= 0 || snapshot.round?.kind !== 'ordinary') return
-      betChips(sceneSeatOf(seat.seatIndex), 1, 100 + order * 120, elapsed)
+      betChipsWithLandingSound(sceneSeatOf(seat.seatIndex), 1, 100 + order * 120, elapsed)
     })
     // Карти: една по една, кръгово; ветрилото се разтваря при всяка нова.
     const created = new Map<number, CardHand>()

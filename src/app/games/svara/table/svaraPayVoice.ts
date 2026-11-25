@@ -13,15 +13,25 @@ let preloaded = false
 export function preloadSvaraPayVoice(): void {
   if (preloaded || typeof Audio === 'undefined') return
   preloaded = true
-  preloadSvaraVoices(['pay', 'raise', 'blind'])
+  preloadSvaraVoices(['pay', 'bet', 'raise', 'blind', 'allin'])
 }
 
 export function playSvaraPayVoice(gender: SvaraVoiceGender): void {
   playSvaraSound(svaraVoiceSrc('pay', gender), { volume: 0.7 })
 }
 
+/** „Залагам!“ — първото откриване на светло („Заложи“ или ×5/×10/×20/×50). */
+export function playSvaraBetVoice(gender: SvaraVoiceGender): void {
+  playSvaraSound(svaraVoiceSrc('bet', gender), { volume: 0.7 })
+}
+
 export function playSvaraRaiseVoice(gender: SvaraVoiceGender): void {
   playSvaraSound(svaraVoiceSrc('raise', gender), { volume: 0.7 })
+}
+
+/** „Ол-ин!“ — реален Ол-ин (цялата наличност), с приоритет пред останалите гласове. */
+export function playSvaraAllInVoice(gender: SvaraVoiceGender): void {
+  playSvaraSound(svaraVoiceSrc('allin', gender), { volume: 0.7 })
 }
 
 /** „Тъмни!“ — при залог на тъмно (вместо „Вдигам!“). */

@@ -42,7 +42,7 @@ export const SVARA_MULTIPLIERS: ReadonlyArray<{ kind: SvaraMultiplierKind; facto
  * `betting === null` или `canAct === false` -> няма позволени действия (не е
  * на ход, не участва в текущото раздаване, друга фаза и т.н. — задание §9).
  */
-export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, looked: boolean): SvaraActionButton[] {
+export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, looked: boolean, entryChips?: number): SvaraActionButton[] {
   if (!betting || !betting.canAct) return []
   const buttons: SvaraActionButton[] = []
 
@@ -70,10 +70,14 @@ export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, lo
     })
   } else if (raiseOption) {
     // Право на залог на тъмно (сървърната опция blindBet) — бутонът е „Тъмни“ и
-    // изпълнява реалния blind-bet; иначе „Плати“ (отваря на светло с минимума).
+    // изпълнява реалния blind-bet. Първо откриване на светло (обикновен залог с
+    // минимум точно Входа — сървърът дава този минимум само при текущ залог 0,
+    // т.е. без предишен залог на тъмно; виж isSvaraOpeningPay) — „Заложи“.
+    // Иначе „Плати“ (напр. отговор на залог на тъмно с минимума).
+    const title = actionKind === 'blind-bet' ? 'Тъмни' : raiseOption.min === entryChips ? 'Заложи' : 'Плати'
     buttons.push({
       kind: 'pay',
-      label: `${actionKind === 'blind-bet' ? 'Тъмни' : 'Плати'} ${raiseOption.min}`,
+      label: `${title} ${raiseOption.min}`,
       amount: raiseOption.min,
       command: { type: 'act', action: { kind: actionKind, total: raiseOption.min } },
       disabled: false,

@@ -38,7 +38,7 @@ import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTrack
 import { playSvaraLookVoice, preloadSvaraLookVoice } from './table/svaraLookVoice'
 import { computeSvaraDealingVisualState } from './table/svaraTableAnimation'
 import { playSvaraFoldVoice, preloadSvaraFoldVoice } from './table/svaraFoldVoice'
-import { playSvaraBlindVoice, playSvaraPayVoice, playSvaraRaiseVoice, preloadSvaraPayVoice } from './table/svaraPayVoice'
+import { playSvaraAllInVoice, playSvaraBetVoice, playSvaraBlindVoice, playSvaraPayVoice, playSvaraRaiseVoice, preloadSvaraPayVoice } from './table/svaraPayVoice'
 import { getSvaraDecisionWindow, patchSvaraDecisionWindow } from './table/svaraDecisionWindows'
 import { fetchSvaraTableCreationOptions, type SvaraTableCreationOptions } from './svaraAccess'
 import { createSvaraRealScene } from './table/svaraRealScene'
@@ -566,7 +566,8 @@ export function createSvaraLobbyController(options: Options) {
     finalCallsShown.add(`${snapshot.matchId}:${finalCall.roundId}`)
     const seat = snapshot.seats.find((s) => s.playerId === finalCall.playerId)
     if (seat) playBetFlash(seat.seatIndex, finalCall.added)
-    if (seat && finalCall.call) announcePay(seat.seatIndex, finalCall.added)
+    if (seat && finalCall.allIn) announceAllIn(seat.seatIndex, finalCall.added)
+    else if (seat && finalCall.call) announcePay(seat.seatIndex, finalCall.added)
   }
 
   // „Плати“ (call, без повишаване): гласът „Плащам!“, балончето „Плащам N“ и
@@ -587,7 +588,26 @@ export function createSvaraLobbyController(options: Options) {
     playSvaraPayVoice(seatVoiceGender(seatIndex))
   }
 
-  // Повишаване (обикновен залог над текущия, вкл. ×5/×10/×20/×50): гласът
+  // „Заложи“ или ×N при първо откриване на светло (виж isSvaraOpeningPay): гласът
+  // „Залагам!“, балончето „Залагам N“ и „+N“ над банката; N = реално внесеното.
+  function announceOpeningBet(seatIndex: number, added: number): void {
+    tableScene.showSpeech(seatIndex, `Залагам ${formatAmount(added)}`)
+    tableScene.showPotRaise(formatAmount(added))
+    playSvaraBetVoice(seatVoiceGender(seatIndex))
+  }
+
+  // Реален Ол-ин (действието изразходва цялата наличност — сървърният флаг
+  // allIn или бутонът Ол-ин): гласът „Ол-ин!“, балончето „ОЛ-ИН!“ и „+N“ над
+  // банката (N = реално внесеното). С приоритет пред „Залагам“, „Вдигам“,
+  // „Плащам“ и „Тъмни“ — вместо тях, не заедно с тях.
+  function announceAllIn(seatIndex: number, added: number): void {
+    tableScene.showSpeech(seatIndex, 'ОЛ-ИН!')
+    tableScene.showPotRaise(formatAmount(added))
+    playSvaraAllInVoice(seatVoiceGender(seatIndex))
+  }
+
+  // Повишаване (обикновен залог над текущия, вкл. ×5/×10/×20/×50, но не
+  // първото откриване на светло — то е „Залагам“): гласът
   // „Вдигам!“, балончето „Вдигам +N“ и „+N“ над банката тръгват заедно.
   // N = увеличението на текущия залог (новото ниво минус предишното), не
   // внесената сума. Видовете повишаване — виж svaraRaiseAmount (обикновен
@@ -597,7 +617,7 @@ export function createSvaraLobbyController(options: Options) {
   // „Тъмни N“ (N = реално внесеното с действието), а „+N“ над банката само
   // ако реално вдига текущия залог (N там = увеличението, като при „Вдигам“).
   function announceRaiseIfAny(seatIndex: number, entry: SvaraNewBetEntry): void {
-    const amount = snapshot ? svaraRaiseAmount(entry, snapshot.table.entryChips) : null
+    const amount = svaraRaiseAmount(entry)
     // Ол-ин без поглеждане: сървърът го записва с blind: true (само тогава).
     if (entry.kind === 'blind-bet' || (entry.kind === 'all-in' && entry.blind)) {
       tableScene.showSpeech(seatIndex, `Тъмни ${formatAmount(entry.added)}`)
@@ -621,11 +641,12 @@ export function createSvaraLobbyController(options: Options) {
     for (const entry of newEntries) {
       const seat = snapshot.seats.find((s) => s.playerId === entry.playerId)
       if (seat) playBetFlash(seat.seatIndex, entry.added)
+      if (seat && (entry.allIn || entry.kind === 'all-in')) { announceAllIn(seat.seatIndex, entry.added); continue }
       if (seat && entry.kind === 'call') announcePay(seat.seatIndex, entry.added)
       if (seat) announceRaiseIfAny(seat.seatIndex, entry)
-      // Откриване с „Плати“ на светло (залог на Входа): не е „Вдигам“ и не е call,
-      // но е „Плати“ — същото като при call: балонче „Плащам N“, „+N“ и глас „Плащам!“.
-      if (seat && isSvaraOpeningPay(entry, snapshot.table.entryChips)) announcePay(seat.seatIndex, entry.added)
+      // Първо откриване на светло („Заложи“ или ×N при текущ залог 0): не е
+      // „Вдигам“ и не е „Плащам“ — балонче „Залагам N“, „+N“ и глас „Залагам!“.
+      if (seat && isSvaraOpeningPay(entry)) announceOpeningBet(seat.seatIndex, entry.added)
     }
     tableScene.onBets(newEntries.flatMap((entry) => {
       const seat = snapshot?.seats.find((s) => s.playerId === entry.playerId)
