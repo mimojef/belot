@@ -206,6 +206,9 @@ export type ActiveRoomFlowController = {
   getSilentResumeTarget: () => { roomId: string; reconnectToken: string } | null
   // Етап 2: състояние „връзката се възстановява“ (масата видима, действията заключени).
   prepareForSilentReconnect: () => void
+  // Етап 1: транспортът е отворен/затворен извън setConnectionState (тихото
+  // възстановяване) — само опреснява банера, без промяна на състоянието.
+  syncConnectionIndicator: () => void
   // STATE B silent attach (§ "SILENT ATTACH") — arms a watch for roomId's
   // room_snapshot stream (already flowing on the shared WS connection after
   // resume_room {silent:true} → room_attached_silent) so the controller can

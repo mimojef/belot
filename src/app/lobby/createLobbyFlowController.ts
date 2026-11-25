@@ -1,5 +1,6 @@
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
+import { isErrorResponseTo, isOtherGameErrorForLudo, LUDO_GAMEPLAY_ACTION_REQUEST_TYPES } from '../network/serverErrorCorrelation'
 import {
   PERSONAL_CHAT_MESSAGE_LIMITS,
   SUPPORT_MESSAGE_LIMITS,
@@ -1051,6 +1052,9 @@ export type CreateLobbyFlowControllerOptions = {
   onLudoRoomKick?: (profileId: string) => void
   onLudoRoomStart?: () => void
   onLudoGameStateOpen?: () => void
+  // Етап 1: дали при 'connected' да се прати сляпата проба за активен Ludo
+  // мач (по подразбиране — да). main.ts я спира, докато профилът е на Белот маса.
+  shouldProbeLudoGameStateOnConnect?: () => boolean
   onLudoMatchLeave?: (matchId: string) => void
   // Виж task-а "Ludo -> level/rank progression: stale profile cache след
   // мач" — извиква се ЕДИНСТВЕНО при onGameEndAcknowledged() (реално
@@ -22331,7 +22335,9 @@ export function createLobbyFlowController(
       // за профила изобщо съществува Ludo match), затова резултантен
       // ludo_match_not_found никога не показва toast — този флаг НЕ се пипа
       // тук нарочно (остава false освен по време на explicit restore).
-      options.onLudoGameStateOpen?.()
+      // Етап 1: не и докато профилът играе Белот (виж main.ts) — там Ludo
+      // мач е невъзможен, а отговорът „не е намерена“ е чужд за масата.
+      if (options.shouldProbeLudoGameStateOnConnect?.() ?? true) options.onLudoGameStateOpen?.()
       // Spectator reconnect (Ludo Spectator Mode Phase 2, виж task-а т.7) —
       // ако spectator overlay-ят все още е активен (watch intent survives
       // WS drop), преизпрати explicit watch_ludo_match за СЪЩИЯ matchId.
@@ -23142,7 +23148,10 @@ export function createLobbyFlowController(
       // send-а и отговора) — discard, никога не стига до _ludoLobbyController.
       // Докато match-ът все още е active (_ludoController съществува),
       // поведението остава напълно непроменено.
-      if (_ludoGameplayActionResponsesPending > 0) {
+      // Етап 1 (обратната посока): броячът и „върни зара“ се пипат само от
+      // отговора на Ludo игрово действие (requestType); чужда грешка не
+      // променя Ludo играта. Стар сървър — досегашното поведение.
+      if (_ludoGameplayActionResponsesPending > 0 && isErrorResponseTo(message, LUDO_GAMEPLAY_ACTION_REQUEST_TYPES)) {
         _ludoGameplayActionResponsesPending -= 1
         if (!_ludoController) return true
         // "Roll already initiated" optimistic guard (виж createLudoFlowController.ts
@@ -23155,6 +23164,14 @@ export function createLobbyFlowController(
         _ludoController.notifyGameplayActionRejected()
       }
       if (_ludoLobbyController) {
+        // Етап 1 (обратната посока): грешка от друга игра (команда на Белот
+        // маса или Svara) не принадлежи на Ludo — масата вече не е отворена
+        // (иначе activeRoom би я поел), значи е закъсняла/чужда. Не се
+        // показва в Ludo и не пипа Ludo играта.
+        if (isOtherGameErrorForLudo(message)) {
+          console.warn('[lobby] error from another game ignored in Ludo:', message.code ?? message.requestType ?? message.message)
+          return true
+        }
         _ludoLobbyController.showMessage(message.message)
         options.onLudoRoomsOpen?.()
         return true

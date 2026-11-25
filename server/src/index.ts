@@ -394,7 +394,7 @@ import { releaseClosedConnection } from './core/releaseClosedConnection.js'
 import { handleJoinRoom } from './core/handleJoinRoom.js'
 import { markHumanParticipantDisconnected } from './core/markHumanParticipantDisconnected.js'
 import { rawDataToText } from './core/rawDataToText.js'
-import { sendJsonMessage, sendSerializedJsonMessage } from './core/sendJsonMessage.js'
+import { sendJsonMessage, sendSerializedJsonMessage, setWsRequestContext } from './core/sendJsonMessage.js'
 import type {
   ConnectionId,
   PlayerPublicProfileSnapshot,
@@ -26983,6 +26983,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       const rawText = rawDataToText(raw)
       const message = parseClientMessage(rawText)
       wsTimingLabel = resolveWsTimingLabel(message)
+      // Етап 1: всеки error, изпратен синхронно към този socket по време на
+      // обработката, носи requestType = типа на това съобщение.
+      if (message !== null) setWsRequestContext({ socket, requestType: message.type })
 
       if (message === null) {
         // Preserve the generic protocol response for other games; Svara has a typed error.
@@ -31511,6 +31514,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         message,
       })
     } finally {
+      setWsRequestContext(null)
       mainThreadTimings.record('ws', wsTimingLabel, performance.now() - wsTimingStartedAt)
     }
   })

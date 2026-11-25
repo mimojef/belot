@@ -90,6 +90,7 @@ import {
   resolveHumanTurnTimeoutMs,
 } from './reactionCountdown'
 import { sharedServerClock } from '../network/serverClock'
+import { isErrorResponseTo, isOtherGameErrorForBelot } from '../network/serverErrorCorrelation'
 import {
   CUTTING_VISUAL_ANIMATION_TOTAL_MS,
   type RenderCuttingAnimationState,
@@ -186,6 +187,13 @@ const BID_RESPONSE_WATCHDOG_MS = 5_000
 const BID_RESYNC_RESPONSE_TIMEOUT_MS = 5_000
 // Огледален watchdog за изиграване на карта (виж submitPlayCardFromUi).
 const PLAY_RESPONSE_WATCHDOG_MS = 5_000
+// Етап 1: двата текста на банера за връзката и подреждането на червените
+// съобщения под него.
+const CONNECTION_BANNER_TEXT_RECONNECTING = 'Връзката със сървъра се възстановява...'
+const CONNECTION_BANNER_TEXT_RESYNCING = 'Възстановяване на играта...'
+const TOP_NOTICE_GAP_PX = 8
+const PLAYING_INPUT_NOTICE_BASE_TOP_PX = 18
+const BIDDING_ERROR_BASE_TOP_PX = 24
 // Частните маси могат да имат 5/10 сек ход — тогава 5 сек watchdog би
 // проверил едва в края на хода. Първата проверка (идемпотентен resync) е
 // ~30% от времето за ход, в [1.5, 5] сек. Таймерът за реакция НЕ се променя;
@@ -2674,11 +2682,12 @@ export function createActiveRoomFlowController(
     document.body.querySelector('[data-playing-input-notice]')?.remove()
     const notice = document.createElement('div')
     notice.setAttribute('data-playing-input-notice', '1')
+    notice.setAttribute('data-notice-base-top', String(PLAYING_INPUT_NOTICE_BASE_TOP_PX))
     notice.textContent = text
     notice.style.cssText = [
       'position:fixed',
       'left:50%',
-      'top:18px',
+      `top:${getTopNoticeTopPx(PLAYING_INPUT_NOTICE_BASE_TOP_PX)}px`,
       'transform:translateX(-50%)',
       'z-index:10000',
       'max-width:min(92vw,520px)',
@@ -4446,10 +4455,11 @@ export function createActiveRoomFlowController(
         ? `
           <div
             data-bidding-error="1"
+            data-notice-base-top="${BIDDING_ERROR_BASE_TOP_PX}"
             style="
               position:fixed;
               left:50%;
-              top:24px;
+              top:${getTopNoticeTopPx(BIDDING_ERROR_BASE_TOP_PX)}px;
               transform:translateX(-50%);
               z-index:18;
               width:min(92vw, 560px);
@@ -7121,15 +7131,27 @@ export function createActiveRoomFlowController(
         showCoPlayRestrictedNotice(message.message, message.context === 'replay' ? 'replay' : 'private_room')
         return true
       }
-      clearPendingCutSubmission()
-      if (biddingUiState.pendingBidSent) {
-        // Същото правило като при картата по-долу: без незабавно отключване
-        // (иначе втора обява, докато първата още чака), а resync.
-        requestBidResyncNow()
-      } else {
-        clearPendingBidSubmission()
+      // Етап 1: грешка от друга игра (напр. Ludo) не принадлежи на масата —
+      // не пипа нито чакащите действия, нито съобщенията (main.ts вече не я
+      // подава насам; това е втора защита).
+      if (isOtherGameErrorForBelot(message)) {
+        console.warn('[active-room] ignored error from another game:', message.code ?? message.requestType ?? message.message)
+        return true
       }
-      if (playingCache.pendingPlayCardSent) {
+      // Етап 1: чакащото действие се пипа само от отговора на СЪЩАТА команда
+      // (requestType от сървъра). Стар сървър без корелация — досегашното
+      // поведение (isErrorResponseTo връща true).
+      if (isErrorResponseTo(message, ['submit_cut_index'])) clearPendingCutSubmission()
+      if (isErrorResponseTo(message, ['submit_bid_action'])) {
+        if (biddingUiState.pendingBidSent) {
+          // Същото правило като при картата по-долу: без незабавно отключване
+          // (иначе втора обява, докато първата още чака), а resync.
+          requestBidResyncNow()
+        } else {
+          clearPendingBidSubmission()
+        }
+      }
+      if (playingCache.pendingPlayCardSent && isErrorResponseTo(message, ['submit_play_card'])) {
         // error-ът няма корелация с командата — може да е отговор на друго,
         // по-рано изпратено съобщение, докато картата още чака на сървъра.
         // Незабавно отключване би позволило втора карта за същия ход, затова
@@ -7146,7 +7168,7 @@ export function createActiveRoomFlowController(
       // сървъра, или каквото и да е неочаквано), UI не трябва да остане
       // permanently disabled — освобождаваме submitting state тук, вместо
       // да разчитаме единствено на table_gift_send_result handler-а.
-      if (tableGiftModal !== null && tableGiftModal.submittingGiftItemId !== null) {
+      if (tableGiftModal !== null && tableGiftModal.submittingGiftItemId !== null && isErrorResponseTo(message, ['send_table_gift'])) {
         tableGiftModal.submittingGiftItemId = null
         tableGiftModal.pendingRequestId = null
         tableGiftModal.errorText = message.message
@@ -7280,7 +7302,10 @@ export function createActiveRoomFlowController(
       releasePendingPlayCard()
     }
 
-    activeRoomState.errorText = message
+    // Етап 1: състоянието на връзката се показва само от банера — текстът
+    // не влиза в errorText (иначе се дублира като червен блок под банера).
+    activeRoomState.errorText = null
+    syncConnectionBanner()
     scheduleActiveRoomRender()
   }
 
@@ -7315,13 +7340,36 @@ export function createActiveRoomFlowController(
       ].join(';')
       document.body.appendChild(banner)
     }
-    const text = activeRoomState.errorText ??
-      (activeRoomState.isConnected ? 'Възстановяване на играта...' : 'Връзката със сървъра се възстановява...')
+    // Етап 1: точно две състояния, по реалния транспорт (не по errorText):
+    // затворен socket -> връзката се възстановява; отворен, но играта още не
+    // е синхронизирана (room_resumed + авторитетен snapshot) -> възстановяване.
+    const text = options.isConnected() ? CONNECTION_BANNER_TEXT_RESYNCING : CONNECTION_BANNER_TEXT_RECONNECTING
     if (banner.textContent !== text) banner.textContent = text
+    banner.setAttribute('data-connection-banner-state', options.isConnected() ? 'resyncing' : 'reconnecting')
+    layoutTopNotices()
   }
 
   function removeConnectionBanner(): void {
     document.body.querySelector('[data-active-room-connection-banner="1"]')?.remove()
+    layoutTopNotices()
+  }
+
+  // Етап 1: червените съобщения горе (input notice в playing фазата, грешка в
+  // bidding фазата) никога не се застъпват с банера — подреждат се под него.
+  // Всяко пази собствената си позиция в data-notice-base-top.
+  function getTopNoticeTopPx(baseTopPx: number): number {
+    const banner = document.body.querySelector<HTMLElement>('[data-active-room-connection-banner="1"]')
+    if (!banner) return baseTopPx
+    return Math.max(baseTopPx, Math.ceil(banner.getBoundingClientRect().bottom) + TOP_NOTICE_GAP_PX)
+  }
+
+  function layoutTopNotices(): void {
+    document.body.querySelectorAll<HTMLElement>('[data-notice-base-top]').forEach((element) => {
+      const baseTopPx = Number(element.getAttribute('data-notice-base-top'))
+      if (!Number.isFinite(baseTopPx)) return
+      const top = `${getTopNoticeTopPx(baseTopPx)}px`
+      if (element.style.top !== top) element.style.top = top
+    })
   }
 
   function setConnectionState(isConnected: boolean, message: string | null): void {
@@ -7346,7 +7394,10 @@ export function createActiveRoomFlowController(
     if (!isConnected) belotSpectatorViewersHydrated = false
 
     activeRoomState.isConnected = isConnected
-    activeRoomState.errorText = message
+    // Етап 1: съобщението за връзката (message) се показва само от банера —
+    // в errorText то се дублираше като червен блок под него.
+    void message
+    activeRoomState.errorText = null
     syncConnectionBanner()
     scheduleActiveRoomRender()
   }
@@ -7605,6 +7656,7 @@ export function createActiveRoomFlowController(
     isCurrentRoomMatchEnded,
     getSilentResumeTarget,
     prepareForSilentReconnect,
+    syncConnectionIndicator: syncConnectionBanner,
     armPendingTournamentSilentEntry,
     clearPendingTournamentSilentEntry,
   }

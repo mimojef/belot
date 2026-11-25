@@ -18,8 +18,31 @@ function extractMessageType(payload: unknown): string | null {
   return null
 }
 
+// Етап 1 — корелация на {type:'error'} с клиентската заявка, която го е
+// предизвикала. WS 'message' handler-ът в index.ts е синхронен: докато той
+// обработва съобщение от даден socket, контекстът сочи към този socket и типа
+// на съобщението. Всеки error, изпратен СИНХРОННО по време на обработката към
+// същия socket, получава requestType = типа на заявката; всеки друг error
+// (асинхронен, към друг socket, извън handler) получава requestType: null.
+// Наличието на ключа казва на клиента, че сървърът поддържа корелация.
+// Не се пипат вече зададени requestType и не-error съобщения.
+type WsRequestContext = { socket: WebSocket; requestType: string }
+let currentWsRequestContext: WsRequestContext | null = null
+
+export function setWsRequestContext(context: WsRequestContext | null): void {
+  currentWsRequestContext = context
+}
+
+function withErrorRequestCorrelation(socket: WebSocket, payload: unknown): unknown {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return payload
+  const record = payload as Record<string, unknown>
+  if (record.type !== 'error' || 'requestType' in record) return payload
+  const context = currentWsRequestContext
+  return { ...record, requestType: context !== null && context.socket === socket ? context.requestType : null }
+}
+
 export function sendJsonMessage<T>(socket: WebSocket, payload: T): void {
-  socket.send(JSON.stringify(payload))
+  socket.send(JSON.stringify(withErrorRequestCorrelation(socket, payload)))
   if (onSentHook !== null) {
     const messageType = extractMessageType(payload)
     if (messageType !== null) onSentHook(messageType)

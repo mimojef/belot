@@ -969,6 +969,12 @@ export type PrivateRoomActionErrorCode =
 export type ErrorMessage = {
   type: 'error'
   message: string
+  /**
+   * Етап 1: типът на клиентската заявка, чийто отговор е тази грешка
+   * (добавя се централно в sendJsonMessage). null — грешката не е синхронен
+   * отговор на заявка от тази връзка. Липсващ ключ — стар сървър без корелация.
+   */
+  requestType?: string | null
   /** „Забрана за съвместна игра“: само при code 'co_play_restricted' от повторен мач. */
   context?: 'replay'
   code?:

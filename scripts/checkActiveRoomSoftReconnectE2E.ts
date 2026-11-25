@@ -438,6 +438,30 @@ if (process.env.SOFT_RECONNECT_E2E_PHASE !== '2') {
       assert(!(await isVisible(M.page, SESSION_OVERLAY)), 'session_in_game прозорец')
       await M.page.screenshot({ path: join(screenshotsDir, 'R4-mobile-after-drops.png') })
     })
+    // ── [R4b] Етап 1: без Ludo проба при тихо възстановяване; двата текста на банера ──
+    await check('[R4b] тихо възстановяване на Белот: без ludo_game_state_request и без Ludo грешка; банерът — две състояния', async () => {
+      // Контрола: в лобито (без маса) пробата се праща както досега.
+      assert(M.sent.some((f) => f.type === 'ludo_game_state_request'), 'пробата липсва и при свързване в лобито')
+      const probes = cycles.flatMap((c) => c.sentAfter).filter((f) => f.type === 'ludo_game_state_request').length
+      assert(probes === 0, `Ludo проба при активна Белот маса: ${probes}`)
+      const ludoErrors = cycles.flatMap((c) => c.receivedAfter).filter((f) => f.type === 'error' && f.data.code === 'ludo_match_not_found').length
+      assert(ludoErrors === 0, `Ludo грешки към масата: ${ludoErrors}`)
+      // Забавена HTTP проверка на сесията -> видим прозорец „транспорт отворен, играта не е синхронизирана“.
+      await M.page.route('**/api/auth/me', async (route) => { await sleep(2_500); await route.continue() })
+      try {
+        M.disconnect()
+        await sleep(600)
+        const textDown = await M.page.evaluate(`document.querySelector('${ROOM_BANNER}')?.textContent ?? null`)
+        assert(textDown === 'Връзката със сървъра се възстановява...', `затворен транспорт: ${textDown}`)
+        M.reconnect()
+        const resyncing = await waitForExpr(M.page, `document.querySelector('${ROOM_BANNER}')?.textContent === 'Възстановяване на играта...'`, 10_000)
+        assert(resyncing, 'банерът не показа „Възстановяване на играта...“ при отворен транспорт')
+        assert(await waitForExpr(M.page, `!document.querySelector('${ROOM_BANNER}')`, 20_000), 'банерът не изчезна след синхронизацията')
+      } finally {
+        await M.page.unroute('**/api/auth/me')
+      }
+      assert(M.offlineReloads.length === 0, `reload: ${M.offlineReloads.join(',')}`)
+    })
     autoP.stop()
     autoM.stop()
     await check('[R1-R4] без грешки в конзолата на страниците', () => {

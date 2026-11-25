@@ -117,6 +117,7 @@ import {
   type OfflineReloadVia,
 } from './app/network/socketReconnectPolicy'
 import { createLobbySoftReconnect, type SoftReconnectSessionCheck, type SoftReconnectSyncFailure } from './app/network/createLobbySoftReconnect'
+import { isOtherGameErrorForBelot } from './app/network/serverErrorCorrelation'
 import { createConnectionLivenessMonitor } from './app/network/createConnectionLivenessMonitor'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { MOBILE_LIGHT_PAGE_BACKGROUND } from './ui/layout/mobileLightPageBackground'
@@ -7641,6 +7642,11 @@ lobby = createLobbyFlowController({
   onLudoRoomKick: (profileId) => { client.kickFromLudoRoom(profileId) },
   onLudoRoomStart: () => { client.startLudoRoom() },
   onLudoGameStateOpen: () => { client.requestLudoGameState() },
+  // Етап 1: сляпата проба за Ludo мач при всяко свързване не се праща, докато
+  // профилът играе на Белот маса (вкл. тихото възстановяване) — двете игри са
+  // взаимно изключени (cross-game guard), а отговорът „не е намерена“ стигаше
+  // до масата. Извън Белот маса (refresh, reconnect в лобито/Ludo) — без промяна.
+  shouldProbeLudoGameStateOnConnect: () => !(activeRoom.hasActiveRoom() && !activeRoom.isSpectatorView()),
   onLudoMatchLeave: (matchId) => { client.leaveLudoMatch(matchId) },
   // Виж task-а "Ludo -> level/rank progression: stale profile cache след
   // мач" — createLobbyFlowController.ts::onGameEndAcknowledged вика това
@@ -9124,6 +9130,10 @@ client = createGameServerClient({
     // voice_presence само от връзката на мястото, а тя се пренасочва при
     // синхронизацията (reconnectMember).
     if (lobbySoftReconnect.handleOpen()) {
+      // Етап 1: банерът на масата минава от „Връзката със сървъра се
+      // възстановява...“ на „Възстановяване на играта...“ (транспортът е
+      // отворен, синхронизацията предстои). Само визуализация.
+      activeRoom.syncConnectionIndicator()
       return
     }
 
@@ -10144,6 +10154,14 @@ client = createGameServerClient({
         profile: { ...currentAuthSession.profile, yellowCoinsBalance: message.walletBalance },
       }
       syncLobbyWithAuthSession()
+    }
+
+    // Етап 1: грешка от друга игра (Ludo/Svara) при отворена Белот маса не
+    // принадлежи на масата и не пипа нейните чакащи действия.
+    if (message.type === 'error' && activeRoom.hasActiveRoom() && isOtherGameErrorForBelot(message)) {
+      console.warn('[game-server] error from another game ignored at the Belot table:', message.code ?? message.requestType ?? message.message)
+      requestPwaUpdateApplyAttempt()
+      return
     }
 
     if (activeRoom.handleServerMessage(message)) {
