@@ -42,6 +42,8 @@ import {
 export type SvaraEntryPercent = 1 | 2 | 3 | 5
 export type SvaraStartMode = 'auto' | 'manual'
 export type SvaraSeatStatus = 'active' | 'absent' | 'exited' | 'eliminated'
+/** Общият бюджет за отсъствие на играч (виж runtime/svaraAbsenceBudget.ts): изразходвано + начало на текущото броене. */
+export type SvaraAbsenceClock = { usedMs: number; since: number | null }
 
 export type SvaraMatchConfig = {
   tableId: string
@@ -267,6 +269,8 @@ export type SvaraMatchState = {
   /** Requests made during a deal never reactivate that deal's player. */
   pendingReturns?: string[]
   finishReason?: 'prolonged-absence' | 'all-absent' | null
+  /** Часовници на общия бюджет за отсъствие — пише ги само runtime-ът (двигателят е без време). */
+  absence?: Record<string, SvaraAbsenceClock>
   /** Archive containers are immutable after commit; live-linked history is copied with the game. */
   ledger: SvaraMatchLedgerEntry[]
   history: SvaraRoundRecord[]
@@ -292,6 +296,7 @@ export type SvaraMatchCommand =
   | { type: 'set-absent'; commandId: string; playerId: string; absent: boolean }
   | { type: 'exit'; commandId: string; playerId: string }
   | { type: 'absence-expired'; commandId: string; playerId: string }
+  | { type: 'absence-limit-expired'; commandId: string; playerId: string }
   | { type: 'reveal-cards'; commandId: string; playerId: string }
   | { type: 'hide-cards'; commandId: string; playerId: string }
   | { type: 'expire-reveal-choice'; commandId: string; roundId: string }
@@ -587,7 +592,7 @@ export function copyRestoredSvaraMatchForServer(state: SvaraMatchState): SvaraMa
       if (at !== undefined && JSON.stringify(outcome.tiedPlayers) === JSON.stringify(pot.eligible)) {
         const detached = commands.slice(at + 1).some((item) => {
           const command = JSON.parse(item.fingerprint) as SvaraMatchCommand
-          return (command.type === 'exit' || command.type === 'absence-expired') && outcome.tiedPlayers.includes(command.playerId)
+          return (command.type === 'exit' || command.type === 'absence-expired' || command.type === 'absence-limit-expired') && outcome.tiedPlayers.includes(command.playerId)
         })
         if (!detached) outcome.tiedPlayers = pot.eligible
       }
@@ -652,6 +657,7 @@ function dispatch(ctx: Ctx): void {
     case 'set-absent': return setAbsent(ctx, command.playerId, command.absent)
     case 'exit': return exitMatch(ctx, command.playerId)
     case 'absence-expired': return absenceExpired(ctx, command.playerId)
+    case 'absence-limit-expired': return absenceLimitExpired(ctx, command.playerId)
     case 'reveal-cards': return revealCards(ctx, command.playerId)
     case 'hide-cards': return hideCards(ctx, command.playerId)
     case 'expire-reveal-choice': return expireRevealChoice(ctx, command.roundId)
@@ -1474,6 +1480,25 @@ function exitMatch(ctx: Ctx, playerId: string): void {
   const { state } = ctx
   const status = state.status[playerId]
   if (status !== 'active' && status !== 'absent' && status !== 'eliminated') fail('not-allowed', `${playerId} has already exited`)
+  removeFromMatch(ctx, playerId)
+}
+
+/**
+ * Изчерпан общ бюджет за отсъствие (360 s за мача): окончателно отпадане със
+ * същите последствия като изход — свободните чипове изгарят (не се
+ * разпределят), внесените в банката остават, без връщане. Само за играч,
+ * който в момента „Липсва“ и не е заявил завръщане (срокът идва от runtime-а).
+ */
+function absenceLimitExpired(ctx: Ctx, playerId: string): void {
+  requirePhase(ctx, 'in-progress')
+  requireSeated(ctx, playerId)
+  const { state } = ctx
+  if (state.status[playerId] !== 'absent' || (state.pendingReturns ?? []).includes(playerId)) fail('not-allowed', `${playerId} is not counting absence`)
+  removeFromMatch(ctx, playerId)
+}
+
+function removeFromMatch(ctx: Ctx, playerId: string): void {
+  const { state } = ctx
   // Неизползваните чипове излизат от играта; направените залози остават.
   const unused = state.stacks[playerId]!
   if (unused > 0) {

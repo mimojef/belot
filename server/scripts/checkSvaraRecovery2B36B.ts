@@ -223,16 +223,17 @@ try {
     assert.equal(f.saved().deadlines[0]!.kind, 'dealing')
     assert.equal(f.saved().deadlines[0]!.deadlineAt, f.clock.now() + 2900)
   })
-  await check('single-active five-minute wait resumes at the original absolute deadline', async () => {
+  await check('single-active final 15-second wait resumes at the original absolute deadline', async () => {
     const t = await joining(); for (const playerId of ['b', 'c']) t.s({ type: 'set-absent', playerId, absent: true })
-    const before = t.saved(), f = await boot(t, 120000); assert.equal(f.lobby.initializeRecovery(), 'ready'); f.lobby.reconnect('a')
+    const before = t.saved(), f = await boot(t, 5000); assert.equal(f.lobby.initializeRecovery(), 'ready'); f.lobby.reconnect('a')
     const wait = f.frames.get('a')!.findLast((m) => m.type === 'svara_match_timing').deadlines.find((d: any) => d.kind === 'presence-wait')
-    assert.equal(wait.remainingMs, 180000); assert.equal(wait.deadlineAt, before.deadlines.find((d) => d.kind === 'presence-wait')!.deadlineAt)
+    assert.equal(wait.remainingMs, 10000); assert.equal(wait.deadlineAt, before.deadlines.find((d) => d.kind === 'presence-wait')!.deadlineAt)
   })
   await check('overdue joining plus presence deadlines are applied in order; sole winner gets the bank once', async () => {
     const t = await joining(); for (const playerId of ['a', 'b']) t.s({ type: 'set-absent', playerId, absent: true })
     const before = t.saved(), pot = before.state.lockedPots.reduce((n, p) => n + p.amount, 0), f = await boot(t, 400000)
-    assert.equal(before.deadlines.length, 2)
+    // Без срока на общия 6-минутен бюджет за отсъствие (отделен вид срок).
+    assert.equal(before.deadlines.filter((d) => d.kind !== 'absence-limit').length, 2)
     assert.equal(f.lobby.initializeRecovery(), 'ready'); const ended = f.saved()
     assert.equal(ended.state.winnerId, 'c'); assert.equal(ended.state.finishReason, 'prolonged-absence'); assert.equal(ended.state.stacks.c, before.state.stacks.c! + pot)
     f.clock.advance(900000); assert.deepEqual(f.saved(), ended)
@@ -241,9 +242,9 @@ try {
   })
   await check('zero-active wait restores without new entries, then aborts without a winner or duplicate removal', async () => {
     const t = await joining(); for (const playerId of ['a', 'b', 'c']) t.s({ type: 'set-absent', playerId, absent: true })
-    const before = t.saved(), f = await boot(t, 100000); assert.equal(f.lobby.initializeRecovery(), 'ready')
+    const before = t.saved(), f = await boot(t, 5000); assert.equal(f.lobby.initializeRecovery(), 'ready')
     assert.equal(f.saved().state.phase, 'in-progress'); assert.equal(f.saved().state.ledger.length, before.state.ledger.length)
-    f.clock.advance(200000); const ended = f.saved(); assert.equal(ended.state.finishReason, 'all-absent'); assert.equal(ended.state.winnerId, null)
+    f.clock.advance(15000); const ended = f.saved(); assert.equal(ended.state.finishReason, 'all-absent'); assert.equal(ended.state.winnerId, null)
     assert.deepEqual(ended.state.stacks, before.state.stacks); assert.equal(ended.state.ledger.filter((e) => e.type === 'entry').length, 3)
     f.clock.advance(300000); assert.deepEqual(f.saved(), ended); assertSvaraMatchInvariants(ended.state)
     const overdue = await joining(); for (const playerId of ['a', 'b', 'c']) overdue.s({ type: 'set-absent', playerId, absent: true })
@@ -434,7 +435,8 @@ try {
     sql(t, (db) => db.exec("CREATE TRIGGER fail_finish BEFORE UPDATE ON svara_match_snapshots WHEN NEW.match_status = 'finished' BEGIN SELECT RAISE(ABORT, 'finish failed'); END"))
     const f = await boot(t, 400000); assert.equal(f.lobby.initializeRecovery(), 'failed')
     assert.equal(f.saved().revision, before.revision + 1); assert.equal(f.saved().state.phase, 'in-progress')
-    assert.equal(f.saved().deadlines.length, 1); assert.equal(f.saved().deadlines[0]!.kind, 'presence-wait')
+    const remaining = f.saved().deadlines.filter((d) => d.kind !== 'absence-limit')
+    assert.equal(remaining.length, 1); assert.equal(remaining[0]!.kind, 'presence-wait')
     assert.equal(f.frames.get('a')!.length, 0)
     sql(t, (db) => db.exec('DROP TRIGGER fail_finish'))
     const retry = await boot(t, 400000); assert.equal(retry.lobby.initializeRecovery(), 'ready')

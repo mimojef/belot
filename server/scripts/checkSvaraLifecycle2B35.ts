@@ -1,4 +1,4 @@
-/** Deterministic 2Б.3.5 checks. All 15s/5min periods use a controlled clock. */
+/** Deterministic 2Б.3.5 checks. All 15s periods (turn and final presence wait) use a controlled clock. */
 import assert from 'node:assert/strict'
 import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
 import { createSvaraMatchRuntime } from '../src/games/svara/runtime/svaraMatchRuntime.js'
@@ -192,8 +192,8 @@ try {
     assert.equal(t.timer('reveal-choice').remainingMs, 5_000); assert.equal(t.timer('reveal-choice').playerId, 'a')
     t.clock.advance(5_000)
     assert.equal(t.state().round, null); assert.equal(t.state().status.a, 'active', 'expiry never marks the deciding winner absent')
-    assert.equal(t.timer('presence-wait').remainingMs, 300_000)
-    const count = entries(); t.clock.advance(299_999)
+    assert.equal(t.timer('presence-wait').remainingMs, 15_000)
+    const count = entries(); t.clock.advance(14_999)
     assert.equal(entries(), count); assert.equal(t.state().phase, 'in-progress')
     t.clock.advance(1); assert.equal(t.state().winnerId, 'a'); assert.equal(t.state().finishReason, 'prolonged-absence')
     assert.equal(entries(), count); assert.equal(t.clock.live().length, 0)
@@ -268,14 +268,14 @@ try {
     assert.equal(t.state().status.b, 'active'); assert.equal(t.view('b').you.returnPending, false)
     assert.equal(t.state().stacks.b, before! - 1, 'only the next normal entry is charged')
   })
-  check('return at a paused boundary resumes; one returned from zero gets a fresh five minutes', () => {
+  check('return at a paused boundary resumes; one returned from zero gets a fresh final 15 seconds', () => {
     const t = fixture(2)
     t.clock.advance(15_000)
     // 2Б.3.7.1: heads-up timeout оставя единствен победител → 5-секунден избор преди границата; изтича автоматично.
     assert.equal((t.state().round as any)?.kind, 'reveal-choice')
     t.clock.advance(5_000)
     assert.equal(t.state().round, null); assert(t.timer('presence-wait'))
-    t.clock.advance(100_000)
+    t.clock.advance(10_000)
     t.ok('b', { type: 'request-return' })
     assert.equal(t.state().round?.kind, 'ordinary'); assert.equal(t.timer('presence-wait'), undefined)
     const z = fixture(2)
@@ -284,13 +284,13 @@ try {
     assert.equal((z.state().round as any)?.kind, 'reveal-choice')
     z.clock.advance(5_000)
     assert.equal(z.timer('presence-wait').playerId, null)
-    z.clock.advance(120_000); z.ok('a', { type: 'request-return' })
-    assert.equal(z.timer('presence-wait').playerId, 'a'); assert.equal(z.timer('presence-wait').remainingMs, 300_000)
+    z.clock.advance(10_000); z.ok('a', { type: 'request-return' })
+    assert.equal(z.timer('presence-wait').playerId, 'a'); assert.equal(z.timer('presence-wait').remainingMs, 15_000)
     const end = z.timer('presence-wait').deadlineAt
     z.ok('a', { type: 'request-return' })
-    assert.equal(z.timer('presence-wait').deadlineAt, end, 'another press cannot restart the five minutes')
+    assert.equal(z.timer('presence-wait').deadlineAt, end, 'another press cannot restart the final 15 seconds')
     const entries = z.state().ledger.filter((e) => e.type === 'entry').length
-    z.clock.advance(299_999); assert.equal(z.state().phase, 'in-progress')
+    z.clock.advance(14_999); assert.equal(z.state().phase, 'in-progress')
     assert.equal(z.state().ledger.filter((e) => e.type === 'entry').length, entries)
     z.clock.advance(1); assert.equal(z.state().winnerId, 'a')
   })
@@ -444,7 +444,7 @@ try {
     const t = joining(), old = t.state(), amount = old.lockedPots.reduce((sum, p) => sum + p.amount, 0)
     t.absent('a', 'b') // c is the sole active player, outside the locked pot
     const before = t.state().stacks.c!
-    t.clock.advance(300_000)
+    t.clock.advance(15_000)
     const ended = t.state()
     assert.equal(ended.winnerId, 'c'); assert.equal(ended.stacks.c, before + amount)
     assert.equal(ended.lockedPots.length, 0); assert.equal(ended.carried.length, 0)
@@ -470,9 +470,9 @@ try {
     assert.equal(t.state().stacks.a, 0)
     // 2Б.3.7.6А: the tied all-in showdown now opens its own 3с public
     // display first (no payout steps for a pure tie, so it closes in one
-    // step) — THEN the 5-minute presence-wait is planned from that later
+    // step) — THEN the final 15-second presence-wait is planned from that later
     // point, pushing its real deadline back by the display's duration too.
-    t.clock.advance(300_000 + SVARA_SHOWDOWN_DISPLAY_MS)
+    t.clock.advance(15_000 + SVARA_SHOWDOWN_DISPLAY_MS)
     assert.equal(t.state().winnerId, 'a'); assert.equal(t.state().stacks.a, 4)
   })
   check('carried balance is awarded exactly once, without another entry', () => {
@@ -485,7 +485,7 @@ try {
     t.ok('c', { type: 'hide-cards' })
     const before = t.state().stacks.c!, entries = t.state().ledger.filter((e) => e.type === 'entry').length
     const stale = t.clock.live().filter((j) => j.at === t.timer('presence-wait', 'c').deadlineAt)[0]!
-    t.clock.advance(300_000)
+    t.clock.advance(15_000)
     assert.equal(t.state().stacks.c, before + 30); assert.equal(t.state().carried.length, 0)
     const ended = JSON.stringify(t.state()); stale.callback(); stale.callback()
     assert.equal(JSON.stringify(t.state()), ended); assert.equal(t.state().ledger.filter((e) => e.type === 'entry').length, entries)
@@ -496,7 +496,7 @@ try {
     const before = t.state(), locked = before.lockedPots.reduce((sum, p) => sum + p.amount, 0)
     assert.equal(t.timer('presence-wait').playerId, null)
     const entries = before.ledger.filter((e) => e.type === 'entry').length
-    t.clock.advance(300_000)
+    t.clock.advance(15_000)
     const state = t.state(), result = t.view().result
     assert.equal(state.winnerId, null); assert.equal(state.phase, 'finished'); assert.equal(result.aborted, true)
     assert.equal(result.reason, 'all-absent'); assert.equal(state.removedChips, before.removedChips + locked)
@@ -515,7 +515,7 @@ try {
     assert.equal(t.state().round, null)
     assert.equal(t.state().phase, 'in-progress'); assert.equal(t.state().winnerId, null)
     assert.equal(t.timer('presence-wait', 'b').playerId, null)
-    t.clock.advance(300_000)
+    t.clock.advance(15_000)
     assert.equal(t.state().phase, 'finished'); assert.equal(t.state().winnerId, null)
     assert.equal(t.state().finishReason, 'all-absent')
   })
@@ -526,12 +526,12 @@ try {
     assert.equal((t.state().round as any)?.kind, 'reveal-choice')
     t.clock.advance(5_000)
     const old = t.clock.live().find((j) => j.at === t.timer('presence-wait').deadlineAt)!
-    t.clock.advance(100_000); t.absent('a')
+    t.clock.advance(10_000); t.absent('a')
     assert.equal(t.timer('presence-wait').playerId, null)
     t.ok('b', { type: 'request-return' })
     assert.equal(t.timer('presence-wait').playerId, 'b')
     old.callback(); assert.equal(t.state().phase, 'in-progress')
-    t.clock.advance(100_000); t.ok('a', { type: 'request-return' })
+    t.clock.advance(10_000); t.ok('a', { type: 'request-return' })
     assert.equal(t.state().round?.kind, 'ordinary'); assert.equal(t.timer('presence-wait'), undefined)
   })
   check('private return identity, expired sessions/roles/flag, system injection and cross-game commitment', () => {

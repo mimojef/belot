@@ -23,6 +23,7 @@
 // списъци на наддаването (pending/acted/raiseLocked) и пълни ръце.
 
 import { buildSvaraPotLayers } from '../engine/svaraPots.js'
+import { svaraAbsenceDeadlineAt } from '../runtime/svaraAbsenceBudget.js'
 import type { SvaraBettingAction, SvaraBettingOptions, SvaraBlindStatus } from '../engine/svaraBetting.js'
 import { parseSvaraCardCode, type SvaraCardCode } from '../engine/svaraCards.js'
 import { evaluateSvaraHand } from '../engine/svaraHandEvaluation.js'
@@ -93,6 +94,11 @@ export type SvaraSnapshotSeat = {
   cardCount: number
   /** Вноска в текущото раздаване (Вход + доброволни залози; в Свара — само новите залози). */
   roundContribution: number
+  /**
+   * Общият бюджет за отсъствие: абсолютният сървърен момент на изчерпване —
+   * само докато играчът „Липсва“ и бюджетът тече (иначе полето липсва).
+   */
+  absenceDeadlineAt?: number
 }
 
 export type SvaraSnapshotAction = {
@@ -364,6 +370,12 @@ function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
  * контекст (автентикирана сесия). Резултатът е нов, дълбоко замразен обект —
  * без споделени изменяеми части между зрители или със състоянието.
  */
+/** Само докато бюджетът за отсъствие тече — иначе без поле (непроменена форма на мястото). */
+function absenceField(state: SvaraMatchState, playerId: string): { absenceDeadlineAt?: number } {
+  const deadlineAt = svaraAbsenceDeadlineAt(state, playerId)
+  return deadlineAt === null ? {} : { absenceDeadlineAt: deadlineAt }
+}
+
 export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMatchState, viewerId: string): SvaraMatchSnapshotMessage {
   if (typeof viewerId !== 'string' || viewerId.trim() === '') throw new SvaraSnapshotAccessError('invalid-viewer', 'viewerId required')
   const seatIndex = state.seats.indexOf(viewerId)
@@ -401,6 +413,7 @@ export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMat
       allIn: betting ? betting.betting.allIn.includes(playerId) : false,
       cardCount: withCards.get(playerId) ?? 0,
       roundContribution: betting ? betting.contributions[playerId] ?? 0 : 0,
+      ...absenceField(state, playerId),
     })),
     dealerId: view.dealerId,
     toActId: view.toAct,

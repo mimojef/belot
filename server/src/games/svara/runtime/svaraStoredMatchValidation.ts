@@ -2,6 +2,7 @@ import { assertSvaraMatchInvariants, describeSvaraLifecycle, type SvaraMatchStat
 import { parseSvaraCardCode } from '../engine/svaraCards.js'
 import { svaraStartingChipsForEntry } from '../engine/svaraChips.js'
 import { planSvaraDeadlines } from './svaraDeadlines.js'
+import { svaraAbsenceLimitTarget } from './svaraAbsenceBudget.js'
 import { SvaraPersistenceError, type SvaraStoredMatch } from './svaraPersistence.js'
 
 const require = (condition: unknown): void => { if (!condition) throw new Error() }
@@ -16,7 +17,7 @@ const amounts = (value: unknown, ids: string[]) => object(value) && Object.entri
 const exactKeys = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 const actions = ['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet']
 const participantTypes = ['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit', 'reveal-cards', 'hide-cards']
-const systemTypes = ['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing', 'advance-showdown-display', 'close-payout-display']
+const systemTypes = ['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'absence-limit-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing', 'advance-showdown-display', 'close-payout-display']
 const ledgerTypes = ['absence-pot-award', 'abandoned-pot-removed', 'starting-chips', 'entry', 'bet', 'svara-join-fee', 'carry-in', 'uncalled-return', 'pot-award', 'pot-lock', 'pot-carry', 'pot-split', 'split-remainder-removed', 'exit-removed']
 
 function hands(value: unknown, players: string[], full: boolean): void {
@@ -84,6 +85,9 @@ function validateStructure(state: SvaraMatchState): void {
   require(!started || member(s.firstDealerId, s.seats))
   require(s.phase !== 'in-progress' || s.winnerId === null)
   require(subset(s.pendingReturns, s.seats) && [null, 'prolonged-absence', 'all-absent'].includes(s.finishReason))
+  // Незадължително (по-стар запис го няма): часовниците на бюджета за отсъствие.
+  require(s.absence === undefined || (object(s.absence) && Object.entries(s.absence).every(([id, clock]: [string, any]) =>
+    s.seats.includes(id) && object(clock) && exactKeys(clock, ['usedMs', 'since']) && integer(clock.usedMs) && (clock.since === null || (integer(clock.since) && clock.since > 0)))))
   require(Array.isArray(s.lockedPots) && Array.isArray(s.carried) && Array.isArray(s.history) && Array.isArray(s.ledger) && object(s.processedCommands))
   if (!started) require(s.round === null && s.firstDealerId === null && s.ordinaryDealerId === null && s.winnerId === null &&
     s.roundCounter === 0 && s.headsUpNoBetStreak === 0 && s.removedChips === 0 && s.history.length === 0 &&
@@ -168,10 +172,11 @@ export function validateSvaraStoredMatch(value: unknown, full = true): asserts v
     assertSvaraMatchInvariants(state)
     const kinds = new Set<string>(), generations = new Set<number>(), view = describeSvaraLifecycle(state)
     for (const d of snapshot.deadlines) {
-      require(object(d) && state.phase === 'in-progress' && d.phase === 'in-progress' && ['dealing', 'turn', 'svara-joining', 'presence-wait', 'reveal-choice', 'reveal-display', 'showdown-display', 'payout-display'].includes(d.kind) && !kinds.has(d.kind))
+      require(object(d) && state.phase === 'in-progress' && d.phase === 'in-progress' && ['dealing', 'turn', 'svara-joining', 'presence-wait', 'reveal-choice', 'reveal-display', 'showdown-display', 'payout-display', 'absence-limit'].includes(d.kind) && !kinds.has(d.kind))
       require(text(d.key) && integer(d.deadlineAt) && d.deadlineAt > 0 && integer(d.generation) && d.generation > 0 && d.generation <= snapshot.deadlineSequence && !generations.has(d.generation))
       require(integer(d.baseRevision) && d.baseRevision <= snapshot.revision && integer(d.actionVersion) && (d.roundId === null || text(d.roundId)))
       require(d.playerId === (d.kind === 'turn' ? view.actorId : d.kind === 'presence-wait' ? view.readyPlayerIds[0] ?? null
+        : d.kind === 'absence-limit' ? svaraAbsenceLimitTarget(state)?.playerId ?? null
         : d.kind === 'reveal-choice' || d.kind === 'reveal-display' ? view.revealChoice?.winnerId ?? null : null))
       if (d.kind === 'dealing' || d.kind === 'turn' || d.kind === 'svara-joining' || d.kind === 'reveal-choice' || d.kind === 'reveal-display' || d.kind === 'showdown-display' || d.kind === 'payout-display') {
         require(d.roundId === view.roundId && d.actionVersion === view.actionVersion)

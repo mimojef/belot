@@ -34,6 +34,7 @@ import { detectSvaraFinalCall } from './svaraBetAnimationTracker'
 import { renderSvaraBelotSeatCardHtml, renderSvaraBelotSpeechBubbleHtml, svaraBelotCardScale, svaraBelotCardSize, SVARA_BELOT_BID_BUBBLE_LIFETIME_MS, SVARA_BELOT_CARD_EDGE_MARGIN_PX } from './svaraBelotSeatCard'
 import { SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
 import { playSvaraSound } from './svaraSound'
+import { sharedServerClock } from '../../../network/serverClock'
 import { getSvaraVisualSlot } from './svaraSeatLayout'
 import { svaraCardCodeToFaceSrc } from './svaraTableAssets'
 import { svaraDealingAnimationMs } from './svaraTableAnimation'
@@ -52,6 +53,8 @@ export const SVARA_REAL_PAYOUT_STEP_TARGET_MS = 1800
 
 const DECK_SPRITES = 20
 // Звукът на раздаването (същият файл и сила като в премахнатото демо).
+/** Оставащото време за отсъствие: ясно видимо върху карето (компютър и телефон). */
+const ABSENCE_TIMER_STYLE = 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;pointer-events:none;padding:3px 10px;border-radius:999px;background:rgba(127,29,29,.92);border:2px solid #fca5a5;color:#fff;font-size:17px;font-weight:900;line-height:1.15;letter-spacing:.5px;font-variant-numeric:tabular-nums;white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.7);box-shadow:0 2px 8px rgba(0,0,0,.55);'
 const DEAL_SOUND_SRC = '/audio/card-sfx/card-move.mp3'
 /** „Свара!“ (женски глас + сигнализация, вече смесени) — заедно с надписа „СВАРА!“. */
 const SVARA_ANNOUNCE_SOUND_SRC = '/audio/game-sounds/svara-announce.mp3'
@@ -990,6 +993,22 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       const filter = hud.dim === 'eliminated' ? 'grayscale(1) brightness(.45)' : hud.dim === 'absent' ? 'grayscale(.6) brightness(.7)' : ''
       const dimTarget = node.card ?? node.avatar
       if (dimTarget.style.filter !== filter) dimTarget.style.filter = filter
+      // Общият бюджет за отсъствие: оставащото време (MM:SS) върху карето на
+      // липсващия играч — само визуално, от сървърния срок и общия сървърен часовник.
+      let absenceTimer = node.node.querySelector<HTMLElement>('[data-svara-absence-timer]')
+      if (hud.absenceDeadlineAt !== null) {
+        if (!absenceTimer) {
+          absenceTimer = document.createElement('div')
+          absenceTimer.dataset.svaraAbsenceTimer = '1'
+          absenceTimer.setAttribute('role', 'timer')
+          absenceTimer.setAttribute('aria-label', 'Оставащо време за отсъствие')
+          absenceTimer.style.cssText = ABSENCE_TIMER_STYLE
+          node.node.appendChild(absenceTimer)
+        }
+        absenceTimer.dataset.deadlineAt = String(hud.absenceDeadlineAt)
+        updateAbsenceTimer(absenceTimer)
+        ensureAbsenceTicker()
+      } else absenceTimer?.remove()
       // Информацията (баланс, залог, статуси) — от другата страна на купчинката чипове.
       const seatLayout = layout.seats[sceneSeat]!
       const dx = seatLayout.avatar.x - seatLayout.chipStack.x, dy = seatLayout.avatar.y - seatLayout.chipStack.y
@@ -1216,7 +1235,25 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     animation.oncancel = finish
   }
 
+  // ── Бюджет за отсъствие (MM:SS) ─────────────────────────────────────────
+  let absenceTicker: ReturnType<typeof setInterval> | null = null
+  function updateAbsenceTimer(el: HTMLElement): void {
+    const left = Math.max(0, Number(el.dataset.deadlineAt) - sharedServerClock.getServerNow())
+    const total = Math.ceil(left / 1000)
+    const text = `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
+    if (el.textContent !== text) el.textContent = text
+  }
+  function ensureAbsenceTicker(): void {
+    if (absenceTicker !== null) return
+    absenceTicker = setInterval(() => {
+      const timers = shell.stage.querySelectorAll<HTMLElement>('[data-svara-absence-timer]')
+      if (timers.length === 0) { clearInterval(absenceTicker!); absenceTicker = null; return }
+      timers.forEach(updateAbsenceTimer)
+    }, 250)
+  }
+
   function clearAll(): void {
+    if (absenceTicker !== null) { clearInterval(absenceTicker); absenceTicker = null }
     clearPotRaises()
     for (const sceneSeat of [...speechBubbles.keys()]) clearSpeech(sceneSeat)
     removeOwnPoints()

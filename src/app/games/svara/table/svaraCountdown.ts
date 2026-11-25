@@ -24,7 +24,7 @@ export const SVARA_DEADLINE_TOTAL_MS: Record<SvaraDeadlineKind, number> = {
   dealing: 5_000,
   turn: 15_000,
   'svara-joining': 15_000,
-  'presence-wait': 300_000,
+  'presence-wait': 15_000,
   'reveal-choice': 5_000,
   'reveal-display': 3_000,
   'showdown-display': 3_000,

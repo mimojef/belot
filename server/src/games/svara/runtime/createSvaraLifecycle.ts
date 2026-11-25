@@ -129,6 +129,7 @@ export function createSvaraLifecycle(runtime: SvaraMatchRuntime, deps: {
           else if (expired.kind === 'reveal-display') command = { type: 'close-reveal-display', roundId: expired.roundId! }
           else if (expired.kind === 'showdown-display') command = { type: 'advance-showdown-display', roundId: expired.roundId! }
           else if (expired.kind === 'payout-display') command = { type: 'close-payout-display', roundId: expired.roundId! }
+          else if (expired.kind === 'absence-limit') command = { type: 'absence-limit-expired', playerId: expired.playerId! }
           else command = { type: 'finish-presence-wait', winnerId: expired.playerId }
           // IDs have their own system namespace. Failed transitions retain the
           // expired record: a retry cannot silently grant another 15s/5min.
@@ -154,7 +155,8 @@ export function createSvaraLifecycle(runtime: SvaraMatchRuntime, deps: {
     timing(matchId: string) {
       const serverNow = clock.now()
       return { type: 'svara_match_timing' as const, matchId, revision: runtime.getMatchRevision(matchId), serverNow,
-        deadlines: [...schedules.get(matchId)?.values() ?? []].map((entry) => ({ kind: entry.kind,
+        // Бюджетът за отсъствие се показва по местата от snapshot-а (absenceDeadlineAt), не тук.
+        deadlines: [...schedules.get(matchId)?.values() ?? []].filter((entry) => entry.kind !== 'absence-limit').map((entry) => ({ kind: entry.kind,
           deadlineAt: entry.deadlineAt, remainingMs: Math.max(0, entry.deadlineAt - serverNow), playerId: entry.playerId })) }
     },
     exportDeadlines(matchId: string): SvaraDeadline[] {

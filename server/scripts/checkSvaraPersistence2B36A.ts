@@ -338,20 +338,20 @@ try {
     assert(t.stored().state.processedCommands[svaraParticipantCommandKey('b', 'committed-fold')])
     hook = undefined; t.sync(); assert.equal(t.state().roundCounter, before + 2); t.roundtrip()
   })
-  await check('five-minute single-active victory durably awards every unresolved locked bank once', () => {
+  await check('final 15-second single-active victory durably awards every unresolved locked bank once', () => {
     const t = joining(); t.s({ type: 'set-absent', playerId: 'b', absent: true }); t.s({ type: 'set-absent', playerId: 'c', absent: true }); t.sync()
-    assert.equal(t.stored().deadlines.find((d) => d.kind === 'presence-wait')!.deadlineAt, t.clock.now() + 300000)
+    assert.equal(t.stored().deadlines.find((d) => d.kind === 'presence-wait')!.deadlineAt, t.clock.now() + 15000)
     const amount = t.state().lockedPots.reduce((sum, p) => sum + p.amount, 0), stack = t.state().stacks.a!
-    t.clock.advance(300000); assert.equal(t.stored().state.winnerId, 'a'); assert.equal(t.stored().state.stacks.a, stack + amount)
+    t.clock.advance(15000); assert.equal(t.stored().state.winnerId, 'a'); assert.equal(t.stored().state.stacks.a, stack + amount)
     assert.equal(t.stored().state.finishReason, 'prolonged-absence'); assert.deepEqual(t.stored().deadlines, [])
     assert(t.stored().state.ledger.some((e) => e.type === 'absence-pot-award')); t.roundtrip()
     const ended = t.stored(); t.sync(); assert.deepEqual(t.stored(), ended)
   })
-  await check('five-minute all-absent abort closes pots without a winner or changes to free stacks', () => {
+  await check('final 15-second all-absent abort closes pots without a winner or changes to free stacks', () => {
     const t = joining(); for (const playerId of ['a', 'b', 'c']) t.s({ type: 'set-absent', playerId, absent: true }); t.sync()
     const before = t.state(), amount = before.lockedPots.reduce((sum, p) => sum + p.amount, 0)
     assert.equal(t.stored().deadlines.find((d) => d.kind === 'presence-wait')!.playerId, null)
-    t.clock.advance(300000); const after = t.stored().state
+    t.clock.advance(15000); const after = t.stored().state
     assert.equal(after.phase, 'finished'); assert.equal(after.winnerId, null); assert.equal(after.finishReason, 'all-absent')
     assert.deepEqual(after.stacks, before.stacks); assert.equal(after.removedChips, before.removedChips + amount); t.roundtrip()
   })
@@ -363,7 +363,7 @@ try {
     assert.equal((t.state().round as any)?.kind, 'reveal-choice')
     t.clock.advance(5000); assert.equal(t.stored().state.round, null); t.roundtrip()
     const stack = t.state().stacks.c!
-    t.clock.advance(300000); assert.equal(t.stored().state.stacks.c, stack + 30); assert.deepEqual(t.stored().state.carried, []); t.roundtrip()
+    t.clock.advance(15000); assert.equal(t.stored().state.stacks.c, stack + 30); assert.deepEqual(t.stored().state.carried, []); t.roundtrip()
   })
   await check('voluntary leave/closure and normal exit/finish persist terminal metadata', () => {
     const waiting = fixture(2, 1000, [], false); waiting.p('b', { type: 'leave-seat' }); waiting.roundtrip()

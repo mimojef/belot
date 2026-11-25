@@ -37,6 +37,7 @@
 
 import { performance } from 'node:perf_hooks'
 import { planSvaraDeadlines, svaraEpochNow, type SvaraDeadline } from './svaraDeadlines.js'
+import { updateSvaraAbsenceClocks } from './svaraAbsenceBudget.js'
 import { SvaraPersistenceError, type SvaraMatchPersistence, type SvaraStoredMatch } from './svaraPersistence.js'
 import { validateSvaraStoredMatch } from './svaraStoredMatchValidation.js'
 import { SvaraInvalidInputError } from '../engine/svaraCards.js'
@@ -113,6 +114,7 @@ export type SvaraSystemCommand =
   | { type: 'svara-start' }
   | { type: 'advance-allin-svara' }
   | { type: 'absence-expired'; playerId: string }
+  | { type: 'absence-limit-expired'; playerId: string }
   | { type: 'set-absent'; playerId: string; absent: boolean }
   | { type: 'activate-returns' }
   | { type: 'turn-timeout'; playerId: string; roundId: string; actionVersion: number }
@@ -215,7 +217,7 @@ export type SvaraRuntimeClientFacade = Pick<SvaraMatchRuntime, 'hasMatch' | 'isP
 // ── Помощни ─────────────────────────────────────────────────────────────────
 
 const PARTICIPANT_TYPES = new Set(['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit', 'reveal-cards', 'hide-cards'])
-const SYSTEM_TYPES = new Set(['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing', 'advance-showdown-display', 'close-payout-display'])
+const SYSTEM_TYPES = new Set(['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'absence-limit-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing', 'advance-showdown-display', 'close-payout-display'])
 const ACTION_KINDS = new Set(['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet'])
 
 const fail = (code: SvaraRuntimeErrorCode, message: string): never => {
@@ -281,7 +283,8 @@ function normalizeSystemCommand(input: SvaraSystemCommand, commandId: string): S
     case 'finish-presence-wait':
       return { type: input.type, commandId, winnerId: input.winnerId === null ? null : requireId(input.winnerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'winnerId') }
     case 'absence-expired':
-      return { type: 'absence-expired', commandId, playerId: requireId(input.playerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'playerId') }
+    case 'absence-limit-expired':
+      return { type: input.type, commandId, playerId: requireId(input.playerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'playerId') }
     case 'set-absent':
       return { type: 'set-absent', commandId, playerId: requireId(input.playerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'playerId'), absent: input.absent }
   }
@@ -324,7 +327,10 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
       const result = applySvaraMatchCommand(entry.state, command, env)
       if (result.status === 'applied') {
         const revision = entry.revision + 1
-        const planned = planSvaraDeadlines(result.state, revision, entry.deadlines, entry.deadlineSequence, now())
+        const at = now()
+        // Общият бюджет за отсъствие: отваря/затваря часовниците по новите статуси.
+        updateSvaraAbsenceClocks(result.state, at)
+        const planned = planSvaraDeadlines(result.state, revision, entry.deadlines, entry.deadlineSequence, at)
         // The candidate remains private until the synchronous SQLite COMMIT returns.
         // Failure leaves state, revision, IDs and absolute deadlines untouched.
         options.persistence?.save(stored(matchId, { state: result.state, revision, ...planned }), entry.revision)

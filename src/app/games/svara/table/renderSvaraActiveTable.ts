@@ -112,6 +112,8 @@ export type SvaraSceneSeatHud = {
   bet: number
   /** Отпаднал/отсъстващ — аватарът се затъмнява вместо надпис. */
   dim: 'eliminated' | 'absent' | null
+  /** Общият бюджет за отсъствие: сървърният момент на изчерпване (MM:SS върху карето), само докато тече. */
+  absenceDeadlineAt: number | null
 }
 
 /**
@@ -203,6 +205,7 @@ export function renderSvaraSceneSeatHuds(rawInput: RenderSvaraActiveTableInput):
       infoHtml,
       bet: betting && !snapshot.result.finished ? seat.roundContribution : 0,
       dim: seat.status === 'eliminated' ? 'eliminated' : seat.status === 'absent' && !snapshot.result.finished ? 'absent' : null,
+      absenceDeadlineAt: seat.status === 'absent' && !snapshot.result.finished ? seat.absenceDeadlineAt ?? null : null,
     }
   })
 }

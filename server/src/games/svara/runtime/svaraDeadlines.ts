@@ -1,9 +1,11 @@
 import { performance } from 'node:perf_hooks'
 import { describeSvaraLifecycle, type SvaraMatchState } from '../engine/svaraMatch.js'
+import { svaraAbsenceLimitTarget } from './svaraAbsenceBudget.js'
 
 export const SVARA_TURN_MS = 15_000
 export const SVARA_JOIN_MS = 15_000
-export const SVARA_PRESENCE_WAIT_MS = 300_000
+/** Финалният срок, когато остане само един активен (готов) играч: 15 s за завръщане, после край на мача. */
+export const SVARA_PRESENCE_WAIT_MS = 15_000
 /** 2Б.3.7.1: прозорец за избор „Покажи“/„Скрий“ след отпадането на всички противници. */
 export const SVARA_REVEAL_CHOICE_MS = 5_000
 /** 2Б.3.7.1: публичен показ на картите, само след „Покажи“. */
@@ -32,7 +34,7 @@ export function svaraDealingAnimationMs(participantCount: number): number {
   return SVARA_DEAL_ENTRY_ANIMATION_MS + participantCount * SVARA_DEAL_CARDS_PER_PLAYER * SVARA_DEAL_CARD_ANIMATION_MS
 }
 export const svaraEpochNow = () => Math.floor(performance.timeOrigin + performance.now())
-export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display' | 'showdown-display' | 'payout-display'
+export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display' | 'showdown-display' | 'payout-display' | 'absence-limit'
 export type SvaraDeadline = {
   kind: SvaraDeadlineKind
   key: string
@@ -64,5 +66,14 @@ export function planSvaraDeadlines(state: SvaraMatchState, revision: number,
   if (view.showdownDisplay?.phase === 'showdown') want('showdown-display', JSON.stringify(['showdown-display', view.roundId]), SVARA_SHOWDOWN_DISPLAY_MS, null)
   if (view.showdownDisplay?.phase === 'payout') want('payout-display', JSON.stringify(['payout-display', view.roundId]), Math.max(1, view.showdownDisplay.payoutStepCount) * SVARA_PAYOUT_STEP_MS, null)
   if (view.atBoundary && view.readyPlayerIds.length < 2) want('presence-wait', JSON.stringify(['wait', view.readyPlayerIds]), SVARA_PRESENCE_WAIT_MS, view.readyPlayerIds[0] ?? null)
+  // Общият бюджет за отсъствие: абсолютен срок от състоянието (не от „сега“),
+  // само за най-ранното изчерпване; след него планировчикът дава следващото.
+  const absence = svaraAbsenceLimitTarget(state)
+  if (absence) {
+    const key = JSON.stringify(['absence-limit', absence.playerId, absence.since])
+    const existing = previous.find((entry) => entry.kind === 'absence-limit' && entry.key === key)
+    deadlines.push(existing ?? { kind: 'absence-limit', key, generation: ++sequence, phase: 'in-progress', baseRevision: revision,
+      deadlineAt: absence.deadlineAt, playerId: absence.playerId, roundId: null, actionVersion: 0 })
+  }
   return { deadlines, deadlineSequence: sequence }
 }

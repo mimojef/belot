@@ -1342,6 +1342,8 @@ export type SvaraSnapshotSeat = {
   /** Брой карти в ръката (без самите карти) — публично видимо за всички. */
   cardCount: number
   roundContribution: number
+  /** Общият бюджет за отсъствие (6 мин за мача): сървърният момент на изчерпване, само докато тече. */
+  absenceDeadlineAt?: number
 }
 
 export type SvaraSnapshotAction = {
