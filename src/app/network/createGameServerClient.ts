@@ -937,6 +937,9 @@ export type ClientMessage =
       // Етап 2: предишната връзка на тази страница (тихо възстановяване) —
       // сървърът никога не измества друга жива сесия.
       reconnectOf?: string
+      // Етап 0 (диагностика): номер на опита в текущото прекъсване — само за
+      // сървърния лог [resume].
+      reconnectAttempt?: number
     }
   | {
       type: 'tournament_semifinal_result_acknowledge'
@@ -3778,7 +3781,7 @@ export type GameServerClient = {
   joinGuestTrial: (stake: MatchStake) => void
   leaveMatchmaking: () => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
-  resumeRoom: (roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string) => void
+  resumeRoom: (roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string, reconnectAttempt?: number) => void
   acknowledgeTournamentSemifinalResult: (tournamentId: string, semifinalMatchId: string) => void
   leaveActiveRoom: (roomId: string, acceptPenalty?: boolean) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
@@ -4124,13 +4127,14 @@ export function createGameServerClient(
   // can attach a tournament round-transition room in the background without
   // navigating to the active-room screen (see activeRoom's
   // armPendingTournamentSilentEntry / the lobby's STATE B silent attach).
-  function resumeRoom(roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string): void {
+  function resumeRoom(roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string, reconnectAttempt?: number): void {
     send({
       type: 'resume_room',
       roomId,
       reconnectToken,
       ...(silent === true ? { silent: true } : {}),
       ...(reconnectOf !== undefined ? { reconnectOf } : {}),
+      ...(reconnectAttempt !== undefined ? { reconnectAttempt } : {}),
     })
   }
 

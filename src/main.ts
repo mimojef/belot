@@ -113,9 +113,10 @@ import {
   isSameAuthSessionIdentity,
   shouldOfflineRecoveryForceLobbyReload,
   type AuthSessionIdentity,
+  type OfflineReloadDetail,
   type OfflineReloadVia,
 } from './app/network/socketReconnectPolicy'
-import { createLobbySoftReconnect, type SoftReconnectSessionCheck } from './app/network/createLobbySoftReconnect'
+import { createLobbySoftReconnect, type SoftReconnectSessionCheck, type SoftReconnectSyncFailure } from './app/network/createLobbySoftReconnect'
 import { createConnectionLivenessMonitor } from './app/network/createConnectionLivenessMonitor'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { MOBILE_LIGHT_PAGE_BACKGROUND } from './ui/layout/mobileLightPageBackground'
@@ -512,7 +513,7 @@ let lastConnectedClientId: string | null = null
 // Стаята/мястото, което се възстановява, и предишната връзка.
 let activeRoomSoftReconnectTarget: { roomId: string; reconnectToken: string; reconnectOf: string } | null = null
 // Текущият опит за resume_room: done(true) след room_resumed + авторитетен snapshot.
-let activeRoomSoftReconnectSync: { roomId: string; resumed: boolean; done: (ok: boolean) => void } | null = null
+let activeRoomSoftReconnectSync: { roomId: string; resumed: boolean; done: (ok: boolean, failure?: SoftReconnectSyncFailure) => void } | null = null
 // session_in_game за ДРУГА стая по време на възстановяването -> безопасният път.
 let activeRoomSoftReconnectMismatch = false
 let showOfflineConnectionOverlay: () => void = () => {
@@ -556,13 +557,13 @@ const SESSION_CACHE_KEY = 'pika_session_cache'
 
 // via — причината от фиксиран списък (OfflineReloadVia), без лични данни;
 // вижда се в nginx лога като ...&via=<причина>.
-function forceOfflineLobbyReload(via: OfflineReloadVia): void {
+function forceOfflineLobbyReload(via: OfflineReloadVia, detail?: OfflineReloadDetail): void {
   if (offlineLobbyReloadScheduled || isPageUnloading) return
   offlineLobbyReloadScheduled = true
 
   const navigateToFreshLobby = (): void => {
     window.setTimeout(() => {
-      window.location.replace(buildOfflineReloadUrl(Date.now(), via))
+      window.location.replace(buildOfflineReloadUrl(Date.now(), via, detail))
     }, 300)
   }
 
@@ -9009,7 +9010,7 @@ const lobbySoftReconnect = createLobbySoftReconnect({
   },
   syncLobby: (done) => lobby.beginReconnectSync(done),
   // Етап 2: вика се само след потвърдена същата сесия (/api/auth/me).
-  syncActiveRoom: (done) => {
+  syncActiveRoom: (done, attempt) => {
     const target = activeRoomSoftReconnectTarget
     if (
       target === null ||
@@ -9017,11 +9018,18 @@ const lobbySoftReconnect = createLobbySoftReconnect({
       activeRoom.getCurrentRoomId() !== target.roomId ||
       !client.isConnected()
     ) {
-      done(false)
+      // Етап 0: кое условие не е изпълнено — само за диагностиката.
+      done(false, {
+        reason: 'resume_precondition',
+        code: target === null ? 'no_target'
+          : activeRoomSoftReconnectMismatch ? 'session_in_game_other_room'
+            : activeRoom.getCurrentRoomId() !== target.roomId ? 'room_changed'
+              : 'socket_not_open',
+      })
       return
     }
     activeRoomSoftReconnectSync = { roomId: target.roomId, resumed: false, done }
-    client.resumeRoom(target.roomId, target.reconnectToken, undefined, target.reconnectOf)
+    client.resumeRoom(target.roomId, target.reconnectToken, undefined, target.reconnectOf, attempt)
   },
   onShowBanner: () => showConnectionRecoveringUi(),
   onShowActiveRoomOutage: () => activeRoom.prepareForSilentReconnect(),
@@ -9044,10 +9052,10 @@ const lobbySoftReconnect = createLobbySoftReconnect({
     voiceController?.setGameConnection(true)
     requestPwaUpdateApplyAttempt()
   },
-  onReload: (via) => {
+  onReload: (via, detail) => {
     activeRoomSoftReconnectTarget = null
     activeRoomSoftReconnectSync = null
-    forceOfflineLobbyReload(via)
+    forceOfflineLobbyReload(via, detail)
   },
 })
 
@@ -9068,11 +9076,11 @@ function getActiveRoomSoftReconnectCandidate(): { roomId: string; reconnectToken
   return activeRoom.getSilentResumeTarget()
 }
 
-function completeActiveRoomSoftReconnectSync(ok: boolean): void {
+function completeActiveRoomSoftReconnectSync(ok: boolean, failure?: SoftReconnectSyncFailure): void {
   const sync = activeRoomSoftReconnectSync
   if (sync === null) return
   activeRoomSoftReconnectSync = null
-  sync.done(ok)
+  sync.done(ok, failure)
 }
 
 client = createGameServerClient({
@@ -9416,7 +9424,7 @@ client = createGameServerClient({
       if (message.type === 'session_in_game') {
         if (message.roomId !== target.roomId) {
           activeRoomSoftReconnectMismatch = true
-          completeActiveRoomSoftReconnectSync(false)
+          completeActiveRoomSoftReconnectSync(false, { reason: 'resume_precondition', code: 'session_in_game_other_room' })
         }
         return
       }
@@ -9424,7 +9432,7 @@ client = createGameServerClient({
       if (sync !== null && message.type === 'room_resume_failed' && message.roomId === sync.roomId) {
         // Отказ (друго устройство, невалидна връзка, изтекла стая) — без
         // „лоби“ междинно състояние: следва досегашното презареждане.
-        completeActiveRoomSoftReconnectSync(false)
+        completeActiveRoomSoftReconnectSync(false, { reason: 'resume_refused', code: message.code ?? 'unspecified' })
         return
       }
       if (sync !== null && message.type === 'room_resumed' && message.roomId === sync.roomId) {

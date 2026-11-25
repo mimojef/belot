@@ -115,8 +115,52 @@ export type OfflineReloadVia =
   | 'sync' // неуспешна или просрочена синхронизация
   | 'offline_page' // public/offline.html (SW fallback) — там стойността е записана директно
 
-export function buildOfflineReloadUrl(now: number, via: OfflineReloadVia): string {
-  return `/lobby?offlineReload=${now}&via=${via}`
+/**
+ * Етап 0 (диагностика): конкретната причина за неуспешно тихо възстановяване.
+ * Само за адреса (nginx лог) — решението за презареждане не зависи от нея.
+ *   auth_timeout        — HTTP проверката на сесията не отговори в срока
+ *   auth_error          — HTTP проверката върна грешка (мрежа / 5xx)
+ *   session_changed     — сесията е друга/невалидна
+ *   resume_timeout      — resume_room е изпратен, но room_resumed + snapshot не дойдоха в срока
+ *   resume_refused      — сървърът отказа (room_resume_failed; code = неговият код)
+ *   resume_precondition — условията за resume_room не бяха изпълнени (code = кое)
+ *   resume_failed       — неуспех без конкретизация
+ *   lobby_sync_timeout / lobby_sync_failed — лоби синхронизацията
+ *   restart / stale     — друг backend процес / прекъсване над лимита
+ */
+export type SoftReconnectFailureReason =
+  | 'auth_timeout'
+  | 'auth_error'
+  | 'session_changed'
+  | 'resume_timeout'
+  | 'resume_refused'
+  | 'resume_precondition'
+  | 'resume_failed'
+  | 'lobby_sync_timeout'
+  | 'lobby_sync_failed'
+  | 'restart'
+  | 'stale'
+
+export type OfflineReloadDetail = {
+  reason: SoftReconnectFailureReason
+  /** Номер на опита в текущото прекъсване (1, 2, ...). */
+  attempt: number
+  /** Продължителност на прекъсването до решението за презареждане. */
+  outageMs: number
+  /** Машинен код (напр. other_session_active); само [a-z0-9_], до 40 знака. */
+  code?: string
+}
+
+const OFFLINE_RELOAD_CODE_PATTERN = /^[a-z0-9_]{1,40}$/
+
+export function buildOfflineReloadUrl(now: number, via: OfflineReloadVia, detail?: OfflineReloadDetail): string {
+  const base = `/lobby?offlineReload=${now}&via=${via}`
+  if (detail === undefined) return base
+  const attempt = Number.isInteger(detail.attempt) && detail.attempt >= 0 ? Math.min(detail.attempt, 1000) : 0
+  const outageMs = Number.isFinite(detail.outageMs) && detail.outageMs >= 0 ? Math.round(detail.outageMs) : 0
+  let url = `${base}&reason=${detail.reason}&attempt=${attempt}&outageMs=${outageMs}`
+  if (detail.code !== undefined) url += `&code=${OFFLINE_RELOAD_CODE_PATTERN.test(detail.code) ? detail.code : 'other'}`
+  return url
 }
 
 export type SoftReconnectAfterConnected =

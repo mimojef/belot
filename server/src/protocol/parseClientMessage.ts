@@ -290,6 +290,10 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         ...(typeof parsed.reconnectOf === 'string' && parsed.reconnectOf.length > 0 && parsed.reconnectOf.length <= 128
           ? { reconnectOf: parsed.reconnectOf }
           : {}),
+        // Етап 0 (диагностика): само цяло число 1..1000; иначе се игнорира.
+        ...(typeof parsed.reconnectAttempt === 'number' && Number.isInteger(parsed.reconnectAttempt) && parsed.reconnectAttempt >= 1 && parsed.reconnectAttempt <= 1000
+          ? { reconnectAttempt: parsed.reconnectAttempt }
+          : {}),
       }
     }
 

@@ -21,6 +21,14 @@ import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
 import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant, type PrivateRoomMatchRecord } from './db/privateRoomMatchStore.js'
 import { createLudoRoomMatchStore, type LudoRoomMatchOccupant, type LudoRoomMatchRecord } from './db/ludoRoomMatchStore.js'
 import { logLudoDiagnosticEvent } from './diagnostics/ludoDiagnosticsLog.js'
+import {
+  createRateLimitedLogWriter,
+  formatResumeRoomLogLine,
+  formatWsConnectedLogLine,
+  formatWsHandlerErrorLogLine,
+  type ResumeRoomDiagnostic,
+} from './diagnostics/reconnectDiagnostics.js'
+import { evaluateSilentActiveRoomReconnect, type SilentReconnectDecision } from './game/evaluateSilentActiveRoomReconnect.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createCoPlayRestrictionStore } from './db/coPlayRestrictionStore.js'
 import { createCoPlayRestrictionAdminHttpRequestHandler } from './coPlayRestrictions/coPlayRestrictionAdminHttpApi.js'
@@ -7877,8 +7885,9 @@ function rememberClosedRoomConnection(connectionId: ConnectionId, profileId: str
  * Валидира тихо възстановяване: reconnectOf е предишната връзка на същия
  * профил към същата стая, token-ът е на човешкото място на този профил,
  * мястото е свободно или още на предишната връзка, и профилът няма друга
- * жива сесия. null = позволено; иначе причината за отказ (без странични
- * ефекти — извиква се ПРЕДИ всяко изместване или промяна на мястото).
+ * жива сесия. Без странични ефекти — извиква се ПРЕДИ всяко изместване или
+ * промяна на мястото. Логиката е в evaluateSilentActiveRoomReconnect.ts
+ * (непроменена; добавена е само конкретната причина за диагностиката).
  */
 function validateSilentActiveRoomReconnect(input: {
   connectionId: ConnectionId
@@ -7886,42 +7895,14 @@ function validateSilentActiveRoomReconnect(input: {
   reconnectOf: string
   room: ServerRoom | null
   reconnectToken: string
-}): 'other_session_active' | 'reconnect_unavailable' | null {
-  const { connectionId, profileId, reconnectOf, room, reconnectToken } = input
-  if (profileId === null || room === null || reconnectOf === connectionId) return 'reconnect_unavailable'
-  if (room.config.isGuestTrial === true) return 'reconnect_unavailable'
-  const seatMatch = findHumanParticipantByReconnectToken(room, reconnectToken)
-  if (seatMatch === null) return 'reconnect_unavailable'
-  const ownerProfileId = seatMatch.participant.identity.profileId ?? seatMatch.participant.publicProfile?.profileId ?? null
-  if (ownerProfileId !== profileId || seatMatch.participant.permanentlyLeftAt != null) return 'reconnect_unavailable'
-
-  // Предишната връзка: още „жива“ (полуотворена) или наскоро затворена.
-  const previousLive = serverState.connections[reconnectOf as ConnectionId] ?? null
-  if (previousLive !== null) {
-    if (previousLive.profileId !== profileId || previousLive.currentRoomId !== room.id) return 'reconnect_unavailable'
-  } else {
-    const closed = recentlyClosedRoomConnections.get(reconnectOf as ConnectionId)
-    if (
-      closed === undefined ||
-      closed.profileId !== profileId ||
-      closed.roomId !== room.id ||
-      Date.now() - closed.closedAt > RECENTLY_CLOSED_ROOM_CONNECTION_TTL_MS
-    ) {
-      return 'reconnect_unavailable'
-    }
-  }
-
-  // Мястото е заето от друга връзка (друго устройство вече е в играта).
-  if (seatMatch.participant.connectionId !== null && seatMatch.participant.connectionId !== reconnectOf) {
-    return 'other_session_active'
-  }
-  // Друга жива сесия на профила (устройство/таб) — никога не се измества.
-  for (const other of Object.values(serverState.connections)) {
-    if (other.profileId !== profileId || other.status !== 'connected') continue
-    if (other.id === connectionId || other.id === reconnectOf) continue
-    return 'other_session_active'
-  }
-  return null
+}): SilentReconnectDecision {
+  return evaluateSilentActiveRoomReconnect({
+    ...input,
+    connections: serverState.connections,
+    getRecentlyClosed: (connectionId) => recentlyClosedRoomConnections.get(connectionId),
+    now: Date.now(),
+    recentlyClosedTtlMs: RECENTLY_CLOSED_ROOM_CONNECTION_TTL_MS,
+  })
 }
 
 function tryResumeRoomForConnection(
@@ -26639,6 +26620,8 @@ function logWsCloseDiagnostics(input: {
   lifetimeMs: number | null
 }): void {
   console.log('[ws-close]', JSON.stringify({
+    // Етап 0: точен UTC момент на затварянето (PM2 логът няма timestamps).
+    at: new Date().toISOString(),
     connectionId: input.connectionId,
     code: input.code,
     reason: input.reason.length > 0 ? input.reason : undefined,
@@ -26649,6 +26632,15 @@ function logWsCloseDiagnostics(input: {
     lifetimeMs: input.lifetimeMs ?? undefined,
   }))
 }
+
+// Етап 0: изключения в общия WS catch — най-много 30 реда в минута (защита
+// от наводняване на лога); пропуснатите се отчитат с един обобщаващ ред.
+const logWsHandlerError = createRateLimitedLogWriter({
+  tag: '[ws-handler-error]',
+  maxPerWindow: 30,
+  windowMs: 60_000,
+  write: (line) => console.error(line),
+})
 
 wsServer.on('connection', (socket, request) => {
   // Phase 0B — синхронният connection bootstrap (auth, pending notifications,
@@ -26753,9 +26745,12 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     }
   }
 
-  console.log(
-    `[ws] client connected: ${connection.id} (${connection.remoteAddress ?? 'unknown'}) profile=${connection.profileId ?? 'none'}`,
-  )
+  // Етап 0: същият ред + точен UTC timestamp (at=...).
+  console.log(formatWsConnectedLogLine({
+    connectionId: connection.id,
+    remoteAddress: connection.remoteAddress,
+    profileId: connection.profileId,
+  }))
 
   sendJsonMessage(socket, {
     type: 'connected',
@@ -28197,6 +28192,19 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       }
 
       if (message.type === 'resume_room') {
+        // Етап 0 — структурирана диагностика: точно един [resume] ред за всеки
+        // изход от този handler (без reconnectToken/cookies). Само наблюдение.
+        const resumeDiagnosticBase: Pick<ResumeRoomDiagnostic, 'connectionId' | 'profileId' | 'roomId' | 'mode' | 'reconnectOf' | 'reconnectAttempt'> = {
+          connectionId: connection.id,
+          profileId: connection.profileId,
+          roomId: message.roomId,
+          mode: message.reconnectOf !== undefined ? 'silent_reconnect' : message.silent === true ? 'silent_attach' : 'explicit',
+          reconnectOf: message.reconnectOf ?? null,
+          reconnectAttempt: message.reconnectAttempt ?? null,
+        }
+        const logResumeRoomOutcome = (outcome: Omit<ResumeRoomDiagnostic, keyof typeof resumeDiagnosticBase>): void => {
+          console.log(formatResumeRoomLogLine({ ...resumeDiagnosticBase, ...outcome }))
+        }
         // Round 4 §2 reconnect policy — tryResumeRoomForConnection matches
         // purely по reconnectToken (никога не проверява дали ТАЗИ connection
         // е authenticated като профила, на когото принадлежи token-ът — това
@@ -28225,6 +28233,13 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
               roomId: message.roomId,
               message: 'Невалиден код за връщане в играта.',
             })
+            logResumeRoomOutcome({
+              result: 'refused',
+              reason: 'token_owner_blocked',
+              detail: pendingProfileModerationStore.getPending(tokenOwnerProfileId) !== null
+                ? 'pending_moderation'
+                : profileBanStore.getActiveBan(tokenOwnerProfileId) !== null ? 'active_ban' : 'svara_commitment',
+            })
             return
           }
         }
@@ -28244,21 +28259,24 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             roomId: message.roomId,
             message: BELOT_ACTIVE_MATCH_CONFLICT_MESSAGE,
           })
+          logResumeRoomOutcome({ result: 'refused', reason: 'tournament_other_active_match' })
           return
         }
 
         // Етап 2 — тихо възстановяване (reconnectOf): всички проверки са тук,
         // ПРЕДИ изместване на връзки или промяна на мястото. При съмнение —
         // отказ с code и клиентът минава към изричния избор.
+        let silentPreviousConnection: 'live' | 'recently_closed' | null = null
         if (message.reconnectOf !== undefined) {
-          const silentReconnectFailure = validateSilentActiveRoomReconnect({
+          const silentReconnectDecision = validateSilentActiveRoomReconnect({
             connectionId: connection.id,
             profileId: connection.profileId,
             reconnectOf: message.reconnectOf,
             room: targetRoomForResume,
             reconnectToken: message.reconnectToken,
           })
-          if (silentReconnectFailure !== null) {
+          if (!silentReconnectDecision.ok) {
+            const silentReconnectFailure = silentReconnectDecision.code
             safeSendToConnection(connection.id, {
               type: 'room_resume_failed',
               roomId: message.roomId,
@@ -28267,9 +28285,25 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
                 : 'Играта не може да бъде възстановена автоматично.',
               code: silentReconnectFailure,
             })
+            logResumeRoomOutcome({
+              result: 'refused',
+              reason: silentReconnectFailure,
+              detail: silentReconnectDecision.detail,
+              blockingConnectionId: silentReconnectDecision.blockingConnectionId ?? null,
+              blockingConnectionAttached: silentReconnectDecision.blockingConnectionAttached ?? null,
+            })
             return
           }
+          silentPreviousConnection = silentReconnectDecision.previousConnection
         }
+
+        // Диагностика: кои живи връзки на профила ще бъдат изместени (същият
+        // филтър като displaceProfileConnections, само четене).
+        const displacedConnectionIds = connection.profileId === null
+          ? []
+          : Object.values(serverState.connections)
+            .filter((conn) => conn.profileId === connection.profileId && conn.id !== connection.id && conn.status === 'connected')
+            .map((conn) => conn.id)
 
         if (connection.profileId !== null) {
           displaceProfileConnections(connection.profileId, connection.id)
@@ -28286,6 +28320,13 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             type: 'room_resume_failed',
             roomId: message.roomId,
             message: result.message,
+          })
+          logResumeRoomOutcome({
+            result: 'refused',
+            reason: 'try_resume_failed',
+            detail: result.message,
+            previousConnection: silentPreviousConnection,
+            displacedConnectionIds,
           })
           return
         }
@@ -28310,6 +28351,13 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
               roomId: result.room.id,
               seat: result.seat,
             })
+        logResumeRoomOutcome({
+          result: 'attached',
+          reason: 'ok',
+          seat: result.seat,
+          previousConnection: silentPreviousConnection,
+          displacedConnectionIds,
+        })
 
         broadcastRoomSnapshots(result.room, socketRegistry)
         // Връщане в приключил мач, докато турнирът тече — „Преиграй“ остава
@@ -31449,6 +31497,14 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unexpected server error.'
+
+      // Етап 0: изключението досега стигаше само до клиента — сървърът не
+      // оставяше следа. Само типът на съобщението, без съдържанието му.
+      logWsHandlerError(formatWsHandlerErrorLogLine({
+        connectionId: connection.id,
+        messageType: wsTimingLabel,
+        error,
+      }))
 
       sendJsonMessage(socket, {
         type: 'error',

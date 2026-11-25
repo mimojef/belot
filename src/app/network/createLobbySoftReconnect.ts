@@ -33,11 +33,15 @@ import {
   OFFLINE_FULL_SCREEN_DELAY_MS,
   SOFT_RECONNECT_MAX_OUTAGE_MS,
   SOFT_RECONNECT_SYNC_TIMEOUT_MS,
+  type OfflineReloadDetail,
   type OfflineReloadVia,
+  type SoftReconnectFailureReason,
 } from './socketReconnectPolicy'
 
 export type SoftReconnectSessionCheck = 'same' | 'changed' | 'error'
 export type SoftReconnectContext = 'lobby' | 'active_room'
+/** Етап 0 (диагностика): защо syncActiveRoom е завършил с неуспех. */
+export type SoftReconnectSyncFailure = { reason: 'resume_refused' | 'resume_precondition' | 'resume_failed'; code?: string }
 
 export type LobbySoftReconnectDeps = {
   now: () => number
@@ -52,15 +56,17 @@ export type LobbySoftReconnectDeps = {
   /**
    * Активна стая: resume_room (с reconnectOf); done(true) едва след
    * room_resumed + авторитетен room_snapshot за същата стая. Вика се само
-   * след потвърдена същата сесия.
+   * след потвърдена същата сесия. attempt — номерът на опита в текущото
+   * прекъсване (Етап 0, само за диагностика); failure — защо е неуспешен.
    */
-  syncActiveRoom?: (done: (ok: boolean) => void) => void
+  syncActiveRoom?: (done: (ok: boolean, failure?: SoftReconnectSyncFailure) => void, attempt: number) => void
   onShowBanner: () => void
   /** Активна стая: съобщението в стаята (масата остава видима). */
   onShowActiveRoomOutage?: () => void
   onShowFullScreen: () => void
   onRecovered: (context: SoftReconnectContext) => void
-  onReload: (via: OfflineReloadVia) => void
+  /** detail — Етап 0: причина, номер на опита и продължителност (само диагностика). */
+  onReload: (via: OfflineReloadVia, detail?: OfflineReloadDetail) => void
 }
 
 export type LobbySoftReconnect = {
@@ -79,6 +85,8 @@ type Outage = {
   startedAt: number
   context: SoftReconnectContext
   phase: 'down' | 'awaiting_connected' | 'syncing' | 'reloading'
+  /** Етап 0: брой стартирани синхронизации в това прекъсване (само диагностика). */
+  attempt: number
 }
 
 export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySoftReconnect {
@@ -95,12 +103,14 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     syncTimer = null
   }
 
-  function reload(via: OfflineReloadVia): void {
+  function reload(via: OfflineReloadVia, reason: SoftReconnectFailureReason, code?: string): void {
     if (outage === null || outage.phase === 'reloading') return
     outage.phase = 'reloading'
     generation += 1
     clearTimers()
-    deps.onReload(via)
+    const detail: OfflineReloadDetail = { reason, attempt: outage.attempt, outageMs: deps.now() - outage.startedAt }
+    if (code !== undefined) detail.code = code
+    deps.onReload(via, detail)
   }
 
   function recovered(): void {
@@ -115,6 +125,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
   function startLobbySync(): void {
     if (outage === null) return
     outage.phase = 'syncing'
+    outage.attempt += 1
     generation += 1
     const syncGeneration = generation
     const startedAt = outage.startedAt
@@ -133,7 +144,14 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
         lobbySynced: lobbySynced === true,
       })
       if (outcome.kind === 'reload') {
-        reload(outcome.via)
+        // Етап 0: само причината за лога; outcome (via) е непроменен.
+        const reason: SoftReconnectFailureReason = outcome.via === 'stale' ? 'stale'
+          : session === 'changed' ? 'session_changed'
+            : session === 'error' ? 'auth_error'
+              : lobbySynced === false ? 'lobby_sync_failed'
+                : session === null ? 'auth_timeout'
+                  : 'lobby_sync_timeout'
+        reload(outcome.via, reason)
         return
       }
       recovered()
@@ -156,16 +174,26 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
   function startActiveRoomSync(): void {
     if (outage === null) return
     outage.phase = 'syncing'
+    outage.attempt += 1
     generation += 1
     const syncGeneration = generation
     const startedAt = outage.startedAt
+    const attempt = outage.attempt
     const isCurrent = (): boolean => syncGeneration === generation && outage !== null && outage.phase === 'syncing'
+    // Етап 0: докъде е стигнал опитът — за разграничаване на HTTP timeout
+    // (проверката на сесията) от resume timeout. Не влияе на решението.
+    let stage: 'auth' | 'resume' = 'auth'
 
-    const finish = (session: SoftReconnectSessionCheck, synced: boolean): void => {
+    const finish = (session: SoftReconnectSessionCheck, synced: boolean, failure?: { reason: SoftReconnectFailureReason; code?: string }): void => {
       if (!isCurrent()) return
       const outcome = decideSoftReconnectOutcome({ outageStartedAt: startedAt, now: deps.now(), session, lobbySynced: synced })
       if (outcome.kind === 'reload') {
-        reload(outcome.via)
+        const reason: SoftReconnectFailureReason = outcome.via === 'stale' ? 'stale'
+          : failure !== undefined ? failure.reason
+            : session === 'changed' ? 'session_changed'
+              : session === 'error' ? 'auth_error'
+                : 'resume_failed'
+        reload(outcome.via, reason, outcome.via === 'stale' ? undefined : failure?.code)
         return
       }
       recovered()
@@ -173,17 +201,18 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
 
     syncTimer = deps.setTimeout(() => {
       syncTimer = null
-      finish('error', false)
+      finish('error', false, { reason: stage === 'auth' ? 'auth_timeout' : 'resume_timeout' })
     }, SOFT_RECONNECT_SYNC_TIMEOUT_MS)
 
     deps.verifySession().then(
       (session) => {
         if (!isCurrent()) return
         if (session !== 'same' || deps.syncActiveRoom === undefined) {
-          finish(session, false)
+          finish(session, false, session === 'same' ? { reason: 'resume_precondition', code: 'no_sync_handler' } : undefined)
           return
         }
-        deps.syncActiveRoom((ok) => finish('same', ok))
+        stage = 'resume'
+        deps.syncActiveRoom((ok, failure) => finish('same', ok, ok ? undefined : (failure ?? { reason: 'resume_failed' })), attempt)
       },
       () => finish('error', false),
     )
@@ -192,7 +221,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
   return {
     beginOutage(context = 'lobby') {
       if (outage === null) {
-        outage = { startedAt: deps.now(), context, phase: 'down' }
+        outage = { startedAt: deps.now(), context, phase: 'down', attempt: 0 }
         generation += 1
         if (context === 'active_room') {
           deps.onShowActiveRoomOutage?.()
@@ -223,7 +252,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
       if (outage === null) return false
       if (outage.phase === 'reloading') return true
       if (deps.now() - outage.startedAt > SOFT_RECONNECT_MAX_OUTAGE_MS) {
-        reload('stale')
+        reload('stale', 'stale')
         return true
       }
       outage.phase = 'awaiting_connected'
@@ -244,7 +273,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
         serverInstanceId,
       })
       if (decision.kind === 'reload') {
-        reload(decision.via)
+        reload(decision.via, decision.via)
         return
       }
       if (outage.context === 'active_room') startActiveRoomSync()

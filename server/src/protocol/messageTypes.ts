@@ -188,6 +188,9 @@ export type ClientMessage =
       // измества друга жива сесия на профила — при съмнение отказва
       // (room_resume_failed с code) и клиентът минава към изричния избор.
       reconnectOf?: string
+      // Етап 0 (диагностика): номер на опита за тихо възстановяване в текущото
+      // прекъсване. Само за лога [resume] — не влияе на решението.
+      reconnectAttempt?: number
     }
   | {
       type: 'tournament_semifinal_result_acknowledge'
