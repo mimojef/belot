@@ -1,10 +1,10 @@
 // Свара — глас „Бягам!“ при ДОБРОВОЛЕН отказ (никога при принудителен:
 // изтекло време/отсъствие/изход). През общата система за игрови звуци
-// (playGameSound): уважава настройката „Звуци в играта“, а грешка/блокирано
+// (playSvaraSound — само в активния таб): уважава настройката „Звуци в играта“, а грешка/блокирано
 // аудио се поглъща тихо — никога не спира играта. Записът (мъжки/женски) е
 // според пола на профила на играча — виж svaraVoiceGender.
 
-import { playGameSound } from '../../../audio/gameSoundSettings'
+import { playSvaraSound } from './svaraSound'
 import { preloadSvaraVoices, svaraVoiceSrc, type SvaraVoiceGender } from './svaraVoiceGender'
 
 let preloaded = false
@@ -16,5 +16,5 @@ export function preloadSvaraFoldVoice(): void {
 }
 
 export function playSvaraFoldVoice(gender: SvaraVoiceGender): void {
-  playGameSound(svaraVoiceSrc('fold', gender), { volume: 0.7 })
+  playSvaraSound(svaraVoiceSrc('fold', gender), { volume: 0.7 })
 }

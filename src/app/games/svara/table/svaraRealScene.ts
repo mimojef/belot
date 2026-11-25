@@ -33,7 +33,7 @@ import { svaraBelotHandsSpec } from './svaraBelotHands'
 import { detectSvaraFinalCall } from './svaraBetAnimationTracker'
 import { renderSvaraBelotSeatCardHtml, renderSvaraBelotSpeechBubbleHtml, svaraBelotCardScale, svaraBelotCardSize, SVARA_BELOT_BID_BUBBLE_LIFETIME_MS, SVARA_BELOT_CARD_EDGE_MARGIN_PX } from './svaraBelotSeatCard'
 import { SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
-import { playGameSound } from '../../../audio/gameSoundSettings'
+import { playSvaraSound } from './svaraSound'
 import { getSvaraVisualSlot } from './svaraSeatLayout'
 import { svaraCardCodeToFaceSrc } from './svaraTableAssets'
 import { svaraDealingAnimationMs } from './svaraTableAnimation'
@@ -330,7 +330,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     const now = performance.now()
     if (now - lastDealSoundAt < DEAL_SOUND_MIN_GAP_MS) return
     lastDealSoundAt = now
-    playGameSound(DEAL_SOUND_SRC, { volume: DEAL_SOUND_VOLUME })
+    playSvaraSound(DEAL_SOUND_SRC, { volume: DEAL_SOUND_VOLUME })
   }
   function preloadDealSound(): void {
     if (dealSoundPreloaded || typeof Audio === 'undefined') return
@@ -512,7 +512,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
   /** Залог: чиповете на играча летят към банката; един звук, когато купчинката кацне (само при реална анимация). */
   function betChipsWithLandingSound(sceneSeat: number, k: number, delayMs: number): number {
     const remaining = betChips(sceneSeat, k, delayMs)
-    if (remaining > 0) later(remaining, () => playGameSound(CHIPS_TO_POT_SOUND_SRC, { volume: CHIPS_SOUND_VOLUME }))
+    if (remaining > 0) later(remaining, () => playSvaraSound(CHIPS_TO_POT_SOUND_SRC, { volume: CHIPS_SOUND_VOLUME }))
     return remaining
   }
 
@@ -548,7 +548,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
     later(Math.max(0, remaining - 40), () => {
       for (const sceneSeat of recipients) shell.showWinner(sceneSeat, amounts.get(sceneSeat) ?? 0, !!input?.animations)
       // Чиповете от банката стигат до спечелилия — един звук на стъпка (само при реална анимация).
-      if (remaining > 0) playGameSound(CHIPS_TO_WINNER_SOUND_SRC, { volume: CHIPS_SOUND_VOLUME })
+      if (remaining > 0) playSvaraSound(CHIPS_TO_WINNER_SOUND_SRC, { volume: CHIPS_SOUND_VOLUME })
     })
   }
 
@@ -888,7 +888,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
           // Звукът „Свара!“ — в същия момент като надписа. Този блок минава
           // веднъж на сравняване (done 'show:'); при reconnect/remount
           // сравняването се маркира като показано без надпис, затова и без звук.
-          playGameSound(SVARA_ANNOUNCE_SOUND_SRC)
+          playSvaraSound(SVARA_ANNOUNCE_SOUND_SRC)
           play(pot.map((chip, idx) => svaraSvarkaHopMove(layout!, chip.id, states[chip.id]!, idx, 3)), elapsed)
         }
         if (waitForChips > 0) later(waitForChips, startTie); else startTie()
