@@ -71,8 +71,13 @@ export function detectSvaraFinalCall(prev: SvaraSnapshotForFinalCall | null, nex
 export function svaraRaiseAmount(entry: Pick<SvaraNewBetEntry, 'kind' | 'total' | 'previousBet'>, entryChips: number): number | null {
   if (entry.kind !== 'bet' && entry.kind !== 'all-in' && entry.kind !== 'blind-bet') return null
   if (entry.total <= entry.previousBet) return null
-  if (entry.kind === 'bet' && entry.previousBet === 0 && entry.total === entryChips) return null
+  if (isSvaraOpeningPay(entry, entryChips)) return null
   return entry.total - entry.previousBet
+}
+
+/** Откриване с „Плати“ на светло: обикновен залог точно на Входа при текущ залог 0 (не е „Вдигам“). */
+export function isSvaraOpeningPay(entry: Pick<SvaraNewBetEntry, 'kind' | 'total' | 'previousBet'>, entryChips: number): boolean {
+  return entry.kind === 'bet' && entry.previousBet === 0 && entry.total === entryChips
 }
 
 export function createSvaraBetAnimationTracker(): SvaraBetAnimationTracker {

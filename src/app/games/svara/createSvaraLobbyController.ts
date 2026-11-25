@@ -32,7 +32,7 @@ import {
   type RenderSvaraActiveTableInput,
 } from './table/renderSvaraActiveTable'
 import { deriveSvaraActionButtons } from './table/svaraBettingActions'
-import { createSvaraBetAnimationTracker, detectSvaraFinalCall, svaraRaiseAmount, type SvaraNewBetEntry } from './table/svaraBetAnimationTracker'
+import { createSvaraBetAnimationTracker, detectSvaraFinalCall, isSvaraOpeningPay, svaraRaiseAmount, type SvaraNewBetEntry } from './table/svaraBetAnimationTracker'
 import { createSvaraFoldAnimationTracker, detectSvaraFinalFold } from './table/svaraFoldAnimationTracker'
 import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTracker'
 import { playSvaraLookVoice, preloadSvaraLookVoice } from './table/svaraLookVoice'
@@ -623,6 +623,9 @@ export function createSvaraLobbyController(options: Options) {
       if (seat) playBetFlash(seat.seatIndex, entry.added)
       if (seat && entry.kind === 'call') announcePay(seat.seatIndex, entry.added)
       if (seat) announceRaiseIfAny(seat.seatIndex, entry)
+      // Откриване с „Плати“ на светло (залог на Входа): не е „Вдигам“ и не е call,
+      // но е „Плати“ — същото като при call: балонче „Плащам N“, „+N“ и глас „Плащам!“.
+      if (seat && isSvaraOpeningPay(entry, snapshot.table.entryChips)) announcePay(seat.seatIndex, entry.added)
     }
     tableScene.onBets(newEntries.flatMap((entry) => {
       const seat = snapshot?.seats.find((s) => s.playerId === entry.playerId)
