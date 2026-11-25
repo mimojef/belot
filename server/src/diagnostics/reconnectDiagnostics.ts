@@ -56,9 +56,12 @@ export function formatWsConnectedLogLine(input: {
   connectionId: string
   remoteAddress: string | null
   profileId: string | null
+  /** Етап 2: handshake-ът е с удостоверителна сесия (auth=session) или без (auth=none). */
+  authenticated?: boolean
   now?: number
 }): string {
-  return `[ws] client connected: ${input.connectionId} (${input.remoteAddress ?? 'unknown'}) profile=${input.profileId ?? 'none'} at=${iso(input.now ?? Date.now())}`
+  const auth = input.authenticated === undefined ? '' : ` auth=${input.authenticated ? 'session' : 'none'}`
+  return `[ws] client connected: ${input.connectionId} (${input.remoteAddress ?? 'unknown'}) profile=${input.profileId ?? 'none'} at=${iso(input.now ?? Date.now())}${auth}`
 }
 
 export function formatResumeRoomLogLine(entry: ResumeRoomDiagnostic, now: number = Date.now()): string {

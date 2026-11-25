@@ -149,6 +149,8 @@ export type OfflineReloadDetail = {
   outageMs: number
   /** Машинен код (напр. other_session_active); само [a-z0-9_], до 40 знака. */
   code?: string
+  /** Етап 2: как е проверена сесията — ws (от connected) или http (/api/auth/me). */
+  authCheck?: 'ws' | 'http'
 }
 
 const OFFLINE_RELOAD_CODE_PATTERN = /^[a-z0-9_]{1,40}$/
@@ -160,6 +162,7 @@ export function buildOfflineReloadUrl(now: number, via: OfflineReloadVia, detail
   const outageMs = Number.isFinite(detail.outageMs) && detail.outageMs >= 0 ? Math.round(detail.outageMs) : 0
   let url = `${base}&reason=${detail.reason}&attempt=${attempt}&outageMs=${outageMs}`
   if (detail.code !== undefined) url += `&code=${OFFLINE_RELOAD_CODE_PATTERN.test(detail.code) ? detail.code : 'other'}`
+  if (detail.authCheck === 'ws' || detail.authCheck === 'http') url += `&authCheck=${detail.authCheck}`
   return url
 }
 

@@ -915,6 +915,13 @@ export type ConnectedMessage = {
   message: string
   /** Непрозрачен идентификатор на backend процеса (нов при всеки старт). */
   serverInstanceId: string
+  /**
+   * Етап 2: удостоверителната сесия на този WS handshake — непрозрачен HMAC
+   * с ключ на backend процеса (не е sessionId/token; null без сесия) и
+   * профилът. Клиентът ги сравнява с тези отпреди прекъсването.
+   */
+  authRef?: string | null
+  profileId?: string | null
 }
 
 export type PongMessage = {

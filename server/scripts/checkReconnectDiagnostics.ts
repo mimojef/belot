@@ -240,6 +240,11 @@ check('[F2] [ws] client connected: префиксът е непроменен (�
   assert(m !== null && m[1] === 'abc-1' && m[3] === PROFILE, 'старият regex вече не разчита реда')
   const guest = formatWsConnectedLogLine({ connectionId: 'g', remoteAddress: null, profileId: null, now: 0 })
   assert(guest === '[ws] client connected: g (unknown) profile=none at=1970-01-01T00:00:00.000Z', guest)
+  // Етап 2: auth=session|none в края — старият regex и at= остават разчитаеми.
+  const withAuth = formatWsConnectedLogLine({ connectionId: 'c', remoteAddress: null, profileId: PROFILE, authenticated: true, now: 0 })
+  assert(withAuth === `[ws] client connected: c (unknown) profile=${PROFILE} at=1970-01-01T00:00:00.000Z auth=session`, withAuth)
+  assert(legacyRegex.exec(withAuth)?.[3] === PROFILE, 'старият regex')
+  assert(formatWsConnectedLogLine({ connectionId: 'c', remoteAddress: null, profileId: null, authenticated: false, now: 0 }).endsWith(' auth=none'), 'auth=none')
 })
 
 check('[F3] [ws-handler-error]: тип + грешка + първи frame, един ред, ограничена дължина', () => {

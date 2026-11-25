@@ -42,6 +42,15 @@ export type SoftReconnectSessionCheck = 'same' | 'changed' | 'error'
 export type SoftReconnectContext = 'lobby' | 'active_room'
 /** Етап 0 (диагностика): защо syncActiveRoom е завършил с неуспех. */
 export type SoftReconnectSyncFailure = { reason: 'resume_refused' | 'resume_precondition' | 'resume_failed'; code?: string }
+/**
+ * Етап 2: удостоверителната сесия, видяна от сървъра при WS handshake —
+ * непрозрачен authRef (HMAC на сесията с ключ на backend процеса, не е
+ * удостоверение и не съдържа sessionId/token) и profileId. undefined = стар
+ * сървър без тези полета.
+ */
+export type ConnectedAuthIdentity = { authRef: string | null; profileId: string | null }
+/** Етап 2: как е потвърдена същата сесия при тихото възстановяване на активна стая. */
+export type SoftReconnectAuthCheck = 'ws' | 'http'
 
 export type LobbySoftReconnectDeps = {
   now: () => number
@@ -64,7 +73,13 @@ export type LobbySoftReconnectDeps = {
   /** Активна стая: съобщението в стаята (масата остава видима). */
   onShowActiveRoomOutage?: () => void
   onShowFullScreen: () => void
-  onRecovered: (context: SoftReconnectContext) => void
+  /** info.authCheck — Етап 2: 'ws' => сесията е потвърдена по WS, без /api/auth/me. */
+  onRecovered: (context: SoftReconnectContext, info?: { authCheck: SoftReconnectAuthCheck }) => void
+  /**
+   * Етап 2: профилът, с който клиентът играе (currentAuthSession) — WS
+   * идентичността трябва да съвпада и с него. Без зависимост — не се проверява.
+   */
+  getExpectedProfileId?: () => string | null
   /** detail — Етап 0: причина, номер на опита и продължителност (само диагностика). */
   onReload: (via: OfflineReloadVia, detail?: OfflineReloadDetail) => void
 }
@@ -74,8 +89,8 @@ export type LobbySoftReconnect = {
   beginOutage: (context?: SoftReconnectContext) => void
   /** WS се отвори. true = в ход е тихо възстановяване (обичайният onOpen път се пропуска). */
   handleOpen: () => boolean
-  /** Всяко 'connected' съобщение (и първото след зареждане). */
-  noteConnected: (serverInstanceId: string | undefined) => void
+  /** Всяко 'connected' съобщение (и първото след зареждане). identity — Етап 2 (undefined при стар сървър). */
+  noteConnected: (serverInstanceId: string | undefined, identity?: ConnectedAuthIdentity) => void
   isOutageActive: () => boolean
   /** Контекстът на текущото прекъсване (null — няма). */
   getOutageContext: () => SoftReconnectContext | null
@@ -87,10 +102,15 @@ type Outage = {
   phase: 'down' | 'awaiting_connected' | 'syncing' | 'reloading'
   /** Етап 0: брой стартирани синхронизации в това прекъсване (само диагностика). */
   attempt: number
+  /** Етап 2: как е потвърдена сесията при последния опит (активна стая). */
+  authCheck?: SoftReconnectAuthCheck
 }
 
 export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySoftReconnect {
   let knownServerInstanceId: string | null = null
+  // Етап 2: WS идентичността при последното свързване извън прекъсване
+  // (отправната точка за „същата сесия“). undefined — стар сървър.
+  let knownAuthIdentity: ConnectedAuthIdentity | undefined
   let outage: Outage | null = null
   let generation = 0
   let fullScreenTimer: unknown = null
@@ -110,16 +130,19 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     clearTimers()
     const detail: OfflineReloadDetail = { reason, attempt: outage.attempt, outageMs: deps.now() - outage.startedAt }
     if (code !== undefined) detail.code = code
+    if (outage.authCheck !== undefined) detail.authCheck = outage.authCheck
     deps.onReload(via, detail)
   }
 
   function recovered(): void {
     if (outage === null) return
     const context = outage.context
+    const authCheck = outage.authCheck
     outage = null
     generation += 1
     clearTimers()
-    deps.onRecovered(context)
+    if (authCheck === undefined) deps.onRecovered(context)
+    else deps.onRecovered(context, { authCheck })
   }
 
   function startLobbySync(): void {
@@ -171,7 +194,10 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
   }
 
   // Активна стая: сесията ПЪРВО; resume_room само след потвърдена същата сесия.
-  function startActiveRoomSync(): void {
+  // Етап 2: при нов сървър сесията се потвърждава веднага от 'connected'
+  // (WS handshake-ът вече е удостоверил връзката) — без да се чака HTTP.
+  // При стар сървър — досегашната проверка през /api/auth/me.
+  function startActiveRoomSync(identity: ConnectedAuthIdentity | undefined): void {
     if (outage === null) return
     outage.phase = 'syncing'
     outage.attempt += 1
@@ -204,6 +230,31 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
       finish('error', false, { reason: stage === 'auth' ? 'auth_timeout' : 'resume_timeout' })
     }, SOFT_RECONNECT_SYNC_TIMEOUT_MS)
 
+    const known = knownAuthIdentity
+    if (identity !== undefined && known !== undefined) {
+      outage.authCheck = 'ws'
+      const expectedProfileId = deps.getExpectedProfileId?.()
+      const sameSession =
+        identity.authRef !== null &&
+        identity.authRef === known.authRef &&
+        identity.profileId === known.profileId &&
+        (expectedProfileId === undefined || identity.profileId === expectedProfileId)
+      if (!sameSession) {
+        // Сменена, изтекла или оттеглена сесия, или друг профил — досегашното
+        // безопасно презареждане (via=session), без resume_room.
+        finish('changed', false, { reason: 'session_changed', code: identity.authRef === null ? 'ws_session_missing' : 'ws_identity_changed' })
+        return
+      }
+      if (deps.syncActiveRoom === undefined) {
+        finish('same', false, { reason: 'resume_precondition', code: 'no_sync_handler' })
+        return
+      }
+      stage = 'resume'
+      deps.syncActiveRoom((ok, failure) => finish('same', ok, ok ? undefined : (failure ?? { reason: 'resume_failed' })), attempt)
+      return
+    }
+
+    outage.authCheck = 'http'
     deps.verifySession().then(
       (session) => {
         if (!isCurrent()) return
@@ -258,11 +309,12 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
       outage.phase = 'awaiting_connected'
       return true
     },
-    noteConnected(serverInstanceId) {
+    noteConnected(serverInstanceId, identity) {
       if (outage === null) {
         // Обикновено свързване (първо, след login, извън тихото възстановяване):
         // текущият процес става отправна точка.
         if (typeof serverInstanceId === 'string' && serverInstanceId.length > 0) knownServerInstanceId = serverInstanceId
+        knownAuthIdentity = identity
         return
       }
       if (outage.phase !== 'awaiting_connected') return
@@ -276,7 +328,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
         reload(decision.via, decision.via)
         return
       }
-      if (outage.context === 'active_room') startActiveRoomSync()
+      if (outage.context === 'active_room') startActiveRoomSync(identity)
       else startLobbySync()
     },
     isOutageActive() {

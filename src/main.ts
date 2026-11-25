@@ -116,7 +116,7 @@ import {
   type OfflineReloadDetail,
   type OfflineReloadVia,
 } from './app/network/socketReconnectPolicy'
-import { createLobbySoftReconnect, type SoftReconnectSessionCheck, type SoftReconnectSyncFailure } from './app/network/createLobbySoftReconnect'
+import { createLobbySoftReconnect, type ConnectedAuthIdentity, type SoftReconnectSessionCheck, type SoftReconnectSyncFailure } from './app/network/createLobbySoftReconnect'
 import { isOtherGameErrorForBelot } from './app/network/serverErrorCorrelation'
 import { createConnectionLivenessMonitor } from './app/network/createConnectionLivenessMonitor'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
@@ -9040,12 +9040,18 @@ const lobbySoftReconnect = createLobbySoftReconnect({
   onShowBanner: () => showConnectionRecoveringUi(),
   onShowActiveRoomOutage: () => activeRoom.prepareForSilentReconnect(),
   onShowFullScreen: () => showConnectionLostFullScreen(),
-  onRecovered: (context) => {
+  // Етап 2: WS идентичността трябва да съвпада и с профила, с който играем.
+  getExpectedProfileId: () => currentAuthSession?.profile.profileId ?? null,
+  onRecovered: (context, info) => {
     if (context === 'active_room') {
       activeRoomSoftReconnectTarget = null
       activeRoomSoftReconnectSync = null
       pwaIsReconnectingActiveRoom = false
       hideConnectionRecoveryUi()
+      // Етап 2: сесията е потвърдена по WS — /api/auth/me се прави след това,
+      // във фона (опресняване на профила + подновяване на сесията), без да
+      // блокира и без да решава нищо за възстановяването.
+      if (info?.authCheck === 'ws') refreshAuthSessionInBackground()
       // Гласът: едва след прикрепянето към мястото (сървърът приема presence
       // само от връзката на мястото); работещата LiveKit връзка не се пипа.
       voiceController?.setGameConnection(true)
@@ -9080,6 +9086,55 @@ function getActiveRoomSoftReconnectCandidate(): { roomId: string; reconnectToken
     return null
   }
   return activeRoom.getSilentResumeTarget()
+}
+
+// Етап 2: идентичността от 'connected'; undefined — стар сървър (без полетата).
+function readConnectedAuthIdentity(message: { authRef?: string | null; profileId?: string | null }): ConnectedAuthIdentity | undefined {
+  if (!('authRef' in message)) return undefined
+  return {
+    authRef: typeof message.authRef === 'string' && message.authRef.length > 0 ? message.authRef : null,
+    profileId: typeof message.profileId === 'string' && message.profileId.length > 0 ? message.profileId : null,
+  }
+}
+
+// Етап 2: неблокиращо /api/auth/me след тихо възстановяване по WS. Резултатът
+// се прилага САМО ако: (1) това е последната такава заявка; (2) клиентът е
+// още в същата сесия, в която е тръгнала; (3) отговорът е за същата сесия и
+// профил. Иначе се игнорира — закъснял отговор не презаписва друга сесия.
+// Не се повтаря; мрежова грешка/timeout не променят нищо.
+const BACKGROUND_AUTH_REFRESH_TIMEOUT_MS = 15_000
+let backgroundAuthRefreshSeq = 0
+function refreshAuthSessionInBackground(): void {
+  const requestSeq = ++backgroundAuthRefreshSeq
+  const expected = toAuthSessionIdentity(currentAuthSession)
+  if (expected === null) return
+  const abortController = typeof AbortController === 'undefined' ? null : new AbortController()
+  const timeoutId = window.setTimeout(() => abortController?.abort(), BACKGROUND_AUTH_REFRESH_TIMEOUT_MS)
+  void (async () => {
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/auth/me`, {
+        method: 'GET', credentials: 'include', cache: 'no-store', signal: abortController?.signal,
+      })
+      if (response.status >= 500) return
+      const data = await readAuthResponse(response)
+      if (requestSeq !== backgroundAuthRefreshSeq) return
+      if (!isSameAuthSessionIdentity(expected, toAuthSessionIdentity(currentAuthSession))) return
+      const session = data.ok ? data.session ?? null : null
+      if (session === null || !isSameAuthSessionIdentity(expected, toAuthSessionIdentity(session))) {
+        // Отговор за друга/липсваща сесия: не се прилага. Ако сесията наистина
+        // е отнета, сървърът затваря WS връзките ѝ и следва досегашният път.
+        console.warn('[auth] background /api/auth/me returned a different session — ignored')
+        return
+      }
+      currentAuthSession = session
+      saveSessionCache(session)
+      syncLobbyWithAuthSession()
+    } catch {
+      // мрежова грешка / timeout — без промяна
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+  })()
 }
 
 function completeActiveRoomSoftReconnectSync(ok: boolean, failure?: SoftReconnectSyncFailure): void {
@@ -9421,7 +9476,8 @@ client = createGameServerClient({
         requestPwaUpdateApplyAttempt()
       })
       // Отправна точка за backend процеса / продължение на тихото възстановяване.
-      lobbySoftReconnect.noteConnected(message.serverInstanceId)
+      // Етап 2: + удостоверителната сесия на този handshake (липсва при стар сървър).
+      lobbySoftReconnect.noteConnected(message.serverInstanceId, readConnectedAuthIdentity(message))
       return
     }
 

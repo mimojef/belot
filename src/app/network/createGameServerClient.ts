@@ -1766,6 +1766,13 @@ export type ConnectedMessage = {
   message: string
   /** Непрозрачен идентификатор на backend процеса; липсва при стар сървър. */
   serverInstanceId?: string
+  /**
+   * Етап 2: удостоверителната сесия на този WS handshake — непрозрачен HMAC
+   * с ключ на backend процеса (не е sessionId/token; null без сесия) и
+   * профилът; липсват при стар сървър. Клиентът ги сравнява с тези отпреди прекъсването.
+   */
+  authRef?: string | null
+  profileId?: string | null
 }
 
 export type PongMessage = {

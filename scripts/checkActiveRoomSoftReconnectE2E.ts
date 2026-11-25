@@ -160,6 +160,11 @@ type Controlled = {
   reconnect: () => void
   /** Еднократно: затваря връзката веднага след изпращане на съобщение от този тип. */
   armDropAfter: (type: string, reconnectAfterMs: number) => void
+  /** Еднократно: задържа следващото съобщение от този тип към сървъра с ms (Етап 2). */
+  delayNext: (type: string, ms: number) => void
+  /** Етап 2: /api/auth/me заявки на страницата (започнати / завършени). */
+  authMeStarted: () => number
+  authMeFinished: () => number
 }
 
 async function openControlled(h: GiftBackHarness, label: string, profile: TestProfile, viewport: { width: number; height: number }): Promise<Controlled> {
@@ -173,6 +178,7 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
   let opened = 0
   let blocked = false
   let armed: { type: string; reconnectAfterMs: number } | null = null
+  let delayed: { type: string; ms: number } | null = null
   let current: { page: WebSocketRoute; server: WebSocketRoute } | null = null
   const parse = (m: string | Buffer): Frame | null => {
     try {
@@ -199,6 +205,12 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
     ws.onMessage((m) => {
       const f = parse(m)
       if (f) sent.push(f)
+      if (f && delayed !== null && f.type === delayed.type) {
+        const ms = delayed.ms
+        delayed = null
+        setTimeout(() => { try { server.send(m) } catch { /* затворена */ } }, ms)
+        return
+      }
       server.send(m)
       if (f && armed !== null && f.type === armed.type) {
         const reconnectAfterMs = armed.reconnectAfterMs
@@ -220,6 +232,10 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
   const errors: string[] = []
   page.on('pageerror', (error) => errors.push(error.message))
   page.on('request', (req) => { if (req.url().includes('offlineReload=')) offlineReloads.push(req.url()) })
+  let authMeStarted = 0
+  let authMeFinished = 0
+  page.on('request', (req) => { if (req.url().includes('/api/auth/me')) authMeStarted += 1 })
+  page.on('requestfinished', (req) => { if (req.url().includes('/api/auth/me')) authMeFinished += 1 })
   await page.goto(`${h.appOrigin}/lobby`)
   await page.locator(LOBBY_READY).first().waitFor({ state: 'attached', timeout: 25_000 })
   await page.waitForTimeout(800)
@@ -230,6 +246,9 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
     disconnect,
     reconnect() { blocked = false },
     armDropAfter(type, reconnectAfterMs) { armed = { type, reconnectAfterMs } },
+    delayNext(type, ms) { delayed = { type, ms } },
+    authMeStarted: () => authMeStarted,
+    authMeFinished: () => authMeFinished,
   }
 }
 
@@ -350,6 +369,12 @@ if (process.env.SOFT_RECONNECT_E2E_PHASE !== '2') {
     const autoP = startAutopilot(P, roomP)
     const autoM = startAutopilot(M, roomM)
 
+    // Етап 2: от тук до края на [R2] /api/auth/me на P НИКОГА не отговаря —
+    // тихото възстановяване трябва да мине само по WS.
+    await P.page.route('**/api/auth/me', () => { /* блокирана: без отговор */ })
+    const authFinishedBeforeR1 = P.authMeFinished()
+    const authStartedBeforeR1 = P.authMeStarted()
+
     // ── [R1] прекъсване веднага след „Пас“ ──
     await waitUntil('P bidding turn', () => lastSnapshot(P, roomP)?.game?.bidding?.canSubmitBid === true && !isMeBotControlled(lastSnapshot(P, roomP)), 90_000, 100)
     autoP.paused = true
@@ -401,6 +426,12 @@ if (process.env.SOFT_RECONNECT_E2E_PHASE !== '2') {
       assert((await getMarker(P.page)) === markerP && P.offlineReloads.length === 0, 'reload')
       await P.page.screenshot({ path: join(screenshotsDir, 'R2-desktop-after-card-drop.png') })
     })
+    await check('[R1-R2] Етап 2: възстановяване без отговор от /api/auth/me (блокирана); фоновата заявка се изпраща след него', async () => {
+      assert(P.authMeFinished() === authFinishedBeforeR1, `/api/auth/me е завършила: ${P.authMeFinished() - authFinishedBeforeR1}`)
+      assert(P.authMeStarted() > authStartedBeforeR1, 'фоновото /api/auth/me след възстановяването не е изпратено')
+      assert(P.offlineReloads.length === 0, `reload: ${P.offlineReloads.join(',')}`)
+    })
+    await P.page.unroute('**/api/auth/me')
 
     // ── [R3] по-дълго прекъсване: ходът изтича -> бот; ново раздаване ──
     const before = lastSnapshot(P, roomP)
@@ -446,26 +477,36 @@ if (process.env.SOFT_RECONNECT_E2E_PHASE !== '2') {
       assert(probes === 0, `Ludo проба при активна Белот маса: ${probes}`)
       const ludoErrors = cycles.flatMap((c) => c.receivedAfter).filter((f) => f.type === 'error' && f.data.code === 'ludo_match_not_found').length
       assert(ludoErrors === 0, `Ludo грешки към масата: ${ludoErrors}`)
-      // Забавена HTTP проверка на сесията -> видим прозорец „транспорт отворен, играта не е синхронизирана“.
-      await M.page.route('**/api/auth/me', async (route) => { await sleep(2_500); await route.continue() })
-      try {
-        M.disconnect()
-        await sleep(600)
-        const textDown = await M.page.evaluate(`document.querySelector('${ROOM_BANNER}')?.textContent ?? null`)
-        assert(textDown === 'Връзката със сървъра се възстановява...', `затворен транспорт: ${textDown}`)
-        M.reconnect()
-        const resyncing = await waitForExpr(M.page, `document.querySelector('${ROOM_BANNER}')?.textContent === 'Възстановяване на играта...'`, 10_000)
-        assert(resyncing, 'банерът не показа „Възстановяване на играта...“ при отворен транспорт')
-        assert(await waitForExpr(M.page, `!document.querySelector('${ROOM_BANNER}')`, 20_000), 'банерът не изчезна след синхронизацията')
-      } finally {
-        await M.page.unroute('**/api/auth/me')
-      }
+      // Задържан resume_room -> видим прозорец „транспорт отворен, играта не е
+      // синхронизирана“ (Етап 2: сесията вече не се чака по HTTP).
+      M.disconnect()
+      await sleep(600)
+      const textDown = await M.page.evaluate(`document.querySelector('${ROOM_BANNER}')?.textContent ?? null`)
+      assert(textDown === 'Връзката със сървъра се възстановява...', `затворен транспорт: ${textDown}`)
+      M.delayNext('resume_room', 2_500)
+      M.reconnect()
+      const resyncing = await waitForExpr(M.page, `document.querySelector('${ROOM_BANNER}')?.textContent === 'Възстановяване на играта...'`, 10_000)
+      assert(resyncing, 'банерът не показа „Възстановяване на играта...“ при отворен транспорт')
+      assert(await waitForExpr(M.page, `!document.querySelector('${ROOM_BANNER}')`, 20_000), 'банерът не изчезна след синхронизацията')
       assert(M.offlineReloads.length === 0, `reload: ${M.offlineReloads.join(',')}`)
     })
     autoP.stop()
     autoM.stop()
     await check('[R1-R4] без грешки в конзолата на страниците', () => {
       assert(P.errors.length === 0 && M.errors.length === 0, JSON.stringify([...P.errors, ...M.errors].slice(0, 3)))
+    })
+    // ── [R11] Етап 2: сесията е оттеглена по време на прекъсването ──
+    await check('[R11] оттеглена сесия по време на прекъсването -> без resume_room, досегашният reload via=session (authCheck=ws)', async () => {
+      const sentFrom = P.sent.length
+      P.disconnect()
+      await sleep(500)
+      const res = await fetch(`${h.backendOrigin}/api/auth/logout`, { method: 'POST', headers: { Cookie: `belot_session=${P.profile.cookie}` } })
+      assert(res.status < 500, `logout ${res.status}`)
+      P.reconnect()
+      await waitUntil('reload via=session', () => P.offlineReloads.find((u) => u.includes('via=session')), 20_000)
+      const url = P.offlineReloads.find((u) => u.includes('via=session'))!
+      assert(url.includes('authCheck=ws') && url.includes('reason=session_changed') && url.includes('code=ws_session_missing'), url)
+      assert(!P.sent.slice(sentFrom).some((f) => f.type === 'resume_room' && typeof f.data.reconnectOf === 'string'), 'resume_room с оттеглена сесия')
     })
   } catch (error) {
     console.error('  FAIL  неочаквана грешка (фаза 1):', error instanceof Error ? error.stack : error)

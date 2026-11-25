@@ -29,6 +29,7 @@ import {
   type ResumeRoomDiagnostic,
 } from './diagnostics/reconnectDiagnostics.js'
 import { evaluateSilentActiveRoomReconnect, type SilentReconnectDecision } from './game/evaluateSilentActiveRoomReconnect.js'
+import { createConnectedAuthRefFactory } from './core/connectedAuthRef.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createCoPlayRestrictionStore } from './db/coPlayRestrictionStore.js'
 import { createCoPlayRestrictionAdminHttpRequestHandler } from './coPlayRestrictions/coPlayRestrictionAdminHttpApi.js'
@@ -26583,6 +26584,9 @@ const wsServer = new WebSocketServer({
 // рестарт (паметта на сървъра е загубена) -> безопасно презареждане.
 // Не съдържа данни за хоста/процеса.
 const SERVER_INSTANCE_ID = randomUUID()
+// Етап 2: непрозрачен идентификатор на удостоверителната сесия в 'connected'
+// (HMAC с ключ на този процес — виж core/connectedAuthRef.ts).
+const buildConnectedAuthRef = createConnectedAuthRefFactory()
 
 // ─── WS close diagnostics (disconnect-lifecycle observability, no new policy) ─
 // Компактен, structured log за ВСЕКИ WS close, за да различаваме explicit
@@ -26750,6 +26754,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     connectionId: connection.id,
     remoteAddress: connection.remoteAddress,
     profileId: connection.profileId,
+    authenticated: connection.sessionId !== null,
   }))
 
   sendJsonMessage(socket, {
@@ -26757,6 +26762,10 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     clientId: connection.id,
     message: 'Connected to Belot V2 server.',
     serverInstanceId: SERVER_INSTANCE_ID,
+    // Етап 2: сесията, с която е удостоверен този handshake (непрозрачно) и
+    // профилът — клиентът потвърждава „същата сесия“ без /api/auth/me.
+    authRef: buildConnectedAuthRef(connection.sessionId),
+    profileId: connection.profileId,
   })
 
   // Фаза 10 — bootstrap flush на всяко ново connection (login/reconnect/
