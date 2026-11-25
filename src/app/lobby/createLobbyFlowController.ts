@@ -2217,6 +2217,8 @@ type InternalLobbyFlowState = {
   bundlePurchaseMessageText: string | null
   /** /games/svara — 'granted' едва след потвърждение от сървъра (виж showSvaraPage). */
   svaraPageStatus: SvaraPageStatus
+  /** Свара — активна игра (виж setSvaraActiveGame); избира мобилната рамка. */
+  svaraActiveGame: boolean
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -3096,6 +3098,7 @@ function createInitialState(): InternalLobbyFlowState {
     bundlePurchaseActionPackageId: null,
     bundlePurchaseMessageText: null,
     svaraPageStatus: 'checking',
+    svaraActiveGame: readSvaraActiveGameHint(),
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -3744,6 +3747,20 @@ type TopicThreadWindow = {
   ownReplyNoticeSeq: number | null
 }
 
+// Свара — подсказка за мобилната рамка при refresh, докато сървърът още не е
+// потвърдил състоянието (само за първия кадър; истината идва от съобщенията,
+// виж setSvaraActiveGame). Пази се за таба (sessionStorage).
+const SVARA_ACTIVE_GAME_HINT_KEY = 'pika.svaraActiveGame'
+function readSvaraActiveGameHint(): boolean {
+  try { return sessionStorage.getItem(SVARA_ACTIVE_GAME_HINT_KEY) === '1' } catch { return false }
+}
+function writeSvaraActiveGameHint(active: boolean): void {
+  try {
+    if (active) sessionStorage.setItem(SVARA_ACTIVE_GAME_HINT_KEY, '1')
+    else sessionStorage.removeItem(SVARA_ACTIVE_GAME_HINT_KEY)
+  } catch { /* личен режим — само подсказка */ }
+}
+
 export function createLobbyFlowController(
   options: CreateLobbyFlowControllerOptions,
 ): LobbyFlowController {
@@ -3964,6 +3981,7 @@ export function createLobbyFlowController(
     setTiming: (timing: SvaraMatchTimingMessage | null) => void
     showMessage: (message: string) => void
     getMyTableId: () => string | null
+    getMyTable: () => SvaraPublicTable | null
     isInActiveMatch: () => boolean
     onCommandResult: (commandId: string) => void
     onCommandError: (message: string, commandId?: string) => void
@@ -3971,6 +3989,7 @@ export function createLobbyFlowController(
     requestExit: () => void
   } | null = null
   let _isOpeningSvaraLobbyOverlay = false
+  let _svaraLobbyModule: typeof import('../games/svara/createSvaraLobbyController') | null = null
   // A parent UI refresh may remount the view while the user edits this form.
   const svaraCreateDialogState: SvaraCreateDialogState = { open: false, draft: { capacity: 2, entryFee: 5000, startMode: 'auto' }, options: null }
   // Пази последната приложена ревизия ПО matchId, независимо от mount
@@ -4006,8 +4025,26 @@ export function createLobbyFlowController(
     _svaraLastSnapshotRevision = null
     _svaraLastSnapshot = null
     _svaraLastTiming = null
+    _svaraRemountMyTable = null
     _svaraLobbyController?.setMyTable(null)
+    setSvaraActiveGame(false)
   }
+  // Мобилната рамка на Свара: светлата е само за предигровите екрани (списък,
+  // чакаща маса), активната игра остава в досегашната тъмна. Флагът живее тук
+  // (не в контролера на Свара, който при remount започва без маса) и следва
+  // само сървърните съобщения за собствената маса — същите, от които
+  // контролерът определя активната маса. Смяна → нов render на рамката (само
+  // на телефон, където рамката зависи от него).
+  function setSvaraActiveGame(active: boolean): void {
+    if (state.svaraActiveGame === active) return
+    state.svaraActiveGame = active
+    writeSvaraActiveGameHint(active)
+    if (state.currentScreen === 'svara' && isPhoneLayoutViewport()) render()
+  }
+  // Масата на контролера, пренесена през принудителен remount (смяна на
+  // рамката или несвързан full-root render): новият instance я получава веднага,
+  // вместо за миг да покаже списъка до следващия svara_tables_list.
+  let _svaraRemountMyTable: SvaraPublicTable | null = null
   function finishSvaraReconnect(): void {
     _svaraReconnect = null
     options.onSvaraReconnectResolved?.()
@@ -4114,7 +4151,10 @@ export function createLobbyFlowController(
       if (!profileId) return
       const mountRoot = options.root.querySelector<HTMLElement>('[data-svara-lobby-mount="1"]')
       if (!mountRoot) return
-      const { createSvaraLobbyController } = await import('../games/svara/createSvaraLobbyController')
+      // Вече зареденият модул се ползва синхронно: принудителният remount
+      // (смяна на мобилната рамка, несвързан full-root render) не оставя
+      // нарисуван кадър с празна маса, докато await import() се разреши.
+      const { createSvaraLobbyController } = _svaraLobbyModule ?? (_svaraLobbyModule = await import('../games/svara/createSvaraLobbyController'))
       const liveMountRoot = mountRoot.isConnected
         ? mountRoot
         : options.root.querySelector<HTMLElement>('[data-svara-lobby-mount="1"]')
@@ -4140,6 +4180,8 @@ export function createLobbyFlowController(
       // за пълния race, който това затваря). Безопасно дори ако matchId не
       // съвпада с току-що mount-натата маса — renderSvaraActiveTable.ts
       // изрично сверява snapshot.matchId === table.matchId, преди да го ползва.
+      if (_svaraRemountMyTable) _svaraLobbyController.setMyTable(_svaraRemountMyTable)
+      _svaraRemountMyTable = null
       if (_svaraLastSnapshot) {
         _svaraLastSnapshotRevision = { matchId: _svaraLastSnapshot.matchId, revision: _svaraLastSnapshot.revision }
         _svaraLobbyController.setSnapshot(_svaraLastSnapshot)
@@ -4153,6 +4195,7 @@ export function createLobbyFlowController(
   function closeSvaraLobbyOverlay(): void {
     _svaraLobbyController?.destroy()
     _svaraLobbyController = null
+    _svaraRemountMyTable = null
     // Следващият mount-нат controller instance стартира с чисто snapshot
     // състояние (нов createSvaraLobbyController() closure) — тракерът на
     // ревизията трябва да се нулира заедно с него, иначе първият push след
@@ -5960,6 +6003,7 @@ export function createLobbyFlowController(
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       canShowSvaraEntry: canShowSvaraEntry(authSession),
       svaraPageStatus: state.svaraPageStatus,
+      svaraActiveGame: state.svaraActiveGame,
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
       lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
@@ -8868,7 +8912,9 @@ export function createLobbyFlowController(
           // _svaraLastSnapshotRevision, оставяйки guard-а да отхвърля
           // ПЪРВИЯ (валиден) snapshot след remount-а завинаги, защото все
           // още сочи към ревизията на ПРЕДИШНИЯ (вече унищожен) instance.
+          const carriedMyTable = _svaraLobbyController.getMyTable()
           closeSvaraLobbyOverlay()
+          _svaraRemountMyTable = carriedMyTable
           void openSvaraLobbyOverlay()
         }
       } else {
@@ -22436,6 +22482,13 @@ export function createLobbyFlowController(
           options.onSvaraTableStateRequest?.(owned.matchId)
         }
       }
+      // Рамката: същото разпознаване като setTables в контролера — само докато
+      // той (или пренесеното при remount) още няма собствена маса.
+      if (!_svaraLobbyController?.getMyTableId() && !_svaraRemountMyTable) {
+        const profileId = options.getAuthSession?.()?.profile.profileId
+        const owned = message.tables.find((table) => table.players.some((p) => p.playerId === profileId && p.status !== 'exited'))
+        setSvaraActiveGame(owned !== undefined && owned.phase !== 'lobby')
+      }
       _svaraLobbyController?.setTables(message.tables)
       return true
     }
@@ -22446,6 +22499,8 @@ export function createLobbyFlowController(
         _svaraDismissedMatches.delete(message.table.matchId)
       }
       _svaraLobbyController?.setMyTable(message.table)
+      if (!_svaraLobbyController && _svaraRemountMyTable) _svaraRemountMyTable = message.table
+      setSvaraActiveGame(message.table.phase !== 'lobby')
       return true
     }
     if (message.type === 'svara_table_left') {
@@ -22459,7 +22514,9 @@ export function createLobbyFlowController(
       // маса, преди реалният fresh round-trip да пристигне.
       _svaraLastSnapshot = null
       _svaraLastTiming = null
+      _svaraRemountMyTable = null
       _svaraLobbyController?.setMyTable(null)
+      setSvaraActiveGame(false)
       if (state.currentScreen === 'svara') options.onSvaraTablesOpen?.()
       return true
     }

@@ -42,6 +42,7 @@ import { playSvaraAllInVoice, playSvaraBetVoice, playSvaraBlindVoice, playSvaraP
 import { getSvaraDecisionWindow, patchSvaraDecisionWindow } from './table/svaraDecisionWindows'
 import { fetchSvaraTableCreationOptions, type SvaraTableCreationOptions } from './svaraAccess'
 import { createSvaraRealScene } from './table/svaraRealScene'
+import { VIOLET_3D_BUTTON_CLASS } from '../../../ui/layout/violet3dButton'
 import { computeSvaraResultVisualState } from './table/svaraResultAnimation'
 
 export type SvaraCreateDialogState = {
@@ -71,6 +72,24 @@ type Options = {
 const esc = (value: unknown) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]!)
 const amountFormatter = new Intl.NumberFormat('bg-BG', { useGrouping: 'always' })
 const formatAmount = (value: number): string => amountFormatter.format(value)
+
+// ─── Светъл мобилен вариант (телефон, само предигровите екрани) ─────────
+// Включва се, когато mount-ът е в data-lobby-member-mobile-light (рамката я
+// дава само извън активна игра — виж isMobileSvaraLobbyView в
+// renderLobbyScreen.ts) и масата не е активна; активната маса никога не е светла.
+// Стиловете са тези на светлото мобилно Ludo (createLudoLobbyController.ts).
+const LIGHT_PANEL_STYLE = 'box-sizing:border-box;min-width:0;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:12px;padding:12px;box-shadow:0 1px 2px rgba(16,24,40,0.05);'
+const LIGHT_PRIMARY_BUTTON_STYLE = 'border:0;border-radius:10px;color:#FFFFFF;font-family:inherit;font-weight:800;cursor:pointer;white-space:nowrap;'
+const LIGHT_SECONDARY_BUTTON_STYLE = 'box-sizing:border-box;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;color:#6941C6;font-family:inherit;font-weight:800;cursor:pointer;white-space:nowrap;'
+const LIGHT_DANGER_BUTTON_STYLE = 'box-sizing:border-box;border:1px solid #FECDCA;border-radius:10px;background:#FFFFFF;color:#B42318;font-family:inherit;font-weight:800;cursor:pointer;white-space:nowrap;'
+const LIGHT_META_STYLE = 'font-size:12.5px;line-height:1.4;font-weight:600;color:#667085;'
+const LIGHT_FIELD_STYLE = 'width:100%;max-width:100%;min-width:0;box-sizing:border-box;height:44px;background:#FFFFFF;color:#111827;border:1px solid #D0D5DD;border-radius:8px;padding:0 12px;font-family:inherit;font-size:16px;color-scheme:light;'
+const LIGHT_MESSAGE_STYLE = 'background:#FFFAEB;border:1px solid #FEDF89;color:#B54708;'
+const LIGHT_FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif"
+const LIGHT_PRIMARY_CLASS = `lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}`
+const LIGHT_EMPTY_ICON_URL = '/assets/lobby-mobile/icons/icon-private-tables-svara.webp'
+const backChevronSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>'
+const createPlusSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg>'
 
 const STATUS_LABEL: Record<SvaraSeatStatus, string> = {
   active: 'активен',
@@ -149,12 +168,30 @@ export function createSvaraLobbyController(options: Options) {
   const button = 'border:1px solid rgba(212,165,32,.55);border-radius:7px;background:#0b0b0b;color:#f4c95b;min-height:40px;padding:0 16px;font-weight:800;cursor:pointer;'
   const panel = 'background:#090909;border:1px solid rgba(212,165,32,.35);border-radius:8px;padding:16px;'
   const createButtonStyle = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 20px;border:1px solid rgba(244,201,91,.5);border-radius:10px;background:linear-gradient(135deg,#f6d27a 0%,#d4a520 55%,#c98f13 100%);color:#1a1200;font-size:14px;font-weight:800;cursor:pointer;white-space:nowrap;'
+  // Светлият вариант — преизчислява се в началото на всеки render().
+  let light = false
 
   function render(): void {
     pruneExpiredEffects(sharedServerClock.getServerNow())
     const isActiveTable = myTable !== null && myTable.phase !== 'lobby'
+    light = !isActiveTable && options.root.closest('[data-lobby-member-mobile-light="1"]') !== null
     ensureTick()
     const body = myTable ? (myTable.phase === 'lobby' ? renderWaiting(myTable) : renderActiveTable(myTable)) : renderTableList()
+    if (light) {
+      options.root.innerHTML = `<section data-svara-lobby="1" data-svara-light="1" style="background:transparent;color:#111827;font-family:inherit;box-sizing:border-box;padding:0;overflow-x:hidden;">
+        ${renderLightActionRow()}
+        ${message ? `<div data-svara-lobby-message="1" role="status" style="${LIGHT_MESSAGE_STYLE}margin-bottom:12px;padding:10px 12px;border-radius:10px;font-size:13.5px;font-weight:700;line-height:1.4;overflow-wrap:anywhere;">${esc(message)}</div>` : ''}
+        ${body}
+        ${createOpen ? renderCreateModal() : ''}
+      </section>`
+      createDialogElement?.remove()
+      createDialogElement = options.root.querySelector<HTMLDialogElement>('dialog[data-svara-create-backdrop]')
+      if (createDialogElement) document.body.appendChild(createDialogElement)
+      wire()
+      ensureResultFrame()
+      syncTableMotion()
+      return
+    }
     // Активната маса получава по-широк контейнер (нужно за landscape/desktop
     // без прекомерно разтягане, виж заданието §11/§12) — списъкът/чакащата
     // маса остават в по-тесния 860px panel layout от 2Б.3.7.2.
@@ -202,7 +239,22 @@ export function createSvaraLobbyController(options: Options) {
     syncTableMotion()
   }
 
+  // Светъл ред с действия (като Ludo): „Назад“ към „Игри“ (същият
+  // data-svara-back-to-games, обслужван от lobby flow controller-а) и
+  // „Създай игра“, докато няма собствена маса.
+  function renderLightActionRow(): string {
+    const back = `<button type="button" data-svara-back-to-games="1" aria-label="Назад" style="${LIGHT_SECONDARY_BUTTON_STYLE}display:inline-flex;align-items:center;gap:6px;height:42px;padding:0 14px 0 10px;color:#344054;font-size:14px;line-height:normal;flex-shrink:0;">${backChevronSvg}<span>Назад</span></button>`
+    const create = myTable ? '' : `<button type="button" data-svara-create-open="1" class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 14px;flex:1 1 auto;min-width:0;font-size:14px;line-height:normal;">${createPlusSvg}<span>Създай игра</span></button>`
+    return `<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;gap:8px;margin-bottom:12px;">${back}${create}</div>`
+  }
+
   function renderEmptyState(text: string): string {
+    if (light) {
+      return `<div style="${LIGHT_PANEL_STYLE}padding:28px 16px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;">
+        <img src="${LIGHT_EMPTY_ICON_URL}" alt="" width="64" height="64" decoding="async" style="width:64px;height:64px;display:block;object-fit:contain;opacity:.9;">
+        <div style="font-size:15px;font-weight:700;color:#667085;line-height:1.45;">${esc(text)}</div>
+      </div>`
+    }
     return `<div style="${panel}text-align:center;color:rgba(255,255,255,.6);">${esc(text)}</div>`
   }
 
@@ -211,6 +263,18 @@ export function createSvaraLobbyController(options: Options) {
     const full = table.players.length >= table.capacity
     const disabled = joining || full
     const actionLabel = joining ? 'Влизане…' : full ? 'Пълна' : 'Влез'
+    if (light) {
+      return `<article style="${LIGHT_PANEL_STYLE}">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
+        <div style="flex:1;min-width:0;">
+          <strong style="display:block;min-width:0;font-size:15px;font-weight:800;line-height:1.3;color:#111827;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Маса ${esc(table.matchId.slice(0, 8))}</strong>
+          <div style="${LIGHT_META_STYLE}margin-top:3px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>
+          ${tableAmountsHtml(table)}
+        </div>
+        <button type="button" data-svara-table-join="${esc(table.matchId)}" ${disabled ? 'disabled' : ''} class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}flex:0 0 auto;height:40px;padding:0 16px;font-size:14px;${disabled ? 'opacity:.55;cursor:not-allowed;' : ''}">${actionLabel}</button>
+      </div>
+    </article>`
+    }
     return `<article style="${panel}">
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;">
         <div>
@@ -231,12 +295,24 @@ export function createSvaraLobbyController(options: Options) {
 
   function seatSlotHtml(table: SvaraPublicTable, index: number): string {
     const player = table.players[index]
+    if (!player && light) return `<div style="box-sizing:border-box;min-height:52px;border-radius:10px;border:1px dashed #D0D5DD;background:#FFFFFF;color:#667085;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;">Свободно място</div>`
     if (!player) return `<div style="box-sizing:border-box;min-height:50px;border-radius:9px;border:1px dashed rgba(255,255,255,.14);background:rgba(255,255,255,.03);color:rgba(255,255,255,.35);font-size:12px;display:flex;align-items:center;justify-content:center;">Свободно място</div>`
     const isCreator = player.playerId === table.creatorId
     const displayName = player.displayName?.trim() || 'Профилът не е достъпен'
     const avatar = player.avatarUrl
       ? `<img data-svara-player-avatar="1" src="${esc(player.avatarUrl)}" alt="" draggable="false" style="width:100%;height:100%;object-fit:cover;display:block;" />`
       : `<span data-svara-avatar-placeholder="1" aria-hidden="true">${esc(displayName.charAt(0).toUpperCase())}</span>`
+    if (light) {
+      return `<div data-svara-waiting-seat="${esc(player.playerId)}" style="box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;border:1px solid #E4E7EC;border-radius:10px;background:#F9FAFB;padding:8px 10px;">
+      <button type="button" data-svara-profile-id="${esc(player.playerId)}" aria-label="${esc(`Отвори профила на ${displayName}`)}" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:0;padding:0;background:transparent;color:#111827;text-align:left;cursor:pointer;font:inherit;">
+        <span style="width:34px;height:34px;flex:0 0 34px;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#F4F0FF;border:1px solid #D9CCFF;color:#6941C6;font-size:17px;font-weight:800;">${avatar}</span>
+        <span data-svara-player-name="1" title="${esc(displayName)}" style="font-weight:700;font-size:13px;color:#111827;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayName)}</span>
+        ${isCreator ? '<span data-svara-creator="1" aria-label="Създател на масата" style="color:#6941C6;flex-shrink:0;">★</span>' : ''}
+        ${player.isBot ? '<span data-svara-bot-badge="1" title="Тестов бот" style="flex-shrink:0;border:1px solid #B2DDFF;border-radius:6px;background:#EFF8FF;padding:1px 5px;font-size:10px;font-weight:800;color:#175CD3;">БОТ</span>' : ''}
+      </button>
+      <span data-svara-player-status="1" style="font-size:11.5px;font-weight:600;color:#667085;flex-shrink:0;">${STATUS_LABEL[player.status]}</span>
+    </div>`
+    }
     return `<div data-svara-waiting-seat="${esc(player.playerId)}" style="box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;border:1px solid rgba(255,255,255,.12);border-radius:9px;padding:8px 10px;">
       <button type="button" data-svara-profile-id="${esc(player.playerId)}" aria-label="${esc(`Отвори профила на ${displayName}`)}" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:0;padding:0;background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit;">
         <span style="width:34px;height:34px;flex:0 0 34px;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#101010;border:1px solid rgba(212,165,32,.34);color:#d4a520;font-size:18px;font-weight:900;">${avatar}</span>
@@ -250,6 +326,12 @@ export function createSvaraLobbyController(options: Options) {
 
   function tableAmountsHtml(table: SvaraPublicTable): string {
     const coin = '<img src="/assets/lobby/icon-coin.png" alt="" aria-hidden="true" style="width:17px;height:17px;display:block;object-fit:contain;flex:0 0 auto;" />'
+    if (light) {
+      return `<div style="display:grid;gap:4px;margin-top:6px;font-size:12.5px;line-height:1.4;font-weight:600;color:#344054;">
+      <div data-svara-waiting-entry="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">Вход: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee)} жълтици</span></span></div>
+      <div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#B54708;">Тестова награда: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee * table.capacity * 4 / 5)} жълтици</span></span><span style="font-size:11px;color:#667085;">(Не се изплаща)</span></div>
+    </div>`
+    }
     return `<div style="display:grid;gap:5px;margin-top:7px;font-size:13px;line-height:1.4;">
       <div data-svara-waiting-entry="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">Вход: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee)} жълтици</span></span></div>
       <div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#f4c95b;">Тестова награда: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee * table.capacity * 4 / 5)} жълтици</span></span><span style="font-size:11px;color:rgba(255,255,255,.65);">(Не се изплаща)</span></div>
@@ -260,6 +342,17 @@ export function createSvaraLobbyController(options: Options) {
     const isHost = table.creatorId === options.localProfileId
     const canManualStart = table.startMode === 'manual' && table.players.length === table.capacity
     const slotsHtml = Array.from({ length: table.capacity }, (_, index) => seatSlotHtml(table, index)).join('')
+    if (light) {
+      return `<div data-svara-waiting="1" style="${LIGHT_PANEL_STYLE}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px;">
+        <div style="flex:1;min-width:0;"><strong style="font-size:15px;font-weight:800;color:#17233C;">Чакаща маса</strong><div data-svara-waiting-capacity="1" style="${LIGHT_META_STYLE}margin-top:3px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>${tableAmountsHtml(table)}</div>
+        <button type="button" data-svara-table-leave="1" ${leavePending ? 'disabled' : ''} style="${LIGHT_DANGER_BUTTON_STYLE}flex:0 0 auto;height:40px;padding:0 14px;font-size:14px;${leavePending ? 'opacity:.55;cursor:wait;' : ''}">${leavePending ? 'Напускане…' : 'Напусни'}</button>
+      </div>
+      <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:8px;">${slotsHtml}</div>
+      ${table.startMode === 'manual' && isHost ? `<button type="button" data-svara-table-start="1" ${canManualStart ? '' : 'disabled'} class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}width:100%;height:44px;margin-top:14px;font-size:15px;${canManualStart ? '' : 'opacity:.55;cursor:not-allowed;'}">Старт</button>` : ''}
+      ${table.testBotFill === true && isHost && options.onFillWithBots ? `<button type="button" data-svara-table-fill-bots="1" ${fillBotsPending ? 'disabled' : ''} style="${LIGHT_SECONDARY_BUTTON_STYLE}width:100%;height:42px;margin-top:10px;border-color:#B2DDFF;color:#175CD3;font-size:14px;${fillBotsPending ? 'opacity:.55;cursor:wait;' : ''}">${fillBotsPending ? 'Запълване…' : 'Запълни с ботове'}</button><div style="margin-top:6px;font-size:11px;font-weight:600;color:#667085;text-align:center;">Само за локално тестване</div>` : ''}
+    </div>`
+    }
     return `<div data-svara-waiting="1" style="${panel}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
         <div style="min-width:0;"><strong>Чакаща маса</strong><div data-svara-waiting-capacity="1" style="color:rgba(255,255,255,.62);margin-top:5px;font-size:13px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>${tableAmountsHtml(table)}</div>
@@ -712,7 +805,33 @@ export function createSvaraLobbyController(options: Options) {
     if (newFolds.length > 0 || newLook) render()
   }
 
+  // Светлият вариант на „Създай игра“ (като светлото Ludo): същата форма,
+  // същите data-атрибути и обработчици — различен е само видът. Диалогът се
+  // мести в document.body (извън рамката), затова шрифтът е зададен изрично.
+  function renderLightCreateModal(): string {
+    const labelStyle = 'display:grid;gap:6px;margin-bottom:14px;min-width:0;font-size:13px;font-weight:700;color:#17233C;'
+    const choiceStyle = 'display:flex;align-items:center;gap:10px;min-height:44px;padding:0 12px;box-sizing:border-box;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;font-size:14px;font-weight:700;color:#111827;cursor:pointer;'
+    const radioStyle = 'width:18px;height:18px;margin:0;flex-shrink:0;accent-color:#7950E8;cursor:pointer;'
+    const cancel = `<button type="button" data-svara-create-close="1" style="${LIGHT_SECONDARY_BUTTON_STYLE}height:44px;color:#344054;font-size:14px;">Отказ</button>`
+    const entry = creationOptions?.entries.find((option) => option.entryFee === createDraft.entryFee)
+    const content = entry && creationOptions ? `<form data-svara-create-form="1">
+      <label style="${labelStyle}">Брой играчи<select name="capacity" style="${LIGHT_FIELD_STYLE}">${[2, 3, 4].map((count) => `<option value="${count}" ${count === createDraft.capacity ? 'selected' : ''}>${count}</option>`).join('')}</select></label>
+      <label style="${labelStyle}">Вход<select name="entryFee" style="${LIGHT_FIELD_STYLE}">${creationOptions.entries.map((option) => `<option value="${option.entryFee}" ${option.entryFee === createDraft.entryFee ? 'selected' : ''}>${formatAmount(option.entryFee)} жълтици</option>`).join('')}</select></label>
+      <div style="display:grid;gap:4px;margin:0 0 16px;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#F9FAFB;font-size:13px;font-weight:600;line-height:1.4;color:#344054;" aria-live="polite">
+        <div data-svara-create-chips="1">Получаваш: ${formatAmount(entry.startingChips)} виртуални чипа</div>
+        <div data-svara-create-ante="1">Анте за раздаване: ${formatAmount(entry.entryChips)} чипа</div>
+        <div data-svara-create-prize="1" style="color:#B54708;">Изчислена тестова награда: ${formatAmount(createDraft.entryFee * createDraft.capacity * 4 / 5)} жълтици (не се изплаща)</div>
+      </div>
+      <fieldset style="border:0;padding:0;margin:0 0 18px;display:grid;gap:8px;min-width:0;"><legend style="padding:0;margin-bottom:6px;font-size:13px;font-weight:700;color:#17233C;">Старт</legend><label style="${choiceStyle}"><input type="radio" name="startMode" value="auto" ${createDraft.startMode === 'auto' ? 'checked' : ''} style="${radioStyle}"> При запълване</label><label style="${choiceStyle}"><input type="radio" name="startMode" value="manual" ${createDraft.startMode === 'manual' ? 'checked' : ''} style="${radioStyle}"> Ръчен старт</label></fieldset>
+      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">${cancel}<button type="submit" class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}height:44px;font-size:15px;">Създай</button></div>
+    </form>` : `<p role="status" style="margin:0 0 16px;font-size:14px;font-weight:600;color:#667085;">${creationLoading ? 'Зареждане на настройките…' : 'Настройките за създаване не са достъпни. Опитай отново.'}</p>
+      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">${cancel}${creationLoading ? '' : `<button type="button" data-svara-create-retry="1" style="${LIGHT_SECONDARY_BUTTON_STYLE}height:44px;font-size:14px;">Опитай отново</button>`}</div>`
+    return `<dialog data-svara-create-backdrop="1" aria-labelledby="svara-create-title" style="position:fixed;inset:0;margin:0;border:0;width:100vw;height:100dvh;max-width:none;max-height:none;box-sizing:border-box;background:rgba(16,24,40,0.45);color:#111827;font-family:${LIGHT_FONT_FAMILY};font-size:16px;display:grid;place-items:center;padding:16px;"><div data-svara-create-panel="1" style="width:min(100%,420px);max-width:100%;min-width:0;max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;padding:20px;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:16px;box-shadow:0 20px 48px rgba(16,24,40,0.18);color:#111827;">
+      <h2 id="svara-create-title" style="margin:0 0 16px;letter-spacing:0;color:#17233C;font-size:20px;font-weight:800;line-height:1.2;">Създай игра</h2>${content}</div></dialog>`
+  }
+
   function renderCreateModal(): string {
+    if (light) return renderLightCreateModal()
     // Match Ludo's dialog dimensions/styles without changing its component.
     const modalButton = `${button}min-height:42px;`
     const selectStyle = 'width:100%;max-width:100%;min-width:0;box-sizing:border-box;min-height:42px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;'
@@ -975,6 +1094,8 @@ export function createSvaraLobbyController(options: Options) {
       render()
     },
     getMyTableId(): string | null { return myTable?.matchId ?? null },
+    /** Пренася се през принудителен remount (виж lobby flow controller-а). */
+    getMyTable(): SvaraPublicTable | null { return myTable },
     // Mirror на Ludo's _ludoController !== null сигнала за PWA update
     // safety (виж pwaUpdateCoordinator.ts's hasActiveSvaraMatch doc
     // коментар) — true само докато масата реално играе, не само докато

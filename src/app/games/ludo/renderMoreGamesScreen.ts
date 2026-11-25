@@ -1,12 +1,12 @@
-import { VIOLET_3D_BUTTON_CLASS } from '../../../ui/layout/violet3dButton'
 // "Игри" — lobby sub-screen. Засега съдържа една feature-flagged карта:
 // "Не се сърди човече" — кликуем банер (бутонът "ИГРАЙ" е нарисуван вътре
 // в самото изображение), обвит в златната рамка на action-card езика от
 // лобито (renderStakeSection и съседните rules/strategy карти).
 //
-// "Свара" — тестова карта, видима САМО при showSvara (server-derived
-// session.svaraTestAccess, виж app/games/svara/svaraAccess.ts). При false
-// HTML-ът изобщо не съдържа картата.
+// "Свара" — кликуем банер по същия модел ("ИГРАЙ" е в изображението), видим
+// САМО при showSvara (server-derived session.svaraTestAccess, виж
+// app/games/svara/svaraAccess.ts). При false HTML-ът изобщо не съдържа
+// картата; самата страница /games/svara пак проверява достъпа в сървъра.
 
 //
 // light — светлият мобилен дизайн (renderLobbyScreen.ts,
@@ -52,35 +52,22 @@ export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, 
         data-svara-play-button="1"
         role="button"
         tabindex="0"
-        aria-label="Свара"
+        aria-label="Играй Свара"
         style="
           margin-top:${useMobileLayout ? '14px' : '18px'};
           background:#000000;
           border:2px solid rgba(212,165,32,0.78);
           border-radius:14px;
-          padding:${useMobileLayout ? '16px 16px' : '20px 24px'};
-          box-sizing:border-box;
+          padding:0;
+          overflow:hidden;
           cursor:pointer;
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:12px;
+          line-height:0;
         "
-      >
-        <div>
-          <div style="color:#fff;font-size:${useMobileLayout ? '20px' : '24px'};font-weight:900;">Свара</div>
-          <div style="margin-top:4px;color:#f5d06f;font-size:12px;font-weight:800;">Тестов достъп · В разработка</div>
-        </div>
-        <span style="
-          flex:0 0 auto;
-          padding:8px 16px;
-          border-radius:10px;
-          background:linear-gradient(180deg,#f5d06f,#d4a520);
-          color:#1a1203;
-          font-size:14px;
-          font-weight:900;
-        ">ОТВОРИ</span>
-      </div>` : ''}
+      ><img
+          src="/images/games/svara-banner.webp"
+          alt="Свара — играй"
+          style="display:block;width:100%;height:auto;border-radius:12px;"
+        /></div>` : ''}
     </article>
   `
 }
@@ -114,22 +101,13 @@ function renderLightMoreGamesScreen(showLudo: boolean, showSvara: boolean, isMem
         data-svara-play-button="1"
         role="button"
         tabindex="0"
-        aria-label="Свара"
-        style="${card}margin-top:14px;padding:14px 16px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;"
-      >
-        <div style="min-width:0;">
-          <div style="color:#17233C;font-size:18px;font-weight:800;">Свара</div>
-          <div style="margin-top:4px;color:#667085;font-size:12px;font-weight:700;">Тестов достъп · В разработка</div>
-        </div>
-        <span class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="
-          flex:0 0 auto;
-          padding:9px 16px;
-          border-radius:8px;
-          color:#FFFFFF;
-          font-size:14px;
-          font-weight:800;
-        ">ОТВОРИ</span>
-      </div>` : ''}
+        aria-label="Играй Свара"
+        style="${card}display:block;width:100%;margin-top:14px;padding:8px;cursor:pointer;line-height:0;"
+      ><img
+          src="/images/games/svara-banner.webp"
+          alt="Свара — играй"
+          style="display:block;width:100%;height:auto;border-radius:8px;"
+        /></div>` : ''}
     </article>
   `
 }

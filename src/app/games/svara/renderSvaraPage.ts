@@ -16,7 +16,11 @@ const MOBILE_EDGE_INSET_PX = 24
 
 export type SvaraPageStatus = 'checking' | SvaraAccessCheckResult
 
-export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false): string {
+/** Иконката пред заглавието „Частни маси – Свара“ (светлата мобилна рамка, 36×36 като Ludo). */
+const LIGHT_TITLE_ICON_URL = '/assets/lobby-mobile/icons/icon-private-tables-svara.webp'
+
+export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false, light = false): string {
+  if (light) return renderLightSvaraPage(status)
   const padding = useMobileLayout ? '14px 12px 40px' : '28px 40px 60px'
 
   if (status === 'checking') {
@@ -72,4 +76,41 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
         >← Обратно към Игри</a>
       </article>
     `
+}
+
+// Светлата мобилна рамка (само предигровите екрани на телефон — виж
+// isMobileSvaraLobbyView в renderLobbyScreen.ts): заглавие с иконка като
+// „Частни маси – Не се сърди човече“. Бутонът „Назад“ е в реда с действията
+// на контролера (createSvaraLobbyController, светлият вариант).
+function renderLightSvaraPage(status: SvaraPageStatus): string {
+  const title = `<div style="display:flex;align-items:center;gap:10px;min-width:0;margin-bottom:12px;">
+          <img src="${LIGHT_TITLE_ICON_URL}" alt="" width="36" height="36" decoding="async" style="width:36px;height:36px;flex:0 0 auto;display:block;object-fit:contain;">
+          <h1 style="margin:0;min-width:0;color:#17233C;font-size:20px;font-weight:800;line-height:1.2;overflow-wrap:anywhere;">Частни маси – Свара</h1>
+        </div>`
+  const article = (body: string) => `
+      <article data-svara-page="${status}" data-svara-light="1" style="padding:4px 0 20px;max-width:920px;margin:0 auto;box-sizing:border-box;color:#111827;">
+        ${title}
+        ${body}
+      </article>
+    `
+  if (status === 'checking') {
+    return article('<div style="font-size:14px;font-weight:700;color:#667085;">Зареждане…</div>')
+  }
+  if (status !== 'granted') {
+    const messages = {
+      unauthenticated: 'Влез в профила си, за да проверим тестовия ти достъп.',
+      forbidden: 'Този профил няма разрешение за тестов достъп до Свара.',
+      unavailable: 'Тестовата игра не е достъпна на този сървър.',
+      denied: 'Проверката за достъп не завърши успешно. Опитай отново.',
+    }
+    const secondary = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 14px;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;color:#344054;font-family:inherit;font-size:14px;font-weight:800;text-decoration:none;cursor:pointer;white-space:nowrap;'
+    return article(`<div style="box-sizing:border-box;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:12px;padding:12px;box-shadow:0 1px 2px rgba(16,24,40,0.05);">
+          <p role="alert" style="margin:0 0 12px;font-size:14px;font-weight:700;line-height:1.45;color:#B42318;">${messages[status]}</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" data-svara-play-button="1" style="${secondary}color:#6941C6;">Опитай отново</button>
+            <a href="/games" data-svara-back-to-games="1" style="${secondary}">← Обратно към Игри</a>
+          </div>
+        </div>`)
+  }
+  return article('<div data-svara-lobby-mount="1"></div>')
 }

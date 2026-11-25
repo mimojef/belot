@@ -805,6 +805,11 @@ export type LobbyScreenState = {
   canShowSvaraEntry: boolean
   /** /games/svara — 'granted' едва след 200 от GET /api/games/svara/access. */
   svaraPageStatus: SvaraPageStatus
+  /**
+   * Свара — локалният играч е в активна игра (масата не е в 'lobby'). Само
+   * за избора на мобилната рамка: светлата е само за предигровите екрани.
+   */
+  svaraActiveGame?: boolean
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -9740,7 +9745,7 @@ function renderMobileLobbyScreenContent(
           : state.view === 'ludo-lobby'
             ? '<div data-ludo-lobby-mount="1"></div>'
           : state.view === 'svara'
-            ? renderSvaraPage(state.svaraPageStatus, true)
+            ? renderSvaraPage(state.svaraPageStatus, true, state.profile.profileId !== null && state.svaraActiveGame !== true)
           : state.view === 'rules'
             ? renderRulesPage(true, isLightInfoView)
           : state.view === 'strategy'
@@ -17890,9 +17895,13 @@ export function renderLobbyScreen(
   // светла рамка; createLudoLobbyController разпознава рамката при всеки
   // render и рисува светлия си вариант.
   const isMobileLudoLobbyView = isPhoneLayout && state.view === 'ludo-lobby' && state.profile.profileId !== null && !isMobileBlockedPage
+  // Свара (/games/svara) на телефон: светлата рамка САМО за предигровите
+  // екрани (списък, чакаща маса); при активна игра остава досегашната тъмна
+  // (svaraActiveGame, виж setSvaraActiveGame в createLobbyFlowController).
+  const isMobileSvaraLobbyView = isPhoneLayout && state.view === 'svara' && state.profile.profileId !== null && !isMobileBlockedPage && state.svaraActiveGame !== true
   // "Настройки" (/settings) — само регистриран на телефон, в светлата рамка.
   const isMobileSettingsView = isPhoneLayout && state.view === 'settings' && state.profile.profileId !== null && !isMobileBlockedPage
-  const isMemberMobileLight = isMemberMobileLobby || isMobileBlockedPage || isMobileTopicsShell || isMobileChatShell || isMobileTournamentsView || isMobileAdCampaignsView || isMobilePrivateRoomsView || isMobileLudoLobbyView || isMobileSettingsView || (isMobileLightInfoView && state.profile.profileId !== null)
+  const isMemberMobileLight = isMemberMobileLobby || isMobileBlockedPage || isMobileTopicsShell || isMobileChatShell || isMobileTournamentsView || isMobileAdCampaignsView || isMobilePrivateRoomsView || isMobileLudoLobbyView || isMobileSvaraLobbyView || isMobileSettingsView || (isMobileLightInfoView && state.profile.profileId !== null)
   const isMobileLightFrame = isGuestMobileLight || isMemberMobileLight
   // "Публикации от Pika.bg" — светъл попъп (камбанката / банерът за гост) във
   // всеки екран на светлата мобилна рамка; извън нея не се показва.
