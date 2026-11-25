@@ -360,8 +360,10 @@ const actionAmountFormatter = new Intl.NumberFormat('bg-BG', { useGrouping: 'alw
 function actionButtonContent(label: string, amount: number | null, kind: SvaraActionButton['kind']): string {
   // „Плати“: винаги на два реда — „Плати“ и цялата сума отдолу (иначе при
   // големи суми се изрязва в тесния бутон, особено на телефон).
+  // Първият ред е действието от надписа („Плати“ или „Тъмни“ — виж svaraBettingActions).
   if (kind === 'pay' && amount !== null) {
-    return `Плати<span data-svara-pay-amount="1" style="display:block;">${esc(actionAmountFormatter.format(amount))}</span>`
+    const title = label.startsWith('Тъмни') ? 'Тъмни' : 'Плати'
+    return `${title}<span data-svara-pay-amount="1" style="display:block;">${esc(actionAmountFormatter.format(amount))}</span>`
   }
   // Ол-ин: сумата от сървъра на втори ред (надписът остава „Ол-ин“).
   return kind === 'all-in' && amount !== null

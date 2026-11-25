@@ -69,9 +69,11 @@ export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, lo
       disabled: false,
     })
   } else if (raiseOption) {
+    // Право на залог на тъмно (сървърната опция blindBet) — бутонът е „Тъмни“ и
+    // изпълнява реалния blind-bet; иначе „Плати“ (отваря на светло с минимума).
     buttons.push({
       kind: 'pay',
-      label: `Плати ${raiseOption.min}`,
+      label: `${actionKind === 'blind-bet' ? 'Тъмни' : 'Плати'} ${raiseOption.min}`,
       amount: raiseOption.min,
       command: { type: 'act', action: { kind: actionKind, total: raiseOption.min } },
       disabled: false,
