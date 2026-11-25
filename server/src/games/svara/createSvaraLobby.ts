@@ -26,7 +26,7 @@ export const SVARA_FINISHED_REVIEW_RETENTION_MS = 10 * 60_000
 
 export function createSvaraLobby(deps: {
   hasOtherGameCommitment: (profileId: string) => boolean
-  getPublicProfile?: (profileId: string) => { displayName: string; avatarUrl: string | null } | null
+  getPublicProfile?: (profileId: string) => { displayName: string; avatarUrl: string | null; gender?: 'male' | 'female' | null } | null
   runtime?: SvaraMatchRuntime
   persistence?: SvaraMatchPersistence
   onError?: (error: unknown) => void
@@ -114,11 +114,13 @@ export function createSvaraLobby(deps: {
     return { ...table, ...(canFill ? { testBotFill: true } : {}), players: table.players.map(({ playerId, status }) => {
       // ВРЕМЕННО — тестови ботове: име/аватар от модула, никога от базата.
       const bot = testBots?.isBot(playerId) ? testBots.publicProfile(playerId) : null
-      if (bot) return { playerId, status, displayName: bot.displayName, avatarUrl: bot.avatarUrl, isBot: true }
+      if (bot) return { playerId, status, displayName: bot.displayName, avatarUrl: bot.avatarUrl, gender: bot.gender, isBot: true }
       let profile: ReturnType<NonNullable<typeof deps.getPublicProfile>> = null
       try { profile = deps.getPublicProfile?.(playerId) ?? null } catch (cause) { deps.onError?.(cause) }
       // Presentation only: never persist profile data or spread a full profile.
-      return { playerId, status, displayName: profile?.displayName?.trim() || null, avatarUrl: profile?.avatarUrl?.trim() || null }
+      // Полът на профила (както в Белот) — само за избора на глас; без пол полето липсва.
+      const gender = profile?.gender === 'male' || profile?.gender === 'female' ? profile.gender : null
+      return { playerId, status, displayName: profile?.displayName?.trim() || null, avatarUrl: profile?.avatarUrl?.trim() || null, ...(gender ? { gender } : {}) }
     }) }
   }
 

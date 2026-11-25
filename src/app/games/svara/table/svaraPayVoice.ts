@@ -1,36 +1,30 @@
-// Свара — гласове при залагане: „Плащам!“ (call, без повишаване) и
-// „Вдигам!“ (повишаване на текущия залог). През общата система за игрови
-// звуци (playGameSound): уважава настройката „Звуци в играта“, а
-// грешка/блокирано аудио се поглъща тихо — никога не спира играта.
-// Snapshot-ът няма пол на играча, затова записите са по един.
+// Свара — гласове при залагане: „Плащам!“ (call, без повишаване),
+// „Вдигам!“ (повишаване на текущия залог) и „Тъмни!“ (залог на тъмно). През
+// общата система за игрови звуци (playGameSound): уважава настройката
+// „Звуци в играта“, а грешка/блокирано аудио се поглъща тихо — никога не
+// спира играта. Записът (мъжки/женски) е според пола на профила на играча —
+// виж svaraVoiceGender.
 
 import { playGameSound } from '../../../audio/gameSoundSettings'
-
-const PAY_VOICE_SRC = '/audio/game-sounds/svara-pay-male.mp3'
-const RAISE_VOICE_SRC = '/audio/game-sounds/svara-raise-male.mp3'
-const BLIND_VOICE_SRC = '/audio/game-sounds/svara-blind-male.mp3'
+import { preloadSvaraVoices, svaraVoiceSrc, type SvaraVoiceGender } from './svaraVoiceGender'
 
 let preloaded = false
 /** Файловете се зареждат предварително, за да тръгнат едновременно с балончето. */
 export function preloadSvaraPayVoice(): void {
   if (preloaded || typeof Audio === 'undefined') return
   preloaded = true
-  for (const src of [PAY_VOICE_SRC, RAISE_VOICE_SRC, BLIND_VOICE_SRC]) {
-    const audio = new Audio()
-    audio.preload = 'auto'
-    audio.src = src
-  }
+  preloadSvaraVoices(['pay', 'raise', 'blind'])
 }
 
-export function playSvaraPayVoice(): void {
-  playGameSound(PAY_VOICE_SRC, { volume: 0.7 })
+export function playSvaraPayVoice(gender: SvaraVoiceGender): void {
+  playGameSound(svaraVoiceSrc('pay', gender), { volume: 0.7 })
 }
 
-export function playSvaraRaiseVoice(): void {
-  playGameSound(RAISE_VOICE_SRC, { volume: 0.7 })
+export function playSvaraRaiseVoice(gender: SvaraVoiceGender): void {
+  playGameSound(svaraVoiceSrc('raise', gender), { volume: 0.7 })
 }
 
 /** „Тъмни!“ — при залог на тъмно (вместо „Вдигам!“). */
-export function playSvaraBlindVoice(): void {
-  playGameSound(BLIND_VOICE_SRC, { volume: 0.7 })
+export function playSvaraBlindVoice(gender: SvaraVoiceGender): void {
+  playGameSound(svaraVoiceSrc('blind', gender), { volume: 0.7 })
 }

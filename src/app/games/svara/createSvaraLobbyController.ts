@@ -7,6 +7,7 @@
 // карти, дилър, countdown пръстен, fullscreen) е в table/renderSvaraActiveTable.ts.
 
 import type {
+  PlayerGender,
   SvaraMatchSnapshotMessage,
   SvaraMatchTimingMessage,
   SvaraPlayerLookedMessage,
@@ -573,10 +574,17 @@ export function createSvaraLobbyController(options: Options) {
   // внесеното с това действие. Вика се само за
   // нови действия (виж betAnimationTracker / finalCallsShown) — без повторение
   // при reconnect или дублиран snapshot.
+  // Полът на профила на играча на това място (както в Белот: от сървърните
+  // данни на профила, ботовете вкл.); без пол → мъжкият запис.
+  function seatVoiceGender(seatIndex: number): PlayerGender | null {
+    const playerId = snapshot?.seats.find((s) => s.seatIndex === seatIndex)?.playerId
+    return playerId ? myTable?.players.find((p) => p.playerId === playerId)?.gender ?? null : null
+  }
+
   function announcePay(seatIndex: number, added: number): void {
     tableScene.showSpeech(seatIndex, `Плащам ${formatAmount(added)}`)
     tableScene.showPotRaise(formatAmount(added))
-    playSvaraPayVoice()
+    playSvaraPayVoice(seatVoiceGender(seatIndex))
   }
 
   // Повишаване (обикновен залог над текущия, вкл. ×5/×10/×20/×50): гласът
@@ -594,14 +602,14 @@ export function createSvaraLobbyController(options: Options) {
     if (entry.kind === 'blind-bet' || (entry.kind === 'all-in' && entry.blind)) {
       tableScene.showSpeech(seatIndex, `Тъмни ${formatAmount(entry.added)}`)
       if (amount !== null) tableScene.showPotRaise(formatAmount(amount))
-      playSvaraBlindVoice()
+      playSvaraBlindVoice(seatVoiceGender(seatIndex))
       return
     }
     if (amount === null) return
     const raise = formatAmount(amount)
     tableScene.showSpeech(seatIndex, `Вдигам +${raise}`)
     tableScene.showPotRaise(raise)
-    playSvaraRaiseVoice()
+    playSvaraRaiseVoice(seatVoiceGender(seatIndex))
   }
 
   function flushBetAnimations(): void {
@@ -646,11 +654,11 @@ export function createSvaraLobbyController(options: Options) {
     const seat = snapshot.seats.find((s) => s.playerId === event.playerId)
     if (!seat) return
     tableScene.showSpeech(seat.seatIndex, 'Поглеждам!')
-    playSvaraLookVoice()
+    playSvaraLookVoice(seatVoiceGender(seat.seatIndex))
   }
   function announceFold(seatIndex: number): void {
     tableScene.showSpeech(seatIndex, 'Бягам!')
-    playSvaraFoldVoice()
+    playSvaraFoldVoice(seatVoiceGender(seatIndex))
   }
 
   function flushFoldAndLookAnimations(): void {

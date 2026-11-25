@@ -51,6 +51,8 @@ export type SvaraPublicTable = {
   startingChips: number
   entryChips: number
   players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null
+    /** Полът на профила (както в Белот) — само за избора на глас; добавя се от lobby при доставка. */
+    gender?: 'male' | 'female' | null
     /** ВРЕМЕННО — тестови ботове: само представяне, добавя се от lobby при доставка. */
     isBot?: boolean }>
   /** ВРЕМЕННО — тестови ботове: само за получател с право на „Запълни с ботове“. */

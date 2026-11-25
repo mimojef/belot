@@ -1294,6 +1294,8 @@ export type SvaraPublicTable = {
   startingChips: number
   entryChips: number
   players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null
+    /** Полът на профила (както RoomSeatSnapshot.gender в Белот) — избира мъжки/женски глас. */
+    gender?: PlayerGender | null
     /** ВРЕМЕННО — тестови ботове: сървърно обозначение (само представяне). */
     isBot?: boolean }>
   /** ВРЕМЕННО — тестови ботове: сървърът го праща само на получател с право на „Запълни с ботове“. */

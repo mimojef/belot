@@ -7,25 +7,29 @@
 
 import { randomUUID } from 'node:crypto'
 
+export type SvaraTestBotProfile = { displayName: string; avatarUrl: string; gender: 'male' | 'female' }
+
 const BOT_ID_PREFIX = 'svara-test-bot:'
 const BOT_ID_PATTERN = /^svara-test-bot:([0-7]):[0-9a-f-]{36}$/
 
-const BOT_PROFILES: ReadonlyArray<{ displayName: string; avatarUrl: string }> = [
-  { displayName: 'Бот Петър', avatarUrl: '/assets/avatars/male/male-avatar-01.webp' },
-  { displayName: 'Бот Мария', avatarUrl: '/assets/avatars/female/female-avatar-01.webp' },
-  { displayName: 'Бот Георги', avatarUrl: '/assets/avatars/male/male-avatar-02.webp' },
-  { displayName: 'Бот Елена', avatarUrl: '/assets/avatars/female/female-avatar-02.webp' },
-  { displayName: 'Бот Николай', avatarUrl: '/assets/avatars/male/male-avatar-03.webp' },
-  { displayName: 'Бот Десислава', avatarUrl: '/assets/avatars/female/female-avatar-03.webp' },
-  { displayName: 'Бот Стоян', avatarUrl: '/assets/avatars/male/male-avatar-04.webp' },
-  { displayName: 'Бот Ивана', avatarUrl: '/assets/avatars/female/female-avatar-04.webp' },
+// gender — изрично зададен пол на профила на бота (за гласа при действия),
+// както полето gender на профилите в базата; не се извежда от името/аватара.
+const BOT_PROFILES: ReadonlyArray<SvaraTestBotProfile> = [
+  { displayName: 'Бот Петър', avatarUrl: '/assets/avatars/male/male-avatar-01.webp', gender: 'male' },
+  { displayName: 'Бот Мария', avatarUrl: '/assets/avatars/female/female-avatar-01.webp', gender: 'female' },
+  { displayName: 'Бот Георги', avatarUrl: '/assets/avatars/male/male-avatar-02.webp', gender: 'male' },
+  { displayName: 'Бот Елена', avatarUrl: '/assets/avatars/female/female-avatar-02.webp', gender: 'female' },
+  { displayName: 'Бот Николай', avatarUrl: '/assets/avatars/male/male-avatar-03.webp', gender: 'male' },
+  { displayName: 'Бот Десислава', avatarUrl: '/assets/avatars/female/female-avatar-03.webp', gender: 'female' },
+  { displayName: 'Бот Стоян', avatarUrl: '/assets/avatars/male/male-avatar-04.webp', gender: 'male' },
+  { displayName: 'Бот Ивана', avatarUrl: '/assets/avatars/female/female-avatar-04.webp', gender: 'female' },
 ]
 
 export function isSvaraTestBotId(playerId: unknown): playerId is string {
   return typeof playerId === 'string' && BOT_ID_PATTERN.test(playerId)
 }
 
-export function getSvaraTestBotProfile(playerId: string): { displayName: string; avatarUrl: string } | null {
+export function getSvaraTestBotProfile(playerId: string): SvaraTestBotProfile | null {
   const match = BOT_ID_PATTERN.exec(playerId)
   return match ? BOT_PROFILES[Number(match[1])]! : null
 }

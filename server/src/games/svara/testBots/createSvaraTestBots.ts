@@ -36,7 +36,7 @@ export type SvaraTestBotHost = {
 export type SvaraTestBots = {
   isEnabled(): boolean
   isBot(playerId: string): boolean
-  publicProfile(playerId: string): { displayName: string; avatarUrl: string } | null
+  publicProfile(playerId: string): { displayName: string; avatarUrl: string; gender: 'male' | 'female' } | null
   createBotIds(existingPlayerIds: readonly string[], count: number): string[]
   /** Вика се след всяка публикувана промяна на мача. Само планира — не изпълнява синхронно. */
   onMatchChanged(matchId: string): void
