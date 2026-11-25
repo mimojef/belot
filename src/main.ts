@@ -114,6 +114,10 @@ import {
   shouldOfflineRecoveryForceLobbyReload,
   type AuthSessionIdentity,
   type OfflineReloadDetail,
+  appendSilentReconnectAttemptProof,
+  decideBrowserOnlineReconnect,
+  shouldResetReconnectBackoffOnOpen,
+  type SilentReconnectAttemptProof,
   type OfflineReloadVia,
 } from './app/network/socketReconnectPolicy'
 import { createLobbySoftReconnect, type ConnectedAuthIdentity, type SoftReconnectSessionCheck, type SoftReconnectSyncFailure } from './app/network/createLobbySoftReconnect'
@@ -515,6 +519,13 @@ let lastConnectedClientId: string | null = null
 let activeRoomSoftReconnectTarget: { roomId: string; reconnectToken: string; reconnectOf: string } | null = null
 // Текущият опит за resume_room: done(true) след room_resumed + авторитетен snapshot.
 let activeRoomSoftReconnectSync: { roomId: string; resumed: boolean; done: (ok: boolean, failure?: SoftReconnectSyncFailure) => void } | null = null
+// Етап 4: { connectionId, attemptProof } на собствените опити в текущото
+// тихо възстановяване (само в паметта; всички опити — до тавана от 32; изчиства се
+// при край на прекъсването).
+let silentReconnectAttemptProofs: SilentReconnectAttemptProof[] = []
+// Етап 3: дали в текущото тихо възстановяване вече е използвано еднократното
+// незабавно свързване при 'online' (следващите спазват паузата).
+let onlineFastReconnectUsed = false
 // session_in_game за ДРУГА стая по време на възстановяването -> безопасният път.
 let activeRoomSoftReconnectMismatch = false
 let showOfflineConnectionOverlay: () => void = () => {
@@ -8413,13 +8424,14 @@ function clearReconnectTimer(): void {
   reconnectTimerId = null
 }
 
-function scheduleServerReconnect(): void {
+function scheduleServerReconnect(delayOverrideMs?: number): void {
   if (isPageUnloading || reconnectTimerId !== null) {
     return
   }
 
-  // Досегашната линейна стъпка (1..5 s) с ±25% jitter.
-  const delayMs = getReconnectDelayMs(reconnectAttempt, SERVER_RECONNECT_DELAY_MS, SERVER_RECONNECT_MAX_DELAY_MS)
+  // Досегашната линейна стъпка (1..5 s) с ±25% jitter. Етап 3: след временен
+  // неуспех на тихото възстановяване — паузата от координатора (1, 2, 4, 8 s).
+  const delayMs = delayOverrideMs ?? getReconnectDelayMs(reconnectAttempt, SERVER_RECONNECT_DELAY_MS, SERVER_RECONNECT_MAX_DELAY_MS)
 
   reconnectAttempt += 1
   reconnectTimerId = window.setTimeout(() => {
@@ -9035,7 +9047,8 @@ const lobbySoftReconnect = createLobbySoftReconnect({
       return
     }
     activeRoomSoftReconnectSync = { roomId: target.roomId, resumed: false, done }
-    client.resumeRoom(target.roomId, target.reconnectToken, undefined, target.reconnectOf, attempt)
+    const priorAttempts = silentReconnectAttemptProofs.filter((p) => p.connectionId !== lastConnectedClientId)
+    client.resumeRoom(target.roomId, target.reconnectToken, undefined, target.reconnectOf, attempt, priorAttempts)
   },
   onShowBanner: () => showConnectionRecoveringUi(),
   onShowActiveRoomOutage: () => activeRoom.prepareForSilentReconnect(),
@@ -9046,6 +9059,10 @@ const lobbySoftReconnect = createLobbySoftReconnect({
     if (context === 'active_room') {
       activeRoomSoftReconnectTarget = null
       activeRoomSoftReconnectSync = null
+      silentReconnectAttemptProofs = []
+      // Етап 3: успешно възстановяване — паузите започват отначало.
+      reconnectAttempt = 0
+      onlineFastReconnectUsed = false
       pwaIsReconnectingActiveRoom = false
       hideConnectionRecoveryUi()
       // Етап 2: сесията е потвърдена по WS — /api/auth/me се прави след това,
@@ -9064,9 +9081,21 @@ const lobbySoftReconnect = createLobbySoftReconnect({
     voiceController?.setGameConnection(true)
     requestPwaUpdateApplyAttempt()
   },
+  // Етап 3: временен неуспех в активна стая — без reload: текущият socket
+  // се изоставя (onClose -> prepareForSilentReconnect + свързване след
+  // паузата от координатора). Нищо игрово не се изпраща повторно; закъснели
+  // съобщения от изоставения socket се игнорират в транспорта.
+  onTransientFailure: (info) => {
+    console.warn('[soft-reconnect] transient failure, retrying silently:', info.reason, info.code ?? '', `retry=${info.retry} delay=${info.delayMs}ms`)
+    activeRoomSoftReconnectSync = null
+    if (!client.abandonUnresponsiveSocket('soft_reconnect_retry')) {
+      scheduleServerReconnect(lobbySoftReconnect.consumeRetryDelayMs() ?? undefined)
+    }
+  },
   onReload: (via, detail) => {
     activeRoomSoftReconnectTarget = null
     activeRoomSoftReconnectSync = null
+    silentReconnectAttemptProofs = []
     forceOfflineLobbyReload(via, detail)
   },
 })
@@ -9147,7 +9176,9 @@ function completeActiveRoomSoftReconnectSync(ok: boolean, failure?: SoftReconnec
 client = createGameServerClient({
   onOpen: () => {
     clearReconnectTimer()
-    reconnectAttempt = 0
+    // Етап 3: при незавършено тихо възстановяване на активна стая паузата
+    // продължава да расте; нулира се при успешно възстановяване (onRecovered).
+    if (shouldResetReconnectBackoffOnOpen(lobbySoftReconnect.getOutageContext())) reconnectAttempt = 0
     hasGameServerConnectedOnce = true
     notifyHealthMonitorSocketState()
 
@@ -9324,7 +9355,7 @@ client = createGameServerClient({
       activeRoom.prepareForSilentReconnect()
       lobbySoftReconnect.beginOutage('active_room')
       notifyHealthMonitorSocketState()
-      scheduleServerReconnect()
+      scheduleServerReconnect(lobbySoftReconnect.consumeRetryDelayMs() ?? undefined)
       return
     }
     const softReconnectCandidate = lobbySoftReconnect.isOutageActive() ? null : getActiveRoomSoftReconnectCandidate()
@@ -9333,6 +9364,8 @@ client = createGameServerClient({
       activeRoomSoftReconnectTarget = { ...softReconnectCandidate, reconnectOf: lastConnectedClientId }
       activeRoomSoftReconnectSync = null
       activeRoomSoftReconnectMismatch = false
+      silentReconnectAttemptProofs = []
+      onlineFastReconnectUsed = false
       pwaIsReconnectingActiveRoom = true
       lobbySoftReconnect.beginOutage('active_room')
       notifyHealthMonitorSocketState()
@@ -9471,6 +9504,11 @@ client = createGameServerClient({
     if (message.type === 'connected') {
       // Етап 2: идентификаторът на тази връзка — reconnectOf при следващото прекъсване.
       if (typeof message.clientId === 'string' && message.clientId.length > 0) lastConnectedClientId = message.clientId
+      // Етап 4: proof на всяка връзка, отворена по време на тихото
+      // възстановяване (собствен опит на тази страница) — до 5, само в паметта.
+      if (lobbySoftReconnect.getOutageContext() === 'active_room' && typeof message.attemptProof === 'string' && message.attemptProof.length > 0 && typeof message.clientId === 'string') {
+        silentReconnectAttemptProofs = appendSilentReconnectAttemptProof(silentReconnectAttemptProofs, { connectionId: message.clientId, proof: message.attemptProof })
+      }
       handleConnectedServerMessage(lobby, message, () => {
         pwaBootstrapServerStateResolved = true
         requestPwaUpdateApplyAttempt()
@@ -11147,11 +11185,17 @@ void loadGuestTrialStatus().finally(() => {
   // контекстът с тихо възстановяване — нов опит веднага, без reload; за
   // останалите екрани explicit "Опитай отново" остава hard reload.
   function handleBrowserOnline(): void {
-    if (lobbySoftReconnect.isOutageActive()) {
+    const outageContext = lobbySoftReconnect.getOutageContext()
+    if (outageContext !== null) {
       updateOfflineOverlayText()
-      if (!client.isConnected()) {
+      // Етап 3: в активна стая незабавно свързване само веднъж на прекъсване.
+      const decision = decideBrowserOnlineReconnect({ outageContext, socketConnected: client.isConnected(), fastReconnectUsed: onlineFastReconnectUsed })
+      if (decision === 'connect_now') {
+        if (outageContext === 'active_room') onlineFastReconnectUsed = true
         clearReconnectTimer()
         client.connect()
+      } else if (decision === 'keep_backoff') {
+        scheduleServerReconnect() // no-op, ако вече има насрочено свързване
       }
       return
     }

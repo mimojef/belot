@@ -162,6 +162,18 @@ type Controlled = {
   armDropAfter: (type: string, reconnectAfterMs: number) => void
   /** Еднократно: задържа следващото съобщение от този тип към сървъра с ms (Етап 2). */
   delayNext: (type: string, ms: number) => void
+  /**
+   * Етапи 3–4: еднократно „поглъща“ следващото съобщение от този тип (не стига
+   * до сървъра); когато страницата изостави тази връзка, сървърната ѝ страна
+   * остава отворена (полуотворена, неприкрепена връзка за сървъра).
+   */
+  swallowNext: (type: string, count?: number) => void
+  /**
+   * Етап 4: следващото съобщение от този тип стига до сървъра, но отговорите
+   * не стигат до страницата; след 400 ms връзката пада само откъм страницата
+   * (сървърът я държи жива — полуотворена и прикрепена).
+   */
+  halfOpenAfterNext: (type: string) => void
   /** Етап 2: /api/auth/me заявки на страницата (започнати / завършени). */
   authMeStarted: () => number
   authMeFinished: () => number
@@ -179,6 +191,8 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
   let blocked = false
   let armed: { type: string; reconnectAfterMs: number } | null = null
   let delayed: { type: string; ms: number } | null = null
+  let swallow: { type: string; count: number } | null = null
+  let halfOpenAfterType: string | null = null
   let current: { page: WebSocketRoute; server: WebSocketRoute } | null = null
   const parse = (m: string | Buffer): Frame | null => {
     try {
@@ -202,9 +216,26 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
     }
     opened += 1
     const server = ws.connectToServer()
+    // Етапи 3–4: keepUpstream — при затваряне откъм страницата сървърната
+    // връзка остава (полуотворена); blackhole — отговорите не стигат до страницата.
+    const conn = { keepUpstream: false, blackhole: false, pageClosed: false }
     ws.onMessage((m) => {
       const f = parse(m)
       if (f) sent.push(f)
+      if (f && swallow !== null && f.type === swallow.type) {
+        swallow.count -= 1
+        if (swallow.count <= 0) swallow = null
+        conn.keepUpstream = true
+        return
+      }
+      if (f && halfOpenAfterType !== null && f.type === halfOpenAfterType) {
+        halfOpenAfterType = null
+        conn.keepUpstream = true
+        server.send(m)
+        conn.blackhole = true
+        setTimeout(() => { try { ws.close({ code: 4002, reason: 'e2e half-open' }) } catch { /* вече затворена */ } }, 400)
+        return
+      }
       if (f && delayed !== null && f.type === delayed.type) {
         const ms = delayed.ms
         delayed = null
@@ -222,9 +253,14 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
         }, 0)
       }
     })
-    server.onMessage((m) => { const f = parse(m); if (f) received.push(f); ws.send(m) })
-    ws.onClose(() => server.close())
-    server.onClose(() => ws.close())
+    server.onMessage((m) => {
+      if (conn.blackhole || conn.pageClosed) return
+      const f = parse(m)
+      if (f) received.push(f)
+      try { ws.send(m) } catch { /* страницата е затворена */ }
+    })
+    ws.onClose(() => { conn.pageClosed = true; if (!conn.keepUpstream) server.close() })
+    server.onClose(() => { try { ws.close() } catch { /* вече затворена */ } })
     current = { page: ws, server }
   })
   const page = await context.newPage()
@@ -247,6 +283,8 @@ async function openControlled(h: GiftBackHarness, label: string, profile: TestPr
     reconnect() { blocked = false },
     armDropAfter(type, reconnectAfterMs) { armed = { type, reconnectAfterMs } },
     delayNext(type, ms) { delayed = { type, ms } },
+    swallowNext(type, count = 1) { swallow = { type, count } },
+    halfOpenAfterNext(type) { halfOpenAfterType = type },
     authMeStarted: () => authMeStarted,
     authMeFinished: () => authMeFinished,
   }
@@ -488,6 +526,59 @@ if (process.env.SOFT_RECONNECT_E2E_PHASE !== '2') {
       const resyncing = await waitForExpr(M.page, `document.querySelector('${ROOM_BANNER}')?.textContent === 'Възстановяване на играта...'`, 10_000)
       assert(resyncing, 'банерът не показа „Възстановяване на играта...“ при отворен транспорт')
       assert(await waitForExpr(M.page, `!document.querySelector('${ROOM_BANNER}')`, 20_000), 'банерът не изчезна след синхронизацията')
+      assert(M.offlineReloads.length === 0, `reload: ${M.offlineReloads.join(',')}`)
+    })
+    // ── [R12]–[R14] Етапи 3–4 (M, mobile) ──
+    const resumeLinesFor = (profileId: string) => h.serverOutput().split('\n')
+      .filter((l) => l.includes('[resume] '))
+      .map((l) => JSON.parse(l.slice(l.indexOf('[resume] ') + 9)))
+      .filter((e: any) => e.profileId === profileId)
+    await check('[R12] room_resumed/snapshot изгубени, връзката остава полуотворена и прикрепена -> следващият опит възстановява с доказателство, без reload', async () => {
+      const sentFrom = M.sent.length
+      const resumeBefore = resumeLinesFor(M.profile.profileId).length
+      M.halfOpenAfterNext('resume_room')
+      M.disconnect()
+      await sleep(600)
+      M.reconnect()
+      assert(await waitForExpr(M.page, `!document.querySelector('${ROOM_BANNER}')`, 30_000), 'не се възстанови')
+      const resumes = M.sent.slice(sentFrom).filter((f) => f.type === 'resume_room')
+      assert(resumes.length === 2, `resume_room: ${resumes.length}`)
+      assert(Array.isArray(resumes[1]!.data.priorAttempts) && resumes[1]!.data.priorAttempts.length >= 1, `priorAttempts: ${JSON.stringify(resumes[1]!.data.priorAttempts)}`)
+      assert(!JSON.stringify(resumes[1]!.data.priorAttempts).includes('reconnectToken'), 'priorAttempts')
+      const entries = resumeLinesFor(M.profile.profileId).slice(resumeBefore)
+      const last = entries[entries.length - 1]
+      assert(entries.length === 2 && entries[0].result === 'attached' && last.result === 'attached' && (last.provenOwnConnectionIds?.length ?? 0) === 1, JSON.stringify(entries))
+      assert(M.offlineReloads.length === 0, `reload: ${M.offlineReloads.join(',')}`)
+    })
+    await check('[R13] resume_room не стига до сървъра -> 10 s, после нов тих опит (Етап 3) с доказателство за полуотворения неприкрепен опит, без reload', async () => {
+      const sentFrom = M.sent.length
+      const openedBefore = M.wsOpened()
+      const resumeBefore = resumeLinesFor(M.profile.profileId).length
+      M.swallowNext('resume_room')
+      const startedAt = Date.now()
+      M.disconnect()
+      await sleep(600)
+      M.reconnect()
+      assert(await waitForExpr(M.page, `!document.querySelector('${ROOM_BANNER}')`, 40_000), 'не се възстанови')
+      const tookMs = Date.now() - startedAt
+      assert(tookMs >= 10_000 && tookMs < 30_000, `продължителност ${tookMs} ms`)
+      assert(M.wsOpened() - openedBefore === 2, `нови връзки: ${M.wsOpened() - openedBefore}`)
+      const resumes = M.sent.slice(sentFrom).filter((f) => f.type === 'resume_room')
+      assert(resumes.length === 2 && resumes[1]!.data.reconnectAttempt === 2, JSON.stringify(resumes.map((f) => f.data.reconnectAttempt)))
+      const last = resumeLinesFor(M.profile.profileId).slice(resumeBefore).pop()
+      assert(last?.result === 'attached' && (last.provenOwnConnectionIds?.length ?? 0) === 1, JSON.stringify(last))
+      assert(M.offlineReloads.length === 0, `reload: ${M.offlineReloads.join(',')}`)
+    })
+    await check('[R14] два поредни временни неуспеха -> възстановяване от третия опит, без reload; паузата расте', async () => {
+      const sentFrom = M.sent.length
+      M.swallowNext('resume_room', 2)
+      M.disconnect()
+      await sleep(600)
+      M.reconnect()
+      assert(await waitForExpr(M.page, `!document.querySelector('${ROOM_BANNER}')`, 60_000), 'не се възстанови')
+      const resumes = M.sent.slice(sentFrom).filter((f) => f.type === 'resume_room')
+      assert(resumes.length === 3 && resumes.map((f) => f.data.reconnectAttempt).join(',') === '1,2,3', JSON.stringify(resumes.map((f) => f.data.reconnectAttempt)))
+      assert((resumes[2]!.data.priorAttempts?.length ?? 0) >= 2, `priorAttempts: ${resumes[2]!.data.priorAttempts?.length}`)
       assert(M.offlineReloads.length === 0, `reload: ${M.offlineReloads.join(',')}`)
     })
     autoP.stop()

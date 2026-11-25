@@ -294,6 +294,21 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         ...(typeof parsed.reconnectAttempt === 'number' && Number.isInteger(parsed.reconnectAttempt) && parsed.reconnectAttempt >= 1 && parsed.reconnectAttempt <= 1000
           ? { reconnectAttempt: parsed.reconnectAttempt }
           : {}),
+        // Етап 4: само масив от до 32 { connectionId, proof } с ограничена
+        // дължина; невалидните записи се пропускат, иначе полето липсва.
+        ...(() => {
+          if (!Array.isArray(parsed.priorAttempts)) return {}
+          const priorAttempts = (parsed.priorAttempts as unknown[])
+            .slice(0, 32)
+            .filter((item): item is { connectionId: string; proof: string } =>
+              typeof item === 'object' && item !== null &&
+              typeof (item as { connectionId?: unknown }).connectionId === 'string' &&
+              typeof (item as { proof?: unknown }).proof === 'string' &&
+              (item as { connectionId: string }).connectionId.length > 0 && (item as { connectionId: string }).connectionId.length <= 128 &&
+              (item as { proof: string }).proof.length > 0 && (item as { proof: string }).proof.length <= 64)
+            .map((item) => ({ connectionId: item.connectionId, proof: item.proof }))
+          return priorAttempts.length > 0 ? { priorAttempts } : {}
+        })(),
       }
     }
 

@@ -940,6 +940,8 @@ export type ClientMessage =
       // Етап 0 (диагностика): номер на опита в текущото прекъсване — само за
       // сървърния лог [resume].
       reconnectAttempt?: number
+      // Етап 4: собствените предишни опити в текущото прекъсване (сървърни proof-ове).
+      priorAttempts?: Array<{ connectionId: string; proof: string }>
     }
   | {
       type: 'tournament_semifinal_result_acknowledge'
@@ -1773,6 +1775,12 @@ export type ConnectedMessage = {
    */
   authRef?: string | null
   profileId?: string | null
+  /**
+   * Етап 4: случайно доказателство за ТАЗИ връзка (само за удостоверени).
+   * Клиентът го подава в resume_room.priorAttempts, ако тази връзка стане
+   * негов предишен опит. Не е удостоверение; не се логва.
+   */
+  attemptProof?: string | null
 }
 
 export type PongMessage = {
@@ -3794,7 +3802,7 @@ export type GameServerClient = {
   joinGuestTrial: (stake: MatchStake) => void
   leaveMatchmaking: () => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
-  resumeRoom: (roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string, reconnectAttempt?: number) => void
+  resumeRoom: (roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string, reconnectAttempt?: number, priorAttempts?: Array<{ connectionId: string; proof: string }>) => void
   acknowledgeTournamentSemifinalResult: (tournamentId: string, semifinalMatchId: string) => void
   leaveActiveRoom: (roomId: string, acceptPenalty?: boolean) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
@@ -4140,7 +4148,7 @@ export function createGameServerClient(
   // can attach a tournament round-transition room in the background without
   // navigating to the active-room screen (see activeRoom's
   // armPendingTournamentSilentEntry / the lobby's STATE B silent attach).
-  function resumeRoom(roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string, reconnectAttempt?: number): void {
+  function resumeRoom(roomId: string, reconnectToken: string, silent?: boolean, reconnectOf?: string, reconnectAttempt?: number, priorAttempts?: Array<{ connectionId: string; proof: string }>): void {
     send({
       type: 'resume_room',
       roomId,
@@ -4148,6 +4156,7 @@ export function createGameServerClient(
       ...(silent === true ? { silent: true } : {}),
       ...(reconnectOf !== undefined ? { reconnectOf } : {}),
       ...(reconnectAttempt !== undefined ? { reconnectAttempt } : {}),
+      ...(priorAttempts !== undefined && priorAttempts.length > 0 ? { priorAttempts } : {}),
     })
   }
 

@@ -30,6 +30,9 @@
 import {
   decideSoftReconnectAfterConnected,
   decideSoftReconnectOutcome,
+  getSoftReconnectRetryDelayMs,
+  MAX_SILENT_RECONNECT_ATTEMPTS_PER_OUTAGE,
+  isTransientActiveRoomSyncFailure,
   OFFLINE_FULL_SCREEN_DELAY_MS,
   SOFT_RECONNECT_MAX_OUTAGE_MS,
   SOFT_RECONNECT_SYNC_TIMEOUT_MS,
@@ -80,6 +83,14 @@ export type LobbySoftReconnectDeps = {
    * идентичността трябва да съвпада и с него. Без зависимост — не се проверява.
    */
   getExpectedProfileId?: () => string | null
+  /**
+   * Етап 3: временен неуспех в активна стая -> нов тих опит вместо reload.
+   * Зависимостта трябва да изостави текущия socket (нова връзка) и да насрочи
+   * свързване след consumeRetryDelayMs(). Без нея — досегашното презареждане.
+   */
+  onTransientFailure?: (info: { reason: SoftReconnectFailureReason; code?: string; attempt: number; retry: number; delayMs: number }) => void
+  /** Етап 3 (тестове): източник на случайност за jitter-а на паузата. */
+  random?: () => number
   /** detail — Етап 0: причина, номер на опита и продължителност (само диагностика). */
   onReload: (via: OfflineReloadVia, detail?: OfflineReloadDetail) => void
 }
@@ -94,6 +105,8 @@ export type LobbySoftReconnect = {
   isOutageActive: () => boolean
   /** Контекстът на текущото прекъсване (null — няма). */
   getOutageContext: () => SoftReconnectContext | null
+  /** Етап 3: паузата преди следващото свързване след временен неуспех (еднократно). */
+  consumeRetryDelayMs: () => number | null
 }
 
 type Outage = {
@@ -104,6 +117,10 @@ type Outage = {
   attempt: number
   /** Етап 2: как е потвърдена сесията при последния опит (активна стая). */
   authCheck?: SoftReconnectAuthCheck
+  /** Етап 3: брой тихи повторни опити след временен неуспех. */
+  retries: number
+  /** Етап 3: паузата преди следващото свързване (взима се веднъж). */
+  pendingRetryDelayMs: number | null
 }
 
 export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySoftReconnect {
@@ -131,6 +148,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     const detail: OfflineReloadDetail = { reason, attempt: outage.attempt, outageMs: deps.now() - outage.startedAt }
     if (code !== undefined) detail.code = code
     if (outage.authCheck !== undefined) detail.authCheck = outage.authCheck
+    if (outage.retries > 0) detail.retries = outage.retries
     deps.onReload(via, detail)
   }
 
@@ -193,6 +211,23 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     deps.syncLobby((ok) => { lobbySynced = ok; settle(false) })
   }
 
+  // Етап 3: текущият опит се анулира (закъснели отговори се игнорират чрез
+  // generation), прекъсването продължава, а main.ts изоставя socket-а и
+  // насрочва нова връзка след паузата. Нищо игрово не се изпраща повторно.
+  function scheduleTransientRetry(reason: SoftReconnectFailureReason, code: string | undefined, attempt: number): void {
+    if (outage === null) return
+    outage.retries += 1
+    outage.phase = 'down'
+    generation += 1
+    if (syncTimer !== null) deps.clearTimeout(syncTimer)
+    syncTimer = null
+    const delayMs = getSoftReconnectRetryDelayMs(outage.retries, deps.random)
+    outage.pendingRetryDelayMs = delayMs
+    const info: { reason: SoftReconnectFailureReason; code?: string; attempt: number; retry: number; delayMs: number } = { reason, attempt, retry: outage.retries, delayMs }
+    if (code !== undefined) info.code = code
+    deps.onTransientFailure?.(info)
+  }
+
   // Активна стая: сесията ПЪРВО; resume_room само след потвърдена същата сесия.
   // Етап 2: при нов сървър сесията се потвърждава веднага от 'connected'
   // (WS handshake-ът вече е удостоверил връзката) — без да се чака HTTP.
@@ -219,7 +254,14 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
             : session === 'changed' ? 'session_changed'
               : session === 'error' ? 'auth_error'
                 : 'resume_failed'
-        reload(outcome.via, reason, outcome.via === 'stale' ? undefined : failure?.code)
+        const code = outcome.via === 'stale' ? undefined : failure?.code
+        // Етап 3: временен неуспех -> нов тих опит (нова връзка, пауза),
+        // в рамките на същото прекъсване (120 s се броят от първото затваряне).
+        if (outcome.via !== 'stale' && deps.onTransientFailure !== undefined && outage !== null && isTransientActiveRoomSyncFailure(reason, code)) {
+          scheduleTransientRetry(reason, code, attempt)
+          return
+        }
+        reload(outcome.via, reason, code)
         return
       }
       recovered()
@@ -272,7 +314,7 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
   return {
     beginOutage(context = 'lobby') {
       if (outage === null) {
-        outage = { startedAt: deps.now(), context, phase: 'down', attempt: 0 }
+        outage = { startedAt: deps.now(), context, phase: 'down', attempt: 0, retries: 0, pendingRetryDelayMs: null }
         generation += 1
         if (context === 'active_room') {
           deps.onShowActiveRoomOutage?.()
@@ -328,6 +370,12 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
         reload(decision.via, decision.via)
         return
       }
+      // Етап 4: таванът от опити гарантира, че клиентът държи proof за всеки
+      // собствен опит в прекъсването (виж MAX_SILENT_RECONNECT_ATTEMPTS_PER_OUTAGE).
+      if (outage.context === 'active_room' && outage.attempt >= MAX_SILENT_RECONNECT_ATTEMPTS_PER_OUTAGE) {
+        reload('sync', 'attempts_exhausted')
+        return
+      }
       if (outage.context === 'active_room') startActiveRoomSync(identity)
       else startLobbySync()
     },
@@ -336,6 +384,12 @@ export function createLobbySoftReconnect(deps: LobbySoftReconnectDeps): LobbySof
     },
     getOutageContext() {
       return outage?.context ?? null
+    },
+    consumeRetryDelayMs() {
+      if (outage === null || outage.pendingRetryDelayMs === null) return null
+      const delayMs = outage.pendingRetryDelayMs
+      outage.pendingRetryDelayMs = null
+      return delayMs
     },
   }
 }

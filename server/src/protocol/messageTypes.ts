@@ -191,6 +191,11 @@ export type ClientMessage =
       // Етап 0 (диагностика): номер на опита за тихо възстановяване в текущото
       // прекъсване. Само за лога [resume] — не влияе на решението.
       reconnectAttempt?: number
+      // Етап 4: собствените предишни опити на тази страница в текущото
+      // прекъсване, всеки със сървърния attemptProof от неговото 'connected'.
+      // Използва се само заедно с reconnectOf. До 32 записа (= таванът от опити
+      // в едно прекъсване на клиента); плюс веригата на сървъра (core/reconnectAttemptProofs.ts).
+      priorAttempts?: Array<{ connectionId: string; proof: string }>
     }
   | {
       type: 'tournament_semifinal_result_acknowledge'
@@ -922,6 +927,12 @@ export type ConnectedMessage = {
    */
   authRef?: string | null
   profileId?: string | null
+  /**
+   * Етап 4: случайно доказателство за ТАЗИ връзка (само за удостоверени).
+   * Клиентът го подава в resume_room.priorAttempts, ако тази връзка стане
+   * негов предишен опит. Не е удостоверение; не се логва.
+   */
+  attemptProof?: string | null
 }
 
 export type PongMessage = {

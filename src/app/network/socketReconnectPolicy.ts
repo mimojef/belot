@@ -140,6 +140,8 @@ export type SoftReconnectFailureReason =
   | 'lobby_sync_failed'
   | 'restart'
   | 'stale'
+  /** Етап 4: достигнат е таванът от опити в едно прекъсване (мигаща мрежа). */
+  | 'attempts_exhausted'
 
 export type OfflineReloadDetail = {
   reason: SoftReconnectFailureReason
@@ -151,6 +153,8 @@ export type OfflineReloadDetail = {
   code?: string
   /** Етап 2: как е проверена сесията — ws (от connected) или http (/api/auth/me). */
   authCheck?: 'ws' | 'http'
+  /** Етап 3: брой тихи повторни опити след временен неуспех преди презареждането. */
+  retries?: number
 }
 
 const OFFLINE_RELOAD_CODE_PATTERN = /^[a-z0-9_]{1,40}$/
@@ -163,7 +167,81 @@ export function buildOfflineReloadUrl(now: number, via: OfflineReloadVia, detail
   let url = `${base}&reason=${detail.reason}&attempt=${attempt}&outageMs=${outageMs}`
   if (detail.code !== undefined) url += `&code=${OFFLINE_RELOAD_CODE_PATTERN.test(detail.code) ? detail.code : 'other'}`
   if (detail.authCheck === 'ws' || detail.authCheck === 'http') url += `&authCheck=${detail.authCheck}`
+  if (detail.retries !== undefined && Number.isInteger(detail.retries) && detail.retries >= 0) url += `&retries=${Math.min(detail.retries, 1000)}`
   return url
+}
+
+/**
+ * Етап 3: временен ли е неуспехът на тихото възстановяване на активна стая
+ * (нов тих опит с нова връзка) или окончателен (досегашното презареждане /
+ * изричен избор). Окончателни: сменена/изтекла сесия, отказ от сървъра (вкл.
+ * друго устройство), друга стая, друг backend процес, над 120 s.
+ */
+export function isTransientActiveRoomSyncFailure(reason: SoftReconnectFailureReason, code?: string): boolean {
+  switch (reason) {
+    case 'auth_timeout':
+    case 'auth_error':
+    case 'resume_timeout':
+    case 'resume_failed':
+      return true
+    case 'resume_precondition':
+      return code === 'socket_not_open'
+    default:
+      return false
+  }
+}
+
+/**
+ * Етап 4: най-много опити (връзки с 'connected') в едно тихо възстановяване
+ * на активна стая. Клиентът пази proof-а на ВСЕКИ от тях и подава всички
+ * предишни, затова никой собствен опит не може да остане недоказан (и да
+ * предизвика other_session_active). Над тавана — досегашното безопасно
+ * презареждане (reason=attempts_exhausted); случва се само при силно мигаща мрежа.
+ */
+export const MAX_SILENT_RECONNECT_ATTEMPTS_PER_OUTAGE = 32
+export const MAX_SILENT_RECONNECT_PRIOR_ATTEMPTS = MAX_SILENT_RECONNECT_ATTEMPTS_PER_OUTAGE
+export type SilentReconnectAttemptProof = { connectionId: string; proof: string }
+export function appendSilentReconnectAttemptProof(
+  list: readonly SilentReconnectAttemptProof[],
+  entry: SilentReconnectAttemptProof,
+  max: number = MAX_SILENT_RECONNECT_PRIOR_ATTEMPTS,
+): SilentReconnectAttemptProof[] {
+  return [...list.filter((item) => item.connectionId !== entry.connectionId), entry].slice(-max)
+}
+
+/**
+ * Етап 3: броячът на паузите между свързванията (getReconnectDelayMs) НЕ се
+ * нулира при отваряне на socket-а, докато тихото възстановяване на активна
+ * стая не е завършило — иначе бързо падащи връзки биха се опитвали отново
+ * през ~750 ms без растяща пауза. Нулира се след успешно възстановяване.
+ */
+export function shouldResetReconnectBackoffOnOpen(outageContext: 'lobby' | 'active_room' | null): boolean {
+  return outageContext !== 'active_room'
+}
+
+/**
+ * Етап 3: събитие 'online' по време на прекъсване. За активна стая незабавно
+ * свързване се позволява само ВЕДНЪЖ на прекъсване; следващите 'online'
+ * събития не заобикалят паузата (насроченото свързване остава). Лоби — както досега.
+ */
+export function decideBrowserOnlineReconnect(input: {
+  outageContext: 'lobby' | 'active_room'
+  socketConnected: boolean
+  fastReconnectUsed: boolean
+}): 'connect_now' | 'keep_backoff' | 'none' {
+  if (input.socketConnected) return 'none'
+  if (input.outageContext === 'active_room' && input.fastReconnectUsed) return 'keep_backoff'
+  return 'connect_now'
+}
+
+/** Етап 3: пауза преди N-тия повторен опит: 1, 2, 4, 8 s (таван) с ±25% jitter. */
+export const SOFT_RECONNECT_RETRY_BASE_MS = 1_000
+export const SOFT_RECONNECT_RETRY_MAX_MS = 8_000
+export function getSoftReconnectRetryDelayMs(retryIndex: number, random: () => number = Math.random): number {
+  const exponent = Math.max(0, Math.min(retryIndex - 1, 10))
+  const base = Math.min(SOFT_RECONNECT_RETRY_BASE_MS * 2 ** exponent, SOFT_RECONNECT_RETRY_MAX_MS)
+  const factor = 0.75 + Math.min(Math.max(random(), 0), 1) * 0.5
+  return Math.max(250, Math.round(base * factor))
 }
 
 export type SoftReconnectAfterConnected =

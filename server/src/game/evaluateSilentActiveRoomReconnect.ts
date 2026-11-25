@@ -33,7 +33,12 @@ export type SilentReconnectRefusalDetail =
 export type RecentlyClosedRoomConnection = { profileId: string; roomId: string; closedAt: number }
 
 export type SilentReconnectDecision =
-  | { ok: true; previousConnection: 'live' | 'recently_closed' }
+  | {
+      ok: true
+      previousConnection: 'live' | 'recently_closed'
+      /** Етап 4: собствени предишни опити (доказани), които иначе биха блокирали. */
+      provenOwnConnectionIds: ConnectionId[]
+    }
   | {
       ok: false
       code: SilentReconnectRefusalCode
@@ -53,6 +58,12 @@ export type EvaluateSilentActiveRoomReconnectInput = {
   getRecentlyClosed: (connectionId: ConnectionId) => RecentlyClosedRoomConnection | undefined
   now: number
   recentlyClosedTtlMs: number
+  /**
+   * Етап 4: предишни опити на СЪЩАТА страница, доказани със сървърен
+   * attemptProof (виж core/reconnectAttemptProofs.ts). Празно = досегашното
+   * поведение без промяна.
+   */
+  provenOwnConnectionIds?: ReadonlySet<ConnectionId>
 }
 
 function refuse(
@@ -99,9 +110,15 @@ export function evaluateSilentActiveRoomReconnect(input: EvaluateSilentActiveRoo
     previousConnection = 'recently_closed'
   }
 
+  const proven = input.provenOwnConnectionIds ?? new Set<ConnectionId>()
+  const provenUsed = new Set<ConnectionId>()
   // Мястото е заето от друга връзка (друго устройство вече е в играта).
+  // Етап 4: освен ако е собствен предишен опит (напр. прикрепен, но
+  // room_resumed/snapshot не са стигнали до клиента).
   const seatConnectionId = seatMatch.participant.connectionId
-  if (seatConnectionId !== null && seatConnectionId !== reconnectOf) {
+  if (seatConnectionId !== null && seatConnectionId !== reconnectOf && proven.has(seatConnectionId)) {
+    provenUsed.add(seatConnectionId)
+  } else if (seatConnectionId !== null && seatConnectionId !== reconnectOf) {
     const holder = connections[seatConnectionId] ?? null
     return refuse('other_session_active', 'seat_held_by_other_connection', {
       connectionId: seatConnectionId,
@@ -112,10 +129,15 @@ export function evaluateSilentActiveRoomReconnect(input: EvaluateSilentActiveRoo
   for (const other of Object.values(connections)) {
     if (other.profileId !== profileId || other.status !== 'connected') continue
     if (other.id === connectionId || other.id === reconnectOf) continue
+    // Етап 4: собствен предишен опит (полуотворен/неприкрепен) не е друго устройство.
+    if (proven.has(other.id)) {
+      provenUsed.add(other.id)
+      continue
+    }
     return refuse('other_session_active', 'other_live_connection', {
       connectionId: other.id,
       attached: other.currentRoomId !== null,
     })
   }
-  return { ok: true, previousConnection }
+  return { ok: true, previousConnection, provenOwnConnectionIds: [...provenUsed] }
 }

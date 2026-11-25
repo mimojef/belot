@@ -30,6 +30,7 @@ import {
 } from './diagnostics/reconnectDiagnostics.js'
 import { evaluateSilentActiveRoomReconnect, type SilentReconnectDecision } from './game/evaluateSilentActiveRoomReconnect.js'
 import { createConnectedAuthRefFactory } from './core/connectedAuthRef.js'
+import { createReconnectAttemptProofStore } from './core/reconnectAttemptProofs.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createCoPlayRestrictionStore } from './db/coPlayRestrictionStore.js'
 import { createCoPlayRestrictionAdminHttpRequestHandler } from './coPlayRestrictions/coPlayRestrictionAdminHttpApi.js'
@@ -7896,6 +7897,7 @@ function validateSilentActiveRoomReconnect(input: {
   reconnectOf: string
   room: ServerRoom | null
   reconnectToken: string
+  provenOwnConnectionIds?: ReadonlySet<ConnectionId>
 }): SilentReconnectDecision {
   return evaluateSilentActiveRoomReconnect({
     ...input,
@@ -8938,6 +8940,10 @@ function sendCrossGameCommitmentBlockedIfNeeded(
 function displaceProfileConnections(
   profileId: string,
   exceptConnectionId: ConnectionId,
+  // Етап 4: само при тихо възстановяване на Белот — изтласкан socket, който не
+  // завърши close handshake-а за кратко (полуотворен), се освобождава с
+  // terminate(). Всички останали изтласквания — досегашното поведение.
+  options: { terminateUnclosedAfterMs?: number } = {},
 ): void {
   for (const conn of Object.values(serverState.connections)) {
     if (
@@ -8960,6 +8966,20 @@ function displaceProfileConnections(
     if (socket && socket.readyState === WebSocket.OPEN) {
       sendJsonMessage(socket, { type: 'session_displaced' })
       socket.close()
+      // Етап 4 (само тихо възстановяване на Белот): жива връзка приключва close
+      // handshake-а за милисекунди; полуотворена никога не отговаря и
+      // библиотеката би чакала 30 s. terminate() след кратък срок я освобождава.
+      // 'close' handler-ът намира връзката по точния connectionId — мястото
+      // вече е на новата връзка и не се засяга.
+      const terminateAfterMs = options.terminateUnclosedAfterMs
+      if (terminateAfterMs !== undefined) {
+        const displacedConnectionId = conn.id
+        setTimeout(() => {
+          if (socket.readyState === WebSocket.CLOSED) return
+          console.log('[ws-displace-terminate]', JSON.stringify({ at: new Date().toISOString(), connectionId: displacedConnectionId }))
+          socket.terminate()
+        }, terminateAfterMs).unref()
+      }
     }
 
     removeConnectionFromMatchmaking(conn.id)
@@ -26587,6 +26607,12 @@ const SERVER_INSTANCE_ID = randomUUID()
 // Етап 2: непрозрачен идентификатор на удостоверителната сесия в 'connected'
 // (HMAC с ключ на този процес — виж core/connectedAuthRef.ts).
 const buildConnectedAuthRef = createConnectedAuthRefFactory()
+// Етап 4: сървърни доказателства за собствените опити на една страница
+// (записът живее колкото връзката; proof-ът не се логва).
+const reconnectAttemptProofs = createReconnectAttemptProofStore()
+// Етап 4: колко дълго изтласкан socket може да чака close handshake
+// (само при тихо възстановяване на Белот, виж displaceProfileConnections).
+const DISPLACED_SOCKET_TERMINATE_AFTER_MS = 1_500
 
 // ─── WS close diagnostics (disconnect-lifecycle observability, no new policy) ─
 // Компактен, structured log за ВСЕКИ WS close, за да различаваме explicit
@@ -26766,6 +26792,8 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
     // профилът — клиентът потвърждава „същата сесия“ без /api/auth/me.
     authRef: buildConnectedAuthRef(connection.sessionId),
     profileId: connection.profileId,
+    // Етап 4: доказателство за ТАЗИ връзка (само за удостоверени; null за гост).
+    attemptProof: reconnectAttemptProofs.issue(connection.id, connection.profileId),
   })
 
   // Фаза 10 — bootstrap flush на всяко ново connection (login/reconnect/
@@ -28206,13 +28234,20 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       if (message.type === 'resume_room') {
         // Етап 0 — структурирана диагностика: точно един [resume] ред за всеки
         // изход от този handler (без reconnectToken/cookies). Само наблюдение.
-        const resumeDiagnosticBase: Pick<ResumeRoomDiagnostic, 'connectionId' | 'profileId' | 'roomId' | 'mode' | 'reconnectOf' | 'reconnectAttempt'> = {
+        // Етап 4: доказаните собствени предишни опити (само при reconnectOf).
+        // Директно проверените + наследените по веригата (виж reconnectAttemptProofs.ts).
+        const provenOwnConnectionIds: Set<ConnectionId> = message.reconnectOf !== undefined
+          ? reconnectAttemptProofs.resolveOwned(connection.id, connection.profileId, message.priorAttempts ?? [])
+          : new Set<ConnectionId>()
+        const resumeDiagnosticBase: Pick<ResumeRoomDiagnostic, 'connectionId' | 'profileId' | 'roomId' | 'mode' | 'reconnectOf' | 'reconnectAttempt' | 'priorAttemptCount' | 'verifiedPriorAttemptCount'> = {
           connectionId: connection.id,
           profileId: connection.profileId,
           roomId: message.roomId,
           mode: message.reconnectOf !== undefined ? 'silent_reconnect' : message.silent === true ? 'silent_attach' : 'explicit',
           reconnectOf: message.reconnectOf ?? null,
           reconnectAttempt: message.reconnectAttempt ?? null,
+          priorAttemptCount: message.priorAttempts?.length ?? 0,
+          verifiedPriorAttemptCount: provenOwnConnectionIds.size,
         }
         const logResumeRoomOutcome = (outcome: Omit<ResumeRoomDiagnostic, keyof typeof resumeDiagnosticBase>): void => {
           console.log(formatResumeRoomLogLine({ ...resumeDiagnosticBase, ...outcome }))
@@ -28279,6 +28314,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // ПРЕДИ изместване на връзки или промяна на мястото. При съмнение —
         // отказ с code и клиентът минава към изричния избор.
         let silentPreviousConnection: 'live' | 'recently_closed' | null = null
+        let provenOwnConnectionsUsed: ConnectionId[] = []
         if (message.reconnectOf !== undefined) {
           const silentReconnectDecision = validateSilentActiveRoomReconnect({
             connectionId: connection.id,
@@ -28286,6 +28322,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             reconnectOf: message.reconnectOf,
             room: targetRoomForResume,
             reconnectToken: message.reconnectToken,
+            provenOwnConnectionIds,
           })
           if (!silentReconnectDecision.ok) {
             const silentReconnectFailure = silentReconnectDecision.code
@@ -28307,6 +28344,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             return
           }
           silentPreviousConnection = silentReconnectDecision.previousConnection
+          provenOwnConnectionsUsed = silentReconnectDecision.provenOwnConnectionIds
         }
 
         // Диагностика: кои живи връзки на профила ще бъдат изместени (същият
@@ -28318,7 +28356,11 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
             .map((conn) => conn.id)
 
         if (connection.profileId !== null) {
-          displaceProfileConnections(connection.profileId, connection.id)
+          displaceProfileConnections(
+            connection.profileId,
+            connection.id,
+            message.reconnectOf !== undefined ? { terminateUnclosedAfterMs: DISPLACED_SOCKET_TERMINATE_AFTER_MS } : {},
+          )
         }
 
         const result = tryResumeRoomForConnection(
@@ -28369,6 +28411,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           seat: result.seat,
           previousConnection: silentPreviousConnection,
           displacedConnectionIds,
+          provenOwnConnectionIds: provenOwnConnectionsUsed,
         })
 
         broadcastRoomSnapshots(result.room, socketRegistry)
@@ -31589,6 +31632,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
 
       // Финален close: handleDisconnect + премахване на записа от
       // serverState.connections (виж core/releaseClosedConnection.ts).
+      reconnectAttemptProofs.release(connection.id)
       const result = releaseClosedConnection(serverState, connection.id)
       const disconnectState = result.serverState
 

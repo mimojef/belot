@@ -34,6 +34,11 @@ export type ResumeRoomDiagnostic = {
   blockingConnectionId?: string | null
   blockingConnectionAttached?: boolean | null
   displacedConnectionIds?: readonly string[]
+  /** Етап 4: подадени priorAttempts (брой) и колко от тях сървърът е потвърдил. */
+  priorAttemptCount?: number
+  verifiedPriorAttemptCount?: number
+  /** Етап 4: собствени предишни опити, които биха блокирали, но са доказани (само id, никога proof). */
+  provenOwnConnectionIds?: readonly string[]
 }
 
 const MAX_TEXT_LENGTH = 200
@@ -83,6 +88,13 @@ export function formatResumeRoomLogLine(entry: ResumeRoomDiagnostic, now: number
   if (entry.blockingConnectionAttached != null) payload.blockingConnectionAttached = entry.blockingConnectionAttached
   if (entry.displacedConnectionIds !== undefined && entry.displacedConnectionIds.length > 0) {
     payload.displacedConnectionIds = entry.displacedConnectionIds.slice(0, 10)
+  }
+  if (entry.priorAttemptCount !== undefined && entry.priorAttemptCount > 0) {
+    payload.priorAttemptCount = entry.priorAttemptCount
+    payload.verifiedPriorAttemptCount = entry.verifiedPriorAttemptCount ?? 0
+  }
+  if (entry.provenOwnConnectionIds !== undefined && entry.provenOwnConnectionIds.length > 0) {
+    payload.provenOwnConnectionIds = entry.provenOwnConnectionIds.slice(0, 10)
   }
   return `[resume] ${JSON.stringify(payload)}`
 }
