@@ -29,6 +29,8 @@ import type {
   MatchStake,
   MissionTemplateInput,
   MatchRoomSnapshot,
+  AdminMatchRoomGamePrizes,
+  AdminMatchRoomInput,
   MissionTemplateSnapshot,
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
@@ -1007,7 +1009,9 @@ export type LobbyScreenState = {
   matchRooms: MatchRoomSnapshot[]
   matchRoomsLoading: boolean
   matchRoomsErrorText: string | null
-  adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
+  adminMatchRoomEdit: MatchRoomSnapshot | 'new' | null
+  /** Етап 4В: сървърно изчислените награди по игри (общ каталог). */
+  adminMatchRoomPrizes: AdminMatchRoomGamePrizes[]
   privateRoomsCreatePopupOpen: boolean
   /**
    * Избраните настройки в отворения прозорец „Нова маса“ (null = стойностите по
@@ -1600,9 +1604,9 @@ export type RenderLobbyScreenOptions = {
   onAdminMissionActiveToggle: (missionId: string, isActive: boolean) => void
   onAdminMissionDelete: (missionId: string) => void
   onAdminMissionEdit: (missionId: string, isStaged?: boolean) => void
-  onAdminMatchRoomEditStart: (room: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | null) => void
+  onAdminMatchRoomEditStart: (room: MatchRoomSnapshot | null) => void
   onAdminMatchRoomEditCancel: () => void
-  onAdminMatchRoomSubmit: (room: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean }) => void
+  onAdminMatchRoomSubmit: (room: AdminMatchRoomInput) => void
   onAdminMatchRoomDelete: (stakeAmount: number) => void
   onPrivateRoomsOpen: () => void
   onPrivateRoomsClose: () => void
@@ -2933,6 +2937,27 @@ function getComposerEmojiLockState(trigger: HTMLElement): { muted: boolean; nonV
 
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
+}
+
+/** Етап 4В: 2000 → „20“, 1250 → „12,50“ (bps → % с точност 0,01). */
+function formatAdminCommissionPercent(bps: number): string {
+  const whole = Math.trunc(bps / 100)
+  const frac = bps % 100
+  return frac === 0 ? String(whole) : `${whole},${String(frac).padStart(2, '0')}`
+}
+
+/** Етап 4В: сървърно изчислените награди по игри за ред от общия каталог. */
+function renderAdminRoomGamePrizes(room: MatchRoomSnapshot, prizes: readonly AdminMatchRoomGamePrizes[]): string {
+  const entry = prizes.find((item) => item.stakeAmount === room.stakeAmount)
+  const prize = (value: number | null | undefined) => value === null || value === undefined ? '—' : formatAmount(value)
+  const belot = `Белот: ${room.prizeAmount > 0 ? formatAmount(room.prizeAmount) : '—'} на победител (4 играчи, 2 победители)`
+  if (!entry) return `<div>${belot}</div>`
+  const svaraAvailable = entry.svara['2'] !== null || entry.svara['3'] !== null || entry.svara['4'] !== null
+  const svara = svaraAvailable
+    ? `Свара: 2 играчи ${prize(entry.svara['2'])} · 3 играчи ${prize(entry.svara['3'])} · 4 играчи ${prize(entry.svara['4'])}`
+    : 'Свара: не се предлага (входът трябва да е кратен на 1 000)'
+  const ludo = `Не се сърди човече: 2 играчи ${prize(entry.ludo['2'])} · 4 играчи ${prize(entry.ludo['4'])}`
+  return `<div>${belot}</div><div>${svara}</div><div>${ludo}</div>`
 }
 
 // Оферти в лобито — сумата (+ евентуален кампаниен "+X <икона>") се свива
@@ -13474,7 +13499,7 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     <section style="margin-top:28px;">
       <div style="display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(52,211,153,0.2);padding-bottom:10px;margin-bottom:20px;">
         <div style="font-size:16px;font-weight:900;color:#34d399;letter-spacing:0.04em;text-transform:uppercase;">Стаи за мач</div>
-        <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:500;">Вход, награда и минимално ниво за влизане.</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:500;">Общ списък с входове за всички игри (Белот, Свара, Не се сърди човече). Наградите се изчисляват автоматично от входа, фонда и комисионата.</div>
       </div>
 
       ${state.matchRoomsLoading ? `
@@ -13492,8 +13517,9 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
               <div style="font-size:13px;font-weight:800;color:${room.isEnabled ? '#f8fafc' : 'rgba(255,255,255,0.45)'};">
                 Вход: ${formatAmount(room.stakeAmount)}
               </div>
-              <div style="font-size:12px;color:rgba(255,255,255,0.6);">Награда: ${formatAmount(room.prizeAmount)}</div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.6);">Комисиона: ${formatAdminCommissionPercent(room.siteCommissionBps ?? 2000)}%</div>
               <div style="font-size:12px;color:rgba(255,255,255,0.6);">Мин. ниво: ${room.minLevel}</div>
+              <div data-admin-room-prizes="${room.stakeAmount}" style="flex-basis:100%;display:grid;gap:2px;font-size:11px;color:rgba(255,255,255,0.55);">${renderAdminRoomGamePrizes(room, state.adminMatchRoomPrizes)}</div>
               ${!room.isEnabled ? `<span style="font-size:10px;font-weight:900;color:rgba(255,255,255,0.35);background:rgba(255,255,255,0.06);border-radius:4px;padding:2px 7px;letter-spacing:0.06em;">ИЗКЛЮЧЕНА</span>` : ''}
             </div>
             <div style="${adminRoomActionsStyle}">
@@ -13519,11 +13545,11 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             <div style="${adminRoomFormGridStyle}">
               <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(52,211,153,0.8);">
                 Вход (жълтици)
-                <input name="stakeAmount" type="number" min="1" value="${room?.stakeAmount ?? ''}" ${!isNew ? 'readonly' : 'data-admin-room-stake-input="1"'} style="width:100%;box-sizing:border-box;height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;${!isNew ? 'opacity:0.55;cursor:not-allowed;' : ''}">
+                <input name="stakeAmount" type="number" min="5000" step="100" value="${room?.stakeAmount ?? ''}" ${!isNew ? 'readonly' : 'data-admin-room-stake-input="1"'} style="width:100%;box-sizing:border-box;height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;${!isNew ? 'opacity:0.55;cursor:not-allowed;' : ''}">
               </label>
               <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(52,211,153,0.8);">
-                Награда (жълтици)
-                <input name="prizeAmount" type="number" min="1" value="${room?.prizeAmount ?? ''}" ${isNew ? 'data-admin-room-prize-input="1"' : ''} style="width:100%;box-sizing:border-box;height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
+                Комисиона (%)
+                <input name="commissionPercent" type="text" inputmode="decimal" placeholder="20" value="${room ? formatAdminCommissionPercent(room.siteCommissionBps ?? 2000) : '20'}" style="width:100%;box-sizing:border-box;height:40px;border-radius:8px;border:1px solid rgba(52,211,153,0.24);background:#050505;color:#ffffff;padding:0 10px;font-size:13px;font-weight:700;outline:none;">
               </label>
               <label style="display:grid;gap:5px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(52,211,153,0.8);">
                 Мин. ниво
@@ -13537,6 +13563,8 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
                 </select>
               </label>
             </div>
+
+            <div style="font-size:11px;color:rgba(255,255,255,0.45);">Вход от 5 000 до 1 000 000 000, кратен на 100. Комисиона 10%–50% със стъпка 0,01%. Наградите за всички игри се изчисляват от сървъра.</div>
 
             <div style="${adminRoomFormActionsStyle}">
               <button type="submit" style="height:40px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#34d399 0%,#059669 100%);color:#000000;font-size:13px;font-weight:900;cursor:pointer;">Запази</button>
@@ -20592,7 +20620,7 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const stakeAmount = Number(btn.dataset.adminRoomEdit ?? 0)
       const room = state.matchRooms.find((r) => r.stakeAmount === stakeAmount)
-      if (room) options.onAdminMatchRoomEditStart({ stakeAmount: room.stakeAmount, minLevel: room.minLevel, prizeAmount: room.prizeAmount, isEnabled: room.isEnabled })
+      if (room) options.onAdminMatchRoomEditStart(room)
     })
   })
 
@@ -20604,15 +20632,6 @@ export function renderLobbyScreen(
   root.querySelector<HTMLButtonElement>('[data-admin-room-form-cancel="1"]')
     ?.addEventListener('click', () => {
       options.onAdminMatchRoomEditCancel()
-    })
-
-  root.querySelector<HTMLInputElement>('[data-admin-room-stake-input="1"]')
-    ?.addEventListener('input', (e) => {
-      const stake = Number((e.currentTarget as HTMLInputElement).value)
-      const prizeInput = root.querySelector<HTMLInputElement>('[data-admin-room-prize-input="1"]')
-      if (!prizeInput || stake <= 0) return
-      const multiplier = stake >= 100_000 ? 1.8 : stake >= 50_000 ? 1.7 : 1.6
-      prizeInput.value = String(Math.round((stake * multiplier) / 1000) * 1000)
     })
 
   root.querySelectorAll<HTMLButtonElement>('[data-admin-room-delete]').forEach((btn) => {
@@ -20630,11 +20649,12 @@ export function renderLobbyScreen(
       const form = event.currentTarget as HTMLFormElement
       const data = new FormData(form)
       const stakeAmount = Number(data.get('stakeAmount') ?? 0)
-      const prizeAmount = Number(data.get('prizeAmount') ?? 0)
       const minLevel = Number(data.get('minLevel') ?? 1)
       const isEnabled = String(data.get('isEnabled') ?? '1') === '1'
-      if (stakeAmount <= 0 || prizeAmount <= 0 || minLevel < 1) return
-      options.onAdminMatchRoomSubmit({ stakeAmount, minLevel, prizeAmount, isEnabled })
+      const commission = String(data.get('commissionPercent') ?? '').trim()
+      if (stakeAmount <= 0 || minLevel < 1) return
+      // Етап 4В: сървърът валидира и изчислява наградите; клиентът подава само стойностите.
+      options.onAdminMatchRoomSubmit({ stakeAmount, minLevel, isEnabled, commissionPercent: commission === '' ? null : commission })
     })
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-package-delete]').forEach((button) => {

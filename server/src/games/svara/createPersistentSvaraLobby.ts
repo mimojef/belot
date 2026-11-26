@@ -33,14 +33,13 @@ export async function createPersistentSvaraLobby(deps: {
       // cannot prove absence: new cross-game admissions must fail closed.
       findActiveMatchId: safe.code === 'schema-missing' ? () => null : unavailable }
   }
-  // Етап 4В: конфигурацията на входовете в базата е водещият източник и във
-  // виртуалния режим → store-ът се създава винаги (началните стойности не
-  // презаписват админ промени). Етап 3В.2: финансовите операции — САМО при
-  // SVARA_PAID_MATCHES_ENABLED=1; недостъпна икономика → 'unavailable'.
+  // Етап 4В: входовете и комисионите идват от общия каталог на масите
+  // (match_rooms) → store-ът се създава винаги, и във виртуалния режим.
+  // Етап 3В.2: финансовите операции — САМО при SVARA_PAID_MATCHES_ENABLED=1;
+  // недостъпна икономика → 'unavailable'.
   let economy: Awaited<ReturnType<typeof createSvaraEconomyStore>> | null = null
   try {
     economy = await createSvaraEconomyStore(deps.databaseFilePath)
-    economy.ensureDefaultConfig()
     const store = economy
     const closeSnapshots = close
     close = () => { closeSnapshots(); store.close() }
@@ -50,7 +49,5 @@ export async function createPersistentSvaraLobby(deps: {
   }
   const paidEconomy: SvaraPaidEconomy | 'unavailable' | undefined = isSvaraPaidMatchesEnabled() ? (economy ?? 'unavailable') : undefined
   const lobby = createSvaraLobby({ ...deps, persistence, svaraConfig: economy ?? 'unavailable', ...(paidEconomy !== undefined ? { paidEconomy } : {}) })
-  /** Етап 4В: за админ endpoint-ите (входове на „Свара“); null — недостъпно. */
-  const admin = economy
-  return { lobby, close, admin }
+  return { lobby, close }
 }

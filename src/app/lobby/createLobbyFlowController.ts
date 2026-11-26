@@ -145,6 +145,8 @@ import type {
   LobbyChatMessageSnapshot,
   MatchFoundMessage,
   MatchRoomSnapshot,
+  AdminMatchRoomGamePrizes,
+  AdminMatchRoomInput,
   MatchStake,
   MissionTemplateInput,
   MissionTemplateSnapshot,
@@ -1007,13 +1009,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onMatchRoomsLoad?: () => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
-  onAdminMatchRoomUpsert?: (room: {
-    stakeAmount: number
-    minLevel: number
-    prizeAmount: number
-    isEnabled: boolean
-  }) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
-  onAdminMatchRoomDelete?: (stakeAmount: number) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
+  /** Етап 4В: общият каталог на масите с наградите по игри (само за админ). */
+  onAdminMatchRoomsLoad?: () => Promise<{ ok: true; rooms: MatchRoomSnapshot[]; gamePrizes: AdminMatchRoomGamePrizes[] } | { ok: false; message: string }>
+  onAdminMatchRoomUpsert?: (room: AdminMatchRoomInput) => Promise<{ ok: true; rooms: MatchRoomSnapshot[]; gamePrizes: AdminMatchRoomGamePrizes[] } | { ok: false; message: string }>
+  onAdminMatchRoomDelete?: (stakeAmount: number) => Promise<{ ok: true; rooms: MatchRoomSnapshot[]; gamePrizes: AdminMatchRoomGamePrizes[] } | { ok: false; message: string }>
   onPrivateRoomsOpen?: () => void
   onPrivateRoomsClose?: () => void
   /** "Играещи"/"Приключили" табове — извиква се веднъж при first-open на всеки от двата (lazy load, не при "Чакащи"). */
@@ -2415,7 +2414,8 @@ type InternalLobbyFlowState = {
   matchRoomsLoaded: boolean
   matchRoomsLoading: boolean
   matchRoomsErrorText: string | null
-  adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
+  adminMatchRoomEdit: MatchRoomSnapshot | 'new' | null
+  adminMatchRoomPrizes: AdminMatchRoomGamePrizes[]
   privateRoomsCreatePopupOpen: boolean
   /** Избраните настройки в отворения прозорец „Нова маса“ (null = по подразбиране; нулира се при отваряне). */
   privateRoomCreateDraft: PrivateRoomCreateDraft | null
@@ -3238,6 +3238,7 @@ function createInitialState(): InternalLobbyFlowState {
     matchRoomsLoading: true,
     matchRoomsErrorText: null,
     adminMatchRoomEdit: null,
+    adminMatchRoomPrizes: [],
     privateRoomsCreatePopupOpen: false,
     privateRoomCreateDraft: null,
     privateRoomVoiceCreateOption: null,
@@ -6180,6 +6181,7 @@ export function createLobbyFlowController(
       matchRoomsLoading: state.matchRoomsLoading,
       matchRoomsErrorText: state.matchRoomsErrorText,
       adminMatchRoomEdit: state.adminMatchRoomEdit,
+      adminMatchRoomPrizes: state.adminMatchRoomPrizes,
       privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
       privateRoomCreateDraft: state.privateRoomCreateDraft,
       privateRoomVoiceCreateOption: state.privateRoomVoiceCreateOption,
@@ -7845,6 +7847,7 @@ export function createLobbyFlowController(
             return
           }
           state.matchRooms = result.rooms
+          state.adminMatchRoomPrizes = result.gamePrizes
           state.adminMatchRoomEdit = null
           state.matchRoomsErrorText = null
           render()
@@ -7860,6 +7863,7 @@ export function createLobbyFlowController(
             return
           }
           state.matchRooms = result.rooms
+          state.adminMatchRoomPrizes = result.gamePrizes
           state.matchRoomsErrorText = null
           render()
         })()
@@ -15529,7 +15533,7 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     render()
 
-    await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadMatchRooms(), loadAdminBelotVisual()])
+    await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadAdminMatchRooms(), loadAdminBelotVisual()])
   }
 
   // Кошчето в „Поддръжка“ — HARD DELETE на собствено admin съобщение.
@@ -25223,6 +25227,21 @@ export function createLobbyFlowController(
     state.adminStagedMissions = result.stagedMissions
     state.adminMissionsErrorText = null
     render()
+  }
+
+  /** Етап 4В: общият каталог на масите + наградите по игри (админ панел). */
+  async function loadAdminMatchRooms(): Promise<void> {
+    if (!options.onAdminMatchRoomsLoad) return loadMatchRooms()
+    const result = await options.onAdminMatchRoomsLoad()
+    if (!result.ok) {
+      state.matchRoomsErrorText = result.message
+      scheduleRender()
+      return
+    }
+    state.matchRooms = result.rooms
+    state.adminMatchRoomPrizes = result.gamePrizes
+    state.matchRoomsErrorText = null
+    scheduleRender()
   }
 
   async function loadMatchRooms(): Promise<void> {

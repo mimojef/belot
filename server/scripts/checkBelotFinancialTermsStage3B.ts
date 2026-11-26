@@ -26,7 +26,9 @@ import { ensureServerDatabaseReady } from '../src/db/ensureServerDatabaseReady.j
 import { createMatchEconomyStore, resolveRoomPayoutPrizeAmount, setMatchPrizeResolver } from '../src/db/matchEconomyStore.js'
 import { createMatchRoomsStore } from '../src/db/matchRoomsStore.js'
 import {
+  BELOT_FORMULA_RULES,
   BELOT_LEGACY_FIXED_PRIZE_RULES,
+  computeBelotPrizePerWinner,
   isBelotRoomEligibleForFinancialTerms,
   isValidBelotFinancialTerms,
   pinLegacyBelotFinancialTerms,
@@ -98,8 +100,15 @@ async function main(): Promise<void> {
     const matchRooms = await createMatchRoomsStore(dbPath)
     const raw = new DatabaseSync(dbPath)
     profileDb = raw
-    const currentPrize = (stake: number) => matchRooms.getPrizeAmount(stake)
-    setMatchPrizeResolver(currentPrize)
+    // Етап 4В: нова маса → формула + обща комисиона; маси без условия /
+    // boot-backfill → непроменената ръчна prize_amount (както в index.ts).
+    const currentPrize = (stake: number) => matchRooms.getBelotPrizeTerms(stake)
+    const legacyPrize = (stake: number) => matchRooms.getLegacyPrizeAmount(stake)
+    setMatchPrizeResolver(legacyPrize)
+    const setCommission = (stake: number, siteCommissionBps: number, isEnabled = true) => {
+      const r = matchRooms.upsertRoom({ stakeAmount: stake, minLevel: 1, isEnabled, siteCommissionBps })
+      if (!r.ok) throw new Error(r.message)
+    }
 
     console.log('\n[1] Модул: фиксиране и валидация')
     {
@@ -133,45 +142,51 @@ async function main(): Promise<void> {
       check('preset с друг вход се игнорира → текуща', withPinnedBelotFinancialTerms(room, () => 9_000, 'private-room-created', Date.now(), wrongPreset).config.financialTerms?.prizePerWinner === 9_000)
       check('гост стая не се фиксира', withPinnedBelotFinancialTerms(buildEndedRoom(5_000, { isGuestTrial: true }), () => 8_000, 'boot-backfill').config.financialTerms === undefined)
       check('турнирна стая не се фиксира', withPinnedBelotFinancialTerms(buildEndedRoom(5_000, { isTournamentMatchOrigin: true }), () => 8_000, 'boot-backfill').config.financialTerms === undefined)
+      // Етап 4В: версия по формула.
+      const f = pinLegacyBelotFinancialTerms(5_000, () => ({ prizePerWinner: 8_000, siteCommissionBps: 2_000 }), 'matchmaking-room-created', 7)
+      check('формула: belot-formula-v1 + комисиона 20%', f !== null && f.rulesVersion === BELOT_FORMULA_RULES && f.prizePerWinner === 8_000 && f.siteCommissionBps === 2_000 && isValidBelotFinancialTerms(f))
+      check('формула: награда, различна от формулата → не се фиксира', pinLegacyBelotFinancialTerms(5_000, () => ({ prizePerWinner: 8_100, siteCommissionBps: 2_000 }), 'boot-backfill') === null)
+      check('формула: подправена награда / комисиона → невалидни', !isValidBelotFinancialTerms({ ...f, prizePerWinner: 9_000 }) && !isValidBelotFinancialTerms({ ...f, siteCommissionBps: 900 }) && !isValidBelotFinancialTerms({ ...f, siteCommissionBps: undefined }))
+      check('формула: BigInt закръгляне до 100 (5 100 × 4 × 80% / 2 = 8 160 → 8 200)', computeBelotPrizePerWinner(5_100, 2_000) === 8_200 && computeBelotPrizePerWinner(5_000, 2_000) === 8_000)
     }
 
-    console.log('\n[2] Активен мач + промяна на prize_amount')
+    console.log('\n[2] Активен мач + промяна на общата комисиона')
     {
-      check('seed: 5 000 → 8 000', matchRooms.getPrizeAmount(5_000) === 8_000)
+      check('seed по формулата: 5 000 → 8 000 (20%); 8 000 → 12 800 (ръчната 12 000 не важи)', matchRooms.getPrizeAmount(5_000) === 8_000 && matchRooms.getPrizeAmount(8_000) === 12_800 && matchRooms.getLegacyPrizeAmount(8_000) === 12_000)
       const room = withPinnedBelotFinancialTerms(buildEndedRoom(5_000), currentPrize, 'matchmaking-room-created')
-      check('условията са фиксирани с 8 000', room.config.financialTerms?.prizePerWinner === 8_000)
-      matchRooms.upsertRoom({ stakeAmount: 5_000, minLevel: 1, prizeAmount: 9_500, isEnabled: true })
-      check('prize_amount сменен на 9 500', matchRooms.getPrizeAmount(5_000) === 9_500)
+      check('условията са фиксирани с 8 000 (формула, 20%)', room.config.financialTerms?.prizePerWinner === 8_000 && room.config.financialTerms.rulesVersion === BELOT_FORMULA_RULES)
+      setCommission(5_000, 2_500)
+      check('комисиона 25% → нова награда 7 500', matchRooms.getPrizeAmount(5_000) === 7_500)
       const payout = economy.payoutMatchWinners(room)
-      check('изплащане по фиксираните 8 000 (не 9 500)', payout.ok && Object.values(payout.awardedPerSeat).every((a) => a === 8_000) && Object.keys(payout.awardedPerSeat).length === 2, payout)
+      check('изплащане по фиксираните 8 000 (не 7 500)', payout.ok && Object.values(payout.awardedPerSeat).every((a) => a === 8_000) && Object.keys(payout.awardedPerSeat).length === 2, payout)
       check('ledger: 2 × 8 000', JSON.stringify(ledgerPayouts(raw, room)) === '[8000,8000]', ledgerPayouts(raw, room))
       const again = economy.payoutMatchWinners(room)
       check('повторно извикване не плаща двойно (идемпотентно)', again.ok && ledgerPayouts(raw, room).length === 2 && Object.values(again.awardedPerSeat).every((a) => a === 8_000))
 
-      const legacyRoom = buildEndedRoom(5_000)
+      const legacyRoom = buildEndedRoom(8_000)
       const legacyPayout = economy.payoutMatchWinners(legacyRoom)
-      check('стара маса без условия → досегашно поведение (текущите 9 500)', legacyPayout.ok && Object.values(legacyPayout.awardedPerSeat).every((a) => a === 9_500))
-      matchRooms.upsertRoom({ stakeAmount: 5_000, minLevel: 1, prizeAmount: 8_000, isEnabled: true })
+      check('стара маса без условия → ръчната prize_amount, с която е започнала (12 000)', legacyPayout.ok && Object.values(legacyPayout.awardedPerSeat).every((a) => a === 12_000))
+      setCommission(5_000, 2_000)
     }
 
     console.log('\n[3] Деактивирано и изтрито ниво')
     {
       const room = withPinnedBelotFinancialTerms(buildEndedRoom(10_000), currentPrize, 'private-room-created')
-      check('фиксирано 10 000 → 15 000', room.config.financialTerms?.prizePerWinner === 15_000)
-      matchRooms.upsertRoom({ stakeAmount: 10_000, minLevel: 1, prizeAmount: 20_000, isEnabled: false })
+      check('фиксирано 10 000 → 16 000', room.config.financialTerms?.prizePerWinner === 16_000)
+      setCommission(10_000, 3_000, false)
       const p1 = economy.payoutMatchWinners(room)
-      check('деактивирано + нова награда → пак 15 000', p1.ok && Object.values(p1.awardedPerSeat).every((a) => a === 15_000))
+      check('деактивирано + нова комисиона → пак 16 000', p1.ok && Object.values(p1.awardedPerSeat).every((a) => a === 16_000))
 
       const roomB = withPinnedBelotFinancialTerms(buildEndedRoom(15_000), currentPrize, 'matchmaking-room-created')
       matchRooms.deleteRoom(15_000)
       check('нивото 15 000 е изтрито (resolver → null)', matchRooms.getPrizeAmount(15_000) === null)
       const p2 = economy.payoutMatchWinners(roomB)
-      check('изтрито ниво → фиксираните 22 000 (а не fallback = входа)', p2.ok && Object.values(p2.awardedPerSeat).every((a) => a === 22_000), p2)
+      check('изтрито ниво → фиксираните 24 000 (а не fallback = входа)', p2.ok && Object.values(p2.awardedPerSeat).every((a) => a === 24_000), p2)
       const legacyDeleted = buildEndedRoom(15_000)
       const legacyResolution = resolveRoomPayoutPrizeAmount(legacyDeleted, 15_000)
       check('стара маса при изтрито ниво → досегашният fallback (входът)', legacyResolution.ok && legacyResolution.prize === 15_000 && legacyResolution.source === 'legacy-current-prize')
-      matchRooms.upsertRoom({ stakeAmount: 15_000, minLevel: 1, prizeAmount: 22_000, isEnabled: true })
-      matchRooms.upsertRoom({ stakeAmount: 10_000, minLevel: 1, prizeAmount: 15_000, isEnabled: true })
+      setCommission(15_000, 2_000)
+      setCommission(10_000, 2_000)
     }
 
     console.log('\n[4] Налични, но невалидни условия → задържане (без резерва от prize_amount)')
@@ -205,7 +220,7 @@ async function main(): Promise<void> {
 
       const historical = buildEndedRoom(20_000)
       const h = resolveRoomPayoutPrizeAmount(historical, 20_000)
-      check('историческа маса (без поле) → текущата награда 30 000', h.ok && h.prize === 30_000 && h.source === 'legacy-current-prize')
+      check('историческа маса (без поле) → ръчната (legacy) награда 30 000', h.ok && h.prize === 30_000 && h.source === 'legacy-current-prize')
       const valid = withTerms(validFor20k)
       const v = resolveRoomPayoutPrizeAmount(valid, 20_000)
       check('валидни условия → записаната награда', v.ok && v.prize === 30_000 && v.source === 'financial-terms')
@@ -223,10 +238,10 @@ async function main(): Promise<void> {
       const p2 = silence(() => economy.payoutMatchWinners(repaired))
       check('ръчно уреждане: 2 × 30 000; повторно — без двойно', settled.ok && !p2.ok && JSON.stringify(ledgerPayouts(raw, repaired)) === '[30000,30000]')
 
-      check('boot backfill не „поправя“ повредени условия', withPinnedBelotFinancialTerms(withTerms({ prizePerWinner: 'x' }), currentPrize, 'boot-backfill').config.financialTerms !== undefined
-        && (withPinnedBelotFinancialTerms(withTerms({ prizePerWinner: 'x' }), currentPrize, 'boot-backfill').config.financialTerms as unknown as { prizePerWinner: unknown }).prizePerWinner === 'x')
+      check('boot backfill не „поправя“ повредени условия', withPinnedBelotFinancialTerms(withTerms({ prizePerWinner: 'x' }), legacyPrize, 'boot-backfill').config.financialTerms !== undefined
+        && (withPinnedBelotFinancialTerms(withTerms({ prizePerWinner: 'x' }), legacyPrize, 'boot-backfill').config.financialTerms as unknown as { prizePerWinner: unknown }).prizePerWinner === 'x')
       const nullRoom = withTerms(null)
-      check('boot backfill не презаписва null', withPinnedBelotFinancialTerms(nullRoom, currentPrize, 'boot-backfill') === nullRoom)
+      check('boot backfill не презаписва null', withPinnedBelotFinancialTerms(nullRoom, legacyPrize, 'boot-backfill') === nullRoom)
     }
 
     console.log('\n[5] Рестарт и възстановяване')
@@ -244,8 +259,9 @@ async function main(): Promise<void> {
       // Boot backfill — същата композиция като loadPersistedServerState в index.ts.
       const rUnpinned = reloaded.find((r) => r.id === unpinned.id)!
       check('стара стая се възстановява без условия', rUnpinned.config.financialTerms === undefined)
-      const backfilled = withPinnedBelotFinancialTerms(rUnpinned, currentPrize, 'boot-backfill')
-      check('boot backfill фиксира текущите 12 000', backfilled.config.financialTerms?.prizePerWinner === 12_000 && backfilled.config.financialTerms.pinSource === 'boot-backfill')
+      check('нова маса 8 000 → по формулата 12 800', pinned.config.financialTerms?.prizePerWinner === 12_800)
+      const backfilled = withPinnedBelotFinancialTerms(rUnpinned, legacyPrize, 'boot-backfill')
+      check('boot backfill фиксира ръчните 12 000, с които масата е започнала', backfilled.config.financialTerms?.prizePerWinner === 12_000 && backfilled.config.financialTerms.pinSource === 'boot-backfill')
       snapshots.upsertRoom(backfilled)
       // Устойчивост: записът е видим от НОВА връзка към базата веднага (autocommit),
       // т.е. преди какъвто и да е payout в същия процес.
@@ -254,16 +270,16 @@ async function main(): Promise<void> {
       check('backfill-ът е записан устойчиво (нова връзка вижда 12 000)', durable?.config.financialTerms?.prizePerWinner === 12_000 && durable.config.financialTerms.pinSource === 'boot-backfill')
       freshConnection.close()
 
-      matchRooms.upsertRoom({ stakeAmount: 8_000, minLevel: 1, prizeAmount: 13_000, isEnabled: true })
+      setCommission(8_000, 3_000)
       const secondBoot = snapshots.loadActiveRooms()
       const afterPinned = secondBoot.find((r) => r.id === pinned.id)!
       const afterBackfilled = secondBoot.find((r) => r.id === unpinned.id)!
-      check('втори рестарт: backfill-ът не преизчислява (идемпотентно)', withPinnedBelotFinancialTerms(afterBackfilled, currentPrize, 'boot-backfill') === afterBackfilled)
+      check('втори рестарт: backfill-ът не преизчислява (идемпотентно)', withPinnedBelotFinancialTerms(afterBackfilled, legacyPrize, 'boot-backfill') === afterBackfilled)
       const p1 = economy.payoutMatchWinners(withEndedState(afterPinned))
       const p2 = economy.payoutMatchWinners(withEndedState(afterBackfilled))
-      check('след рестарт + промяна на наградата: фиксирана маса → 12 000', p1.ok && Object.values(p1.awardedPerSeat).every((a) => a === 12_000))
-      check('след рестарт + промяна на наградата: backfill маса → 12 000', p2.ok && Object.values(p2.awardedPerSeat).every((a) => a === 12_000))
-      matchRooms.upsertRoom({ stakeAmount: 8_000, minLevel: 1, prizeAmount: 12_000, isEnabled: true })
+      check('след рестарт + комисиона 30%: фиксирана маса → 12 800', p1.ok && Object.values(p1.awardedPerSeat).every((a) => a === 12_800))
+      check('след рестарт + комисиона 30%: backfill маса → 12 000', p2.ok && Object.values(p2.awardedPerSeat).every((a) => a === 12_000))
+      setCommission(8_000, 2_000)
       snapshots.close()
     }
 
@@ -277,37 +293,37 @@ async function main(): Promise<void> {
         stake: 20_000, isLocked: false, waitMinutes: 5, manualStart: false,
         financialTerms: pinLegacyBelotFinancialTerms(20_000, currentPrize, 'private-room-created'),
       })
-      check('чакащата маса пази условията (30 000)', created.ok && created.room.financialTerms?.prizePerWinner === 30_000)
+      check('чакащата маса пази условията (32 000 по формулата)', created.ok && created.room.financialTerms?.prizePerWinner === 32_000)
       const legacyCreated = store.createRoom({
         connectionId: 'c-host2', profileId: 'host2', displayName: 'Host2', avatarUrl: null, level: 1, rankTitle: null,
         stake: 20_000, isLocked: false, waitMinutes: 5, manualStart: false,
       })
       check('без подадени условия → null (обратна съвместимост)', legacyCreated.ok && legacyCreated.room.financialTerms === null)
-      matchRooms.upsertRoom({ stakeAmount: 20_000, minLevel: 1, prizeAmount: 33_000, isEnabled: true })
+      setCommission(20_000, 2_500)
       if (created.ok) {
         // Същата композиция като handlePrivateRoomReady в index.ts.
         const started = withPinnedBelotFinancialTerms(
           { ...buildEndedRoom(20_000, { isPrivate: true, isPrivateTableOrigin: true }) },
           currentPrize, 'private-room-created', Date.now(), created.room.financialTerms,
         )
-        check('старт след промяна на наградата → старите 30 000', started.config.financialTerms?.prizePerWinner === 30_000)
+        check('старт след смяна на комисионата (25% → 30 000) → старите 32 000', started.config.financialTerms?.prizePerWinner === 32_000)
         const payout = economy.payoutMatchWinners(started)
-        check('изплащане 30 000 (не 33 000)', payout.ok && Object.values(payout.awardedPerSeat).every((a) => a === 30_000))
+        check('изплащане 32 000 (не 30 000)', payout.ok && Object.values(payout.awardedPerSeat).every((a) => a === 32_000))
       }
-      matchRooms.upsertRoom({ stakeAmount: 20_000, minLevel: 1, prizeAmount: 30_000, isEnabled: true })
+      setCommission(20_000, 2_000)
     }
 
     console.log('\n[7] Случайна опашка: условията се фиксират еднократно при създаване на масата')
     {
       const before = withPinnedBelotFinancialTerms(buildEndedRoom(5_000), currentPrize, 'matchmaking-room-created')
-      matchRooms.upsertRoom({ stakeAmount: 5_000, minLevel: 1, prizeAmount: 8_800, isEnabled: true })
+      setCommission(5_000, 1_200)
       const after = withPinnedBelotFinancialTerms(buildEndedRoom(5_000), currentPrize, 'matchmaking-room-created')
-      check('маса преди промяната → 8 000; след → 8 800 (без смесване в една маса)',
+      check('маса преди промяната → 8 000; след (12%) → 8 800 (без смесване в една маса)',
         before.config.financialTerms?.prizePerWinner === 8_000 && after.config.financialTerms?.prizePerWinner === 8_800)
       check('всичките 4 места делят един config (едни условия за масата)', SEATS.every((s) => before.seats[s].participant !== null))
       const replay = { ...before, game: { ...before.game, stateVersion: before.game.stateVersion + 1 } }
       check('„Преиграй“ (spread на стаята) запазва условията', replay.config.financialTerms === before.config.financialTerms)
-      matchRooms.upsertRoom({ stakeAmount: 5_000, minLevel: 1, prizeAmount: 8_000, isEnabled: true })
+      setCommission(5_000, 2_000)
     }
 
     console.log('\n[8] Свързване в index.ts (статично)')
@@ -318,15 +334,16 @@ async function main(): Promise<void> {
       check('частна маса: фиксиране при създаване', /financialTerms: pinLegacyBelotFinancialTerms\(message\.stake, resolveCurrentBelotPrizeForPinning, 'private-room-created'\)/.test(src))
       check('частна маса: старт с preset privateRoom.financialTerms', /'private-room-created',\s*Date\.now\(\),\s*privateRoom\.financialTerms,/.test(src))
       const boot = /function loadPersistedServerState[\s\S]*?\n}\r?\n/.exec(src)?.[0] ?? ''
-      check('boot backfill + незабавен запис', boot.includes("withPinnedBelotFinancialTerms(preparedRoom, resolveCurrentBelotPrizeForPinning, 'boot-backfill', now)") && boot.includes('persistRoomSnapshot(pinnedRoom)'))
+      check('boot backfill + незабавен запис', boot.includes("withPinnedBelotFinancialTerms(preparedRoom, resolveLegacyBelotPrizeForBackfill, 'boot-backfill', now)") && boot.includes('persistRoomSnapshot(pinnedRoom)'))
       check('boot: записът е ПРЕДИ стаята да влезе в server state',
         boot.indexOf('persistRoomSnapshot(pinnedRoom)') > 0 && boot.indexOf('persistRoomSnapshot(pinnedRoom)') < boot.indexOf('upsertServerRoom(nextServerState, pinnedRoom)'))
       const bootCall = src.indexOf('let serverState: ServerState = loadPersistedServerState()')
       check('boot: възстановяването е при инициализация, преди runtime-а да тръгне',
         bootCall > 0 && bootCall < src.indexOf('const activeRoomRuntime ='))
-      check('изплащанията все още са legacy (resolver = prize_amount)', (src.match(/setMatchPrizeResolver\(\(stake\) => matchRoomsStore\.getPrizeAmount\(stake\)\)/g) ?? []).length === 3)
+      check('исторически маси без условия → legacy prize_amount (resolver)', (src.match(/setMatchPrizeResolver\(\(stake\) => matchRoomsStore\.getLegacyPrizeAmount\(stake\)\)/g) ?? []).length === 3)
+      check('нови маси → формула (getBelotPrizeTerms)', src.includes('const resolveCurrentBelotPrizeForPinning = (stake: number) => matchRoomsStore.getBelotPrizeTerms(stake)'))
       check('турнир/гост не се изплащат през payoutMatchWinners (непроменено)', src.includes('if (!room.config.isGuestTrial && !isTournamentMatchRoom(room)) {'))
-      check('формулата не участва в изплащания', !/computePrizeBreakdown|requirePrizeBreakdown/.test(src) && !/computePrizeBreakdown/.test(readFileSync(join(import.meta.dirname, '../src/db/matchEconomyStore.ts'), 'utf8')))
+      check('изплащането чете само фиксираните условия (формулата е само при фиксирането)', !/computePrizeBreakdown|requirePrizeBreakdown/.test(src) && !/computePrizeBreakdown/.test(readFileSync(join(import.meta.dirname, '../src/db/matchEconomyStore.ts'), 'utf8')))
     }
     raw.close()
   } finally {

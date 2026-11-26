@@ -60,7 +60,12 @@ const dbPath = join(dir, 'svara.sqlite')
 await ensureServerDatabaseReady({ databaseFilePathOverride: dbPath })
 const raw = new DatabaseSync(dbPath)
 const economy = await createSvaraEconomyStore(dbPath)
-economy.ensureDefaultConfig()
+// Етап 4В: входовете на „Свара“ идват от общия каталог (match_rooms) —
+// тестът добавя 13-те тестови входа там (както админ би ги добавил), 20%.
+for (const fee of SVARA_TEST_ENTRY_FEES) {
+  raw.prepare('INSERT OR IGNORE INTO match_rooms (stake_amount, min_level, prize_amount, is_enabled, site_commission_bps) VALUES (?, 1, ?, 1, 2000)').run(fee, fee * 8 / 5)
+}
+const setCommission = (fee: number, bps: number) => raw.prepare('UPDATE match_rooms SET site_commission_bps = ? WHERE stake_amount = ?').run(bps, fee)
 
 const START = 1_000_000
 const profile = (id: string, balance = START) => {
@@ -71,21 +76,23 @@ const balance = (id: string) => (raw.prepare('SELECT yellow_coins_balance AS b F
 const ledgerRows = (matchId: string) => raw.prepare(`SELECT match_id, profile_id, entry_type, amount FROM svara_match_economy_ledger WHERE match_id LIKE ? ORDER BY rowid`).all(`${matchId}:a%`) as Array<{ match_id: string; profile_id: string; entry_type: string; amount: number }>
 const silenceErrors: unknown[] = []
 
-console.log('\n[1] Конфигурация в базата (водещ източник), без презаписване')
+console.log('\n[1] Конфигурация от общия каталог (match_rooms) — единствен източник')
 {
-  const row = raw.prepare(`SELECT config_version, config_json FROM game_financial_configs WHERE game_key = 'svara'`).get() as { config_version: string; config_json: string }
-  check('началната конфигурация е създадена (svara-default-v1, 13 входа, 20%)', row.config_version === 'svara-default-v1' && JSON.parse(row.config_json).entryFees.length === 13 && JSON.parse(row.config_json).defaultCommissionBps === 2_000)
-  raw.prepare(`UPDATE game_financial_configs SET config_json = ?, config_version = 'admin-v2' WHERE game_key = 'svara'`).run(JSON.stringify({ ...SVARA_DEFAULT_FINANCIAL_CONFIG, configVersion: 'admin-v2', defaultCommissionBps: 2_500 }))
-  economy.ensureDefaultConfig()
-  const after = raw.prepare(`SELECT config_version FROM game_financial_configs WHERE game_key = 'svara'`).get() as { config_version: string }
-  check('повторно създаване на началните стойности НЕ презаписва по-късна промяна', after.config_version === 'admin-v2')
   const active = economy.getActiveConfig()
-  check('активната конфигурация идва от базата (25%)', active.ok && active.config.defaultCommissionBps === 2_500)
-  raw.prepare(`UPDATE game_financial_configs SET config_json = '{"broken":' WHERE game_key = 'svara'`).run()
-  check('повредена конфигурация → fail closed (без награда, без удържане)', !economy.getActiveConfig().ok && economy.previewPrize(5_000, 2) === null)
+  check('входовете и комисионите идват от общия каталог (13 тестови + съвместимите 10 000), 20%', active.ok && SVARA_TEST_ENTRY_FEES.every((fee) => active.config.entryFees.includes(fee)) && active.config.entryFees.includes(10_000) && economy.previewPrize(5_000, 2) === 8_000)
+  check('game_financial_configs не е източник за „Свара“ (няма ред)', (raw.prepare(`SELECT COUNT(*) AS n FROM game_financial_configs WHERE game_key = 'svara'`).get() as { n: number }).n === 0)
+  setCommission(5_000, 2_500)
+  check('обща комисиона 25% за 5 000 → наградата на „Свара“ се сменя (7 500)', economy.previewPrize(5_000, 2) === 7_500)
+  setCommission(5_000, 2_000)
+  const saved = raw.prepare('SELECT * FROM match_rooms').all() as Array<Record<string, number | string | null>>
+  raw.exec('DELETE FROM match_rooms')
+  check('няма съвместими входове → fail closed (без награда, без удържане)', !economy.getActiveConfig().ok && economy.previewPrize(5_000, 2) === null)
   const failedCollect = economy.collectEntries({ matchId: 'cfg-broken', entryFee: 5_000, participantIds: ['x1', 'x2'] })
-  check('удържане при повредена конфигурация → отказ', !failedCollect.ok && failedCollect.code === 'config-unavailable')
-  raw.prepare(`UPDATE game_financial_configs SET config_json = ?, config_version = ? WHERE game_key = 'svara'`).run(JSON.stringify(SVARA_DEFAULT_FINANCIAL_CONFIG), SVARA_DEFAULT_FINANCIAL_CONFIG.configVersion)
+  check('удържане без конфигурация → отказ', !failedCollect.ok && failedCollect.code === 'config-unavailable')
+  for (const row of saved) {
+    raw.prepare('INSERT INTO match_rooms (stake_amount, min_level, prize_amount, is_enabled, created_at, updated_at, site_commission_bps) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(row.stake_amount, row.min_level, row.prize_amount, row.is_enabled, row.created_at, row.updated_at, row.site_commission_bps)
+  }
 }
 
 console.log('\n[2] Точно 20/80 за всички 13 входа × 2/3/4 участници')
@@ -97,8 +104,10 @@ console.log('\n[2] Точно 20/80 за всички 13 входа × 2/3/4 у�
     if (economy.previewPrize(fee, n) !== fee * n * 4 / 5) exact = false
   }
   check('награда = 80% и комисиона = 20% точно (39 комбинации), previewPrize съвпада', exact)
-  const inexact = pinGameMatchFinancialTerms({ ...SVARA_DEFAULT_FINANCIAL_CONFIG, defaultCommissionBps: 1_234 }, { entryFee: 5_000, paidEntries: 3, pinnedAt: 1 })
-  check('конфигурация с неточно съотношение (12,34% × 15 000) → isExactSvaraSplit=false', inexact.ok && !isExactSvaraSplit(inexact.terms))
+  // Етап 4В: общата формула — закръгляне до 100 (при 50 нагоре), комисионата е остатъкът.
+  const rounded = pinGameMatchFinancialTerms({ ...SVARA_DEFAULT_FINANCIAL_CONFIG, defaultCommissionBps: 1_234 }, { entryFee: 5_000, paidEntries: 3, pinnedAt: 1 })
+  check('12,34% × 15 000: 13 149 → 13 100 награда, 1 900 комисиона (остатъкът) → валидни', rounded.ok && isExactSvaraSplit(rounded.terms) && rounded.terms.prizes[0] === 13_100 && rounded.terms.siteCommission === 1_900)
+  check('подправена награда (≠ формулата) → невалидни', rounded.ok && !isExactSvaraSplit({ ...rounded.terms, prizes: [13_200], siteCommission: 1_800 }))
 }
 
 console.log('\n[3] Атомарно удържане (store)')
@@ -119,7 +128,7 @@ console.log('\n[3] Атомарно удържане (store)')
   check('неразрешен вход → отказ', (() => { const r = economy.collectEntries({ matchId: 'm-x', entryFee: 7_000, participantIds: ['s1', 's2'] }); return !r.ok && r.code === 'entry-fee-not-allowed' })())
 
   console.log('\n[4] Изплащане 80/20, идемпотентност, фиксирани условия')
-  raw.prepare(`UPDATE game_financial_configs SET config_json = ? WHERE game_key = 'svara'`).run(JSON.stringify({ ...SVARA_DEFAULT_FINANCIAL_CONFIG, configVersion: 'admin-v3', defaultCommissionBps: 3_000 }))
+  setCommission(50_000, 3_000)
   const settle = economy.settleMatch('m-ok', 's2')
   check('промяна на конфигурацията след старта НЕ засяга мача: победителят получава 120 000 (80% от 150 000)', settle.ok && settle.status === 'paid' && settle.prize === 120_000 && balance('s2') === START - 50_000 + 120_000)
   const totalChange = ['s1', 's2', 's3'].reduce((sum, p) => sum + balance(p) - START, 0)
@@ -130,7 +139,7 @@ console.log('\n[3] Атомарно удържане (store)')
     && ledgerRows('m-ok').filter((r) => r.entry_type === 'svara_winner_payout').length === 1)
   const refundPaid = economy.refundEntries('m-ok')
   check('връщане след изплащане → no-op', refundPaid.ok && !refundPaid.refunded && balance('s1') === START - 50_000)
-  raw.prepare(`UPDATE game_financial_configs SET config_json = ?, config_version = ? WHERE game_key = 'svara'`).run(JSON.stringify(SVARA_DEFAULT_FINANCIAL_CONFIG), SVARA_DEFAULT_FINANCIAL_CONFIG.configVersion)
+  setCommission(50_000, 2_000)
 
   console.log('\n[5] Без победител / невалидни условия → за проверка, без движение')
   for (const id of ['h1', 'h2']) profile(id)
@@ -199,12 +208,11 @@ let matchA = ''
   check('пълна маса → удържани 3 × 20 000 и мачът е in-progress (записан)', saved?.state.phase === 'in-progress' && ['L1', 'L2', 'L3'].every((p) => balance(p) === START - 20_000) && economy.getFinance(matchA)?.status === 'collected')
   const terms = JSON.parse(economy.getFinance(matchA)!.termsJson)
   check('фиксирани условия: 60 000 фонд, 48 000 награда, 12 000 комисиона', terms.pot === 60_000 && terms.prizes[0] === 48_000 && terms.siteCommission === 12_000 && terms.paidEntries === 3)
-  // Активната конфигурация в базата без 5 000 → нова маса с 5 000 се отказва.
-  raw.prepare(`UPDATE game_financial_configs SET config_json = ? WHERE game_key = 'svara'`)
-    .run(JSON.stringify({ ...SVARA_DEFAULT_FINANCIAL_CONFIG, configVersion: 'no-5000', entryFees: SVARA_DEFAULT_FINANCIAL_CONFIG.entryFees.filter((fee) => fee !== 5_000) }))
+  // Общият каталог без 5 000 → нова маса с 5 000 се отказва.
+  raw.prepare('DELETE FROM match_rooms WHERE stake_amount = 5000').run()
   lobby.handle('LPOOR', { type: 'create_svara_table', requestId: randomUUID(), capacity: 2, entryFee: 5_000, entryPercent: 1, startMode: 'auto' } as never)
   check('създаване с вход, премахнат от конфигурацията в базата → paid_unavailable, без маса', last(frames, 'LPOOR', 'svara_lobby_error')?.code === 'paid_unavailable' && lobby.findCommitment('LPOOR') === null)
-  raw.prepare(`UPDATE game_financial_configs SET config_json = ? WHERE game_key = 'svara'`).run(JSON.stringify(SVARA_DEFAULT_FINANCIAL_CONFIG))
+  raw.prepare('INSERT INTO match_rooms (stake_amount, min_level, prize_amount, is_enabled, site_commission_bps) VALUES (5000, 1, 8000, 1, 2000)').run()
   lobby.shutdown()
 }
 
@@ -292,9 +300,9 @@ console.log('\n[10] Флаг, тестови ботове, интерфейс')
 console.log('\n[11] Белот / Ludo / турнири — без промени')
 {
   const { execFileSync } = await import('node:child_process')
-  const diff = execFileSync('git', ['diff', '--name-only', 'HEAD', '--', 'src/db/matchEconomyStore.ts', 'src/db/ludoEconomyStore.ts', 'src/db/tournamentEconomyStore.ts', 'src/tournament', 'src/economy/prizeFormula.ts'],
+  const diff = execFileSync('git', ['diff', '--name-only', 'HEAD', '--', 'src/db/matchEconomyStore.ts', 'src/db/tournamentEconomyStore.ts', 'src/tournament', 'src/economy/prizeFormula.ts'],
     { cwd: join(import.meta.dirname, '..'), encoding: 'utf8' }).trim()
-  check('икономиките на Белот/Ludo/турнири и формулите — непроменени (двигателят на „Свара“ — в 4Б, конфигурацията — в 4В по замисъл)', diff === '', diff)
+  check('изплащанията на Белот/турнири и формулата — непроменени (Свара — в 4Б/4В, наградата на Ludo — в 4В по замисъл)', diff === '', diff)
 }
 
 raw.close()

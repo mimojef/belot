@@ -24,6 +24,24 @@ export type MatchRoomSnapshot = {
   minLevel: number
   prizeAmount: number
   isEnabled: boolean
+  /** Етап 4В: общата комисиона на входа за всички игри (bps); null — по подразбиране (20%). */
+  siteCommissionBps?: number | null
+}
+
+/** Етап 4В: сървърно изчислените награди по игри за вход от общия каталог (само за админ). */
+export type AdminMatchRoomGamePrizes = {
+  stakeAmount: number
+  /** null — входът не се предлага в „Свара“ (несъвместим). */
+  svara: Record<'2' | '3' | '4', number | null>
+  ludo: Record<'2' | '4', number | null>
+}
+
+export type AdminMatchRoomInput = {
+  stakeAmount: number
+  minLevel: number
+  isEnabled: boolean
+  /** Обща комисиона в %; null — по подразбиране. */
+  commissionPercent: string | null
 }
 
 export type ClientBidAction =

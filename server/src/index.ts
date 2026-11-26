@@ -327,7 +327,8 @@ import {
 import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver, type HeldPayoutRecord } from './db/matchEconomyStore.js'
-import { createLudoEconomyStore } from './db/ludoEconomyStore.js'
+import { computeLudoFormulaPrize, createLudoEconomyStore } from './db/ludoEconomyStore.js'
+import { checkEntryFeePolicy, parseCommissionPercent } from './economy/entryLevelPolicy.js'
 import { createActiveLudoMatchSnapshotStore } from './db/activeLudoMatchSnapshotStore.js'
 import { createAttemptLudoRoomStart } from './game/attemptLudoRoomStart.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
@@ -4179,13 +4180,16 @@ const tableExitPenaltyStore = await createTableExitPenaltyStore(
 )
 const matchRoomsStore = await createMatchRoomsStore(databaseBootstrap.databaseFilePath)
 setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
-setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
-// Етап 2: общ read-only каталог на входните нива (match_rooms). Само информационен —
-// не участва в изплащанията (те остават през prize_amount по-горе).
+// Етап 4В: исторически маси БЕЗ фиксирани условия (отпреди Етап 3Б) са
+// започнали с ръчната prize_amount → само за тях се ползва legacy стойността.
+setMatchPrizeResolver((stake) => matchRoomsStore.getLegacyPrizeAmount(stake))
+// Етап 2: общ read-only каталог на входните нива (match_rooms).
 const entryLevelCatalogReader = createEntryLevelCatalogReader(matchRoomsStore)
-// Етап 3Б: текущата legacy награда за вход — чете се САМО при създаване на
-// маса (фиксиране), не при изплащане. Същата стойност като payout resolver-а.
-const resolveCurrentBelotPrizeForPinning = (stake: number): number | null => matchRoomsStore.getPrizeAmount(stake)
+// Етап 4В: нова Белот маса фиксира наградата по общата формула и комисионата
+// от общия каталог ('belot-formula-v1') — чете се САМО при създаване на масата.
+const resolveCurrentBelotPrizeForPinning = (stake: number) => matchRoomsStore.getBelotPrizeTerms(stake)
+// Маси, възстановени без условия (започнали преди внедряването) → legacy награда.
+const resolveLegacyBelotPrizeForBackfill = (stake: number): number | null => matchRoomsStore.getLegacyPrizeAmount(stake)
 
 // Етап 3Б.2: резервен файлов журнал (write-ahead) за задържаните изплащания —
 // до файла на базата (server/database/data, не се пипа от Smart Deploy),
@@ -5061,9 +5065,9 @@ function loadPersistedServerState(): ServerState {
   for (const room of restoredRooms) {
     const preparedRoom = prepareRestoredRoomForServerStart(room, now)
     // Етап 3Б: маса отпреди фиксирането → условията се фиксират СЕГА, с
-    // текущата prize_amount (= стойността, която payout-ът би прочел), и се
-    // записват веднага — повторен рестарт не ги преизчислява.
-    const pinnedRoom = withPinnedBelotFinancialTerms(preparedRoom, resolveCurrentBelotPrizeForPinning, 'boot-backfill', now)
+    // ръчната prize_amount, с която е започнала (= стойността, която payout-ът
+    // би прочел), и се записват веднага — повторен рестарт не ги преизчислява.
+    const pinnedRoom = withPinnedBelotFinancialTerms(preparedRoom, resolveLegacyBelotPrizeForBackfill, 'boot-backfill', now)
     if (pinnedRoom !== preparedRoom) {
       backfilledFinancialTerms += 1
       persistRoomSnapshot(pinnedRoom)
@@ -25651,6 +25655,26 @@ async function handleGuestTrialStatusRequest(
   return true
 }
 
+/**
+ * Етап 4В: общият каталог на масите (match_rooms) за всички игри + сървърно
+ * изчислените награди по игри (само преглед; всяка игра прилага своите правила).
+ * Всички — по общата формула от входа, фонда, общата комисиона и схемата:
+ * Белот — на всеки от 2-мата победители (4 входа); „Свара“ — 2/3/4 играчи
+ * (null — входът не е съвместим със „Свара“); „Не се сърди човече“ — 2/4 играчи.
+ */
+function adminMatchRoomsPayload() {
+  const rooms = matchRoomsStore.listRooms()
+  const prizeFor = svaraService.lobby.creationPrize.prizeFor
+  return {
+    rooms,
+    gamePrizes: rooms.map((room) => ({
+      stakeAmount: room.stakeAmount,
+      svara: { 2: prizeFor(room.stakeAmount, 2), 3: prizeFor(room.stakeAmount, 3), 4: prizeFor(room.stakeAmount, 4) },
+      ludo: { 2: computeLudoFormulaPrize(room.stakeAmount, 2, room.siteCommissionBps), 4: computeLudoFormulaPrize(room.stakeAmount, 4, room.siteCommissionBps) },
+    })),
+  }
+}
+
 async function handleAdminMatchRoomsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -25668,7 +25692,7 @@ async function handleAdminMatchRoomsRequest(
   }
 
   if (pathname === '/api/admin/rooms' && req.method === 'GET') {
-    sendJsonResponse(res, 200, { ok: true, rooms: matchRoomsStore.listRooms() })
+    sendJsonResponse(res, 200, { ok: true, ...adminMatchRoomsPayload() })
     return true
   }
 
@@ -25677,18 +25701,38 @@ async function handleAdminMatchRoomsRequest(
     const bodyRecord = isRecord(body) ? body : {}
     const stakeAmount = getNumberField(bodyRecord, 'stakeAmount') ?? 0
     const minLevel = getNumberField(bodyRecord, 'minLevel') ?? 1
-    const prizeAmount = getNumberField(bodyRecord, 'prizeAmount') ?? 0
     const isEnabled = bodyRecord['isEnabled'] !== false
 
-    const result = matchRoomsStore.upsertRoom({ stakeAmount, minLevel, prizeAmount, isEnabled })
+    // Етап 4В: общият каталог — нов вход е 5 000–1 000 000 000, кратен на 100.
+    if (matchRoomsStore.getRoom(stakeAmount) === null) {
+      const feeErrors = checkEntryFeePolicy(stakeAmount)
+      if (feeErrors.length > 0) {
+        sendJsonResponse(res, 400, { ok: false, message: feeErrors[0]!.message })
+        return true
+      }
+    }
+    // Общата комисиона за всички игри (10–50%, 0,01%): липсващо поле — без промяна; празно — 20%.
+    let siteCommissionBps: number | null | undefined
+    const rawCommission = bodyRecord['commissionPercent']
+    if (rawCommission === null || rawCommission === '') siteCommissionBps = null
+    else if (rawCommission !== undefined) {
+      const parsed = parseCommissionPercent(rawCommission)
+      if (!parsed.ok) {
+        sendJsonResponse(res, 400, { ok: false, message: parsed.error.message })
+        return true
+      }
+      siteCommissionBps = parsed.bps
+    }
+
+    const result = matchRoomsStore.upsertRoom({ stakeAmount, minLevel, isEnabled, siteCommissionBps })
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
       return true
     }
 
     setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
-    setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
-    sendJsonResponse(res, 200, { ok: true, room: result.room, rooms: matchRoomsStore.listRooms() })
+    setMatchPrizeResolver((stake) => matchRoomsStore.getLegacyPrizeAmount(stake))
+    sendJsonResponse(res, 200, { ok: true, room: result.room, ...adminMatchRoomsPayload() })
     return true
   }
 
@@ -25700,8 +25744,8 @@ async function handleAdminMatchRoomsRequest(
       return true
     }
     setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
-    setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
-    sendJsonResponse(res, 200, { ok: true, rooms: matchRoomsStore.listRooms() })
+    setMatchPrizeResolver((stake) => matchRoomsStore.getLegacyPrizeAmount(stake))
+    sendJsonResponse(res, 200, { ok: true, ...adminMatchRoomsPayload() })
     return true
   }
 

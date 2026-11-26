@@ -116,8 +116,10 @@ async function main(): Promise<void> {
       const recorded = db.prepare('SELECT COUNT(*) AS n FROM server_migrations WHERE filename = ?').get(COMMISSION_MIGRATION) as { n: number } | undefined
       check('записана в server_migrations', (recorded?.n ?? 0) === 1)
       const seeded = db.prepare('SELECT stake_amount, prize_amount, site_commission_bps FROM match_rooms ORDER BY stake_amount').all() as Array<{ stake_amount: number; prize_amount: number; site_commission_bps: unknown }>
-      check('seed-натите 5 нива с NULL комисиона и оригинален prize_amount',
-        seeded.length === 5 && seeded.every((r) => r.site_commission_bps === null) && seeded.map((r) => r.prize_amount).join(',') === '8000,12000,15000,22000,30000', seeded)
+      // Етап 4В (20261126_005): всички съществуващи входове получават начална комисиона 20%;
+      // ръчната prize_amount остава непроменена (legacy — само за маси отпреди 4В).
+      check('seed-натите 5 нива: комисиона 20% (Етап 4В) и непроменен prize_amount',
+        seeded.length === 5 && seeded.every((r) => r.site_commission_bps === 2_000) && seeded.map((r) => r.prize_amount).join(',') === '8000,12000,15000,22000,30000', seeded)
       db.close()
     }
 
@@ -125,8 +127,8 @@ async function main(): Promise<void> {
     {
       const store = await createMatchRoomsStore(legacyPath)
       check('празна карта при NULL навсякъде', store.getSiteCommissionBpsByStake().size === 0)
-      check('rooms[] пази точно stakeAmount/minLevel/prizeAmount/isEnabled',
-        store.listRooms().every((r) => Object.keys(r).sort().join(',') === 'isEnabled,minLevel,prizeAmount,stakeAmount'))
+      check('rooms[]: stakeAmount/minLevel/prizeAmount/isEnabled + обща комисиона (Етап 4В)',
+        store.listRooms().every((r) => Object.keys(r).sort().join(',') === 'isEnabled,minLevel,prizeAmount,siteCommissionBps,stakeAmount'))
       const raw = new DatabaseSync(legacyPath)
       raw.exec('UPDATE match_rooms SET site_commission_bps = 1500 WHERE stake_amount = 5000')
       raw.exec('UPDATE match_rooms SET site_commission_bps = 1234 WHERE stake_amount = 10000')
@@ -135,12 +137,12 @@ async function main(): Promise<void> {
       check('след reload: 5000→1500, 10000→1234', map.get(5_000) === 1_500 && map.get(10_000) === 1_234 && map.size === 2)
       const prizesBefore = store.listRooms().map((r) => r.prizeAmount)
       // Съществуващият админ път (upsertRoom) не знае за колоната и трябва да я запази.
-      const upsert = store.upsertRoom({ stakeAmount: 5_000, minLevel: 2, prizeAmount: 8_000, isEnabled: true })
+      const upsert = store.upsertRoom({ stakeAmount: 5_000, minLevel: 2, isEnabled: true })
       check('upsertRoom работи', upsert.ok)
       check('upsertRoom запазва site_commission_bps', store.getSiteCommissionBpsByStake().get(5_000) === 1_500)
-      check('getPrizeAmount непроменен', store.getPrizeAmount(5_000) === 8_000 && JSON.stringify(store.listRooms().map((r) => r.prizeAmount)) === JSON.stringify(prizesBefore))
-      const inserted = store.upsertRoom({ stakeAmount: 30_000, minLevel: 1, prizeAmount: 45_000, isEnabled: false })
-      check('ново ниво през upsertRoom → NULL комисиона', inserted.ok && !store.getSiteCommissionBpsByStake().has(30_000))
+      check('Етап 4В: наградата е по формулата с общата комисиона (5 000 @15% → 8 500)', store.getPrizeAmount(5_000) === 8_500 && JSON.stringify(store.listRooms().map((r) => r.prizeAmount)) === JSON.stringify(prizesBefore))
+      const inserted = store.upsertRoom({ stakeAmount: 30_000, minLevel: 1, isEnabled: false })
+      check('Етап 4В: ново ниво през upsertRoom → начална комисиона 20%', inserted.ok && store.getSiteCommissionBpsByStake().get(30_000) === 2_000)
       raw.close()
 
       const oldPath = join(dir, 'old-schema.sqlite')
@@ -230,8 +232,8 @@ async function main(): Promise<void> {
       const store = await createMatchRoomsStore(legacyPath)
       const reader = createEntryLevelCatalogReader(store)
       const body = JSON.parse(JSON.stringify({ ok: true, rooms: store.listRooms(), entryCatalog: tryBuildPublicEntryCatalogPayload(reader) }))
-      check('rooms без нови ключове (siteCommissionBps не изтича в rooms)',
-        body.rooms.every((r: Record<string, unknown>) => Object.keys(r).sort().join(',') === 'isEnabled,minLevel,prizeAmount,stakeAmount'))
+      check('Етап 4В: rooms носи общата комисиона (siteCommissionBps)',
+        body.rooms.every((r: Record<string, unknown>) => Object.keys(r).sort().join(',') === 'isEnabled,minLevel,prizeAmount,siteCommissionBps,stakeAmount'))
       check('entryCatalog отразява реалната база (5 000 @15%)', body.entryCatalog.levels.find((l: { entryFee: number }) => l.entryFee === 5_000)?.configuredCommissionBps === 1_500)
       const stage2Keys = ['entryFee', 'minLevel', 'policyCompliant', 'policyViolations', 'configuredCommissionBps', 'prizePreview']
       check('Етап 2 полетата на ниво са налични', body.entryCatalog.levels.every((l: Record<string, unknown>) => stage2Keys.every((k) => k in l)))
@@ -242,11 +244,11 @@ async function main(): Promise<void> {
       check('формулата, каталогът и политиката — непроменени', diff === '', diff)
       // index.ts се променя в следващите етапи — проверяваме съдържателно, не по diff.
       const indexSource = readFileSync(join(SERVER_ROOT, 'src/index.ts'), 'utf8')
-      check('admin endpoint-ите за ниво: upsertRoom + deleteRoom непроменени',
-        indexSource.includes('matchRoomsStore.upsertRoom({ stakeAmount, minLevel, prizeAmount, isEnabled })') && indexSource.includes('matchRoomsStore.deleteRoom(stakeAmount)'))
+      check('Етап 4В: admin endpoint-ът записва общата комисиона (без ръчна награда)',
+        indexSource.includes('matchRoomsStore.upsertRoom({ stakeAmount, minLevel, isEnabled, siteCommissionBps })') && indexSource.includes('matchRoomsStore.deleteRoom(stakeAmount)'))
       check('index.ts не пише site_commission_bps', !indexSource.includes('site_commission_bps'))
       const storeSource = readFileSync(join(SERVER_ROOT, 'src/db/matchRoomsStore.ts'), 'utf8')
-      check('store не пише site_commission_bps', !/(INSERT|UPDATE)[^;`]*site_commission_bps/.test(storeSource))
+      check('Етап 4В: store пише site_commission_bps само в upsertRoom', storeSource.includes('INSERT INTO match_rooms (stake_amount, min_level, prize_amount, is_enabled, site_commission_bps'))
     }
   } finally {
     try { rmSync(dir, { recursive: true, force: true }) } catch { /* Windows: store-ът държи файла отворен */ }

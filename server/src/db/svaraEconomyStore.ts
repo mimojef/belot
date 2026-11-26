@@ -11,21 +11,77 @@
 //   - UNIQUE(match, profile, type) в ledger-а — втора защита;
 //   - невалидни условия / няма победител → 'held', без движение на жълтици.
 //
-// Наградата на „Свара“ трябва да е ТОЧНО (100% − комисиона) от фонда — без
-// закръгляне, което променя съотношението; иначе мачът не започва.
+// Наградата на „Свара“ е по общата формула (закръгляне до 100, при 50 нагоре);
+// комисионата на сайта е остатъкът от фонда (Етап 4В; до тогава — само точно 20/80).
+//
+// Етап 4В (корекция): входовете, активността и комисионите на „Свара“ идват
+// САМО от общия каталог на масите (match_rooms) — същия, който ползват Белот
+// и „Не се сърди човече“. „Свара“ прилага само собствените си правила:
+// вход, кратен на 1 000 (чипове = вход/10, анте 1%); несъвместимите входове
+// просто не се предлагат.
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   pinGameMatchFinancialTerms,
-  SVARA_DEFAULT_FINANCIAL_CONFIG,
   validateGameFinancialConfig,
   validateGameMatchFinancialTerms,
   type GameFinancialConfig,
   type GameMatchFinancialTerms,
 } from '../economy/gameFinancialConfig.js'
-import { BASIS_POINTS_SCALE } from '../economy/prizeFormula.js'
+import { computePrizeBreakdown } from '../economy/prizeFormula.js'
+import { checkCommissionBpsPolicy, checkEntryFeePolicy } from '../economy/entryLevelPolicy.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+/** „Свара“: първоначалните чипове = вход/10, антето (1%) = чипове/100 → входът е кратен на 1 000. */
+export const SVARA_ENTRY_FEE_STEP = 1_000
+export const SVARA_CAPACITIES = [2, 3, 4] as const
+
+/** Ред от общия каталог (match_rooms). */
+export type CommonEntryRow = { stake_amount: unknown; is_enabled: unknown; site_commission_bps?: unknown }
+
+const SVARA_PRIZE_SCHEMES = [{ minParticipants: 2, sharesBps: [10_000] }]
+
+/** Наградата на победителя в „Свара“ (null — входът не е в конфигурацията или разпределението не е точно). */
+export function svaraPrizeFor(config: GameFinancialConfig, entryFee: number, participants: number): number | null {
+  const pinned = pinGameMatchFinancialTerms(config, { entryFee, paidEntries: participants, pinnedAt: 1 })
+  return pinned.ok && isExactSvaraSplit(pinned.terms) ? pinned.terms.prizes[0]! : null
+}
+
+/**
+ * Конфигурацията на „Свара“, изведена от общия каталог. Не се съхранява
+ * отделно. Fail-closed: ред с невалиден вход/комисиона не се предлага.
+ */
+export function buildSvaraConfigFromCommonEntries(rows: readonly CommonEntryRow[]): { ok: true; config: GameFinancialConfig } | { ok: false; message: string } {
+  const candidates: Array<{ fee: number; enabled: boolean; bps: number | null }> = []
+  for (const row of rows) {
+    const fee = row.stake_amount
+    if (typeof fee !== 'number' || checkEntryFeePolicy(fee).length > 0 || fee % SVARA_ENTRY_FEE_STEP !== 0) continue
+    if (row.is_enabled !== 0 && row.is_enabled !== 1) continue
+    const bps = row.site_commission_bps ?? null
+    if (bps !== null && checkCommissionBpsPolicy(bps).length > 0) continue
+    if (candidates.some((c) => c.fee === fee)) continue
+    candidates.push({ fee, enabled: row.is_enabled === 1, bps: bps as number | null })
+  }
+  const make = (list: typeof candidates) => validateGameFinancialConfig({
+    gameKey: 'svara',
+    configVersion: `common-entries:${createHash('sha256').update(JSON.stringify(list)).digest('hex').slice(0, 12)}`,
+    entryFees: list.map((c) => c.fee),
+    defaultCommissionBps: 2_000,
+    commissionBpsByEntryFee: Object.fromEntries(list.filter((c) => c.bps !== null).map((c) => [String(c.fee), c.bps])),
+    prizeSchemes: SVARA_PRIZE_SCHEMES,
+    disabledEntryFees: list.filter((c) => !c.enabled).map((c) => c.fee),
+  })
+  if (candidates.length === 0) return { ok: false, message: 'Няма входове, съвместими със „Свара“.' }
+  const draft = make(candidates)
+  if (!draft.ok) return { ok: false, message: `Невалидна конфигурация: ${draft.errors.map((e) => `${e.path}:${e.code}`).join(', ')}` }
+  // Само входове с точно разпределение при 2, 3 и 4 играчи.
+  const exact = candidates.filter((c) => SVARA_CAPACITIES.every((n) => svaraPrizeFor(draft.config, c.fee, n) !== null))
+  if (exact.length === 0) return { ok: false, message: 'Няма входове, съвместими със „Свара“.' }
+  if (exact.length === candidates.length) return { ok: true, config: draft.config }
+  const final = make(exact)
+  return final.ok ? { ok: true, config: final.config } : { ok: false, message: 'Невалидна конфигурация.' }
+}
 
 export type SvaraFinanceStatus = 'collected' | 'paid' | 'refunded' | 'held'
 export type SvaraHeldReason = 'no-winner' | 'invalid-terms' | 'winner-not-participant' | 'match-unrecoverable'
@@ -60,8 +116,6 @@ export type SvaraSettleResult =
   | { ok: false; message: string }
 
 export type SvaraEconomyStore = {
-  /** Създава началната конфигурация, ако липсва. Никога не презаписва. */
-  ensureDefaultConfig: () => void
   getActiveConfig: () => { ok: true; config: GameFinancialConfig } | { ok: false; message: string }
   /** Сървърната награда за победителя (null — недостъпна/неточна конфигурация). */
   previewPrize: (entryFee: number, participants: number) => number | null
@@ -75,10 +129,17 @@ export type SvaraEconomyStore = {
   close: () => void
 }
 
-/** Точност 20/80: наградата × 10 000 = фонд × (10 000 − комисиона), с една позиция. */
+/**
+ * Етап 4В: един победител; наградата е ТОЧНО резултатът от общата формула
+ * (prizeFormula.ts — закръгляне до 100, при 50 нагоре), а комисионата на сайта
+ * е остатъкът: награда + комисиона = фонд. (Името е запазено от 3В.2.)
+ */
 export function isExactSvaraSplit(terms: GameMatchFinancialTerms): boolean {
   if (terms.prizes.length !== 1) return false
-  return BigInt(terms.prizes[0]!) * BigInt(BASIS_POINTS_SCALE) === BigInt(terms.pot) * BigInt(BASIS_POINTS_SCALE - terms.commissionBps)
+  const formula = computePrizeBreakdown({ entryFee: terms.entryFee, paidEntries: terms.paidEntries, winners: 1, siteCommissionBps: terms.commissionBps })
+  return formula.ok
+    && formula.breakdown.pot === terms.pot
+    && terms.prizes[0] === formula.breakdown.prizePerWinner
     && terms.prizes[0]! + terms.siteCommission === terms.pot
 }
 
@@ -123,19 +184,11 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
     try { database.exec('ROLLBACK;') } catch { /* already closed */ }
   }
 
-  function ensureDefaultConfig(): void {
-    database.prepare(`INSERT INTO game_financial_configs (game_key, config_json, config_version) VALUES ('svara', ?, ?) ON CONFLICT(game_key) DO NOTHING;`)
-      .run(JSON.stringify(SVARA_DEFAULT_FINANCIAL_CONFIG), SVARA_DEFAULT_FINANCIAL_CONFIG.configVersion)
-  }
-
   function getActiveConfig(): { ok: true; config: GameFinancialConfig } | { ok: false; message: string } {
     try {
-      const row = database.prepare(`SELECT config_json FROM game_financial_configs WHERE game_key = 'svara' LIMIT 1;`).get() as { config_json: string } | undefined
-      if (!row) return { ok: false, message: 'Липсва конфигурация за „Свара“.' }
-      const validated = validateGameFinancialConfig(JSON.parse(row.config_json))
-      if (!validated.ok) return { ok: false, message: `Невалидна конфигурация: ${validated.errors.map((e) => `${e.path}:${e.code}`).join(', ')}` }
-      if (validated.config.gameKey !== 'svara') return { ok: false, message: 'Конфигурацията не е за „Свара“.' }
-      return { ok: true, config: validated.config }
+      const hasCommission = (database.prepare('PRAGMA table_info(match_rooms)').all() as Array<{ name: string }>).some((c) => c.name === 'site_commission_bps')
+      const rows = database.prepare(`SELECT stake_amount, is_enabled${hasCommission ? ', site_commission_bps' : ''} FROM match_rooms ORDER BY stake_amount ASC;`).all() as CommonEntryRow[]
+      return buildSvaraConfigFromCommonEntries(rows)
     } catch (error) {
       return { ok: false, message: messageOf(error) }
     }
@@ -158,7 +211,7 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
     // Условията се фиксират СЕГА — при действителния старт.
     const pinned = pinGameMatchFinancialTerms(active.config, { entryFee: input.entryFee, paidEntries: ids.length })
     if (!pinned.ok) return { ok: false, code: pinned.code === 'entry-fee-not-allowed' ? 'entry-fee-not-allowed' : 'inexact-split', message: pinned.message }
-    if (!isExactSvaraSplit(pinned.terms)) return { ok: false, code: 'inexact-split', message: 'Наградата не е точно (100% − комисиона) от фонда.' }
+    if (!isExactSvaraSplit(pinned.terms)) return { ok: false, code: 'inexact-split', message: 'Наградата не съответства на общата формула.' }
     const terms = pinned.terms
     try {
       database.exec('BEGIN IMMEDIATE;')
@@ -266,7 +319,6 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
   }
 
   return {
-    ensureDefaultConfig,
     getActiveConfig,
     previewPrize,
     collectEntries,

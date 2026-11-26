@@ -8,18 +8,37 @@
 // при рестарт и възстановяване.
 //
 // Версии на правилата:
-//   'belot-legacy-fixed-prize-v1' — наградата е фиксираната prize_amount от
-//     match_rooms (ЕДИНСТВЕНАТА активна версия; всички реални изплащания).
-//   Бъдещата версия по формула (prizeFormula.ts) НЕ е включена тук и не
-//   участва в изплащания — ще получи собствен rulesVersion при активиране.
+//   'belot-legacy-fixed-prize-v1' — ръчната prize_amount от match_rooms.
+//     Само за маси, създадени ПРЕДИ Етап 4В (boot-backfill / исторически).
+//   'belot-formula-v1' (Етап 4В) — наградата е изчислена от общата формула
+//     (prizeFormula.ts): фонд = 4 платени входа (ботовете също плащат),
+//     2 победители, общата комисиона на входа от match_rooms. Комисионата
+//     се фиксира заедно с наградата; при четене наградата се проверява
+//     отново спрямо формулата (несъответствие → невалидни условия).
 //
-// Размерът на наградите НЕ се променя: фиксира се същата стойност, която
-// payout-ът би прочел. Разликата е само кога се чете — при създаване на
-// масата, а не при приключване на мача.
+// И при двете версии наградата се фиксира при създаване на масата —
+// по-късни промени в каталога не засягат започнали мачове.
+
+import { computePrizeBreakdown } from './prizeFormula.js'
+import { checkCommissionBpsPolicy } from './entryLevelPolicy.js'
 
 export const BELOT_LEGACY_FIXED_PRIZE_RULES = 'belot-legacy-fixed-prize-v1' as const
+export const BELOT_FORMULA_RULES = 'belot-formula-v1' as const
+/** Белот: 4 платени входа, 2 победители (отборът). */
+export const BELOT_PAID_ENTRIES = 4
+export const BELOT_WINNERS = 2
 
-export type BelotFinancialRulesVersion = typeof BELOT_LEGACY_FIXED_PRIZE_RULES
+export type BelotFinancialRulesVersion = typeof BELOT_LEGACY_FIXED_PRIZE_RULES | typeof BELOT_FORMULA_RULES
+
+/** Наградата за всеки победител в Белот по общата формула (null — невалиден вход/комисиона). */
+export function computeBelotPrizePerWinner(entryFee: number, siteCommissionBps: number): number | null {
+  if (checkCommissionBpsPolicy(siteCommissionBps).length > 0) return null
+  const result = computePrizeBreakdown({ entryFee, paidEntries: BELOT_PAID_ENTRIES, winners: BELOT_WINNERS, siteCommissionBps })
+  return result.ok ? result.breakdown.prizePerWinner : null
+}
+
+/** Резолвър при фиксиране: число — legacy награда; обект — по формула. */
+export type BelotPrizeResolver = (entryFee: number) => number | { prizePerWinner: number; siteCommissionBps: number } | null
 
 export type BelotFinancialTermsPinSource =
   | 'matchmaking-room-created'
@@ -33,6 +52,8 @@ export type BelotFinancialTerms = {
   entryFee: number
   /** Награда за всеки победител. */
   prizePerWinner: number
+  /** Само при 'belot-formula-v1': фиксираната обща комисиона (bps). */
+  siteCommissionBps?: number
   pinnedAt: number
   pinSource: BelotFinancialTermsPinSource
 }
@@ -48,12 +69,24 @@ function isPositiveSafeInteger(value: unknown): value is number {
  */
 export function pinLegacyBelotFinancialTerms(
   entryFee: unknown,
-  resolvePrize: (entryFee: number) => number | null,
+  resolvePrize: BelotPrizeResolver,
   pinSource: BelotFinancialTermsPinSource,
   now: number = Date.now(),
 ): BelotFinancialTerms | null {
   if (!isPositiveSafeInteger(entryFee)) return null
   const prize = resolvePrize(entryFee)
+  if (prize !== null && typeof prize === 'object') {
+    // Етап 4В: по формула — наградата се проверява спрямо комисионата.
+    if (computeBelotPrizePerWinner(entryFee, prize.siteCommissionBps) !== prize.prizePerWinner) return null
+    return {
+      rulesVersion: BELOT_FORMULA_RULES,
+      entryFee,
+      prizePerWinner: prize.prizePerWinner,
+      siteCommissionBps: prize.siteCommissionBps,
+      pinnedAt: now,
+      pinSource,
+    }
+  }
   if (!isPositiveSafeInteger(prize)) return null
   return {
     rulesVersion: BELOT_LEGACY_FIXED_PRIZE_RULES,
@@ -68,6 +101,14 @@ export function pinLegacyBelotFinancialTerms(
 export function isValidBelotFinancialTerms(value: unknown): value is BelotFinancialTerms {
   if (typeof value !== 'object' || value === null) return false
   const terms = value as Record<string, unknown>
+  if (terms.rulesVersion === BELOT_FORMULA_RULES) {
+    return isPositiveSafeInteger(terms.entryFee)
+      && isPositiveSafeInteger(terms.prizePerWinner)
+      && typeof terms.siteCommissionBps === 'number'
+      && computeBelotPrizePerWinner(terms.entryFee, terms.siteCommissionBps) === terms.prizePerWinner
+      && typeof terms.pinnedAt === 'number' && Number.isFinite(terms.pinnedAt)
+      && typeof terms.pinSource === 'string'
+  }
   return terms.rulesVersion === BELOT_LEGACY_FIXED_PRIZE_RULES
     && isPositiveSafeInteger(terms.entryFee)
     && isPositiveSafeInteger(terms.prizePerWinner)
@@ -111,7 +152,7 @@ export function withPinnedBelotFinancialTerms<
   T extends { config: { stakeAmount?: number | null; isGuestTrial?: boolean; isTournamentMatchOrigin?: boolean; financialTerms?: unknown } },
 >(
   room: T,
-  resolvePrize: (entryFee: number) => number | null,
+  resolvePrize: BelotPrizeResolver,
   pinSource: BelotFinancialTermsPinSource,
   now: number = Date.now(),
   preset: BelotFinancialTerms | null = null,

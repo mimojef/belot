@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { ProfileId } from '../core/serverTypes.js'
 import { buildLudoMatchSnapshotRow, UPSERT_LUDO_MATCH_SNAPSHOT_SQL } from './activeLudoMatchSnapshotStore.js'
 import type { LudoMatchSnapshot } from '../game/ludoMatchRuntime.js'
+import { computePrizeBreakdown, DEFAULT_SITE_COMMISSION_BPS } from '../economy/prizeFormula.js'
+import { checkCommissionBpsPolicy } from '../economy/entryLevelPolicy.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -68,7 +70,7 @@ export type LudoEconomyStore = {
    */
   getLudoMatchTotalPot: (matchId: string) => number
   /**
-   * Idempotent payout — 80% от totalPot (integer floor) към winner-а, точно
+   * Idempotent payout към winner-а, точно
    * веднъж per matchId. Ако вече е платено (duplicate finished transition,
    * reconnect replay), връща historical amount от ledger-а вместо да
    * credit-не отново.
@@ -88,8 +90,20 @@ type LudoLedgerEntryType = 'ludo_stake_debit' | 'ludo_winner_payout'
 // Integer-only arithmetic — виж task spec-а. Remainder-ът винаги остава в
 // platformShare (никога не се credit-ва на никого, никакъв fiktiven platform
 // profile — виж §8 в task spec-а).
+/** Правилото отпреди Етап 4В — САМО за мачове без фиксирани условия (започнали преди това). */
 export function computeLudoWinnerPrize(totalPot: number): number {
   return Math.floor((totalPot * 80) / 100)
+}
+
+// Етап 4В: наградата по общата формула (prizeFormula.ts) — 1 победител,
+// фонд = реално платените входове, общата комисиона от каталога (match_rooms),
+// фиксирана при старта в ludo_match_financial_terms.
+export const LUDO_FORMULA_RULES = 'ludo-formula-v1' as const
+
+export function computeLudoFormulaPrize(entryFee: number, paidEntries: number, siteCommissionBps: number): number | null {
+  if (checkCommissionBpsPolicy(siteCommissionBps).length > 0) return null
+  const result = computePrizeBreakdown({ entryFee, paidEntries, winners: 1, siteCommissionBps })
+  return result.ok ? result.breakdown.prizePerWinner : null
 }
 
 export async function createLudoEconomyStore(
@@ -142,6 +156,26 @@ export async function createLudoEconomyStore(
     SELECT amount FROM ludo_match_economy_ledger
     WHERE match_id = ? AND profile_id = ? AND entry_type = ? LIMIT 1;
   `)
+
+  const selectDebitCountStatement = database.prepare(`
+    SELECT COUNT(*) AS n FROM ludo_match_economy_ledger
+    WHERE match_id = ? AND entry_type = 'ludo_stake_debit';
+  `)
+
+  // Етап 4В: общата комисиона на входа от общия каталог; липсващ вход /
+  // NULL → 20% по подразбиране. Невалидна стойност → null (стартът се отказва).
+  function resolveCommonCommissionBps(stakeAmount: number): number | null {
+    const columns = database.prepare('PRAGMA table_info(match_rooms)').all() as Array<{ name: string }>
+    if (!columns.some((c) => c.name === 'site_commission_bps')) return DEFAULT_SITE_COMMISSION_BPS
+    const row = database.prepare('SELECT site_commission_bps AS bps FROM match_rooms WHERE stake_amount = ?').get(stakeAmount) as { bps: unknown } | undefined
+    const bps = row?.bps ?? null
+    if (bps === null) return DEFAULT_SITE_COMMISSION_BPS
+    return checkCommissionBpsPolicy(bps).length === 0 ? bps as number : null
+  }
+
+  function selectTerms(matchId: string): { entry_fee: number; site_commission_bps: number; rules_version: string } | null {
+    return (database.prepare('SELECT entry_fee, site_commission_bps, rules_version FROM ludo_match_financial_terms WHERE match_id = ?').get(matchId) as { entry_fee: number; site_commission_bps: number; rules_version: string } | undefined) ?? null
+  }
 
   const selectPotStatement = database.prepare(`
     SELECT COALESCE(SUM(amount), 0) AS total FROM ludo_match_economy_ledger
@@ -298,6 +332,15 @@ export async function createLudoEconomyStore(
         row.revision, row.snapshotJson, row.matchStatus,
       )
 
+      // Етап 4В: фиксираните условия (обща комисиона) — в СЪЩАТА транзакция.
+      const siteCommissionBps = resolveCommonCommissionBps(stakeAmount)
+      if (siteCommissionBps === null || computeLudoFormulaPrize(stakeAmount, profileIds.length, siteCommissionBps) === null) {
+        database.exec('ROLLBACK;')
+        return { ok: false, message: 'Невалидни финансови условия за този вход.', insufficientProfileId: null }
+      }
+      database.prepare(`INSERT INTO ludo_match_financial_terms (match_id, rules_version, entry_fee, site_commission_bps)
+        VALUES (?, ?, ?, ?) ON CONFLICT(match_id) DO NOTHING`).run(matchId, LUDO_FORMULA_RULES, stakeAmount, siteCommissionBps)
+
       database.exec('COMMIT;')
     } catch (error) {
       try {
@@ -325,7 +368,22 @@ export async function createLudoEconomyStore(
       return { ok: false, message: 'Няма събран залог за този Ludo match.' }
     }
 
-    const prizeAmount = computeLudoWinnerPrize(totalPot)
+    // Етап 4В: фиксирани условия → общата формула върху реално платените
+    // входове; без ред (мач отпреди Етап 4В) → досегашното правило.
+    let prizeAmount: number
+    const terms = selectTerms(matchId)
+    if (terms !== null) {
+      const paidEntries = (selectDebitCountStatement.get(matchId) as { n: number }).n
+      const formulaPrize = terms.rules_version === LUDO_FORMULA_RULES && terms.entry_fee * paidEntries === totalPot
+        ? computeLudoFormulaPrize(terms.entry_fee, paidEntries, terms.site_commission_bps)
+        : null
+      if (formulaPrize === null) {
+        return { ok: false, message: 'Фиксираните финансови условия не съответстват на събрания фонд — изплащането е задържано.' }
+      }
+      prizeAmount = formulaPrize
+    } else {
+      prizeAmount = computeLudoWinnerPrize(totalPot)
+    }
 
     try {
       database.exec('BEGIN;')

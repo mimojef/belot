@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     raw.close()
     check('5 реда в базата (без DELETE/INSERT)', count === 5)
     // Изключване през store-а → reader вижда промяната (общ източник).
-    store.upsertRoom({ stakeAmount: 8_000, minLevel: 1, prizeAmount: 12_000, isEnabled: false })
+    store.upsertRoom({ stakeAmount: 8_000, minLevel: 1, isEnabled: false })
     check('след upsert isEnabled=false → 4 активни', reader.getActiveLevels().length === 4 && reader.getActiveLevel(8_000) === null)
     check('изключеното ниво остава в каталога', reader.getCatalog().getLevel(8_000)?.isEnabled === false)
   } finally {
@@ -141,7 +141,7 @@ async function main(): Promise<void> {
     const handler = /async function handlePublicRoomsRequest[\s\S]*?\n}\r?\n/.exec(indexSource)?.[0] ?? ''
     check('handler връща rooms: matchRoomsStore.listRooms()', handler.includes('rooms: matchRoomsStore.listRooms()'))
     check('handler добавя entryCatalog чрез fail-safe функцията', handler.includes('tryBuildPublicEntryCatalogPayload(entryLevelCatalogReader'))
-    check('изплащанията на Белот остават през prize_amount', /setMatchPrizeResolver\(\(stake\) => matchRoomsStore\.getPrizeAmount\(stake\)\)/.test(indexSource))
+    check('Етап 4В: prize_amount — само legacy за маси без условия; нови маси — формула', /setMatchPrizeResolver\(\(stake\) => matchRoomsStore\.getLegacyPrizeAmount\(stake\)\)/.test(indexSource))
     check('readerът не се ползва в изплащания/опашки (само /api/rooms + създаване)', (indexSource.match(/(?<![/\w])entryLevelCatalogReader\b/g) ?? []).length === 2)
     const readerSource = readFileSync(join(import.meta.dirname, '../src/economy/entryLevelCatalogReader.ts'), 'utf8')
     check('reader модулът не пише (няма INSERT/UPDATE/DELETE/upsert)', !/\b(INSERT|UPDATE|DELETE)\b|upsertRoom|deleteRoom/.test(readerSource))

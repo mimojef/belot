@@ -71,6 +71,8 @@ import {
   type MissionTemplateInput,
   type MissionTemplateSnapshot,
   type MatchRoomSnapshot,
+  type AdminMatchRoomGamePrizes,
+  type AdminMatchRoomInput,
   type PlayerMissionProgressSnapshot,
   type PlayerPublicProfileSnapshot,
   type GuestContactMessageListItem,
@@ -5995,7 +5997,22 @@ async function deleteAdminMission(
   }
 }
 
-type MatchRoomsApiResponse = { ok: boolean; rooms?: MatchRoomSnapshot[]; message?: string }
+type MatchRoomsApiResponse = { ok: boolean; rooms?: MatchRoomSnapshot[]; gamePrizes?: AdminMatchRoomGamePrizes[]; message?: string }
+type AdminMatchRoomsResult = { ok: true; rooms: MatchRoomSnapshot[]; gamePrizes: AdminMatchRoomGamePrizes[] } | { ok: false; message: string }
+
+/** Етап 4В: общият каталог на масите с наградите по игри (само за админ). */
+async function loadAdminMatchRooms(): Promise<AdminMatchRoomsResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/rooms`, { credentials: 'include' })
+    const data = (await response.json()) as MatchRoomsApiResponse
+    if (!response.ok || !data.ok || !Array.isArray(data.rooms)) {
+      return { ok: false, message: data.message ?? 'Стаите не бяха заредени.' }
+    }
+    return { ok: true, rooms: data.rooms, gamePrizes: Array.isArray(data.gamePrizes) ? data.gamePrizes : [] }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
 
 async function loadMatchRooms(): Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }> {
   try {
@@ -6011,8 +6028,8 @@ async function loadMatchRooms(): Promise<{ ok: true; rooms: MatchRoomSnapshot[] 
 }
 
 async function upsertAdminMatchRoom(
-  room: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean },
-): Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }> {
+  room: AdminMatchRoomInput,
+): Promise<AdminMatchRoomsResult> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/rooms`, {
       method: 'POST',
@@ -6024,7 +6041,7 @@ async function upsertAdminMatchRoom(
     if (!response.ok || !data.ok || !Array.isArray(data.rooms)) {
       return { ok: false, message: data.message ?? 'Записът не беше успешен.' }
     }
-    return { ok: true, rooms: data.rooms }
+    return { ok: true, rooms: data.rooms, gamePrizes: Array.isArray(data.gamePrizes) ? data.gamePrizes : [] }
   } catch {
     return { ok: false, message: 'Няма връзка.' }
   }
@@ -6032,7 +6049,7 @@ async function upsertAdminMatchRoom(
 
 async function deleteAdminMatchRoom(
   stakeAmount: number,
-): Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }> {
+): Promise<AdminMatchRoomsResult> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/rooms/${stakeAmount}`, {
       method: 'DELETE',
@@ -6042,7 +6059,7 @@ async function deleteAdminMatchRoom(
     if (!response.ok || !data.ok || !Array.isArray(data.rooms)) {
       return { ok: false, message: data.message ?? 'Изтриването не беше успешно.' }
     }
-    return { ok: true, rooms: data.rooms }
+    return { ok: true, rooms: data.rooms, gamePrizes: Array.isArray(data.gamePrizes) ? data.gamePrizes : [] }
   } catch {
     return { ok: false, message: 'Няма връзка.' }
   }
@@ -7621,6 +7638,7 @@ lobby = createLobbyFlowController({
   onAdminMissionActiveToggle: (missionId, isActive) => setAdminMissionActive(missionId, isActive),
   onAdminMissionDelete: (missionId) => deleteAdminMission(missionId),
   onMatchRoomsLoad: () => loadMatchRooms(),
+  onAdminMatchRoomsLoad: () => loadAdminMatchRooms(),
   onAdminMatchRoomUpsert: (room) => upsertAdminMatchRoom(room),
   onAdminMatchRoomDelete: (stakeAmount) => deleteAdminMatchRoom(stakeAmount),
   onPrivateRoomsOpen: () => { client.requestPrivateRoomsList() },
