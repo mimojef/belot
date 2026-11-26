@@ -81,7 +81,8 @@ function validateStructure(state: SvaraMatchState): void {
       && integer(d.intervalMs) && d.intervalMs >= SVARA_ANTE_INTERVAL_MIN_MS && d.intervalMs <= SVARA_ANTE_INTERVAL_MAX_MS
       && (d.startedAt === null || (integer(d.startedAt) && d.startedAt > 0)) && integer(d.percent) && d.percent >= 1 && integer(d.appliedTimeSteps)
       && Array.isArray(d.pendingRemovals) && d.pendingRemovals.every((at: unknown) => at === null || integer(at))
-      && Array.isArray(d.changes) && d.changes.every((c: any) => object(c) && ['time', 'removal'].includes(c.kind) && integer(c.percent) && integer(c.roundCounter) && (c.at === null || integer(c.at))))
+      && Array.isArray(d.changes) && d.changes.every((c: any) => object(c) && ['time', 'removal'].includes(c.kind) && integer(c.percent) && integer(c.roundCounter) && (c.at === null || integer(c.at))
+        && (c.appliedAt === undefined || c.appliedAt === null || integer(c.appliedAt))))
     require(s.entryChips === svaraAnteChipsFor(s.startingChips, d.percent))
   }
   require(strings(s.seats) && s.seats.length <= s.config.capacity && s.seats.every((id: string) => id.length <= 128))

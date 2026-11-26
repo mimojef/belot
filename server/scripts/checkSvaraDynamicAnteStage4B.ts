@@ -193,6 +193,70 @@ console.log('\n[7] Без принудителен All-in по часовник'
   check('мачът не е прекратен и няма автоматичен ход', s.phase === 'in-progress' && before.phase === 'in-progress')
 }
 
+console.log('\n[8] Брояч до следващото увеличение (snapshot) и нулиране след отпадане')
+{
+  const rt = createSvaraMatchRuntime({ persistence: store, now, random: { nextInt: () => 0 } })
+  const ante = (id: string, player: string) => rt.getPlayerSnapshot(id, { playerId: player }).table
+  // Обичайно времево увеличение: срокът е видим за всички участници и минава към следващия пълен интервал.
+  const id = newMatch(rt, ['t1', 't2', 't3'], 10 * MIN, 5_000)
+  check('след старта: всички участници виждат срок T0+10:00, без промяна (changedAt null)',
+    ['t1', 't2', 't3'].every((p) => ante(id, p).ante?.nextIncreaseAt === T0 + 10 * MIN && ante(id, p).ante?.changedAt === null), ante(id, 't1'))
+  deal(rt, id, T0 + 10 * MIN + 5_000); finishRound(rt, id)
+  const afterTime = ante(id, 't2')
+  check('граница 10:05 → +1 (2%), следващ срок 20:00 (пълен интервал от планираното), changedAt = момента на границата',
+    afterTime.entryChips === svaraAnteChipsFor(500, 2) && afterTime.ante?.nextIncreaseAt === T0 + 20 * MIN && afterTime.ante?.changedAt === T0 + 10 * MIN + 5_000, afterTime)
+
+  // „Бягам“ (отказ в раздаване) не е отпадане и не нулира брояча.
+  const before = state(rt, id).dynamicAnte!
+  deal(rt, id, T0 + 12 * MIN); finishRound(rt, id) // всички освен един отказват
+  check('„Бягам“ не нулира: срокът остава 20:00, без удвояване', ante(id, 't1').ante?.nextIncreaseAt === T0 + 20 * MIN
+    && state(rt, id).dynamicAnte!.percent === before.percent && state(rt, id).dynamicAnte!.startedAt === before.startedAt)
+
+  // Отпадане (пример от заданието): остават 4:00 → вход ×2 от следващото раздаване, броячът — пълни 10:00.
+  clock = T0 + 16 * MIN
+  act(rt, id, 't3', { type: 'exit' })
+  check('по средата между границите: антето още не е променено, срокът е 20:00', ante(id, 't1').entryChips === svaraAnteChipsFor(500, 2) && ante(id, 't1').ante?.nextIncreaseAt === T0 + 20 * MIN)
+  const r = deal(rt, id, T0 + 16 * MIN + 30_000)
+  check('следващо раздаване 16:30 → вход ×2 (4%), броячът започва 10:00 (срок 26:30)', r.percent === 4
+    && ante(id, 't1').ante?.nextIncreaseAt === T0 + 26 * MIN + 30_000 && ante(id, 't1').ante?.changedAt === T0 + 16 * MIN + 30_000, ante(id, 't1'))
+  finishRound(rt, id)
+  check('20:00 (старият срок) вече не увеличава', deal(rt, id, T0 + 21 * MIN).percent === 4)
+  finishRound(rt, id)
+  check('след новите 10:00 (26:30) → обичайното +1 (5%), срок 36:30', deal(rt, id, T0 + 26 * MIN + 30_000).percent === 5 && ante(id, 't1').ante?.nextIncreaseAt === T0 + 36 * MIN + 30_000)
+  finishRound(rt, id)
+
+  // Едновременни условия: времеви срок и отпадане на една граница — детерминистично, без двойно увеличение.
+  const sim = newMatch(rt, ['u1', 'u2', 'u3', 'u4'], 10 * MIN, 5_000)
+  clock = T0 + 9 * MIN + 59_000
+  act(rt, sim, 'u4', { type: 'exit' })
+  clock = T0 + 9 * MIN + 59_500
+  act(rt, sim, 'u3', { type: 'exit' })
+  const s = deal(rt, sim, T0 + 10 * MIN + 5_000)
+  const changes = state(rt, sim).dynamicAnte!.changes.map((c) => `${c.kind}:${c.percent}`).join(',')
+  check('отпадания 9:59 и 9:59,5 + срок 10:00, граница 10:05 → 1×2×2+1 = 5% (по време, по веднъж)', s.percent === 5 && changes === 'removal:2,removal:4,time:5', { s, changes })
+  check('само едно нулиране: срок 20:05 (пълен интервал от границата)', ante(sim, 'u1').ante?.nextIncreaseAt === T0 + 20 * MIN + 5_000)
+  finishRound(rt, sim)
+  check('без повторно прилагане на същата граница/срок', deal(rt, sim, T0 + 11 * MIN).percent === 5)
+  finishRound(rt, sim)
+
+  // Възстановяване: срокът след нулиране оцелява при рестарт; стари записи без appliedAt са валидни.
+  const saved = store.load(id)!
+  const rt2 = createSvaraMatchRuntime({ persistence: store, now, random: { nextInt: () => 0 } })
+  rt2.restoreMatchesForServer([saved])
+  check('рестарт: същият срок (36:30), вход и changedAt', rt2.getPlayerSnapshot(id, { playerId: 't1' }).table.ante?.nextIncreaseAt === T0 + 36 * MIN + 30_000
+    && rt2.getPlayerSnapshot(id, { playerId: 't2' }).table.entryChips === svaraAnteChipsFor(500, 5)
+    && rt2.getPlayerSnapshot(id, { playerId: 't1' }).table.ante?.changedAt === T0 + 26 * MIN + 30_000)
+  check('рестарт: 36:00 → без промяна; 36:30 → 6%', deal(rt2, id, T0 + 36 * MIN).percent === 5 && (finishRound(rt2, id), deal(rt2, id, T0 + 36 * MIN + 30_000).percent === 6))
+  const legacy = structuredClone(saved)
+  for (const change of legacy.state.dynamicAnte!.changes) delete change.appliedAt
+  let legacyOk = true
+  try { createSvaraMatchRuntime({ now }).restoreMatchesForServer([legacy]) } catch { legacyOk = false }
+  check('стар запис (без appliedAt в историята) се възстановява; changedAt → null', legacyOk)
+  const waiting = `w${++serial}`
+  rt.registerMatch({ matchId: waiting, creator: { playerId: 'w1' }, capacity: 2, entryFee: 5_000, startMode: 'manual', anteIncreaseIntervalMs: 10 * MIN })
+  check('чакаща маса (lobby): няма срок', rt.getPlayerSnapshot(waiting, { playerId: 'w1' }).table.ante?.nextIncreaseAt === null)
+}
+
 try { rmSync(dir, { recursive: true, force: true }) } catch { /* Windows */ }
 console.log(`\nРезултат: ${passed} PASS, ${failed} FAIL`)
 process.exit(failed > 0 ? 1 : 0)

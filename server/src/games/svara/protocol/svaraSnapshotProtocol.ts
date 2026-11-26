@@ -31,6 +31,7 @@ import {
   createSvaraMatchPlayerView,
   describeSvaraMatchOptions,
   describeSvaraLifecycle,
+  svaraNextAnteIncreaseAt,
   type SvaraEntryPercent,
   type SvaraMatchState,
   type SvaraPotOutcome,
@@ -233,6 +234,12 @@ export type SvaraMatchSnapshotMessage = {
     entryPercent: SvaraEntryPercent
     startingChips: number
     entryChips: number
+    /**
+     * Динамичното анте (само ако мачът го има): срокът на следващото времево
+     * увеличение (null извън игра) и сървърният момент на последната приложена
+     * промяна на антето (null — няма такава). Клиентът брои по сървърния часовник.
+     */
+    ante?: { nextIncreaseAt: number | null; changedAt: number | null }
   }
   seats: SvaraSnapshotSeat[]
   dealerId: string | null
@@ -408,6 +415,10 @@ export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMat
       entryPercent: state.config.entryPercent,
       startingChips: state.startingChips,
       entryChips: state.entryChips,
+      ...(state.dynamicAnte ? { ante: {
+        nextIncreaseAt: state.phase === 'in-progress' ? svaraNextAnteIncreaseAt(state.dynamicAnte) : null,
+        changedAt: state.dynamicAnte.changes.at(-1)?.appliedAt ?? null,
+      } } : {}),
     },
     seats: state.seats.map((playerId, index) => ({
       seatIndex: index,

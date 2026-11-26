@@ -18,6 +18,7 @@ import type {
   SvaraStartMode,
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
+import { detectSvaraAnteChange, formatSvaraAnteCountdown, SVARA_ANTE_FLASH_MS, type SvaraAnteSeen } from './table/svaraAnteIndicator'
 import { isGameSoundsEnabled, setGameSoundsEnabled } from '../../audio/gameSoundSettings'
 import {
   renderSvaraActiveTable,
@@ -622,7 +623,61 @@ export function createSvaraLobbyController(options: Options) {
     }
   }
 
+  // Индикатор „Вход X — MM:SS“: само текстът на брояча се обновява локално по
+  // sharedServerClock (без пълно рендиране и без заявки към сървъра).
+  let anteTimer: ReturnType<typeof setInterval> | null = null
+  function patchAnteCountdown(): void {
+    const serverNow = sharedServerClock.getServerNow()
+    for (const el of options.root.querySelectorAll<HTMLElement>('[data-svara-ante-countdown]')) {
+      const text = formatSvaraAnteCountdown(Number(el.dataset.svaraAnteCountdown), serverNow)
+      if (el.textContent !== text) el.textContent = text
+    }
+  }
+  function syncAnteTimer(): void {
+    const needed = myTable !== null && myTable.phase !== 'lobby' && snapshot?.matchId === myTable.matchId
+      && snapshot.phase === 'in-progress' && (snapshot.table.ante?.nextIncreaseAt ?? null) !== null
+    if (needed && anteTimer === null) anteTimer = setInterval(patchAnteCountdown, 500)
+    else if (!needed && anteTimer !== null) { clearInterval(anteTimer); anteTimer = null }
+  }
+
+  // „Вход X“ в центъра на сукното при действително, току-що приложено ново
+  // анте (времево или след отпадане). Първото виждане е само база — без
+  // анимация при зареждане, remount, reconnect или възстановяване.
+  let anteSeen: SvaraAnteSeen | null = null
+  function flushAnteChange(): void {
+    if (!snapshot || !myTable || snapshot.matchId !== myTable.matchId) return
+    const amount = detectSvaraAnteChange(anteSeen, snapshot, sharedServerClock.getServerNow())
+    anteSeen = { matchId: snapshot.matchId, chips: snapshot.table.entryChips, changedAt: snapshot.table.ante?.changedAt ?? null }
+    if (amount !== null) playAnteFlash(amount)
+  }
+  function playAnteFlash(amount: number): void {
+    const felt = options.root.querySelector<HTMLElement>('[data-svara-felt]')
+    if (!felt) return
+    felt.querySelector('[data-svara-ante-flash]')?.remove()
+    const el = document.createElement('div')
+    el.dataset.svaraAnteFlash = String(amount)
+    el.setAttribute('aria-live', 'polite')
+    el.textContent = `Вход ${formatAmount(amount)}`
+    el.style.cssText = 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:25;pointer-events:none;white-space:nowrap;'
+      + 'font-size:clamp(26px,8vw,46px);font-weight:900;letter-spacing:.02em;color:#f6d36b;'
+      + 'text-shadow:0 0 14px rgba(246,211,107,.55),0 2px 4px rgba(0,0,0,.95),0 0 2px rgba(80,50,0,.9);'
+    felt.appendChild(el)
+    try {
+      const animation = el.animate([
+        { opacity: 0, transform: 'translate(-50%,-50%) scale(.85)', offset: 0 },
+        { opacity: 1, transform: 'translate(-50%,-50%) scale(1.05)', offset: 0.18 },
+        { opacity: 1, transform: 'translate(-50%,-50%) scale(1)', offset: 0.75 },
+        { opacity: 0, transform: 'translate(-50%,-50%) scale(1)', offset: 1 },
+      ], { duration: SVARA_ANTE_FLASH_MS, easing: 'ease-out', fill: 'forwards' })
+      animation.onfinish = () => el.remove()
+      animation.oncancel = () => el.remove()
+    } catch {
+      setTimeout(() => el.remove(), SVARA_ANTE_FLASH_MS)
+    }
+  }
+
   function ensureTick(): void {
+    syncAnteTimer()
     const hasActiveDeadline = (timing?.deadlines.length ?? 0) > 0
     const needsTick = hasActiveDeadline || hasActiveVisualAnimation()
     const desiredIntervalMs = hasActiveVisualAnimation() ? 33 : 250
@@ -714,12 +769,13 @@ export function createSvaraLobbyController(options: Options) {
   function regionKey(el: Element, index: number): string {
     const data = (el as HTMLElement).dataset
     if (data.svaraSeatIndex !== undefined) return `seat:${data.svaraSeatIndex}`
-    for (const name of ['svaraFelt', 'svaraFeltCenter', 'svaraResultOverlay', 'svaraResultBanner', 'svaraDiagnostics', 'svaraActionBar', 'svaraDecisionMount', 'svaraTopBar', 'svaraSettingsMount', 'svaraExitConfirmMount'] as const) {
+    for (const name of ['svaraFelt', 'svaraFeltCenter', 'svaraAnteIndicator', 'svaraResultOverlay', 'svaraResultBanner', 'svaraDiagnostics', 'svaraActionBar', 'svaraDecisionMount', 'svaraTopBar', 'svaraSettingsMount', 'svaraExitConfirmMount'] as const) {
       if (data[name] !== undefined) return name
     }
     return `#${index}`
   }
   const isPersistentNode = (el: Element) => (el as HTMLElement).dataset.svaraSceneStage !== undefined || (el as HTMLElement).dataset.svaraBetFlash !== undefined
+    || (el as HTMLElement).dataset.svaraAnteFlash !== undefined
   function recordRegions(container: Element, path: string): void {
     ;[...container.children].filter((c) => !isPersistentNode(c)).forEach((child, i) => {
       const key = `${path}/${regionKey(child, i)}`
@@ -1245,6 +1301,7 @@ export function createSvaraLobbyController(options: Options) {
       render()
       flushFoldAndLookAnimations()
       flushBetAnimations()
+      flushAnteChange()
     },
     setTiming(next: SvaraMatchTimingMessage | null) { timing = next; render() },
     // Отказана lobby заявка (вкл. напускане) освобождава бутоните — иначе
@@ -1286,6 +1343,7 @@ export function createSvaraLobbyController(options: Options) {
       options.root.removeEventListener('click', handleDecisionClick)
       if (resultFrame !== null) { cancelAnimationFrame(resultFrame); resultFrame = null }
       if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }
+      if (anteTimer !== null) { clearInterval(anteTimer); anteTimer = null }
       tableScene.destroy()
       if (fullscreenSupported) document.removeEventListener('fullscreenchange', handleFullscreenChange)
       document.removeEventListener('keydown', handleExitConfirmKeydown)

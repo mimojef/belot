@@ -1486,6 +1486,8 @@ export type SvaraMatchSnapshotMessage = {
     entryPercent: SvaraEntryPercent
     startingChips: number
     entryChips: number
+    /** Динамично анте: срок на следващото времево увеличение и момент на последната промяна (сървърно време). */
+    ante?: { nextIncreaseAt: number | null; changedAt: number | null }
   }
   seats: SvaraSnapshotSeat[]
   dealerId: string | null

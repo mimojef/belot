@@ -28,6 +28,7 @@ import { svaraDealingAnimationMs, type SvaraDealingVisualState } from './svaraTa
 import { computeSvaraResultVisualState, type SvaraResultVisualState } from './svaraResultAnimation'
 import { getSvaraDecisionWindow, renderSvaraDecisionWindow, svaraJoiningStatus, svaraDecisionStructureKey } from './svaraDecisionWindows'
 import { renderGameSoundsToggleState } from '../../../activeRoom/renderActiveRoomActionBar'
+import { renderSvaraAnteIndicatorHtml } from './svaraAnteIndicator'
 
 /** Активно балонче при отказ (voluntary/forced), по seatIndex. */
 export type SvaraActiveFoldEffect = { seatIndex: number; voluntary: boolean; elapsedMs: number; startedAtServerMs?: number }
@@ -526,6 +527,7 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   return `<div data-svara-table="1" style="position:relative;box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:0;background:#030303;touch-action:manipulation;">
     ${topBarHtml(input)}
     <div data-svara-felt="1" data-svara-scene-host="1" style="position:relative;flex:0 0 auto;min-height:240px;">
+      ${renderSvaraAnteIndicatorHtml(snapshot, input.serverNow)}
       ${resultBanner}
       <div data-svara-diagnostics="1" style="${SR_ONLY}">rev ${snapshot?.revision ?? '—'}</div>
     </div>

@@ -395,27 +395,38 @@ function inSeatOrder(seats: readonly string[], members: readonly string[]): stri
 
 // ── Етап 4Б: динамично анте ─────────────────────────────────────────────────
 //   - старт: 1% от първоначалните чипове на ЕДИН играч (не от текущия баланс);
-//   - на всеки intervalMs от началото на мача: +1 процентен пункт;
+//   - на всеки intervalMs от началото на текущия цикъл: +1 процентен пункт;
 //   - при отпадане на играч (0 чипа, доброволен изход, изчерпан бюджет за
-//     отсъствие): текущото анте × 2;
+//     отсъствие): текущото анте × 2; „Бягам“ в едно раздаване не е отпадане;
 //   - събитията се прилагат последователно по време (при равно време —
 //     първо времевото увеличение, после удвояването) и САМО на границата
-//     между раздаванията (start-next-round); никога по средата на раздаване.
+//     между раздаванията (start-next-round); никога по средата на раздаване;
+//   - граница с приложено отпадане започва нов цикъл: следващото времево
+//     увеличение е след ПЪЛЕН интервал от тази граница.
 export const SVARA_ANTE_INTERVAL_MIN_MS = 60_000
 export const SVARA_ANTE_INTERVAL_MAX_MS = 30 * 60_000
 
 export type SvaraDynamicAnte = {
   intervalMs: number
-  /** Сървърното време на старта на мача; null — стартиран без часовник (само тестове). */
+  /**
+   * Началото на текущия цикъл на времевите увеличения: стартът на мача, а след
+   * приложено отпадане — моментът на границата, от която важи новото анте
+   * (броячът започва пълен интервал). null — стартиран без часовник (тестове).
+   */
   startedAt: number | null
   /** Текущ процент от първоначалните чипове на един играч. */
   percent: number
-  /** Колко времеви увеличения вече са приложени. */
+  /** Колко времеви увеличения вече са приложени в текущия цикъл. */
   appliedTimeSteps: number
   /** Времената на отпаданията, чакащи следващата граница (null — без часовник). */
   pendingRemovals: Array<number | null>
-  /** Приложените промени — за проверка и показване. */
-  changes: Array<{ at: number | null; kind: 'time' | 'removal'; percent: number; roundCounter: number }>
+  /** Приложените промени — за проверка и показване (appliedAt — моментът на границата; липсва в стари записи). */
+  changes: Array<{ at: number | null; kind: 'time' | 'removal'; percent: number; roundCounter: number; appliedAt?: number | null }>
+}
+
+/** Следващото планирано времево увеличение (сървърно време); null — няма часовник или мачът не е започнал. */
+export function svaraNextAnteIncreaseAt(ante: SvaraDynamicAnte): number | null {
+  return ante.startedAt === null ? null : ante.startedAt + (ante.appliedTimeSteps + 1) * ante.intervalMs
 }
 
 /** Антето в чипове: винаги нагоре до цял чип — същото правило като при старта (computeSvaraEntryChips). */
@@ -446,11 +457,19 @@ function applyDueAnteChanges(ctx: Ctx): void {
   if (events.length === 0) return
   const key = (at: number | null) => (at === null ? Number.MAX_SAFE_INTEGER : at)
   events.sort((a, b) => key(a.at) - key(b.at) || a.order - b.order)
+  const appliedAt = typeof now === 'number' ? now : null
   for (const event of events) {
     ante.percent = event.kind === 'time' ? ante.percent + 1 : ante.percent * 2
-    ante.changes.push({ at: event.at, kind: event.kind, percent: ante.percent, roundCounter: state.roundCounter })
+    ante.changes.push({ at: event.at, kind: event.kind, percent: ante.percent, roundCounter: state.roundCounter, appliedAt })
   }
   state.entryChips = svaraAnteChipsFor(state.startingChips, ante.percent)
+  // Отпадане → новото анте важи от тази граница и броячът започва ПЪЛЕН
+  // интервал. Дължимите до момента времеви увеличения вече са приложени
+  // по-горе (веднъж, по време), затова няма двойно увеличение.
+  if (appliedAt !== null && ante.startedAt !== null && events.some((event) => event.kind === 'removal')) {
+    ante.startedAt = appliedAt
+    ante.appliedTimeSteps = 0
+  }
 }
 
 export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; entryFee: number; entryPercent?: SvaraEntryPercent; startMode: SvaraStartMode; creatorId: string; anteIncreaseIntervalMs?: number }): SvaraMatchState {
