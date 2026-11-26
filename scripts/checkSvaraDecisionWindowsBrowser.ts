@@ -37,6 +37,8 @@ try {
       const { svaraDecisionFixture, RESULT_START } = await import(fixturePath)
       const { sharedServerClock } = await import(clockPath)
       const root = document.querySelector<HTMLElement>('#root')!
+      // От f22a2cc6 всяко място маркира възела И info host-а със същия индекс — четат се и двата.
+      const seatText = (host: HTMLElement, index: number) => Array.from(host.querySelectorAll(`[data-svara-seat-index="${index}"]`)).map((e) => e.textContent ?? '').join(' ')
       const originalNow = Date.now
       let now = RESULT_START + 6300
       Date.now = () => now
@@ -98,12 +100,12 @@ try {
         joining.snapshot.lockedPots[0].eligible.push('carol')
         send(joining)
         ok(!root.querySelector('[data-svara-decision-window]'), 'confirmed join closes local window')
-        ok(root.querySelector('[data-svara-seat-index="2"]')!.textContent!.includes('ВКЛЮЧВА СЕ'), 'joined badge belongs to the matching profile')
+        ok(seatText(root, 2).includes('ВКЛЮЧВА СЕ'), 'joined badge belongs to the matching profile')
         joining.snapshot.round.decisions[1].status = 'declined'
         controller.setSnapshot(joining.snapshot)
-        ok(root.querySelector('[data-svara-seat-index="3"]')!.textContent!.includes('ПРОПУСКА'), 'other participant decline comes directly from server')
+        ok(seatText(root, 3).includes('ПРОПУСКА'), 'other participant decline comes directly from server')
         controller.destroy(); controller = mount(); send(joining)
-        ok(!root.querySelector('[data-svara-decision-window]') && root.querySelector('[data-svara-seat-index="2"]')!.textContent!.includes('ВКЛЮЧВА СЕ') && root.querySelector('[data-svara-seat-index="3"]')!.textContent!.includes('ПРОПУСКА'), 'remount restores completed public choices without reopening the dialog')
+        ok(!root.querySelector('[data-svara-decision-window]') && seatText(root, 2).includes('ВКЛЮЧВА СЕ') && seatText(root, 3).includes('ПРОПУСКА'), 'remount restores completed public choices without reopening the dialog')
         const decline = svaraDecisionFixture()
         decline.snapshot.round.roundId = 'joining-decline'
         send(decline); click('decline')
@@ -127,7 +129,7 @@ try {
         ok(calls.length === beforeTimeout, 'deadline rechecked on click even before the next UI tick')
         await wait()
         ok(!root.querySelector('[data-svara-decision-window]') && calls.length === beforeTimeout, 'joining expiry removes actions without inventing a decline command')
-        ok(root.querySelector('[data-svara-seat-index="2"]')!.textContent!.includes('ИЗЧАКВА СЕ'), 'deadline alone does not fabricate public declined status')
+        ok(seatText(root, 2).includes('ИЗЧАКВА СЕ'), 'deadline alone does not fabricate public declined status')
         controller.destroy(); controller = mount('alice')
         now = RESULT_START + 3100
         const reveal = svaraDecisionFixture('reveal', 'alice')

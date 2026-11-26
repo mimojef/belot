@@ -220,7 +220,10 @@ try {
         await (target === 'name' ? profile.locator('[data-svara-player-name]') : profile.locator('[data-svara-player-avatar], [data-svara-avatar-placeholder]')).click()
         const popup = page.locator('[data-player-profile-popup-root="1"]')
         await popup.waitFor()
-        assert.equal((await popup.locator('[data-player-profile-title="1"] > div').first().textContent())?.trim(), user.displayName)
+        // Тъмният прозорец има името в div вътре в заглавието; светлият (мобилен) — директно в заглавието.
+        const title = popup.locator('[data-player-profile-title="1"]').first()
+        const nameNode = (await title.locator(':scope > div').count()) > 0 ? title.locator(':scope > div').first() : title
+        assert.equal((await nameNode.textContent())?.trim(), user.displayName)
         await popup.locator('[data-player-profile-popup-close="1"]').click()
         await popup.waitFor({ state: 'detached' })
         await page.locator('[data-svara-waiting="1"]').waitFor()

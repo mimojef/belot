@@ -106,7 +106,16 @@ async function game(count: 2 | 3 | 4) {
             })) }
         })
         if (view.revision !== `rev ${s.revision}` || stored().revision !== saved.revision || snapshot(p).revision !== s.revision) return false
-        captured = { snapshot: s, saved, seats: view.seats }
+        // Since the shared scene (f22a2cc6) each seat marks BOTH its node and its
+        // info host with data-svara-seat-index (bet-flash mounting). One logical
+        // seat per index: merge both elements (balance from whichever shows it,
+        // dealer badge from either; cards are looked up by seat index anyway).
+        const bySeat = new Map<number, (typeof view.seats)[number]>()
+        for (const seat of view.seats) {
+          const known = bySeat.get(seat.index)
+          bySeat.set(seat.index, known ? { ...known, stack: Number.isNaN(known.stack) ? seat.stack : known.stack, dealer: known.dealer || seat.dealer } : seat)
+        }
+        captured = { snapshot: s, saved, seats: [...bySeat.values()] }
         return true
       }, 5000)
       assert(captured)
@@ -274,7 +283,8 @@ async function game(count: 2 | 3 | 4) {
           for (const id of step.winners) {
             const amount: number = step.share ?? step.amount
             const index = before.state.seats.indexOf(id)
-            const text = observation.bubbles.find((bubble) => bubble.index === index)?.text ?? ''
+            // Two elements per seat (node + info host) — the bubble may live in either.
+            const text = observation.bubbles.filter((bubble) => bubble.index === index).map((bubble) => bubble.text).find((t) => t !== '') ?? ''
             if (text) { assert.equal(text, `Печеля ${amount}!`); bubbles.add(`${step.potId}:${id}`) }
           }
           if (options.payoutReconnect && !payoutReloaded) {
