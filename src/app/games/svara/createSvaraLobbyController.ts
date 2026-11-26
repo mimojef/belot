@@ -203,8 +203,11 @@ export function createSvaraLobbyController(options: Options) {
     const body = myTable ? (myTable.phase === 'lobby' ? renderWaiting(myTable) : renderActiveTable(myTable)) : renderTableList()
     if (light) {
       options.root.innerHTML = `<section data-svara-lobby="1" data-svara-light="1" style="background:transparent;color:#111827;font-family:inherit;box-sizing:border-box;padding:0;overflow-x:hidden;">
-        ${renderLightActionRow()}
+        <div data-svara-light-banner="1" style="border:1px solid #E4E7EC;border-radius:12px;overflow:hidden;line-height:0;margin-bottom:12px;background:#FFFFFF;box-shadow:0 1px 2px rgba(16,24,40,0.05);">
+          <img src="/images/games/svara-lobby-banner.webp" alt="Свара" width="1643" height="458" style="display:block;width:100%;height:auto;">
+        </div>
         ${message ? `<div data-svara-lobby-message="1" role="status" style="${LIGHT_MESSAGE_STYLE}margin-bottom:12px;padding:10px 12px;border-radius:10px;font-size:13.5px;font-weight:700;line-height:1.4;overflow-wrap:anywhere;">${esc(message)}</div>` : ''}
+        ${renderLightActionRow()}
         ${body}
         ${createOpen ? renderCreateModal() : ''}
       </section>`
