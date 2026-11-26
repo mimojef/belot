@@ -7276,9 +7276,9 @@ const GUEST_MOBILE_LIGHT_INFO_VIEWS = new Set<string>(['rules', 'strategy', 'lea
 // човече": един широк банер, 1200×320 (15:4).
 const GUEST_LOBBY_BELOT_TABLE_IMAGE_URL = '/assets/lobby-mobile/belot-table.webp'
 const GUEST_LOBBY_LUDO_BANNER_IMAGE_URL = '/assets/lobby-mobile/ludo-banner.webp'
-// "Свара": банерът от лобито на играта (1643×458, без нарисуван бутон) в
-// същия 15:4 контейнер като Ludo (object-fit:cover).
-const GUEST_LOBBY_SVARA_BANNER_IMAGE_URL = '/images/games/svara-lobby-banner.webp'
+// "Свара": собствен банер за основното лоби, 1200×400 (3:1, ширината на Ludo).
+// Контейнерът е 3:1, за да няма изрязване; рамката и ъглите са от CSS.
+const GUEST_LOBBY_SVARA_BANNER_IMAGE_URL = '/assets/lobby-mobile/svara-banner.webp'
 // Без двойни кавички — стойността влиза в inline style="..." атрибут.
 export const GUEST_MOBILE_LOBBY_FONT_FAMILY = MOBILE_LIGHT_FONT_FAMILY
 export const GUEST_MOBILE_LOBBY_BOTTOM_NAV_CLEARANCE = 'calc(84px + env(safe-area-inset-bottom, 0px))'
@@ -8152,7 +8152,7 @@ function renderGuestMobileLobbySvaraSection(canShowSvaraEntry: boolean): string 
         margin:0 12px 8px;background:#FFFFFF;border-radius:12px;padding:8px;box-sizing:border-box;
         border:1px solid rgba(20,20,43,0.05);box-shadow:${GUEST_LOBBY_CARD_SHADOW};
       ">
-        ${renderGuestLobbyMediaSlot('svara-banner', '15 / 4', GUEST_LOBBY_SVARA_BANNER_IMAGE_URL)}
+        ${renderGuestLobbyMediaSlot('svara-banner', '3 / 1', GUEST_LOBBY_SVARA_BANNER_IMAGE_URL)}
         <div style="display:flex;align-items:center;gap:10px;padding:10px 2px 2px;">
           <span style="flex:1;min-width:0;color:${GUEST_LOBBY_MUTED};font-size:13px;line-height:1.35;font-weight:600;">Създай маса за 2, 3 или 4 играчи.</span>
           <button type="button" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" data-lobby-svara-create="1" style="${guestLobbyPlayButtonStyle()}width:auto;flex:0 0 auto;padding:0 18px;font-size:15px;">Създай игра</button>

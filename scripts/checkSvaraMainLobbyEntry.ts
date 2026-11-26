@@ -66,7 +66,7 @@ try {
   const { page, errors } = await open('access=1&role=player')
   await check('със сървърен достъп (обикновен профил, „Достъпна за всички“) — банер, „Създай игра“ и каре; абонамент веднъж', async () => {
     assert(await page.locator('[data-lobby-svara-section="1"] [data-lobby-svara-create="1"]').count() === 1, 'няма „Създай игра“')
-    assert(await page.locator('[data-lobby-svara-section="1"] img[src="/images/games/svara-lobby-banner.webp"]').count() === 1, 'няма банер')
+    assert(await page.locator('[data-lobby-svara-section="1"] img[src="/assets/lobby-mobile/svara-banner.webp"]').count() === 1, 'няма банер')
     assert(await page.locator('[data-lobby-svara-private="1"] [data-svara-play-button="1"]').count() === 1, 'няма каре → /games/svara')
     assert((await page.locator('[data-lobby-svara-private="1"]').innerText()).includes('Частни маси – Свара'), 'заглавие')
     const n = (await calls(page)).filter((c) => c === 'onSvaraTablesOpen').length
@@ -92,7 +92,7 @@ try {
       .map((s) => document.querySelector(s)!.getBoundingClientRect().top))
     assert(order.every((top, i) => i === 0 || top > order[i - 1]!), JSON.stringify(order))
   })
-  await check('същите ширини, рамки и височина на банера като Ludo; отстоянията между секциите съвпадат', async () => {
+  await check('същите ширини и рамки като Ludo; отстоянията между секциите съвпадат', async () => {
     const m = await page.evaluate(() => {
       const rect = (s: string) => document.querySelector(s)!.getBoundingClientRect()
       const art = (s: string) => document.querySelector(`${s} article`)!
@@ -115,7 +115,7 @@ try {
       }
     })
     const eq = (a: number, b: number) => Math.abs(a - b) < 0.6
-    assert(eq(m.artW[0]!, m.artW[1]!) && m.frame && eq(m.slotH[0]!, m.slotH[1]!) && eq(m.rowW[0]!, m.rowW[1]!) && eq(m.rowH[0]!, m.rowH[1]!)
+    assert(eq(m.artW[0]!, m.artW[1]!) && m.frame && eq(m.rowW[0]!, m.rowW[1]!) && eq(m.rowH[0]!, m.rowH[1]!)
       && eq(m.gapIntoLudo, m.gapIntoSvara) && eq(m.gapToRowsLudo, m.gapToRowsSvara) && !m.overflow, JSON.stringify(m))
   })
   await check('няма JS грешки', async () => { assert(errors.length === 0, errors.join('; ')) })
@@ -128,7 +128,17 @@ try {
     const p = await context.newPage()
     await p.goto('/scripts/fixtures/svaraMainLobbyHarness.html?access=1&role=player')
     await p.waitForSelector('[data-lobby-stakes-scroll="1"] > *')
-    await check(`${width}px`, async () => {
+    await check(`${width}px: банерът на „Свара“ — без изрязване (контейнер = пропорцията на картинката), в рамките на екрана`, async () => {
+      await p.waitForFunction(() => (document.querySelector('[data-lobby-media-slot="svara-banner"] img') as HTMLImageElement | null)?.complete === true)
+      const b = await p.evaluate(() => {
+        const slot = document.querySelector('[data-lobby-media-slot="svara-banner"]')!
+        const img = slot.querySelector('img') as HTMLImageElement, r = slot.getBoundingClientRect(), s = getComputedStyle(slot)
+        return { natural: [img.naturalWidth, img.naturalHeight], ratio: r.width / r.height, left: r.left, right: r.right, vw: window.innerWidth, radius: s.borderRadius, overflow: s.overflow }
+      })
+      assert(b.natural[0] === 1200 && b.natural[1] === 400 && Math.abs(b.ratio - 3) < 0.02 && b.left >= 0 && b.right <= b.vw
+        && b.radius === '8px' && b.overflow === 'hidden', JSON.stringify(b))
+    })
+    await check(`${width}px: отстояния`, async () => {
       const g = await p.evaluate(() => {
         const r = (s: string) => document.querySelector(s)!.getBoundingClientRect()
         const card = document.querySelector('[data-lobby-stakes-scroll="1"] > *')!.getBoundingClientRect()
@@ -146,7 +156,10 @@ try {
       assert(eq(g.belotPair, 8) && eq(g.ludoPair, 8) && eq(g.svaraPair, 8) && eq(g.belotToLudo, 18) && eq(g.ludoToSvara, 18) && eq(g.toRewards, 24) && !g.overflow, JSON.stringify(g))
     })
     if (process.env.SCREENSHOT_DIR) await p.waitForTimeout(3000) // началният екран за зареждане
-    if (process.env.SCREENSHOT_DIR) await p.screenshot({ path: `${process.env.SCREENSHOT_DIR}/svara-lobby-spacing-${width}.png`, fullPage: true })
+    if (process.env.SCREENSHOT_DIR) {
+      await p.locator('[data-lobby-svara-section="1"]').scrollIntoViewIfNeeded()
+      await p.screenshot({ path: `${process.env.SCREENSHOT_DIR}/svara-lobby-${width}.png` })
+    }
     await context.close()
   }
   console.log(`\nРезултат: ${passed} PASS, ${failed} FAIL`)
