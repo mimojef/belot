@@ -5,6 +5,7 @@ import {
   SERVER_TEAM_A_SEATS,
 } from '../core/serverTypes.js'
 import { escapeSqlLikePattern } from './normalizeProfileIdentityText.js'
+import { resolvePinnedBelotPrize } from '../economy/belotFinancialTerms.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -130,6 +131,25 @@ export function setMatchPrizeResolver(resolver: (stakeAmount: number) => number 
 
 function getPrizeAmount(stakeAmount: number): number {
   return getPrizeForStake(stakeAmount) ?? stakeAmount
+}
+
+export type RoomPayoutPrizeResolution =
+  | { ok: true; prize: number; source: 'financial-terms' | 'legacy-current-prize' }
+  | { ok: false; reason: 'invalid' | 'stake-mismatch' }
+
+/**
+ * Етап 3Б: наградата за изплащане.
+ *   - валидни room.config.financialTerms → записаната награда (винаги);
+ *   - полето ЛИПСВА (историческа маса) → досегашният път (текущото prize_amount);
+ *   - полето е налично, но повредено/несъответстващо → ok:false. Текущото
+ *     prize_amount НЕ се ползва като резерва; payoutMatchWinners задържа
+ *     изплащането без запис в базата.
+ */
+export function resolveRoomPayoutPrizeAmount(room: ServerRoom, stakeAmount: number): RoomPayoutPrizeResolution {
+  const pinned = resolvePinnedBelotPrize(room.config)
+  if (pinned.prize !== null) return { ok: true, prize: pinned.prize, source: 'financial-terms' }
+  if (pinned.reason === 'missing') return { ok: true, prize: getPrizeAmount(stakeAmount), source: 'legacy-current-prize' }
+  return { ok: false, reason: pinned.reason }
 }
 
 type MatchEconomyEntryType = 'stake_debit' | 'stake_refund' | 'winner_payout'
@@ -626,8 +646,26 @@ export async function createMatchEconomyStore(
       }
     }
 
-    const prizeAmount = getPrizeAmount(stakeAmount)
+    const prizeResolution = resolveRoomPayoutPrizeAmount(room, stakeAmount)
     const winningSeatEntries = getWinningSeatEntries(room, winnerTeam)
+
+    if (!prizeResolution.ok) {
+      // Задържане: нищо не се записва (нито портфейл, нито ledger) — няма
+      // произволна сума и няма маркиране като платено. Ledger-ът остава без
+      // winner_payout за този scope, така че по-късно изплащане (след ръчна
+      // проверка) минава през същата идемпотентна логика без двойно плащане.
+      console.error(
+        `[match-economy] PAYOUT HELD room=${room.id} scope=${getRoomStakeLedgerScope(room)} reason=${prizeResolution.reason}`
+          + ` stake=${stakeAmount} winners=${winningSeatEntries.map((entry) => entry.profileId).join(',')}`
+          + ` financialTerms=${JSON.stringify(room.config.financialTerms ?? null)}`,
+      )
+      return {
+        ok: false,
+        message: `Изплащането е задържано: невалидни финансови условия на масата (${prizeResolution.reason}).`,
+      }
+    }
+
+    const prizeAmount = prizeResolution.prize
     const scope = getRoomStakeLedgerScope(room)
     const awardedPerSeat: Partial<Record<(typeof SERVER_SEAT_ORDER)[number], number>> = {}
 

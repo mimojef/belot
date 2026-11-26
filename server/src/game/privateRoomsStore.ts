@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { safeInvokeTimingHook, type MainThreadTimingHook } from '../monitoring/mainThreadTimingMetrics.js'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
+import type { BelotFinancialTerms } from '../economy/belotFinancialTerms.js'
 import type { PrivateRoomActionErrorCode, PrivateRoomWaitMinutes } from '../protocol/messageTypes.js'
 import {
   DEFAULT_HUMAN_TURN_TIMEOUT_MS,
@@ -119,6 +120,12 @@ export type PrivateRoom = {
   id: string
   kind: 'open' | 'locked'
   stake: MatchStake
+  /**
+   * Етап 3Б: финансовите условия, фиксирани при създаването на чакащата маса.
+   * Пренасят се в ServerRoom.config.financialTerms при старта, независимо от
+   * по-късни промени на prize_amount. null = наградата не е била известна.
+   */
+  readonly financialTerms: BelotFinancialTerms | null
   /**
    * Оригиналният създател на масата. Задава се веднъж в createRoom и НИКОГА
    * не се променя (нито при leave/host transfer, нито при reconnect) —
@@ -366,6 +373,8 @@ export type CreateRoomInput = {
   voiceTableId?: string | null
   /** „Забрана за съвместна игра“ — accountId от сесията на връзката. */
   coPlayAccountId?: string | null
+  /** Етап 3Б: фиксирани условия (index.ts ги смята при създаването). Липсващо = null. */
+  financialTerms?: BelotFinancialTerms | null
 }
 
 export type CreateRoomResult =
@@ -784,6 +793,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks, options: Stor
       id: randomUUID(),
       kind: input.isLocked ? 'locked' : 'open',
       stake: input.stake,
+      financialTerms: input.financialTerms ?? null,
       creatorProfileId: input.profileId,
       hostProfileId: input.profileId,
       hostConnectionId: input.connectionId,

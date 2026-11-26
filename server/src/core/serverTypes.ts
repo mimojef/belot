@@ -1,4 +1,5 @@
 import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
+import type { BelotFinancialTerms } from '../economy/belotFinancialTerms.js'
 import type {
   TournamentId,
   TournamentMatchId,
@@ -249,6 +250,13 @@ export type ServerRoomConfig = {
   isPrivate: boolean
   joinCode: string | null
   stakeAmount?: number | null
+  /**
+   * Етап 3Б: финансовите условия, фиксирани при създаване на масата (вход +
+   * награда за победител). payoutMatchWinners ги предпочита пред текущото
+   * match_rooms.prize_amount. Липсващо = стара маса / турнир / гост.
+   * Виж economy/belotFinancialTerms.ts.
+   */
+  financialTerms?: BelotFinancialTerms
   targetScore: number
   turnTimeMs: number
   reconnectGraceMs: number

@@ -237,9 +237,14 @@ async function main(): Promise<void> {
       check('Етап 2 полетата на ниво са налични', body.entryCatalog.levels.every((l: Record<string, unknown>) => stage2Keys.every((k) => k in l)))
       check('Етап 2 top-level полетата са налични', ['version', 'source', 'informationalOnly', 'commissionConfigured', 'policy', 'levels', 'excludedRowCount', 'notice'].every((k) => k in body.entryCatalog))
 
-      const untouched = ['src/index.ts', 'src/economy/prizeFormula.ts', 'src/economy/entryLevelCatalog.ts', 'src/economy/entryLevelPolicy.ts']
+      const untouched = ['src/economy/prizeFormula.ts', 'src/economy/entryLevelCatalog.ts', 'src/economy/entryLevelPolicy.ts']
       const diff = execFileSync('git', ['diff', '--name-only', 'HEAD', '--', ...untouched], { cwd: SERVER_ROOT, encoding: 'utf8' }).trim()
-      check('index.ts (endpoint-и, изплащания), формулата, каталогът и политиката — непроменени', diff === '', diff)
+      check('формулата, каталогът и политиката — непроменени', diff === '', diff)
+      // index.ts се променя в следващите етапи — проверяваме съдържателно, не по diff.
+      const indexSource = readFileSync(join(SERVER_ROOT, 'src/index.ts'), 'utf8')
+      check('admin endpoint-ите за ниво: upsertRoom + deleteRoom непроменени',
+        indexSource.includes('matchRoomsStore.upsertRoom({ stakeAmount, minLevel, prizeAmount, isEnabled })') && indexSource.includes('matchRoomsStore.deleteRoom(stakeAmount)'))
+      check('index.ts не пише site_commission_bps', !indexSource.includes('site_commission_bps'))
       const storeSource = readFileSync(join(SERVER_ROOT, 'src/db/matchRoomsStore.ts'), 'utf8')
       check('store не пише site_commission_bps', !/(INSERT|UPDATE)[^;`]*site_commission_bps/.test(storeSource))
     }

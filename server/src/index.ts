@@ -332,6 +332,7 @@ import { createActiveLudoMatchSnapshotStore } from './db/activeLudoMatchSnapshot
 import { createAttemptLudoRoomStart } from './game/attemptLudoRoomStart.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { createEntryLevelCatalogReader, tryBuildPublicEntryCatalogPayload } from './economy/entryLevelCatalogReader.js'
+import { pinLegacyBelotFinancialTerms, withPinnedBelotFinancialTerms } from './economy/belotFinancialTerms.js'
 import { createVipStore } from './db/vipStore.js'
 import {
   createVipPurchaseStore,
@@ -4180,6 +4181,9 @@ setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 // Етап 2: общ read-only каталог на входните нива (match_rooms). Само информационен —
 // не участва в изплащанията (те остават през prize_amount по-горе).
 const entryLevelCatalogReader = createEntryLevelCatalogReader(matchRoomsStore)
+// Етап 3Б: текущата legacy награда за вход — чете се САМО при създаване на
+// маса (фиксиране), не при изплащане. Същата стойност като payout resolver-а.
+const resolveCurrentBelotPrizeForPinning = (stake: number): number | null => matchRoomsStore.getPrizeAmount(stake)
 
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
@@ -5041,15 +5045,22 @@ function loadPersistedServerState(): ServerState {
   const restoredRooms = activeRoomSnapshotStore.loadActiveRooms()
   const now = Date.now()
   let nextServerState = createInitialServerState()
+  let backfilledFinancialTerms = 0
 
   for (const room of restoredRooms) {
-    nextServerState = upsertServerRoom(
-      nextServerState,
-      prepareRestoredRoomForServerStart(room, now),
-    )
+    const preparedRoom = prepareRestoredRoomForServerStart(room, now)
+    // Етап 3Б: маса отпреди фиксирането → условията се фиксират СЕГА, с
+    // текущата prize_amount (= стойността, която payout-ът би прочел), и се
+    // записват веднага — повторен рестарт не ги преизчислява.
+    const pinnedRoom = withPinnedBelotFinancialTerms(preparedRoom, resolveCurrentBelotPrizeForPinning, 'boot-backfill', now)
+    if (pinnedRoom !== preparedRoom) {
+      backfilledFinancialTerms += 1
+      persistRoomSnapshot(pinnedRoom)
+    }
+    nextServerState = upsertServerRoom(nextServerState, pinnedRoom)
   }
 
-  console.log(`[room-snapshot] restored active rooms=${restoredRooms.length}`)
+  console.log(`[room-snapshot] restored active rooms=${restoredRooms.length} financialTermsBackfilled=${backfilledFinancialTerms}`)
 
   return nextServerState
 }
@@ -6020,17 +6031,25 @@ function resolveLiveConnectionForMember(
 function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
   const hasBotOccupant = privateRoom.slots.some((s) => s.occupant?.kind === 'bot')
 
-  let currentRoom = createServerRoom({
-    config: {
-      allowBots: hasBotOccupant,
-      isPrivate: true,
-      isPrivateTableOrigin: true,
-      stakeAmount: privateRoom.stake,
-      humanTurnTimeoutMs: privateRoom.humanTurnTimeoutMs,
-      // Гласов чат: същият voiceTableId преминава от чакалнята в играта.
-      voiceTableId: privateRoom.voiceTableId,
-    },
-  })
+  // Етап 3Б: условията, фиксирани при създаването на чакащата маса (preset),
+  // имат предимство; само ако липсват — фиксират се сега.
+  let currentRoom = withPinnedBelotFinancialTerms(
+    createServerRoom({
+      config: {
+        allowBots: hasBotOccupant,
+        isPrivate: true,
+        isPrivateTableOrigin: true,
+        stakeAmount: privateRoom.stake,
+        humanTurnTimeoutMs: privateRoom.humanTurnTimeoutMs,
+        // Гласов чат: същият voiceTableId преминава от чакалнята в играта.
+        voiceTableId: privateRoom.voiceTableId,
+      },
+    }),
+    resolveCurrentBelotPrizeForPinning,
+    'private-room-created',
+    Date.now(),
+    privateRoom.financialTerms,
+  )
   let nextServerState = upsertServerRoom(serverState, currentRoom)
 
   const seatAssignments: Array<{ connectionId: string; seat: Seat }> = []
@@ -9821,7 +9840,10 @@ function processMatchmakingUnsafe(): void {
 
     activityCounters.incrementRooms('matchmakingMatchFound')
 
-    const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
+    // Етап 3Б: условията се фиксират при създаването на масата от опашката.
+    const initializedRoom = initializeRoomAuthoritativeGameState(
+      withPinnedBelotFinancialTerms(result.room, resolveCurrentBelotPrizeForPinning, 'matchmaking-room-created'),
+    )
 
     const ensureResult = activeRoomRuntime.ensureRoom(initializedRoom)
 
@@ -29886,6 +29908,8 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           invitePartner: message.invitePartner === true,
           voiceTableId,
           coPlayAccountId: coPlayAccountIdByConnection.get(connection.id) ?? null,
+          // Етап 3Б: условията се фиксират при създаването на чакащата маса.
+          financialTerms: pinLegacyBelotFinancialTerms(message.stake, resolveCurrentBelotPrizeForPinning, 'private-room-created'),
         })
 
         if (!createResult.ok) {
