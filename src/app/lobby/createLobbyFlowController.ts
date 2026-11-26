@@ -1,3 +1,4 @@
+import type { AdminSvaraEntries, AdminSvaraEntryInput, AdminSvaraState } from './adminSvaraEntries'
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 import { isErrorResponseTo, isOtherGameErrorForLudo, LUDO_GAMEPLAY_ACTION_REQUEST_TYPES } from '../network/serverErrorCorrelation'
@@ -1014,6 +1015,9 @@ export type CreateLobbyFlowControllerOptions = {
     isEnabled: boolean
   }) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
   onAdminMatchRoomDelete?: (stakeAmount: number) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
+  /** Етап 4В: входовете на „Свара“ (сървърната конфигурация). */
+  onAdminSvaraEntriesLoad?: () => Promise<{ ok: true; entries: AdminSvaraEntries } | { ok: false; message: string }>
+  onAdminSvaraEntryUpsert?: (input: AdminSvaraEntryInput) => Promise<{ ok: true; entries: AdminSvaraEntries } | { ok: false; message: string }>
   onPrivateRoomsOpen?: () => void
   onPrivateRoomsClose?: () => void
   /** "Играещи"/"Приключили" табове — извиква се веднъж при first-open на всеки от двата (lazy load, не при "Чакащи"). */
@@ -2416,6 +2420,7 @@ type InternalLobbyFlowState = {
   matchRoomsLoading: boolean
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
+  adminSvara: AdminSvaraState
   privateRoomsCreatePopupOpen: boolean
   /** Избраните настройки в отворения прозорец „Нова маса“ (null = по подразбиране; нулира се при отваряне). */
   privateRoomCreateDraft: PrivateRoomCreateDraft | null
@@ -3238,6 +3243,7 @@ function createInitialState(): InternalLobbyFlowState {
     matchRoomsLoading: true,
     matchRoomsErrorText: null,
     adminMatchRoomEdit: null,
+    adminSvara: { game: 'belot', entries: null, loading: false, errorText: null, edit: null },
     privateRoomsCreatePopupOpen: false,
     privateRoomCreateDraft: null,
     privateRoomVoiceCreateOption: null,
@@ -6180,6 +6186,7 @@ export function createLobbyFlowController(
       matchRoomsLoading: state.matchRoomsLoading,
       matchRoomsErrorText: state.matchRoomsErrorText,
       adminMatchRoomEdit: state.adminMatchRoomEdit,
+      adminSvara: state.adminSvara,
       privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
       privateRoomCreateDraft: state.privateRoomCreateDraft,
       privateRoomVoiceCreateOption: state.privateRoomVoiceCreateOption,
@@ -7830,6 +7837,30 @@ export function createLobbyFlowController(
       onAdminMatchRoomEditStart: (room) => {
         state.adminMatchRoomEdit = room ?? 'new'
         render()
+      },
+      // Етап 4В: „Стаи за мач → Свара“ — винаги прясно от сървъра при избор.
+      onAdminMatchRoomsGameSelect: (game) => {
+        state.adminSvara = { ...state.adminSvara, game, edit: null, errorText: null }
+        render()
+        if (game === 'svara') void loadAdminSvaraEntries()
+      },
+      onAdminSvaraEditStart: (entry) => {
+        state.adminSvara = { ...state.adminSvara, edit: entry ?? 'new', errorText: null }
+        render()
+      },
+      onAdminSvaraEditCancel: () => {
+        state.adminSvara = { ...state.adminSvara, edit: null }
+        render()
+      },
+      onAdminSvaraEntrySubmit: (input) => {
+        void (async () => {
+          if (!options.onAdminSvaraEntryUpsert) return
+          const result = await options.onAdminSvaraEntryUpsert(input)
+          state.adminSvara = result.ok
+            ? { ...state.adminSvara, entries: result.entries, edit: null, errorText: null }
+            : { ...state.adminSvara, errorText: result.message }
+          render()
+        })()
       },
       onAdminMatchRoomEditCancel: () => {
         state.adminMatchRoomEdit = null
@@ -25222,6 +25253,17 @@ export function createLobbyFlowController(
     state.adminActiveMissions = result.activeMissions
     state.adminStagedMissions = result.stagedMissions
     state.adminMissionsErrorText = null
+    render()
+  }
+
+  async function loadAdminSvaraEntries(): Promise<void> {
+    if (!options.onAdminSvaraEntriesLoad) return
+    state.adminSvara = { ...state.adminSvara, loading: true, errorText: null }
+    render()
+    const result = await options.onAdminSvaraEntriesLoad()
+    state.adminSvara = result.ok
+      ? { ...state.adminSvara, loading: false, entries: result.entries }
+      : { ...state.adminSvara, loading: false, errorText: result.message }
     render()
   }
 

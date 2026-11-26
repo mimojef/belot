@@ -874,6 +874,11 @@ export function createSvaraLobbyController(options: Options) {
     if (request !== creationRequest || !createOpen) return
     creationOptions = result
     dialogState.options = result
+    // Етап 4В: входовете са от сървъра (админ може да изключи 5 000) — ако
+    // избраният го няма, се избира първият разрешен, без твърдо зададен списък.
+    if (result && result.entries.length > 0 && !result.entries.some((entry) => entry.entryFee === createDraft.entryFee)) {
+      dialogState.draft = createDraft = { ...createDraft, entryFee: result.entries[0]!.entryFee }
+    }
     creationLoading = false
     render()
   }

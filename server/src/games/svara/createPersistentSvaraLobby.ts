@@ -33,21 +33,24 @@ export async function createPersistentSvaraLobby(deps: {
       // cannot prove absence: new cross-game admissions must fail closed.
       findActiveMatchId: safe.code === 'schema-missing' ? () => null : unavailable }
   }
-  // Етап 3В.2: платената „Свара“ — САМО при SVARA_PAID_MATCHES_ENABLED=1.
-  // Недостъпна икономика при включен флаг → 'unavailable' (новите маси се отказват).
-  let paidEconomy: SvaraPaidEconomy | 'unavailable' | undefined
-  if (isSvaraPaidMatchesEnabled()) {
-    try {
-      const economy = await createSvaraEconomyStore(deps.databaseFilePath)
-      economy.ensureDefaultConfig()
-      paidEconomy = economy
-      const closeSnapshots = close
-      close = () => { closeSnapshots(); economy.close() }
-    } catch (cause) {
-      deps.onError?.(cause)
-      paidEconomy = 'unavailable'
-    }
+  // Етап 4В: конфигурацията на входовете в базата е водещият източник и във
+  // виртуалния режим → store-ът се създава винаги (началните стойности не
+  // презаписват админ промени). Етап 3В.2: финансовите операции — САМО при
+  // SVARA_PAID_MATCHES_ENABLED=1; недостъпна икономика → 'unavailable'.
+  let economy: Awaited<ReturnType<typeof createSvaraEconomyStore>> | null = null
+  try {
+    economy = await createSvaraEconomyStore(deps.databaseFilePath)
+    economy.ensureDefaultConfig()
+    const store = economy
+    const closeSnapshots = close
+    close = () => { closeSnapshots(); store.close() }
+  } catch (cause) {
+    deps.onError?.(cause)
+    economy = null
   }
-  const lobby = createSvaraLobby({ ...deps, persistence, ...(paidEconomy !== undefined ? { paidEconomy } : {}) })
-  return { lobby, close }
+  const paidEconomy: SvaraPaidEconomy | 'unavailable' | undefined = isSvaraPaidMatchesEnabled() ? (economy ?? 'unavailable') : undefined
+  const lobby = createSvaraLobby({ ...deps, persistence, svaraConfig: economy ?? 'unavailable', ...(paidEconomy !== undefined ? { paidEconomy } : {}) })
+  /** Етап 4В: за админ endpoint-ите (входове на „Свара“); null — недостъпно. */
+  const admin = economy
+  return { lobby, close, admin }
 }

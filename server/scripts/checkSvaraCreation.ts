@@ -66,8 +66,23 @@ try {
 
   const base = { type: 'create_svara_table', requestId: 'policy', capacity: 2, entryFee: 5000, startMode: 'auto' }
   assert.equal(parseSvaraLobbyMessage(base)?.type, 'create_svara_table', 'Missing percentage uses the server policy')
-  for (const entryFee of [0, -5000, 10, 500, 1000, 10000, 5100, 200010, 1.5, '5000', null, true, NaN, Infinity]) {
+  for (const entryFee of [0, -5000, 10, 500, 1000, 5100, 200010, 1.5, '5000', null, true, NaN, Infinity]) {
     assert.equal(parseSvaraLobbyMessage({ ...base, entryFee }), null, `Accepted arbitrary fee ${String(entryFee)}`)
+  }
+  // Етап 4В: парсерът проверява само формата (кратно на 1 000); дали входът е
+  // разрешен решава лобито по актуалната конфигурация (10 000 не е сред 13-те).
+  {
+    const frames: SvaraLobbyServerMessage[] = []
+    const lobby = createSvaraLobby({ runtime: createSvaraMatchRuntime(), hasOtherGameCommitment: () => false })
+    try {
+      lobby.attachConnection('host', { profileId: 'host', getSession: () => ({ account: { role: 'admin' }, profile: { profileId: 'host' } }),
+        send: (frame) => frames.push(typeof frame === 'string' ? JSON.parse(frame) : frame) })
+      const parsed = parseSvaraLobbyMessage({ ...base, entryFee: 10000 })
+      assert(parsed, 'Shape-valid fee 10000 must reach the lobby')
+      lobby.handle('host', parsed)
+      const error = frames.at(-1)
+      assert(error?.type === 'svara_lobby_error' && error.code === 'invalid_input', 'Lobby accepted a fee outside the configured entries')
+    } finally { lobby.shutdown() }
   }
   for (const entryPercent of [0, 2, 3, 4, 5, -1, 100, 1.5, '1', null, true, NaN, Infinity]) {
     const input = { ...base, entryPercent }

@@ -206,8 +206,8 @@ console.log('\n[7] Действащите игри не са засегнати'
   const diff = execFileSync('git', ['diff', '--name-only', 'HEAD', '--',
     'src/economy/prizeFormula.ts', 'src/economy/entryLevelPolicy.ts', 'src/economy/entryLevelCatalog.ts',
     'src/db/matchEconomyStore.ts', 'src/db/ludoEconomyStore.ts', 'src/db/tournamentEconomyStore.ts',
-    'src/tournament/tournamentPrizeRules.ts', 'src/games/svara', 'src/index.ts'], { cwd: SERVER_ROOT, encoding: 'utf8' }).trim()
-  check('формулата, политиката, Белот/Ludo/турнири, Свара и index.ts — без промени', diff === '', diff)
+    'src/tournament/tournamentPrizeRules.ts'], { cwd: SERVER_ROOT, encoding: 'utf8' }).trim()
+  check('формулата, политиката, Белот/Ludo/турнири — без промени (Свара и index.ts се променят в 4В по замисъл)', diff === '', diff)
   const index = readFileSync(join(SERVER_ROOT, 'src/index.ts'), 'utf8')
   check('новият модул не е свързан с работещия сървър (не активира платена Свара)', !index.includes('gameFinancialConfig'))
   const mod = readFileSync(join(SERVER_ROOT, 'src/economy/gameFinancialConfig.ts'), 'utf8')

@@ -591,7 +591,7 @@ check('H2. клиентът не импортира двигателя; Бело
     .replace("import { getSvaraTableCreationOptions } from './svaraTableCreationOptions.js'\n", '')
     .replace(", creationOptions: getSvaraTableCreationOptions()", '')
     // Етап 3В.2 (одобрено): сървърната награда във формата — само четене, без промяна на достъпа.
-    .replace("  /** Етап 3В.2: сървърната награда за формата „Създай игра“. */\n  prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null }\n", '')
+    .replace("  /** Етап 3В.2: сървърната награда за формата „Създай игра“. */\n  prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null; entryFees?: () => readonly number[] }\n", '')
     .replace(", creationOptions: getSvaraTableCreationOptions(deps.prize)", '')
   assert(current === baseline, 'Svara HTTP authorization changed beyond the approved read-only preview')
   const changed = execFileSync('git', ['diff', '--name-only', '6859a06', '--', 'src/app/activeRoom', 'src/app/games/ludo', 'server/src/game', 'server/src/games/svara/svaraAccess.ts', 'server/src/games/svara/svaraFeatureFlag.ts'], { cwd: projectRoot, encoding: 'utf8' }).trim()

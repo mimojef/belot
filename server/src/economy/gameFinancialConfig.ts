@@ -42,6 +42,18 @@ export type GameFinancialConfig = {
   /** Комисиона по вход (ключ — входът като низ, за JSON). */
   commissionBpsByEntryFee: Readonly<Record<string, number>>
   prizeSchemes: readonly PrizeScheme[]
+  /**
+   * Етап 4В: изключени входове (подмножество на entryFees). Остават в
+   * конфигурацията (с комисионата си) — нови маси с тях не се създават.
+   * Липсващо в по-стар запис = няма изключени.
+   */
+  disabledEntryFees: readonly number[]
+}
+
+/** Входовете, с които може да се създаде НОВА маса. */
+export function activeEntryFees(config: GameFinancialConfig): number[] {
+  const disabled = new Set(config.disabledEntryFees)
+  return config.entryFees.filter((fee) => !disabled.has(fee))
 }
 
 export type FinancialConfigError = { path: string; code: string; message: string }
@@ -142,6 +154,19 @@ export function validateGameFinancialConfig(input: unknown): ValidateConfigResul
     }
   }
 
+  const disabled: number[] = []
+  if (raw.disabledEntryFees !== undefined) {
+    if (!Array.isArray(raw.disabledEntryFees)) {
+      errors.push({ path: 'disabledEntryFees', code: 'invalid', message: 'Изключените входове трябва да са списък.' })
+    } else {
+      raw.disabledEntryFees.forEach((fee, i) => {
+        if (!isSafeInt(fee) || !entryFees.includes(fee)) errors.push({ path: `disabledEntryFees[${i}]`, code: 'unknown-entry-fee', message: 'Изключен вход, който не е в списъка с входове.' })
+        else if (disabled.includes(fee)) errors.push({ path: `disabledEntryFees[${i}]`, code: 'duplicate-entry-fee', message: 'Дублиран изключен вход.' })
+        else disabled.push(fee)
+      })
+    }
+  }
+
   const schemes: PrizeScheme[] = []
   if (!Array.isArray(raw.prizeSchemes) || raw.prizeSchemes.length === 0) {
     errors.push({ path: 'prizeSchemes', code: 'invalid-schemes', message: 'Нужна е поне една схема за награди.' })
@@ -169,6 +194,7 @@ export function validateGameFinancialConfig(input: unknown): ValidateConfigResul
       defaultCommissionBps: raw.defaultCommissionBps as number,
       commissionBpsByEntryFee: overrides,
       prizeSchemes: schemes.sort((a, b) => a.minParticipants - b.minParticipants),
+      disabledEntryFees: [...disabled].sort((a, b) => a - b),
     }),
   }
 }

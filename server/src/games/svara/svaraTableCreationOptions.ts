@@ -10,15 +10,26 @@ export function isSvaraTestEntryFee(value: unknown): value is number {
 }
 
 /**
+ * Етап 4В: структурна проверка на входа в парсера (без база): цяло число от
+ * 5 000 до 1 000 000 000, кратно на 1 000. Дали входът е РАЗРЕШЕН (активен
+ * в конфигурацията) решава lobby-то при създаване на масата.
+ */
+export function isSvaraEntryFeeShape(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 5_000 && value <= 1_000_000_000 && value % 1_000 === 0
+}
+
+/**
  * Етап 3В.2: prize — сървърна функция за наградата (вход, участници) → сума
  * или null. paid — дали масите са платени. Без prize наградите липсват
  * (клиентът не смята сам).
  */
-export function getSvaraTableCreationOptions(prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null }) {
+export function getSvaraTableCreationOptions(prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null; entryFees?: () => readonly number[] }) {
+  // Етап 4В: входовете идват от сървърната конфигурация (активните); без нея — началният списък.
+  const entryFees = prize?.entryFees ? prize.entryFees() : SVARA_TEST_ENTRY_FEES
   return {
     entryPercent: SVARA_TEST_ENTRY_PERCENT,
     ...(prize ? { paid: prize.paid } : {}),
-    entries: SVARA_TEST_ENTRY_FEES.map((entryFee) => {
+    entries: entryFees.map((entryFee) => {
       const startingChips = svaraStartingChipsForEntry(entryFee)
       const prizeByCapacity = prize
         ? { 2: prize.prizeFor(entryFee, 2), 3: prize.prizeFor(entryFee, 3), 4: prize.prizeFor(entryFee, 4) }

@@ -18,7 +18,7 @@ export type SvaraHttpDeps = {
   getSessionFromRequest: (req: IncomingMessage) => SvaraAccessSession
   sendJsonResponse: (res: ServerResponse, statusCode: number, payload: unknown, headers?: Record<string, string>) => void
   /** Етап 3В.2: сървърната награда за формата „Създай игра“. */
-  prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null }
+  prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null; entryFees?: () => readonly number[] }
 }
 
 const NO_STORE_HEADERS = { 'Cache-Control': 'no-store' }

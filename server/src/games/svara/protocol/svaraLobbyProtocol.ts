@@ -2,7 +2,7 @@ import type { SvaraEntryPercent, SvaraStartMode } from '../engine/svaraMatch.js'
 import type { SvaraParticipantCommand } from '../runtime/svaraMatchRuntime.js'
 import type { SvaraDeadlineKind } from '../runtime/svaraDeadlines.js'
 import type { SvaraMatchSnapshotMessage, SvaraPublicTable } from './svaraSnapshotProtocol.js'
-import { isSvaraTestEntryFee, SVARA_TEST_ENTRY_PERCENT } from '../svaraTableCreationOptions.js'
+import { isSvaraEntryFeeShape, SVARA_TEST_ENTRY_PERCENT } from '../svaraTableCreationOptions.js'
 export type { SvaraPublicTable } from './svaraSnapshotProtocol.js'
 
 export type SvaraLobbyClientMessage =
@@ -88,7 +88,8 @@ export function parseSvaraLobbyMessage(input: Record<string, unknown>): SvaraLob
   if (!validId(input.requestId)) return null
   if (input.type === 'create_svara_table') {
     if (input.capacity !== 2 && input.capacity !== 3 && input.capacity !== 4) return null
-    if (!isSvaraTestEntryFee(input.entryFee)) return null
+    // Етап 4В: само формата на входа; разрешеността се проверява от lobby-то спрямо базата.
+    if (!isSvaraEntryFeeShape(input.entryFee)) return null
     if (input.startMode !== 'auto' && input.startMode !== 'manual') return null
     if (input.entryPercent !== undefined && input.entryPercent !== SVARA_TEST_ENTRY_PERCENT) return null
     const entryPercent = SVARA_TEST_ENTRY_PERCENT

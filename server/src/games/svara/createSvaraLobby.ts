@@ -13,7 +13,7 @@ import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
 import { serializeSvaraSnapshotForClient, type SvaraPublicTable } from './protocol/svaraSnapshotProtocol.js'
 import { participantsIfCommandStartsMatch, reconcileSvaraPaidMatches, type SvaraPaidEconomy } from './svaraPaidEconomy.js'
-import { pinGameMatchFinancialTerms, SVARA_DEFAULT_FINANCIAL_CONFIG } from '../../economy/gameFinancialConfig.js'
+import { activeEntryFees, pinGameMatchFinancialTerms, SVARA_DEFAULT_FINANCIAL_CONFIG, type GameFinancialConfig } from '../../economy/gameFinancialConfig.js'
 
 type Transport = {
   /** Handshake identity used only to skip unrelated connections during broadcast. */
@@ -47,6 +47,12 @@ export function createSvaraLobby(deps: {
    * Чете се при създаване на маса и остава в мача. Липсва → фиксирано анте.
    */
   getAnteIncreaseIntervalMs?: () => number
+  /**
+   * Етап 4В: активната конфигурация на входовете от базата (водещ източник и
+   * във виртуалния режим). Липсва → началната конфигурация (само тестове без
+   * база); 'unavailable' → нови маси се отказват.
+   */
+  svaraConfig?: { getActiveConfig: () => { ok: true; config: GameFinancialConfig } | { ok: false; message: string } } | 'unavailable'
 }) {
   // An injected runtime is a test/server-owned dependency. Production always supplies persistence.
   if (deps.runtime && deps.persistence) throw new Error('Provide persistence through the injected Svara runtime')
@@ -67,9 +73,27 @@ export function createSvaraLobby(deps: {
   const paidMode = deps.paidEconomy !== undefined
   const paidEconomy = deps.paidEconomy === undefined || deps.paidEconomy === 'unavailable' ? null : deps.paidEconomy
   /** Сървърната награда за победителя; клиентът никога не я смята сам. */
+  /** Етап 4В: текущата конфигурация (чете се при всяко ползване — промяна от админа важи веднага). */
+  function currentConfig(): GameFinancialConfig | null {
+    if (deps.svaraConfig === undefined) return SVARA_DEFAULT_FINANCIAL_CONFIG
+    if (deps.svaraConfig === 'unavailable') return null
+    try {
+      const result = deps.svaraConfig.getActiveConfig()
+      if (result.ok) return result.config
+      deps.onError?.(new Error(`[svara-config] ${result.message}`))
+    } catch (cause) { deps.onError?.(cause) }
+    return null
+  }
+  /** Входовете за НОВИ маси (сортирани) — за формата „Създай игра“. */
+  function creationEntryFees(): number[] {
+    const config = currentConfig()
+    return config ? activeEntryFees(config) : []
+  }
   function prizeFor(entryFee: number, participants: number): number | null {
     if (!paidMode) {
-      const terms = pinGameMatchFinancialTerms(SVARA_DEFAULT_FINANCIAL_CONFIG, { entryFee, paidEntries: participants, pinnedAt: 1 })
+      const config = currentConfig()
+      if (!config) return null
+      const terms = pinGameMatchFinancialTerms(config, { entryFee, paidEntries: participants, pinnedAt: 1 })
       return terms.ok ? terms.terms.prizes[0]! : null
     }
     try { return paidEconomy?.previewPrize(entryFee, participants) ?? null } catch (cause) { deps.onError?.(cause); return null }
@@ -315,7 +339,7 @@ export function createSvaraLobby(deps: {
 
   return {
     /** Етап 3В.2: за формата „Създай игра“ (HTTP). */
-    creationPrize: { paid: paidMode, prizeFor },
+    creationPrize: { paid: paidMode, prizeFor, entryFees: creationEntryFees },
     getRecoveryState: () => recoveryState,
     /** Synchronous startup barrier; call only after the other games' commitments are restored. */
     initializeRecovery(): SvaraRecoveryState {
@@ -468,6 +492,8 @@ export function createSvaraLobby(deps: {
         if (message.type === 'create_svara_table') {
           // Етап 3В.2: платен режим → само вход от активната конфигурация с точна награда.
           if (paidMode && prizeFor(message.entryFee, message.capacity) === null) { error(transport, 'paid_unavailable', requestId); return }
+          // Етап 4В: само активен вход от конфигурацията в базата (не твърдо зададен списък).
+          if (!creationEntryFees().includes(message.entryFee)) { error(transport, deps.svaraConfig === 'unavailable' ? 'server_unavailable' : 'invalid_input', requestId); return }
           const matchId = randomUUID()
           let anteIncreaseIntervalMs: number | undefined
           try { anteIncreaseIntervalMs = deps.getAnteIncreaseIntervalMs?.() } catch (cause) { deps.onError?.(cause) }

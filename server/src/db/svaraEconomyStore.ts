@@ -16,6 +16,8 @@
 
 import { randomUUID } from 'node:crypto'
 import {
+  activeEntryFees,
+  resolveCommissionBps,
   pinGameMatchFinancialTerms,
   SVARA_DEFAULT_FINANCIAL_CONFIG,
   validateGameFinancialConfig,
@@ -24,6 +26,35 @@ import {
   type GameMatchFinancialTerms,
 } from '../economy/gameFinancialConfig.js'
 import { BASIS_POINTS_SCALE } from '../economy/prizeFormula.js'
+import { checkCommissionBpsPolicy, checkEntryFeePolicy, parseCommissionPercent } from '../economy/entryLevelPolicy.js'
+
+// ── Етап 4В: администриране на входовете на „Свара“ ──────────────────────────
+/** „Свара“: първоначалните чипове = вход/10, антето (1%) = чипове/100 → входът е кратен на 1 000. */
+export const SVARA_ENTRY_FEE_STEP = 1_000
+export const SVARA_ADMIN_CAPACITIES = [2, 3, 4] as const
+
+export type SvaraAdminEntry = {
+  entryFee: number
+  isEnabled: boolean
+  /** Ефективната комисиона (bps) и дали е по подразбиране или зададена за входа. */
+  commissionBps: number
+  commissionSource: 'default' | 'entry'
+  /** Наградата за победителя при 2/3/4 играчи (null — неточно разпределение). */
+  prizeByCapacity: Record<2 | 3 | 4, number | null>
+}
+
+export type SvaraAdminEntries = {
+  configVersion: string
+  defaultCommissionBps: number
+  entries: SvaraAdminEntry[]
+}
+
+export type SvaraEntryUpsertInput = {
+  entryFee: unknown
+  isEnabled: unknown
+  /** null/'' → комисионата по подразбиране; иначе процент (напр. „20“, „12,50“). */
+  commissionPercent: unknown
+}
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -70,6 +101,13 @@ export type SvaraEconomyStore = {
   refundEntries: (matchId: string) => { ok: true; refunded: boolean; status: SvaraFinanceStatus | null } | { ok: false; message: string }
   settleMatch: (matchId: string, winnerProfileId: string | null) => SvaraSettleResult
   markUnrecoverable: (matchId: string) => { ok: true; changed: boolean } | { ok: false; message: string }
+  /** Етап 4В: входовете за админ интерфейса (вкл. изключените). */
+  listSvaraEntries: () => { ok: true; value: SvaraAdminEntries } | { ok: false; message: string }
+  /**
+   * Етап 4В: добавя нов вход или редактира съществуващ (активност и
+   * комисиона). Никога не трие; започнатите мачове пазят своите условия.
+   */
+  upsertSvaraEntry: (input: SvaraEntryUpsertInput) => { ok: true; value: SvaraAdminEntries } | { ok: false; message: string }
   getFinance: (matchId: string) => SvaraFinanceRow | null
   listCollectedMatchIds: () => string[]
   close: () => void
@@ -256,6 +294,87 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
     }
   }
 
+  function describeEntries(config: GameFinancialConfig, configVersion: string): SvaraAdminEntries {
+    const active = new Set(activeEntryFees(config))
+    return {
+      configVersion,
+      defaultCommissionBps: config.defaultCommissionBps,
+      entries: config.entryFees.map((entryFee) => {
+        const prizeAt = (n: number) => {
+          const pinned = pinGameMatchFinancialTerms(config, { entryFee, paidEntries: n, pinnedAt: 1 })
+          return pinned.ok && isExactSvaraSplit(pinned.terms) ? pinned.terms.prizes[0]! : null
+        }
+        return {
+          entryFee,
+          isEnabled: active.has(entryFee),
+          commissionBps: resolveCommissionBps(config, entryFee),
+          commissionSource: config.commissionBpsByEntryFee[String(entryFee)] === undefined ? 'default' as const : 'entry' as const,
+          prizeByCapacity: { 2: prizeAt(2), 3: prizeAt(3), 4: prizeAt(4) },
+        }
+      }),
+    }
+  }
+
+  function listSvaraEntries(): { ok: true; value: SvaraAdminEntries } | { ok: false; message: string } {
+    const active = getActiveConfig()
+    if (!active.ok) return active
+    return { ok: true, value: describeEntries(active.config, active.config.configVersion) }
+  }
+
+  function upsertSvaraEntry(input: SvaraEntryUpsertInput): { ok: true; value: SvaraAdminEntries } | { ok: false; message: string } {
+    const feeErrors = checkEntryFeePolicy(input.entryFee)
+    if (feeErrors.length > 0) return { ok: false, message: feeErrors[0]!.message }
+    const entryFee = input.entryFee as number
+    if (entryFee % SVARA_ENTRY_FEE_STEP !== 0) return { ok: false, message: `За „Свара“ входът трябва да е кратен на ${SVARA_ENTRY_FEE_STEP.toLocaleString('bg-BG')} (антето е 1% от чиповете).` }
+    if (typeof input.isEnabled !== 'boolean') return { ok: false, message: 'Активността трябва да е „Да“ или „Не“.' }
+    let commissionBps: number | null = null
+    if (input.commissionPercent !== null && input.commissionPercent !== undefined && input.commissionPercent !== '') {
+      const parsed = parseCommissionPercent(input.commissionPercent)
+      if (!parsed.ok) return { ok: false, message: parsed.error.message }
+      if (checkCommissionBpsPolicy(parsed.bps).length > 0) return { ok: false, message: 'Комисионата трябва да е между 10% и 50%.' }
+      commissionBps = parsed.bps
+    }
+    try {
+      ensureDefaultConfig()
+      database.exec('BEGIN IMMEDIATE;')
+      const current = getActiveConfig()
+      if (!current.ok) { rollback(); return current }
+      const config = current.config
+      const entryFees = config.entryFees.includes(entryFee) ? [...config.entryFees] : [...config.entryFees, entryFee]
+      const disabled = new Set(config.disabledEntryFees)
+      if (input.isEnabled) disabled.delete(entryFee)
+      else disabled.add(entryFee)
+      const overrides: Record<string, number> = { ...config.commissionBpsByEntryFee }
+      if (commissionBps === null) delete overrides[String(entryFee)]
+      else overrides[String(entryFee)] = commissionBps
+      if (entryFees.every((fee) => disabled.has(fee))) { rollback(); return { ok: false, message: 'Поне един вход трябва да остане активен.' } }
+      const configVersion = `admin-${new Date().toISOString()}`
+      const next = validateGameFinancialConfig({
+        ...config,
+        configVersion,
+        entryFees,
+        disabledEntryFees: [...disabled],
+        commissionBpsByEntryFee: overrides,
+      })
+      if (!next.ok) { rollback(); return { ok: false, message: `Невалидна конфигурация: ${next.errors.map((e) => e.message).join(' ')}` } }
+      // Точно разпределение при 2/3/4 играчи — иначе мачовете с този вход не биха започвали.
+      for (const n of SVARA_ADMIN_CAPACITIES) {
+        const pinned = pinGameMatchFinancialTerms(next.config, { entryFee, paidEntries: n, pinnedAt: 1 })
+        if (!pinned.ok || !isExactSvaraSplit(pinned.terms)) {
+          rollback()
+          return { ok: false, message: `При ${n} играчи наградата не е точно (100% − комисиона) от фонда — избери друга комисиона или вход.` }
+        }
+      }
+      database.prepare(`UPDATE game_financial_configs SET config_json = ?, config_version = ?, updated_at = CURRENT_TIMESTAMP WHERE game_key = 'svara';`)
+        .run(JSON.stringify(next.config), configVersion)
+      database.exec('COMMIT;')
+      return { ok: true, value: describeEntries(next.config, configVersion) }
+    } catch (error) {
+      rollback()
+      return { ok: false, message: messageOf(error) }
+    }
+  }
+
   function markUnrecoverable(matchId: string): { ok: true; changed: boolean } | { ok: false; message: string } {
     try {
       const updated = updateFinance.run('held', null, 'match-unrecoverable', matchId) as { changes?: number }
@@ -273,6 +392,8 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
     refundEntries,
     settleMatch,
     markUnrecoverable,
+    listSvaraEntries,
+    upsertSvaraEntry,
     getFinance: rowOf,
     listCollectedMatchIds: () => (database.prepare(`SELECT match_id FROM svara_match_finance WHERE status = 'collected' ORDER BY created_at, match_id;`).all() as Array<{ match_id: string }>).map((r) => r.match_id),
     close: () => database.close(),
