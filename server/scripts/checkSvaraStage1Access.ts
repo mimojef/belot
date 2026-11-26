@@ -119,10 +119,12 @@ await check('A7. default флаг (без SVARA_TEST_ENABLED в env) е OFF', ()
 // ─── B. Клиент ──────────────────────────────────────────────────────────────
 console.log('\n=== B. клиент ===')
 
+// Видимостта следва само сървърния сигнал (флаг + роли + „Достъпна за всички“,
+// изчислени от evaluateSvaraAccess) — без втора клиентска проверка по роля.
 for (const role of ALL_ROLES) {
-  const shouldShow = EXPECTED_ALLOWED.includes(role)
-  await check(`B1. canShowSvaraEntry role=${role}, svaraTestAccess=true → ${shouldShow}`, () => {
-    assert(canShowSvaraEntry({ account: { role }, svaraTestAccess: true }) === shouldShow, role)
+  await check(`B1. canShowSvaraEntry role=${role} следва svaraTestAccess (true/false)`, () => {
+    assert(canShowSvaraEntry({ account: { role }, svaraTestAccess: true }) === true, role)
+    assert(canShowSvaraEntry({ account: { role }, svaraTestAccess: false }) === false, role)
   })
 }
 

@@ -18,8 +18,11 @@ export function isSvaraAllowedRole(role: string): boolean {
   return (SVARA_ALLOWED_ROLES as readonly string[]).includes(role)
 }
 
+// Само сървърният сигнал: той вече включва флага, ролите и „Свара — Достъпна
+// за всички“ (evaluateSvaraAccess). Клиентска проверка по роля би скрила
+// входовете за обикновените профили и при включен публичен достъп.
 export function canShowSvaraEntry(session: SvaraEntrySession): boolean {
-  return session !== null && session.svaraTestAccess === true && isSvaraAllowedRole(session.account.role)
+  return session !== null && session.svaraTestAccess === true
 }
 
 export type SvaraAccessCheckResult = 'granted' | 'denied' | 'unauthenticated' | 'forbidden' | 'unavailable'

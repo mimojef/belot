@@ -1216,6 +1216,8 @@ export function createSvaraLobbyController(options: Options) {
           myTable = owned
           leavePending = false
           joinPendingMatchId = null
+          // Формата (напр. отворена от "Създай игра" в основното лоби) не важи при собствена маса.
+          if (createOpen) { dialogState.open = createOpen = false; creationRequest++ }
           if (owned.phase !== 'lobby') options.onRequestTableState(owned.matchId)
         }
       }

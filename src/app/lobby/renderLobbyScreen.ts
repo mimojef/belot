@@ -809,6 +809,8 @@ export type LobbyScreenState = {
   canDeleteLobbyChat: boolean
   /** Показва картата "Свара" в "Игри" — server-derived (session.svaraTestAccess), виж app/games/svara/svaraAccess.ts. Само UX. */
   canShowSvaraEntry: boolean
+  /** Брой чакащи маси на "Свара" (фаза lobby) от svara_tables_list — значката на "Частни маси – Свара". */
+  svaraWaitingTablesCount: number
   /** /games/svara — 'granted' едва след 200 от GET /api/games/svara/access. */
   svaraPageStatus: SvaraPageStatus
   /**
@@ -7274,6 +7276,9 @@ const GUEST_MOBILE_LIGHT_INFO_VIEWS = new Set<string>(['rules', 'strategy', 'lea
 // човече": един широк банер, 1200×320 (15:4).
 const GUEST_LOBBY_BELOT_TABLE_IMAGE_URL = '/assets/lobby-mobile/belot-table.webp'
 const GUEST_LOBBY_LUDO_BANNER_IMAGE_URL = '/assets/lobby-mobile/ludo-banner.webp'
+// "Свара": банерът от лобито на играта (1643×458, без нарисуван бутон) в
+// същия 15:4 контейнер като Ludo (object-fit:cover).
+const GUEST_LOBBY_SVARA_BANNER_IMAGE_URL = '/images/games/svara-lobby-banner.webp'
 // Без двойни кавички — стойността влиза в inline style="..." атрибут.
 export const GUEST_MOBILE_LOBBY_FONT_FAMILY = MOBILE_LIGHT_FONT_FAMILY
 export const GUEST_MOBILE_LOBBY_BOTTOM_NAV_CLEARANCE = 'calc(84px + env(safe-area-inset-bottom, 0px))'
@@ -7736,7 +7741,7 @@ function renderGuestMobileLobbySectionTitle(iconName: string, title: string, asi
 
 // Контейнер за изображение — снимката запълва контейнера с object-fit:cover
 // (без деформиране), overflow:hidden пази заоблените ъгли.
-function renderGuestLobbyMediaSlot(slot: 'belot-table' | 'ludo-banner', aspectRatio: string, imageUrl: string): string {
+function renderGuestLobbyMediaSlot(slot: 'belot-table' | 'ludo-banner' | 'svara-banner',aspectRatio: string, imageUrl: string): string {
   return `
     <div data-lobby-media-slot="${slot}" aria-hidden="true" style="aspect-ratio:${aspectRatio};border-radius:8px;overflow:hidden;background:#E7EDFB;">
       <img src="${escapeHtml(imageUrl)}" alt="" style="width:100%;height:100%;display:block;object-fit:cover;">
@@ -8126,6 +8131,43 @@ function renderGuestMobileLobbyLudoPrivateRow(isMember = false): string {
   `
 }
 
+// "Свара" — същата секция (банер + "Създай игра") и същият ред "Частни маси"
+// като "Не се сърди човече", веднага след тях. Видимостта е canShowSvaraEntry
+// (server-derived session.svaraTestAccess: флаг + роля/„Достъпна за всички“) —
+// гост никога не я вижда. Сървърът презаверява достъпа на /games/svara и при
+// всяко WebSocket действие. "Създай игра" отваря /games/svara със
+// съществуващата форма (data-lobby-svara-create); редът — /games/svara
+// (data-svara-play-button). Броячът = масите във фаза lobby от svara_tables_list.
+function renderGuestMobileLobbySvaraSection(canShowSvaraEntry: boolean): string {
+  if (!canShowSvaraEntry) return ''
+  // Вертикалните полета се сливат: 18px = същото отстояние като между реда на
+  // Белот (18px) и секцията на Ludo (6px), след реда на Ludo (9px).
+  return `
+    <section data-lobby-svara-section="1" style="margin-top:18px;">
+      ${renderGuestMobileLobbySectionTitle('icon-private-tables-svara', 'Свара')}
+      <article style="
+        margin:0 12px 18px;background:#FFFFFF;border-radius:12px;padding:8px;box-sizing:border-box;
+        border:1px solid rgba(20,20,43,0.05);box-shadow:${GUEST_LOBBY_CARD_SHADOW};
+      ">
+        ${renderGuestLobbyMediaSlot('svara-banner', '15 / 4', GUEST_LOBBY_SVARA_BANNER_IMAGE_URL)}
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 2px 2px;">
+          <span style="flex:1;min-width:0;color:${GUEST_LOBBY_MUTED};font-size:13px;line-height:1.35;font-weight:600;">Създай маса за 2, 3 или 4 играчи.</span>
+          <button type="button" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" data-lobby-svara-create="1" style="${guestLobbyPlayButtonStyle()}width:auto;flex:0 0 auto;padding:0 18px;font-size:15px;">Създай игра</button>
+        </div>
+      </article>
+    </section>
+  `
+}
+
+function renderGuestMobileLobbySvaraPrivateRow(canShowSvaraEntry: boolean, waitingTablesCount: number): string {
+  if (!canShowSvaraEntry) return ''
+  return `
+    <section data-lobby-svara-private="1" style="margin:0 12px 9px;display:grid;">
+      ${renderGuestLobbyRow({ tag: 'button', attributes: 'data-svara-play-button="1" data-lobby-svara-private-row="1"', iconName: 'icon-private-tables-svara', iconTint: '#FFF6E0', title: 'Частни маси – Свара', subtitle: 'Създай маса за 2, 3 или 4 играчи.', badgeHtml: guestLobbyCountPill(waitingTablesCount, 'violet') })}
+    </section>
+  `
+}
+
 function renderGuestMobileLobbyRows(unclaimedMissionsCount: number, hasUnclaimedDailyReward: boolean): string {
   return `
     <section data-lobby-guest-rows="1" style="margin:0 12px;display:grid;gap:9px;">
@@ -8216,6 +8258,8 @@ function renderGuestMobileLobbyMain(state: LobbyScreenState, canStartSearch: boo
       ${renderGuestMobileLobbyBelotPrivateRow(getPrivateRoomsBadgeCount(state.privateRooms), isMember)}
       ${renderGuestMobileLobbyLudoSection(isMember)}
       ${renderGuestMobileLobbyLudoPrivateRow(isMember)}
+      ${renderGuestMobileLobbySvaraSection(isMember && state.canShowSvaraEntry)}
+      ${renderGuestMobileLobbySvaraPrivateRow(isMember && state.canShowSvaraEntry, state.svaraWaitingTablesCount)}
       ${renderGuestMobileLobbyRows(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0)}
     </main>
   `

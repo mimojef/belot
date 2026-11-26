@@ -2222,6 +2222,8 @@ type InternalLobbyFlowState = {
   svaraPageStatus: SvaraPageStatus
   /** Свара — активна игра (виж setSvaraActiveGame); избира мобилната рамка. */
   svaraActiveGame: boolean
+  /** Свара — брой чакащи маси (фаза lobby) от последния svara_tables_list; значката в основното лоби. */
+  svaraWaitingTablesCount: number
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -3104,6 +3106,7 @@ function createInitialState(): InternalLobbyFlowState {
     bundlePurchaseMessageText: null,
     svaraPageStatus: 'checking',
     svaraActiveGame: readSvaraActiveGameHint(),
+    svaraWaitingTablesCount: 0,
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -4042,6 +4045,20 @@ export function createLobbyFlowController(
   // само сървърните съобщения за собствената маса — същите, от които
   // контролерът определя активната маса. Смяна → нов render на рамката (само
   // на телефон, където рамката зависи от него).
+  // Абонамент за svara_tables_list (същото съобщение като /games/svara) за
+  // брояча на чакащите маси в основното лоби — веднъж на връзка, само при
+  // сървърния сигнал за достъп (canShowSvaraEntry); сървърът пак проверява
+  // достъпа при всяко изпращане. Сесията може да пристигне след 'connected'
+  // → проверява се и при рендер на лобито.
+  // Ключ = clientId от 'connected' (null — няма потвърдена връзка).
+  let _svaraConnectionClientId: string | null = null
+  let _svaraTablesSubscribedClientId: string | null = null
+  function ensureSvaraTablesSubscription(): void {
+    if (_svaraConnectionClientId === null || _svaraTablesSubscribedClientId === _svaraConnectionClientId) return
+    if (!canShowSvaraEntry(options.getAuthSession?.() ?? null)) return
+    _svaraTablesSubscribedClientId = _svaraConnectionClientId
+    options.onSvaraTablesOpen?.()
+  }
   function setSvaraActiveGame(active: boolean): void {
     if (state.svaraActiveGame === active) return
     state.svaraActiveGame = active
@@ -4082,6 +4099,14 @@ export function createLobbyFlowController(
     if (target.closest('[data-svara-back-to-games="1"]')) {
       event.preventDefault()
       showMoreGamesPage()
+      return
+    }
+    // "Създай игра" в основното лоби: /games/svara със съществуващата форма
+    // (същото dialog състояние като бутона в лобито на играта). Не се отваря,
+    // ако профилът вече е в игра.
+    if (target.closest('[data-lobby-svara-create="1"]')) {
+      if (!state.svaraActiveGame) svaraCreateDialogState.open = true
+      showSvaraPage()
       return
     }
     if (!target.closest('[data-svara-play-button="1"]')) return
@@ -6011,6 +6036,7 @@ export function createLobbyFlowController(
       canShowSvaraEntry: canShowSvaraEntry(authSession),
       svaraPageStatus: state.svaraPageStatus,
       svaraActiveGame: state.svaraActiveGame,
+      svaraWaitingTablesCount: state.svaraWaitingTablesCount,
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
       lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
@@ -21061,6 +21087,7 @@ export function createLobbyFlowController(
 
   function render(): void {
     options.onBeforeRender?.()
+    if (state.currentScreen === 'lobby') ensureSvaraTablesSubscription()
     // Известията за частната маса — изолирано от root-а (виж syncPrivateRoomNoticeHost).
     syncPrivateRoomNoticeHost()
     // „Теми“ — напусната нишка (назад, друга тема, друг екран, изтрит root):
@@ -22400,6 +22427,10 @@ export function createLobbyFlowController(
         state.errorText = MATCHMAKING_INTERRUPTED_TEXT
       }
       if (_svaraReconnect) options.onSvaraTablesOpen?.()
+      // Нова връзка — сървърът е забравил абонамента за svara_tables_list.
+      _svaraConnectionClientId = message.clientId || 'connected'
+      _svaraTablesSubscribedClientId = null
+      ensureSvaraTablesSubscription()
       // Виж _isExpectingLudoMatchRestore doc коментара при декларацията му —
       // тази проба е "blind" (никакво предварително известие от сървъра, че
       // за профила изобщо съществува Ludo match), затова резултантен
@@ -22514,6 +22545,13 @@ export function createLobbyFlowController(
         setSvaraActiveGame(owned !== undefined && owned.phase !== 'lobby')
       }
       _svaraLobbyController?.setTables(message.tables, message.finished)
+      // Значката "Частни маси – Свара" в основното лоби: сървърът праща списъка
+      // на абонатите при създаване, старт и освобождаване на маса.
+      const waitingCount = message.tables.filter((table) => table.phase === 'lobby').length
+      if (state.svaraWaitingTablesCount !== waitingCount) {
+        state.svaraWaitingTablesCount = waitingCount
+        if (state.currentScreen === 'lobby') scheduleRender()
+      }
       return true
     }
     if (message.type === 'svara_table_updated') {
@@ -25453,6 +25491,7 @@ export function createLobbyFlowController(
     getShopActiveTab: () => state.shopActiveTab,
     setConnected: (value) => {
       state.isConnected = value
+      if (!value) _svaraConnectionClientId = null
       if (value) {
         _initConnected = true
         maybeHideInitialOverlay()
