@@ -77,7 +77,35 @@ export type MatchEconomyStore = {
     room: ServerRoom,
   ) =>
     | { ok: true; awardedPerSeat: Partial<Record<import('../core/serverTypes.js').Seat, number>> }
-    | { ok: false; message: string }
+    | { ok: false; message: string; held?: HeldPayoutNotice }
+  /**
+   * Етап 3Б.2: записва (идемпотентно) задържано изплащане в
+   * belot_held_payouts. Ползва се за повторен опит, когато първоначалният
+   * запис в payoutMatchWinners не е успял.
+   */
+  recordHeldPayout: (record: HeldPayoutRecord) => { ok: true } | { ok: false; message: string }
+  /**
+   * Етап 3Б.2: за възстановена при старт маса — ако мачът е приключил, а
+   * изплащането би било задържано и още не е регистрирано, го регистрира.
+   */
+  registerHeldPayoutForRestoredRoom: (room: ServerRoom) => { status: 'not-held' | 'recorded' } | { status: 'failed'; message: string }
+  /**
+   * Етап 3Б.2 (диагностика при старт): завършени платени Белот мачове по
+   * belot_match_completion_ledger (записан ПРЕДИ изплащането), които нямат
+   * winner_payout и нямат ред в belot_held_payouts → регистрира ги като
+   * 'payout-missing' за ръчна проверка. НИКОГА не начислява жълтици.
+   * Изключени: турнири (залог 0), гост мачове, временни ботове.
+   */
+  registerMissingPayoutsFromCompletionLedger: () => MissingPayoutDiagnosticReport
+  getHeldPayout: (matchScope: string) => HeldPayoutRow | null
+  listHeldPayouts: (filter?: { status?: HeldPayoutStatus }) => HeldPayoutRow[]
+  /**
+   * Етап 3Б.2: ръчно уреждане от администратор (сървърен механизъм; без UI).
+   * Една транзакция: движение на жълтици + ledger + смяна на статуса, само от
+   * 'pending_review'. Никога текущото prize_amount — наградата се подава
+   * изрично след проверка и се записва заедно с доказателството.
+   */
+  settleHeldPayout: (input: SettleHeldPayoutInput) => SettleHeldPayoutResult
   /**
    * Technical-abort refund [1/2] — ROOM-SCOPED debits (root-cause audit:
    * "zombie Belot room / session_in_game lock", economy-safety follow-up).
@@ -138,6 +166,84 @@ export type MatchEconomyStore = {
 }
 
 export const MATCHMAKING_STAKE_BINDINGS_MIGRATION = '20261126_002_matchmaking_stake_bindings.sql'
+
+// ─── Етап 3Б.2: регистър на задържаните изплащания ──────────────────────
+
+export type HeldPayoutStatus = 'pending_review' | 'settled_payout' | 'settled_refund' | 'closed_no_action'
+
+export type HeldPayoutReason = 'invalid' | 'stake-mismatch' | 'payout-missing'
+
+export type MissingPayoutDiagnosticReport = {
+  /** Завършени платени мачове без winner_payout и без ред в регистъра. */
+  found: number
+  registered: string[]
+  failed: Array<{ matchScope: string; message: string }>
+}
+
+export type HeldPayoutParticipant = {
+  /** null — случай, възстановен от belot_match_completion_ledger (няма място). */
+  seat: (typeof SERVER_SEAT_ORDER)[number] | null
+  team: Team
+  /** 'unknown' — възстановен от belot_match_completion_ledger. */
+  kind: 'human' | 'bot' | 'unknown'
+  profileId: ProfileId | null
+  stakeLedgerScope: string | null
+  isWinner: boolean
+}
+
+export type HeldPayoutStakeDebit = { scope: string; profileId: ProfileId; amount: number }
+
+export type HeldPayoutRecord = {
+  matchScope: string
+  roomId: string
+  stakeAmount: number
+  rulesVersion: string | null
+  holdReason: HeldPayoutReason
+  financialTermsJson: string
+  winnerTeam: Team
+  participants: HeldPayoutParticipant[]
+  winners: Array<{ seat: (typeof SERVER_SEAT_ORDER)[number] | null; profileId: ProfileId }>
+  stakeDebits: HeldPayoutStakeDebit[]
+  context: Record<string, unknown>
+}
+
+export type HeldPayoutNotice = { matchScope: string; recorded: true } | { matchScope: string; recorded: false; record: HeldPayoutRecord; error: string }
+
+export type HeldPayoutRow = Omit<HeldPayoutRecord, 'context'> & {
+  context: Record<string, unknown>
+  status: HeldPayoutStatus
+  holdCount: number
+  heldAt: string
+  lastHeldAt: string
+  resolvedAt: string | null
+  resolvedBy: string | null
+  resolutionNote: string | null
+  resolutionPrizePerWinner: number | null
+  resolutionEvidence: string | null
+}
+
+export type SettleHeldPayoutInput =
+  | { matchScope: string; action: 'payout'; prizePerWinner: number; resolvedBy: string; note: string; evidence: string }
+  | { matchScope: string; action: 'refund'; resolvedBy: string; note: string; evidence?: string }
+  | { matchScope: string; action: 'close'; resolvedBy: string; note: string; evidence?: string }
+
+export type SettleHeldPayoutErrorCode =
+  | 'invalid-input'
+  | 'not-found'
+  | 'not-pending'
+  | 'no-recipients'
+  | 'prize-exceeds-pot'
+  | 'already-paid'
+  | 'already-refunded'
+  | 'debit-mismatch'
+  | 'db-error'
+
+export type SettleHeldPayoutResult =
+  | { ok: true; status: HeldPayoutStatus; movements: Array<{ profileId: ProfileId; amount: number; entryType: 'winner_payout' | 'stake_refund'; scope: string }> }
+  | { ok: false; code: SettleHeldPayoutErrorCode; message: string }
+
+/** Белот: 4 платени входа — горна граница на общата ръчна награда. */
+const BELOT_PAID_ENTRIES = 4
 
 export type QueueStakeItem = {
   queueScope: string
@@ -677,7 +783,7 @@ export async function createMatchEconomyStore(
     room: ServerRoom,
   ):
     | { ok: true; awardedPerSeat: Partial<Record<(typeof SERVER_SEAT_ORDER)[number], number>> }
-    | { ok: false; message: string } {
+    | { ok: false; message: string; held?: HeldPayoutNotice } {
     const stakeAmount = room.config.stakeAmount ?? null
     const winnerTeam = getMatchWinnerTeam(room)
 
@@ -696,19 +802,46 @@ export async function createMatchEconomyStore(
     const winningSeatEntries = getWinningSeatEntries(room, winnerTeam)
 
     if (!prizeResolution.ok) {
-      // Задържане: нищо не се записва (нито портфейл, нито ledger) — няма
-      // произволна сума и няма маркиране като платено. Ledger-ът остава без
-      // winner_payout за този scope, така че по-късно изплащане (след ръчна
-      // проверка) минава през същата идемпотентна логика без двойно плащане.
+      // Задържане: портфейли и ledger не се пипат — няма произволна сума и
+      // няма маркиране като платено. Случаят се записва в
+      // belot_held_payouts (Етап 3Б.2) за ръчно уреждане.
+      const matchScope = getRoomStakeLedgerScope(room)
       console.error(
-        `[match-economy] PAYOUT HELD room=${room.id} scope=${getRoomStakeLedgerScope(room)} reason=${prizeResolution.reason}`
+        `[match-economy] PAYOUT HELD room=${room.id} scope=${matchScope} reason=${prizeResolution.reason}`
           + ` stake=${stakeAmount} winners=${winningSeatEntries.map((entry) => entry.profileId).join(',')}`
           + ` financialTerms=${JSON.stringify(room.config.financialTerms ?? null)}`,
       )
+      let record: HeldPayoutRecord | null = null
+      let held: HeldPayoutNotice
+      try {
+        record = buildHeldPayoutRecord(room, stakeAmount, winnerTeam, winningSeatEntries, prizeResolution.reason)
+        const recorded = recordHeldPayout(record)
+        held = recorded.ok
+          ? { matchScope, recorded: true }
+          : { matchScope, recorded: false, record, error: recorded.message }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        held = record === null
+          ? { matchScope, recorded: false, record: buildMinimalHeldPayoutRecord(room, stakeAmount, winnerTeam, winningSeatEntries, prizeResolution.reason), error: message }
+          : { matchScope, recorded: false, record, error: message }
+      }
       return {
         ok: false,
         message: `Изплащането е задържано: невалидни финансови условия на масата (${prizeResolution.reason}).`,
+        held,
       }
+    }
+
+    // Етап 3Б.2: мач, вече регистриран като задържан, се урежда САМО ръчно
+    // (settleHeldPayout) — никога автоматично, дори ако условията изглеждат
+    // валидни при по-късно извикване.
+    try {
+      const heldRow = selectHeldPayoutStatusStatement().get(getRoomStakeLedgerScope(room)) as { status: string } | undefined
+      if (heldRow !== undefined) {
+        return { ok: false, message: `Мачът е в регистъра на задържаните изплащания (status=${heldRow.status}) — урежда се ръчно.` }
+      }
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : 'Регистърът на задържаните изплащания не беше прочетен.' }
     }
 
     const prizeAmount = prizeResolution.prize
@@ -1038,6 +1171,382 @@ export async function createMatchEconomyStore(
     return report
   }
 
+  // ─── Етап 3Б.2: регистър на задържаните изплащания ─────────────────────
+
+  let cachedHeldStatusStatement: ReturnType<typeof database.prepare> | null = null
+  function selectHeldPayoutStatusStatement(): ReturnType<typeof database.prepare> {
+    cachedHeldStatusStatement ??= database.prepare(`SELECT status FROM belot_held_payouts WHERE match_scope = ? LIMIT 1;`)
+    return cachedHeldStatusStatement
+  }
+
+  function listHeldPayoutParticipants(room: ServerRoom, winnerTeam: Team): HeldPayoutParticipant[] {
+    const participants: HeldPayoutParticipant[] = []
+    for (const seat of SERVER_SEAT_ORDER) {
+      const participant = room.seats[seat].participant
+      if (participant === null) continue
+      const team = getTeamBySeat(seat)
+      const profileId = participant.kind === 'human'
+        ? participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+        : participant.botProfileId ?? null
+      participants.push({
+        seat,
+        team,
+        kind: participant.kind,
+        profileId,
+        stakeLedgerScope: participant.kind === 'human' ? participant.stakeLedgerScope ?? null : null,
+        isWinner: team === winnerTeam,
+      })
+    }
+    return participants
+  }
+
+  function buildMinimalHeldPayoutRecord(
+    room: ServerRoom,
+    stakeAmount: number,
+    winnerTeam: Team,
+    winningSeatEntries: WinningSeatEntry[],
+    holdReason: 'invalid' | 'stake-mismatch',
+  ): HeldPayoutRecord {
+    const terms = room.config.financialTerms as unknown
+    const rulesVersion = typeof terms === 'object' && terms !== null && typeof (terms as { rulesVersion?: unknown }).rulesVersion === 'string'
+      ? (terms as { rulesVersion: string }).rulesVersion
+      : null
+    return {
+      matchScope: getRoomStakeLedgerScope(room),
+      roomId: room.id,
+      stakeAmount,
+      rulesVersion,
+      holdReason,
+      financialTermsJson: JSON.stringify(terms === undefined ? null : terms),
+      winnerTeam,
+      participants: listHeldPayoutParticipants(room, winnerTeam),
+      winners: winningSeatEntries.map(({ seat, profileId }) => ({ seat, profileId })),
+      stakeDebits: [],
+      context: {
+        isPrivate: room.config.isPrivate,
+        isPrivateTableOrigin: room.config.isPrivateTableOrigin === true,
+        stateVersion: room.game.stateVersion,
+      },
+    }
+  }
+
+  /**
+   * Входовете на ТОЗИ мач (не на предишни „Преиграй“ рундове на същата маса):
+   *   - room-scoped дебит с най-голямата версия ≤ текущата stateVersion
+   *     (частни маси, ботове, „Преиграй“ — collectRoomStakes/collectBotStakes
+   *     вграждат stateVersion в момента на дебита);
+   *   - иначе — queue-scoped дебитът на участника (първи мач от опашката).
+   */
+  function findMatchStakeDebits(room: ServerRoom, participants: HeldPayoutParticipant[]): HeldPayoutStakeDebit[] {
+    const prefix = `${room.id}:v`
+    const roomDebits = database.prepare(`
+      SELECT room_id, profile_id, amount FROM match_economy_ledger
+      WHERE room_id LIKE ? ESCAPE '\\' AND entry_type = 'stake_debit';
+    `).all(`${escapeSqlLikePattern(room.id)}:v%`) as Array<{ room_id: string; profile_id: ProfileId | null; amount: number }>
+    const currentVersion = room.game.stateVersion
+    const debits: HeldPayoutStakeDebit[] = []
+    for (const participant of participants) {
+      if (participant.profileId === null) continue
+      let best: { scope: string; version: number; amount: number } | null = null
+      for (const row of roomDebits) {
+        if (row.profile_id !== participant.profileId) continue
+        const version = Number(row.room_id.slice(prefix.length))
+        if (!Number.isSafeInteger(version) || version > currentVersion) continue
+        if (best === null || version > best.version) best = { scope: row.room_id, version, amount: row.amount }
+      }
+      if (best !== null) {
+        debits.push({ scope: best.scope, profileId: participant.profileId, amount: best.amount })
+        continue
+      }
+      if (participant.stakeLedgerScope !== null) {
+        const amount = getLedgerAmount(participant.stakeLedgerScope, participant.profileId, 'stake_debit')
+        if (amount !== null) debits.push({ scope: participant.stakeLedgerScope, profileId: participant.profileId, amount })
+      }
+    }
+    return debits
+  }
+
+  function buildHeldPayoutRecord(
+    room: ServerRoom,
+    stakeAmount: number,
+    winnerTeam: Team,
+    winningSeatEntries: WinningSeatEntry[],
+    holdReason: 'invalid' | 'stake-mismatch',
+  ): HeldPayoutRecord {
+    const record = buildMinimalHeldPayoutRecord(room, stakeAmount, winnerTeam, winningSeatEntries, holdReason)
+    return { ...record, stakeDebits: findMatchStakeDebits(room, record.participants) }
+  }
+
+  function recordHeldPayout(record: HeldPayoutRecord): { ok: true } | { ok: false; message: string } {
+    try {
+      // Повторно регистриране: първоначалните доказателства остават; само
+      // брояч и последно време. Статусът (вкл. вече уреден) не се пипа.
+      database.prepare(`
+        INSERT INTO belot_held_payouts (
+          match_scope, room_id, stake_amount, rules_version, hold_reason, financial_terms_json,
+          winner_team, participants_json, winners_json, stake_debits_json, context_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(match_scope) DO UPDATE SET
+          hold_count = hold_count + 1,
+          last_held_at = CURRENT_TIMESTAMP;
+      `).run(
+        record.matchScope,
+        record.roomId,
+        record.stakeAmount,
+        record.rulesVersion,
+        record.holdReason,
+        record.financialTermsJson,
+        record.winnerTeam,
+        JSON.stringify(record.participants),
+        JSON.stringify(record.winners),
+        JSON.stringify(record.stakeDebits),
+        JSON.stringify(record.context),
+      )
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : 'Задържаното изплащане не беше записано.' }
+    }
+  }
+
+  function registerHeldPayoutForRestoredRoom(room: ServerRoom): { status: 'not-held' | 'recorded' } | { status: 'failed'; message: string } {
+    const stakeAmount = room.config.stakeAmount ?? null
+    const winnerTeam = getMatchWinnerTeam(room)
+    if (winnerTeam === null || stakeAmount === null || !Number.isInteger(stakeAmount) || stakeAmount <= 0) return { status: 'not-held' }
+    if (room.config.isGuestTrial === true || room.config.isTournamentMatchOrigin === true) return { status: 'not-held' }
+    const resolution = resolveRoomPayoutPrizeAmount(room, stakeAmount)
+    if (resolution.ok) return { status: 'not-held' }
+    try {
+      const record = buildHeldPayoutRecord(room, stakeAmount, winnerTeam, getWinningSeatEntries(room, winnerTeam), resolution.reason)
+      const recorded = recordHeldPayout(record)
+      return recorded.ok ? { status: 'recorded' } : { status: 'failed', message: recorded.message }
+    } catch (error) {
+      return { status: 'failed', message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  type HeldPayoutDbRow = {
+    match_scope: string; room_id: string; stake_amount: number; rules_version: string | null; hold_reason: HeldPayoutReason
+    financial_terms_json: string; winner_team: Team; participants_json: string; winners_json: string; stake_debits_json: string
+    context_json: string; status: HeldPayoutStatus; hold_count: number; held_at: string; last_held_at: string
+    resolved_at: string | null; resolved_by: string | null; resolution_note: string | null
+    resolution_prize_per_winner: number | null; resolution_evidence: string | null
+  }
+
+  function toHeldPayoutRow(row: HeldPayoutDbRow): HeldPayoutRow {
+    return {
+      matchScope: row.match_scope,
+      roomId: row.room_id,
+      stakeAmount: row.stake_amount,
+      rulesVersion: row.rules_version,
+      holdReason: row.hold_reason,
+      financialTermsJson: row.financial_terms_json,
+      winnerTeam: row.winner_team,
+      participants: JSON.parse(row.participants_json) as HeldPayoutParticipant[],
+      winners: JSON.parse(row.winners_json) as HeldPayoutRecord['winners'],
+      stakeDebits: JSON.parse(row.stake_debits_json) as HeldPayoutStakeDebit[],
+      context: JSON.parse(row.context_json) as Record<string, unknown>,
+      status: row.status,
+      holdCount: row.hold_count,
+      heldAt: row.held_at,
+      lastHeldAt: row.last_held_at,
+      resolvedAt: row.resolved_at,
+      resolvedBy: row.resolved_by,
+      resolutionNote: row.resolution_note,
+      resolutionPrizePerWinner: row.resolution_prize_per_winner,
+      resolutionEvidence: row.resolution_evidence,
+    }
+  }
+
+  function registerMissingPayoutsFromCompletionLedger(): MissingPayoutDiagnosticReport {
+    const report: MissingPayoutDiagnosticReport = { found: 0, registered: [], failed: [] }
+    // Мачът се брои само ако има поне един победител, когото payoutMatchWinners
+    // би изплатил (профил, не временен бот).
+    const matches = database.prepare(`
+      SELECT DISTINCT completion.match_scope AS match_scope
+      FROM belot_match_completion_ledger AS completion
+      WHERE completion.did_win = 1
+        AND completion.is_guest_trial = 0
+        AND completion.stake_amount > 0
+        AND completion.profile_id IS NOT NULL
+        AND completion.profile_id NOT LIKE 'temp-bot-%'
+        AND NOT EXISTS (
+          SELECT 1 FROM match_economy_ledger AS payout
+          WHERE payout.room_id = completion.match_scope AND payout.entry_type = 'winner_payout'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM belot_held_payouts AS held WHERE held.match_scope = completion.match_scope
+        )
+      ORDER BY completion.match_scope;
+    `).all() as Array<{ match_scope: string }>
+    report.found = matches.length
+
+    const selectRows = database.prepare(`
+      SELECT profile_id, room_id, team, did_win, stake_amount, ended_at
+      FROM belot_match_completion_ledger WHERE match_scope = ?;
+    `)
+    const selectBinding = database.prepare(`
+      SELECT queue_scope FROM matchmaking_stake_bindings WHERE room_id = ? AND profile_id = ? LIMIT 1;
+    `)
+
+    for (const { match_scope: matchScope } of matches) {
+      try {
+        const rows = selectRows.all(matchScope) as Array<{
+          profile_id: ProfileId | null; room_id: string; team: Team; did_win: number; stake_amount: number; ended_at: string
+        }>
+        const first = rows[0]!
+        const winnerRow = rows.find((row) => row.did_win === 1)!
+        const participants: HeldPayoutParticipant[] = rows.map((row) => ({
+          seat: null,
+          team: row.team,
+          kind: 'unknown',
+          profileId: row.profile_id,
+          stakeLedgerScope: row.profile_id === null
+            ? null
+            : ((selectBinding.get(row.room_id, row.profile_id) as { queue_scope: string } | undefined)?.queue_scope ?? null),
+          isWinner: row.did_win === 1,
+        }))
+        const versionText = matchScope.slice(`${first.room_id}:v`.length)
+        const matchVersion = Number(versionText)
+        const pseudoRoom = {
+          id: first.room_id,
+          game: { stateVersion: Number.isSafeInteger(matchVersion) ? matchVersion : -1 },
+        } as unknown as ServerRoom
+        const record: HeldPayoutRecord = {
+          matchScope,
+          roomId: first.room_id,
+          stakeAmount: first.stake_amount,
+          rulesVersion: null,
+          holdReason: 'payout-missing',
+          // Условията на масата не са в този източник — не се измислят.
+          financialTermsJson: 'null',
+          winnerTeam: winnerRow.team,
+          participants,
+          winners: rows
+            .filter((row) => row.did_win === 1 && row.profile_id !== null && !row.profile_id.startsWith('temp-bot-'))
+            .map((row) => ({ seat: null, profileId: row.profile_id! })),
+          stakeDebits: Number.isSafeInteger(matchVersion) ? findMatchStakeDebits(pseudoRoom, participants) : [],
+          context: { source: 'boot-completion-diagnostic', endedAt: first.ended_at, participantsFromCompletionLedger: rows.length },
+        }
+        const recorded = recordHeldPayout(record)
+        if (recorded.ok) report.registered.push(matchScope)
+        else report.failed.push({ matchScope, message: recorded.message })
+      } catch (error) {
+        report.failed.push({ matchScope, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return report
+  }
+
+  function getHeldPayout(matchScope: string): HeldPayoutRow | null {
+    const row = database.prepare(`SELECT * FROM belot_held_payouts WHERE match_scope = ? LIMIT 1;`).get(matchScope) as HeldPayoutDbRow | undefined
+    return row === undefined ? null : toHeldPayoutRow(row)
+  }
+
+  function listHeldPayouts(filter: { status?: HeldPayoutStatus } = {}): HeldPayoutRow[] {
+    const rows = (filter.status === undefined
+      ? database.prepare(`SELECT * FROM belot_held_payouts ORDER BY held_at ASC, match_scope ASC;`).all()
+      : database.prepare(`SELECT * FROM belot_held_payouts WHERE status = ? ORDER BY held_at ASC, match_scope ASC;`).all(filter.status)) as HeldPayoutDbRow[]
+    return rows.map(toHeldPayoutRow)
+  }
+
+  function settleHeldPayout(input: SettleHeldPayoutInput): SettleHeldPayoutResult {
+    const fail = (code: SettleHeldPayoutErrorCode, message: string): SettleHeldPayoutResult => ({ ok: false, code, message })
+    const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.trim() !== ''
+    if (!nonEmpty(input.matchScope) || !nonEmpty(input.resolvedBy) || !nonEmpty(input.note)) {
+      return fail('invalid-input', 'matchScope, resolvedBy и note са задължителни.')
+    }
+    if (input.action === 'payout') {
+      if (!Number.isSafeInteger(input.prizePerWinner) || input.prizePerWinner <= 0) return fail('invalid-input', 'Наградата трябва да е цяло положително число.')
+      if (!nonEmpty(input.evidence)) return fail('invalid-input', 'Изплащане изисква описание на доказателството за наградата.')
+    }
+
+    // Строг INSERT (без ON CONFLICT) — дублиран ledger ред хвърля и връща
+    // цялата транзакция, вместо тихо да кредитира без запис.
+    const strictInsertLedger = database.prepare(`
+      INSERT INTO match_economy_ledger (ledger_id, room_id, profile_id, entry_type, amount, balance_after)
+      VALUES (?, ?, ?, ?, ?, ?);
+    `)
+    const movements: Array<{ profileId: ProfileId; amount: number; entryType: 'winner_payout' | 'stake_refund'; scope: string }> = []
+
+    try {
+      // IMMEDIATE — write lock още от началото: никой друг процес/връзка не
+      // може да урежда същия случай паралелно.
+      database.exec('BEGIN IMMEDIATE;')
+      const row = database.prepare(`SELECT * FROM belot_held_payouts WHERE match_scope = ? LIMIT 1;`).get(input.matchScope) as HeldPayoutDbRow | undefined
+      const abort = (code: SettleHeldPayoutErrorCode, message: string): SettleHeldPayoutResult => {
+        database.exec('ROLLBACK;')
+        return fail(code, message)
+      }
+      if (row === undefined) return abort('not-found', 'Няма такъв задържан случай.')
+      if (row.status !== 'pending_review') return abort('not-pending', `Случаят вече е уреден (status=${row.status}).`)
+      const record = toHeldPayoutRow(row)
+
+      const anyPayoutForMatch = (database.prepare(`SELECT COUNT(*) AS n FROM match_economy_ledger WHERE room_id = ? AND entry_type = 'winner_payout';`)
+        .get(record.matchScope) as { n: number }).n > 0
+      const anyRefundOfDebits = record.stakeDebits.some((debit) => hasLedgerEntry(debit.scope, debit.profileId, 'stake_refund'))
+
+      if (input.action === 'payout') {
+        if (record.winners.length === 0) return abort('no-recipients', 'Няма победители за изплащане — ползвай close или refund.')
+        if (input.prizePerWinner * record.winners.length > record.stakeAmount * BELOT_PAID_ENTRIES) {
+          return abort('prize-exceeds-pot', `Общата награда надвишава фонда от ${BELOT_PAID_ENTRIES} входа (${record.stakeAmount * BELOT_PAID_ENTRIES}).`)
+        }
+        if (anyPayoutForMatch) return abort('already-paid', 'За този мач вече има winner_payout в ledger-а.')
+        if (anyRefundOfDebits) return abort('already-refunded', 'Вход от този мач вече е възстановен — изплащане не е допустимо.')
+        for (const winner of record.winners) {
+          ensureWalletStatement.run(winner.profileId)
+          creditWalletStatement.run(input.prizePerWinner, winner.profileId)
+          strictInsertLedger.run(randomUUID(), record.matchScope, winner.profileId, 'winner_payout', input.prizePerWinner, getWalletBalance(winner.profileId))
+          movements.push({ profileId: winner.profileId, amount: input.prizePerWinner, entryType: 'winner_payout', scope: record.matchScope })
+        }
+      } else if (input.action === 'refund') {
+        if (record.stakeDebits.length === 0) return abort('no-recipients', 'Няма записани входове за възстановяване — ползвай close.')
+        if (anyPayoutForMatch) return abort('already-paid', 'За този мач вече има winner_payout — възстановяване не е допустимо.')
+        if (anyRefundOfDebits) return abort('already-refunded', 'Вход от този мач вече е възстановен.')
+        for (const debit of record.stakeDebits) {
+          const ledgerAmount = getLedgerAmount(debit.scope, debit.profileId, 'stake_debit')
+          if (ledgerAmount === null || ledgerAmount !== debit.amount) {
+            return abort('debit-mismatch', `Входът ${debit.scope}/${debit.profileId} не съвпада с ledger-а.`)
+          }
+          if (hasLedgerEntry(debit.scope, debit.profileId, 'winner_payout')) {
+            return abort('already-paid', `За входа ${debit.scope}/${debit.profileId} вече има winner_payout.`)
+          }
+        }
+        for (const debit of record.stakeDebits) {
+          ensureWalletStatement.run(debit.profileId)
+          creditWalletStatement.run(debit.amount, debit.profileId)
+          strictInsertLedger.run(randomUUID(), debit.scope, debit.profileId, 'stake_refund', debit.amount, getWalletBalance(debit.profileId))
+          movements.push({ profileId: debit.profileId, amount: debit.amount, entryType: 'stake_refund', scope: debit.scope })
+        }
+      }
+
+      const nextStatus: HeldPayoutStatus = input.action === 'payout' ? 'settled_payout' : input.action === 'refund' ? 'settled_refund' : 'closed_no_action'
+      const update = database.prepare(`
+        UPDATE belot_held_payouts SET
+          status = ?, resolved_at = CURRENT_TIMESTAMP, resolved_by = ?, resolution_note = ?,
+          resolution_prize_per_winner = ?, resolution_evidence = ?
+        WHERE match_scope = ? AND status = 'pending_review';
+      `).run(
+        nextStatus,
+        input.resolvedBy.trim(),
+        input.note.trim(),
+        input.action === 'payout' ? input.prizePerWinner : null,
+        input.evidence ?? null,
+        input.matchScope,
+      ) as { changes?: number }
+      if ((update.changes ?? 0) !== 1) return abort('not-pending', 'Статусът се промени по време на уреждането.')
+
+      database.exec('COMMIT;')
+      return { ok: true, status: nextStatus, movements }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+      return fail('db-error', error instanceof Error ? error.message : 'Уреждането не беше записано.')
+    }
+  }
+
   function close(): void {
     database.close()
   }
@@ -1054,6 +1563,12 @@ export async function createMatchEconomyStore(
     refundParticipantScopedStake,
     bindQueueStakesToRoom,
     reconcileOrphanedQueueStakes,
+    recordHeldPayout,
+    registerHeldPayoutForRestoredRoom,
+    registerMissingPayoutsFromCompletionLedger,
+    getHeldPayout,
+    listHeldPayouts,
+    settleHeldPayout,
     close,
   }
 }

@@ -326,13 +326,14 @@ import {
 } from './tournament/tournamentAdmin.js'
 import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
-import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
+import { createMatchEconomyStore, setMatchPrizeResolver, type HeldPayoutRecord } from './db/matchEconomyStore.js'
 import { createLudoEconomyStore } from './db/ludoEconomyStore.js'
 import { createActiveLudoMatchSnapshotStore } from './db/activeLudoMatchSnapshotStore.js'
 import { createAttemptLudoRoomStart } from './game/attemptLudoRoomStart.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { createEntryLevelCatalogReader, tryBuildPublicEntryCatalogPayload } from './economy/entryLevelCatalogReader.js'
 import { pinLegacyBelotFinancialTerms, withPinnedBelotFinancialTerms } from './economy/belotFinancialTerms.js'
+import { createHeldPayoutRegistrationGuard } from './economy/heldPayoutRegistrationGuard.js'
 import { createVipStore } from './db/vipStore.js'
 import {
   createVipPurchaseStore,
@@ -5144,7 +5145,75 @@ function reconcileOrphanedQueueStakesOnBoot(state: ServerState): void {
   }
 }
 
+// Етап 3Б.2 — задържани изплащания, които не са стигнали до регистъра
+// (belot_held_payouts). Записът е самодостатъчен (не зависи от масата), затова
+// cleanup на масата не губи информацията. Пълният запис е и в лога.
+const HELD_PAYOUT_REGISTRATION_RETRY_MS = 30_000
+let heldPayoutRegistrationRetryTimer: ReturnType<typeof setInterval> | null = null
+const heldPayoutRegistrationGuard = createHeldPayoutRegistrationGuard({
+  recordHeldPayout: (record) => matchEconomyStore.recordHeldPayout(record),
+  removeRoomSnapshot: (roomId) => activeRoomSnapshotStore.markRoomRemoved(roomId),
+  isRoomActive: (roomId) => serverState.rooms[roomId] !== undefined,
+})
+
+function ensureHeldPayoutRegistrationRetryTimer(): void {
+  if (heldPayoutRegistrationRetryTimer !== null) return
+  heldPayoutRegistrationRetryTimer = setInterval(() => {
+    heldPayoutRegistrationGuard.retryNow()
+    if (heldPayoutRegistrationGuard.isIdle() && heldPayoutRegistrationRetryTimer !== null) {
+      clearInterval(heldPayoutRegistrationRetryTimer)
+      heldPayoutRegistrationRetryTimer = null
+    }
+  }, HELD_PAYOUT_REGISTRATION_RETRY_MS)
+  heldPayoutRegistrationRetryTimer.unref?.()
+}
+
+function enqueueHeldPayoutRegistrationRetry(record: HeldPayoutRecord, error: string): void {
+  heldPayoutRegistrationGuard.enqueue(record, error)
+  ensureHeldPayoutRegistrationRetryTimer()
+}
+
+function registerHeldPayoutsForRestoredRoomsOnBoot(state: ServerState): void {
+  let recorded = 0
+  for (const room of Object.values(state.rooms)) {
+    try {
+      const result = matchEconomyStore.registerHeldPayoutForRestoredRoom(room)
+      if (result.status === 'recorded') recorded += 1
+      else if (result.status === 'failed') console.error(`[match-economy] held payout boot registration FAILED room=${room.id}: ${result.message}`)
+    } catch (error) {
+      console.error(`[match-economy] held payout boot registration FAILED room=${room.id}`, error)
+    }
+  }
+  if (recorded > 0) console.warn(`[match-economy] held payouts registered on boot=${recorded}`)
+
+  // Диагностика: завършени платени мачове (belot_match_completion_ledger)
+  // без winner_payout и без ред в регистъра — напр. срив между края на мача
+  // и изплащането/записа, или изтрит snapshot. Само регистрация за преглед.
+  try {
+    const diagnostic = matchEconomyStore.registerMissingPayoutsFromCompletionLedger()
+    if (diagnostic.found > 0 || diagnostic.failed.length > 0) {
+      console.warn(
+        `[match-economy] missing-payout diagnostic found=${diagnostic.found} registered=${diagnostic.registered.length} failed=${diagnostic.failed.length}`,
+      )
+    }
+    for (const failure of diagnostic.failed) {
+      console.error(`[match-economy] missing-payout registration FAILED scope=${failure.matchScope}: ${failure.message}`)
+    }
+  } catch (error) {
+    console.error('[match-economy] missing-payout diagnostic failed — will run again on next boot', error)
+  }
+}
+
 function persistRoomSnapshot(room: ServerRoom): void {
+  // Етап 3Б.2: преди snapshot-ът на масата да бъде презаписан (напр.
+  // „Преиграй“) или изтрит (status=finished) — опит незаписаното задържане
+  // да стигне до регистъра. Изтриване при все още незаписан случай се спира.
+  const heldPayoutRecorded = heldPayoutRegistrationGuard.flushRoom(room.id)
+  if (room.status === 'finished' && !heldPayoutRecorded) {
+    heldPayoutRegistrationGuard.retainSnapshot(room.id)
+    ensureHeldPayoutRegistrationRetryTimer()
+    return
+  }
   try {
     activeRoomSnapshotStore.upsertRoom(room)
   } catch (error) {
@@ -5153,6 +5222,13 @@ function persistRoomSnapshot(room: ServerRoom): void {
 }
 
 function markRoomSnapshotRemoved(roomId: string): void {
+  // Етап 3Б.2: snapshot-ът е последният източник за задържано изплащане,
+  // което още не е в belot_held_payouts — не се трие, докато не е записано.
+  if (!heldPayoutRegistrationGuard.flushRoom(roomId)) {
+    heldPayoutRegistrationGuard.retainSnapshot(roomId)
+    ensureHeldPayoutRegistrationRetryTimer()
+    return
+  }
   try {
     activeRoomSnapshotStore.markRoomRemoved(roomId)
   } catch (error) {
@@ -5313,6 +5389,9 @@ let serverState: ServerState = loadPersistedServerState()
 // financialTerms) и ПРЕДИ опашката/връзките да тръгнат — синхронно, при
 // инициализацията. Връща само доказано осиротелите queue:<id> входове.
 reconcileOrphanedQueueStakesOnBoot(serverState)
+// Етап 3Б.2: възстановени, вече приключили маси с невалидни financialTerms,
+// чието задържане не е стигнало до регистъра преди рестарта.
+registerHeldPayoutsForRestoredRoomsOnBoot(serverState)
 const roomRevisionRegistry = createRoomRevisionRegistry()
 // Zombie-room liveness tracking (root-cause audit "session_in_game lock") —
 // runtime-only, NOT persisted, intentionally reconstructable from nothing on
@@ -7855,6 +7934,12 @@ async function tickRoomGameRuntimes(): Promise<void> {
                   console.error(
                     `[match-economy] payout failed room=${room.id}: ${payoutResult.message}`,
                   )
+                  // Етап 3Б.2: задържано, но НЕ записано в регистъра → пълният
+                  // запис остава в RAM + лог и се опитва отново, докато успее
+                  // (не зависи от живота на масата).
+                  if (payoutResult.held !== undefined && !payoutResult.held.recorded) {
+                    enqueueHeldPayoutRegistrationRetry(payoutResult.held.record, payoutResult.held.error)
+                  }
                 } else {
                   room.awardedPrizePerSeat = payoutResult.awardedPerSeat
                 }

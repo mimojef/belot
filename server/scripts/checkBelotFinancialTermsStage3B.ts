@@ -214,10 +214,14 @@ async function main(): Promise<void> {
       // на условията същият мач се изплаща точно веднъж.
       const held = withTerms({ ...validFor20k, prizePerWinner: 'broken' })
       check('задържано изплащане', !silence(() => economy.payoutMatchWinners(held)).ok && ledgerPayouts(raw, held).length === 0)
+      // Етап 3Б.2: регистриран случай се урежда САМО ръчно (settleHeldPayout) —
+      // „поправени“ условия не отключват автоматично изплащане.
       const repaired = { ...held, config: { ...held.config, financialTerms: validFor20k } }
-      const p1 = economy.payoutMatchWinners(repaired)
-      const p2 = economy.payoutMatchWinners(repaired)
-      check('след корекция: изплащане 2 × 30 000, повторно — без двойно', p1.ok && p2.ok && JSON.stringify(ledgerPayouts(raw, repaired)) === '[30000,30000]')
+      const p1 = silence(() => economy.payoutMatchWinners(repaired))
+      check('след „корекция“: автоматичното изплащане остава отказано (регистър)', !p1.ok && ledgerPayouts(raw, repaired).length === 0)
+      const settled = economy.settleHeldPayout({ matchScope: `${held.id}:v${held.game.stateVersion}`, action: 'payout', prizePerWinner: 30_000, resolvedBy: 'test', note: 'проверено', evidence: 'test' })
+      const p2 = silence(() => economy.payoutMatchWinners(repaired))
+      check('ръчно уреждане: 2 × 30 000; повторно — без двойно', settled.ok && !p2.ok && JSON.stringify(ledgerPayouts(raw, repaired)) === '[30000,30000]')
 
       check('boot backfill не „поправя“ повредени условия', withPinnedBelotFinancialTerms(withTerms({ prizePerWinner: 'x' }), currentPrize, 'boot-backfill').config.financialTerms !== undefined
         && (withPinnedBelotFinancialTerms(withTerms({ prizePerWinner: 'x' }), currentPrize, 'boot-backfill').config.financialTerms as unknown as { prizePerWinner: unknown }).prizePerWinner === 'x')
