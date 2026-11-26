@@ -1,5 +1,6 @@
 import { svaraStartingChipsForEntry } from './engine/svaraChips.js'
 import { computeSvaraEntryChips } from './engine/svaraMatch.js'
+import { checkEntryFeePolicy } from '../../economy/entryLevelPolicy.js'
 
 // Admission policy for NEW test tables. Historical snapshots retain their rules.
 export const SVARA_TEST_ENTRY_FEES = [5000, 8000, 15000, 20000, 35000, 50000, 60000, 80000, 100000, 130000, 150000, 180000, 200000] as const
@@ -11,11 +12,11 @@ export function isSvaraTestEntryFee(value: unknown): value is number {
 
 /**
  * Етап 4В: структурна проверка на входа в парсера (без база): цяло число от
- * 5 000 до 1 000 000 000, кратно на 1 000. Дали входът е РАЗРЕШЕН (активен
+ * 5 000 до 1 000 000 000, кратно на 100 (общата политика). Дали входът е РАЗРЕШЕН (активен
  * в конфигурацията) решава lobby-то при създаване на масата.
  */
 export function isSvaraEntryFeeShape(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 5_000 && value <= 1_000_000_000 && value % 1_000 === 0
+  return typeof value === 'number' && checkEntryFeePolicy(value).length === 0
 }
 
 /**

@@ -66,7 +66,7 @@ try {
 
   const base = { type: 'create_svara_table', requestId: 'policy', capacity: 2, entryFee: 5000, startMode: 'auto' }
   assert.equal(parseSvaraLobbyMessage(base)?.type, 'create_svara_table', 'Missing percentage uses the server policy')
-  for (const entryFee of [0, -5000, 10, 500, 1000, 5100, 200010, 1.5, '5000', null, true, NaN, Infinity]) {
+  for (const entryFee of [0, -5000, 10, 500, 1000, 5150, 200010, 1.5, '5000', null, true, NaN, Infinity]) {
     assert.equal(parseSvaraLobbyMessage({ ...base, entryFee }), null, `Accepted arbitrary fee ${String(entryFee)}`)
   }
   // Етап 4В: парсерът проверява само формата (кратно на 1 000); дали входът е

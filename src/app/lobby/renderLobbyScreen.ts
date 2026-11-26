@@ -2955,7 +2955,7 @@ function renderAdminRoomGamePrizes(room: MatchRoomSnapshot, prizes: readonly Adm
   const svaraAvailable = entry.svara['2'] !== null || entry.svara['3'] !== null || entry.svara['4'] !== null
   const svara = svaraAvailable
     ? `Свара: 2 играчи ${prize(entry.svara['2'])} · 3 играчи ${prize(entry.svara['3'])} · 4 играчи ${prize(entry.svara['4'])}`
-    : 'Свара: не се предлага (входът трябва да е кратен на 1 000)'
+    : 'Свара: не се предлага за този вход'
   const ludo = `Не се сърди човече: 2 играчи ${prize(entry.ludo['2'])} · 4 играчи ${prize(entry.ludo['4'])}`
   return `<div>${belot}</div><div>${svara}</div><div>${ludo}</div>`
 }

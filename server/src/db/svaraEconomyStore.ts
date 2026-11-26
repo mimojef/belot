@@ -17,8 +17,8 @@
 // Етап 4В (корекция): входовете, активността и комисионите на „Свара“ идват
 // САМО от общия каталог на масите (match_rooms) — същия, който ползват Белот
 // и „Не се сърди човече“. „Свара“ прилага само собствените си правила:
-// вход, кратен на 1 000 (чипове = вход/10, анте 1%); несъвместимите входове
-// просто не се предлагат.
+// общите входове (кратни на 100; чипове = вход/10, антето се закръгля
+// нагоре до цял чип); несъвместимите входове просто не се предлагат.
 
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -33,8 +33,8 @@ import { checkCommissionBpsPolicy, checkEntryFeePolicy } from '../economy/entryL
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-/** „Свара“: първоначалните чипове = вход/10, антето (1%) = чипове/100 → входът е кратен на 1 000. */
-export const SVARA_ENTRY_FEE_STEP = 1_000
+/** „Свара“ приема общите входове (кратни на 100): чипове = вход/10, антето — нагоре до цял чип. */
+export const SVARA_ENTRY_FEE_STEP = 100
 export const SVARA_CAPACITIES = [2, 3, 4] as const
 
 /** Ред от общия каталог (match_rooms). */

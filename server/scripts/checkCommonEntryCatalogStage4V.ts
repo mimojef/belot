@@ -19,7 +19,8 @@ import { createSvaraEconomyStore } from '../src/db/svaraEconomyStore.js'
 import { createSvaraMatchSnapshotStore } from '../src/db/svaraMatchSnapshotStore.js'
 import { computeLudoWinnerPrize, createLudoEconomyStore } from '../src/db/ludoEconomyStore.js'
 import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
-import { getSvaraTableCreationOptions } from '../src/games/svara/svaraTableCreationOptions.js'
+import { getSvaraTableCreationOptions, isSvaraEntryFeeShape, SVARA_TEST_ENTRY_FEES } from '../src/games/svara/svaraTableCreationOptions.js'
+import { computeSvaraEntryChips, createSvaraMatch, svaraAnteChipsFor } from '../src/games/svara/engine/svaraMatch.js'
 import type { SvaraAccessSession } from '../src/games/svara/svaraAccess.js'
 import { checkEntryFeePolicy, parseCommissionPercent } from '../src/economy/entryLevelPolicy.js'
 import { BELOT_FORMULA_RULES, computeBelotPrizePerWinner, isValidBelotFinancialTerms, pinLegacyBelotFinancialTerms } from '../src/economy/belotFinancialTerms.js'
@@ -71,7 +72,7 @@ console.log('\n[2] Белот: наградите по общата формул
 console.log('\n[3] „Свара“ и „Не се сърди човече“ четат същия каталог и комисиона')
 {
   const config = svara.getActiveConfig()
-  check('„Свара“: входовете = съвместимите от каталога (кратни на 1 000)', config.ok && config.config.entryFees.join(',') === '5000,8000,10000,15000,20000', config)
+  check('„Свара“: входовете = общите от каталога', config.ok && config.config.entryFees.join(',') === '5000,8000,10000,15000,20000', config)
   check('„Свара“ 10 000: 2/3/4 играчи → 16 000 / 24 000 / 32 000', svaraPrize(10_000, 2) === 16_000 && svaraPrize(10_000, 3) === 24_000 && svaraPrize(10_000, 4) === 32_000)
   check('Белот 15 000 и „Свара“ 15 000 × 4 — един и същ фонд и комисиона (24 000 × 2 = 48 000; 48 000)', rooms.getPrizeAmount(15_000)! * 2 === 48_000 && svaraPrize(15_000, 4) === 48_000)
 }
@@ -100,7 +101,20 @@ const createSvaraTable = (id: string, entryFee: number) => {
     && options().some((e) => e.entryFee === 50_000 && e.prizeByCapacity?.[2] === 80_000) && rooms.getEnabledStakes().includes(50_000))
   check('нов вход — prize_amount колоната получава изчислената стойност (не ръчна)', (raw.prepare('SELECT prize_amount AS p FROM match_rooms WHERE stake_amount = 50000').get() as { p: number }).p === 80_000)
   const fiveFive = upsert(5_500)
-  check('5 500 (кратно на 100) → в Белот (8 800), но не в „Свара“ (изисква кратно на 1 000)', fiveFive.ok && rooms.getPrizeAmount(5_500) === 8_800 && !options().some((e) => e.entryFee === 5_500))
+  check('5 500 (кратно на 100) → в Белот (8 800) и в „Свара“ (8 800 / 13 200 / 17 600)', fiveFive.ok && rooms.getPrizeAmount(5_500) === 8_800
+    && JSON.stringify(options().find((e) => e.entryFee === 5_500)?.prizeByCapacity) === JSON.stringify({ 2: 8_800, 3: 13_200, 4: 17_600 }), options().find((e) => e.entryFee === 5_500))
+  const table5500 = createSvaraTable('a3', 5_500)
+  check('маса „Свара“ с вход 5 500 → създадена', table5500?.type === 'svara_table_updated' && table5500.table.entryFee === 5_500, table5500)
+  check('парсерът: 5 500 ✓; 5 550 / 4 900 / 1 000 000 100 ✗', isSvaraEntryFeeShape(5_500) && !isSvaraEntryFeeShape(5_550) && !isSvaraEntryFeeShape(4_900) && !isSvaraEntryFeeShape(1_000_000_100))
+  {
+    const match = createSvaraMatch({ tableId: 't-5500', capacity: 2, entryFee: 5_500, startMode: 'manual', creatorId: 'c' })
+    check('5 500 → 550 чипа; анте 1% = 5,5 → 6 (нагоре до цял чип)', match.startingChips === 550 && match.entryChips === 6, { startingChips: match.startingChips, entryChips: match.entryChips })
+    check('динамично анте при 550 чипа: 2% → 11, 3% → 17, отпадане 2% × 2 = 4% → 22; старт и динамика — едно правило',
+      svaraAnteChipsFor(550, 2) === 11 && svaraAnteChipsFor(550, 3) === 17 && svaraAnteChipsFor(550, 4) === 22 && svaraAnteChipsFor(550, 1) === computeSvaraEntryChips(550, 1))
+    const existing = [...SVARA_TEST_ENTRY_FEES, 10_000]
+    const unchanged = existing.every((fee) => [1, 2, 3, 4, 5, 6, 8, 10, 16, 32].every((p) => svaraAnteChipsFor(fee / 10, p) === Math.max(1, Math.floor((fee / 10) * p / 100))))
+    check('досегашните входове (кратни на 1 000): антето е същото като преди при всички проценти', unchanged)
+  }
   const created = createSvaraTable('a1', 50_000)
   check('маса „Свара“ с добавения вход 50 000 → създадена, награда 80 000', created?.type === 'svara_table_updated' && created.table.entryFee === 50_000 && created.table.prizeAmount === 80_000, created)
   // Редакция на комисиона

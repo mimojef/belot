@@ -418,8 +418,9 @@ export type SvaraDynamicAnte = {
   changes: Array<{ at: number | null; kind: 'time' | 'removal'; percent: number; roundCounter: number }>
 }
 
+/** Антето в чипове: винаги нагоре до цял чип — същото правило като при старта (computeSvaraEntryChips). */
 export function svaraAnteChipsFor(startingChips: number, percent: number): number {
-  return Math.max(1, Math.floor((startingChips * percent) / 100))
+  return Math.max(1, Math.ceil((startingChips * percent) / 100))
 }
 
 function recordAnteRemoval(ctx: Ctx): void {
