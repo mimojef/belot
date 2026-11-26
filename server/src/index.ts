@@ -5094,6 +5094,56 @@ function reconcileLegacySoloTournamentEntriesOnBoot(): void {
   )
 }
 
+// Етап 3Б.1 — осиротели входове от случайната опашка (опашката живее само в
+// RAM). Класификацията е в matchEconomyStore.reconcileOrphanedQueueStakes;
+// тук само подаваме активните маси, допълваме липсващите връзки за тях
+// (маси, създадени преди връзките) и логваме доклада. Грешка тук НЕ спира
+// сървъра — невърнатите входове остават за следващия старт.
+function getQueueStakesOfRoom(room: ServerRoom): Array<{ queueScope: string; profileId: string }> {
+  const stakes: Array<{ queueScope: string; profileId: string }> = []
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind !== 'human') continue
+    const scope = participant.stakeLedgerScope ?? null
+    const profileId = participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+    if (scope !== null && scope.startsWith('queue:') && profileId !== null) stakes.push({ queueScope: scope, profileId })
+  }
+  return stakes
+}
+
+function reconcileOrphanedQueueStakesOnBoot(state: ServerState): void {
+  try {
+    const activeRooms = Object.values(state.rooms).map((room) => ({ roomId: room.id, queueStakes: getQueueStakesOfRoom(room) }))
+    for (const room of activeRooms) {
+      const bindResult = matchEconomyStore.bindQueueStakesToRoom(room.roomId, room.queueStakes)
+      if (!bindResult.ok) console.error(`[queue-stake-reconcile] binding backfill failed room=${room.roomId}: ${bindResult.message}`)
+    }
+
+    const report = matchEconomyStore.reconcileOrphanedQueueStakes({ activeRooms })
+    const countBy = (reason: string) => report.ambiguous.filter((item) => item.reason === reason).length
+    console.log(
+      `[queue-stake-reconcile] epoch=${report.trackingEpoch ?? 'none'} refunded=${report.refunded.length}`
+        + ` inActiveRoom=${report.inActiveRoom.length} consumed=${report.consumedByCompletedMatch.length}`
+        + ` refundFailed=${report.refundFailed.length} ambiguous=${report.ambiguous.length}`
+        + ` (preTracking=${countBy('pre-tracking-debit')} noEpoch=${countBy('no-tracking-epoch')}`
+        + ` boundRoomMissing=${countBy('bound-room-missing-without-completion')} deletedProfile=${countBy('deleted-profile')})`,
+    )
+    for (const item of report.refunded) {
+      console.log(`[queue-stake-reconcile] refunded scope=${item.queueScope} profile=${item.profileId} amount=${item.amount} debitedAt=${item.debitedAt}`)
+    }
+    for (const item of report.refundFailed) {
+      console.error(`[queue-stake-reconcile] refund FAILED (${item.kind}) scope=${item.queueScope} profile=${item.profileId} amount=${item.amount}: ${item.message}`)
+    }
+    // Историческите (отпреди проследяването) могат да са хиляди — само брой
+    // по-горе; подробно се логват само случаите, които изискват проверка.
+    for (const item of report.ambiguous.filter((entry) => entry.reason !== 'pre-tracking-debit').slice(0, 100)) {
+      console.warn(`[queue-stake-reconcile] NEEDS REVIEW reason=${item.reason} scope=${item.queueScope} profile=${item.profileId} amount=${item.amount} debitedAt=${item.debitedAt}`)
+    }
+  } catch (error) {
+    console.error('[queue-stake-reconcile] failed — orphaned queue stakes stay for the next boot', error)
+  }
+}
+
 function persistRoomSnapshot(room: ServerRoom): void {
   try {
     activeRoomSnapshotStore.upsertRoom(room)
@@ -5259,6 +5309,10 @@ const tournamentMatchesLiveTokenSigner = createTournamentMatchesLiveTokenSigner(
 const lastNotifiedTournamentMatchesScoreByRoomId = new Map<string, string>()
 
 let serverState: ServerState = loadPersistedServerState()
+// Етап 3Б.1: СЛЕД възстановяването на активните маси (и техните
+// financialTerms) и ПРЕДИ опашката/връзките да тръгнат — синхронно, при
+// инициализацията. Връща само доказано осиротелите queue:<id> входове.
+reconcileOrphanedQueueStakesOnBoot(serverState)
 const roomRevisionRegistry = createRoomRevisionRegistry()
 // Zombie-room liveness tracking (root-cause audit "session_in_game lock") —
 // runtime-only, NOT persisted, intentionally reconstructable from nothing on
@@ -9886,6 +9940,23 @@ function processMatchmakingUnsafe(): void {
       } else {
         justDebitedConnectionIds.add(matchedEntry.connectionId)
         justDebitedEntries.push(matchedEntry)
+      }
+    }
+
+    // Етап 3Б.1: устойчива връзка „queue:<entryId> вход → тази маса“, ПРЕДИ
+    // стаята да се запише. Без нея рестарт не може да различи използван вход
+    // от осиротял. Ако записът не успее, масата НЕ се създава (същото
+    // почистване като при неуспешно удържане по-долу).
+    if (!stakeCollectionFailed) {
+      const bindResult = matchEconomyStore.bindQueueStakesToRoom(
+        initializedRoom.id,
+        result.group.matchedHumans
+          .filter((entry) => entry.profileId !== null)
+          .map((entry) => ({ queueScope: `queue:${entry.entryId}`, profileId: entry.profileId! })),
+      )
+      if (!bindResult.ok) {
+        console.error(`[match-economy] queue stake binding failed room=${initializedRoom.id}: ${bindResult.message}`)
+        stakeCollectionFailed = true
       }
     }
 

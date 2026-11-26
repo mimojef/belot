@@ -116,7 +116,53 @@ export type MatchEconomyStore = {
   ) =>
     | { ok: true; refunded: boolean; amount: number | null }
     | { ok: false; message: string; kind: 'transient' | 'permanent' }
+  /**
+   * Етап 3Б.1: записва (в една транзакция) връзката „queue:<entryId> вход →
+   * създадена маса“ за всички хора в новата маса. Идемпотентно (INSERT OR
+   * IGNORE). При грешка нищо не се записва и извикващият НЕ създава масата.
+   */
+  bindQueueStakesToRoom: (
+    roomId: string,
+    bindings: ReadonlyArray<{ queueScope: string; profileId: ProfileId }>,
+  ) => { ok: true } | { ok: false; message: string }
+  /**
+   * Етап 3Б.1: при старт — класифицира всеки невърнат queue:<id> вход и
+   * връща САМО доказано осиротелите (виж QueueStakeReconciliationReport).
+   * Трябва да се вика след възстановяването на активните маси и преди
+   * сървърът да приема връзки / да тиктака опашката.
+   */
+  reconcileOrphanedQueueStakes: (input: {
+    activeRooms: ReadonlyArray<{ roomId: string; queueStakes: ReadonlyArray<{ queueScope: string; profileId: ProfileId }> }>
+  }) => QueueStakeReconciliationReport
   close: () => void
+}
+
+export const MATCHMAKING_STAKE_BINDINGS_MIGRATION = '20261126_002_matchmaking_stake_bindings.sql'
+
+export type QueueStakeItem = {
+  queueScope: string
+  profileId: ProfileId | null
+  amount: number
+  debitedAt: string
+}
+
+export type QueueStakeAmbiguousReason =
+  /** Удържан преди проследяването на връзките — не може да се докаже, че не е използван в мач. */
+  | 'pre-tracking-debit'
+  /** Няма информация кога е започнало проследяването (миграцията липсва в server_migrations). */
+  | 'no-tracking-epoch'
+  /** Има връзка към маса, която я няма, а няма и запис за завършен мач. */
+  | 'bound-room-missing-without-completion'
+  /** Профилът е изтрит (profile_id = NULL) — няма къде да се върне. */
+  | 'deleted-profile'
+
+export type QueueStakeReconciliationReport = {
+  trackingEpoch: string | null
+  refunded: QueueStakeItem[]
+  inActiveRoom: QueueStakeItem[]
+  consumedByCompletedMatch: QueueStakeItem[]
+  ambiguous: Array<QueueStakeItem & { reason: QueueStakeAmbiguousReason }>
+  refundFailed: Array<QueueStakeItem & { message: string; kind: 'transient' | 'permanent' }>
 }
 
 type WalletRow = {
@@ -859,6 +905,139 @@ export async function createMatchEconomyStore(
     return { ok: true, refunded: true, amount }
   }
 
+  function bindQueueStakesToRoom(
+    roomId: string,
+    bindings: ReadonlyArray<{ queueScope: string; profileId: ProfileId }>,
+  ): { ok: true } | { ok: false; message: string } {
+    if (bindings.length === 0) return { ok: true }
+    try {
+      // ON CONFLICT DO NOTHING — игнорира САМО дублирането (идемпотентност);
+      // `INSERT OR IGNORE` би пропуснал тихо и ред, нарушаващ CHECK.
+      const insertBinding = database.prepare(`
+        INSERT INTO matchmaking_stake_bindings (queue_scope, profile_id, room_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(queue_scope, profile_id) DO NOTHING;
+      `)
+      database.exec('BEGIN;')
+      for (const binding of bindings) {
+        insertBinding.run(binding.queueScope, binding.profileId, roomId)
+      }
+      database.exec('COMMIT;')
+      return { ok: true }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+      return { ok: false, message: error instanceof Error ? error.message : 'Връзката вход → маса не беше записана.' }
+    }
+  }
+
+  function reconcileOrphanedQueueStakes(input: {
+    activeRooms: ReadonlyArray<{ roomId: string; queueStakes: ReadonlyArray<{ queueScope: string; profileId: ProfileId }> }>
+  }): QueueStakeReconciliationReport {
+    const report: QueueStakeReconciliationReport = {
+      trackingEpoch: null,
+      refunded: [],
+      inActiveRoom: [],
+      consumedByCompletedMatch: [],
+      ambiguous: [],
+      refundFailed: [],
+    }
+
+    const epochRow = database.prepare(`SELECT applied_at FROM server_migrations WHERE filename = ? LIMIT 1;`)
+      .get(MATCHMAKING_STAKE_BINDINGS_MIGRATION) as { applied_at: string } | undefined
+    report.trackingEpoch = epochRow?.applied_at ?? null
+
+    const activeRoomIds = new Set(input.activeRooms.map((room) => room.roomId))
+    const activeStakeKeys = new Set(
+      input.activeRooms.flatMap((room) => room.queueStakes.map((stake) => `${stake.queueScope}\u0000${stake.profileId}`)),
+    )
+
+    // Невърнати queue:<id> дебити (range по индекса на room_id вместо LIKE).
+    // completed_room = има ли запис за завършен мач на свързаната маса за
+    // същия профил.
+    const rows = database.prepare(`
+      SELECT
+        debit.room_id AS queue_scope,
+        debit.profile_id AS profile_id,
+        debit.amount AS amount,
+        debit.created_at AS created_at,
+        binding.room_id AS bound_room_id,
+        EXISTS (
+          SELECT 1 FROM belot_match_completion_ledger AS completion
+          WHERE completion.room_id = binding.room_id
+            AND completion.profile_id = debit.profile_id
+        ) AS has_completion
+      FROM match_economy_ledger AS debit
+      LEFT JOIN matchmaking_stake_bindings AS binding
+        ON binding.queue_scope = debit.room_id
+       AND binding.profile_id = debit.profile_id
+      WHERE debit.room_id >= 'queue:' AND debit.room_id < 'queue;'
+        AND debit.entry_type = 'stake_debit'
+        AND NOT EXISTS (
+          SELECT 1 FROM match_economy_ledger AS settled
+          WHERE settled.room_id = debit.room_id
+            AND settled.profile_id IS debit.profile_id
+            AND settled.entry_type IN ('stake_refund', 'winner_payout')
+        )
+      ORDER BY debit.created_at ASC, debit.room_id ASC;
+    `).all() as Array<{
+      queue_scope: string
+      profile_id: ProfileId | null
+      amount: number
+      created_at: string
+      bound_room_id: string | null
+      has_completion: number
+    }>
+
+    for (const row of rows) {
+      const item: QueueStakeItem = {
+        queueScope: row.queue_scope,
+        profileId: row.profile_id,
+        amount: row.amount,
+        debitedAt: row.created_at,
+      }
+
+      if (row.profile_id === null) {
+        report.ambiguous.push({ ...item, reason: 'deleted-profile' })
+        continue
+      }
+      if (activeStakeKeys.has(`${row.queue_scope}\u0000${row.profile_id}`)) {
+        report.inActiveRoom.push(item)
+        continue
+      }
+      if (row.bound_room_id !== null) {
+        if (activeRoomIds.has(row.bound_room_id)) report.inActiveRoom.push(item)
+        else if (row.has_completion === 1) report.consumedByCompletedMatch.push(item)
+        else report.ambiguous.push({ ...item, reason: 'bound-room-missing-without-completion' })
+        continue
+      }
+      if (report.trackingEpoch === null) {
+        report.ambiguous.push({ ...item, reason: 'no-tracking-epoch' })
+        continue
+      }
+      // Строго СЛЕД прилагането на миграцията: вход от същата секунда може да
+      // е от стария процес (без връзки) → не се приема за доказан.
+      if (!(row.created_at > report.trackingEpoch)) {
+        report.ambiguous.push({ ...item, reason: 'pre-tracking-debit' })
+        continue
+      }
+
+      // Доказано осиротял: проследяван, без връзка към маса, без активна маса,
+      // без refund/payout. Връщане през съществуващия атомарен/идемпотентен път.
+      const refund = refundParticipantScopedStake(row.queue_scope, row.profile_id)
+      if (!refund.ok) {
+        report.refundFailed.push({ ...item, message: refund.message, kind: refund.kind })
+      } else if (refund.refunded) {
+        report.refunded.push(item)
+      }
+    }
+
+    return report
+  }
+
   function close(): void {
     database.close()
   }
@@ -873,6 +1052,8 @@ export async function createMatchEconomyStore(
     payoutMatchWinners,
     refundUnsettledRoomScopedStakes,
     refundParticipantScopedStake,
+    bindQueueStakesToRoom,
+    reconcileOrphanedQueueStakes,
     close,
   }
 }
