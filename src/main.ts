@@ -7723,6 +7723,9 @@ lobby = createLobbyFlowController({
     hideOfflineConnectionOverlay()
     requestPwaUpdateApplyAttempt()
   },
+  // Платена „Свара“: същото фоново /api/auth/me (със защитите за сесия и
+  // закъснял отговор), след като сървърът вече е удържал/изплатил.
+  onSvaraWalletRefresh: () => refreshAuthSessionInBackground(),
   // The form chooses capacity/entry/start mode; new-table admission fixes 1% on the server.
   onSvaraTableCreate: (capacity, entryFee, startMode) => { client.createSvaraTable(capacity, entryFee, 1, startMode) },
   onSvaraTableJoin: (matchId) => { client.joinSvaraTable(matchId) },

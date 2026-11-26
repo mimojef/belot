@@ -1102,6 +1102,8 @@ export type CreateLobbyFlowControllerOptions = {
   // (bet/fold/look/all-in/request-return/...).
   onSvaraTablesOpen?: () => void
   onSvaraReconnectResolved?: () => void
+  /** Баланс от сървъра (/api/auth/me): старт (удържан вход), край (изплащане), напускане на масата. */
+  onSvaraWalletRefresh?: () => void
   onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number, startMode: 'auto' | 'manual') => void
   onSvaraTableJoin?: (matchId: string) => void
   onSvaraTableLeave?: (matchId: string) => void
@@ -4067,6 +4069,17 @@ export function createLobbyFlowController(
   // рамката или несвързан full-root render): новият instance я получава веднага,
   // вместо за миг да покаже списъка до следващия svara_tables_list.
   let _svaraRemountMyTable: SvaraPublicTable | null = null
+  // Балансът след платен мач: сървърът удържа входовете преди старта и
+  // урежда мача преди да публикува 'finished' → при всяка нова фаза
+  // 'in-progress'/'finished' на собствената маса (и при напускането ѝ)
+  // балансът се презарежда от сървъра. Без локално смятане.
+  let _svaraWalletPhase: { matchId: string; phase: string } | null = null
+  function refreshSvaraWalletOnPhase(matchId: string, phase: string): void {
+    const previous = _svaraWalletPhase
+    _svaraWalletPhase = { matchId, phase }
+    if (previous?.matchId === matchId && previous.phase === phase) return
+    if (phase === 'in-progress' || phase === 'finished') options.onSvaraWalletRefresh?.()
+  }
   function finishSvaraReconnect(): void {
     _svaraReconnect = null
     options.onSvaraReconnectResolved?.()
@@ -22560,6 +22573,7 @@ export function createLobbyFlowController(
       _svaraLobbyController?.setMyTable(message.table)
       if (!_svaraLobbyController && _svaraRemountMyTable) _svaraRemountMyTable = message.table
       setSvaraActiveGame(message.table.phase !== 'lobby')
+      refreshSvaraWalletOnPhase(message.table.matchId, message.table.phase)
       return true
     }
     if (message.type === 'svara_table_left') {
@@ -22576,6 +22590,8 @@ export function createLobbyFlowController(
       _svaraRemountMyTable = null
       _svaraLobbyController?.setMyTable(null)
       setSvaraActiveGame(false)
+      _svaraWalletPhase = null
+      options.onSvaraWalletRefresh?.()
       if (state.currentScreen === 'svara') options.onSvaraTablesOpen?.()
       return true
     }
