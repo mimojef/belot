@@ -338,17 +338,23 @@ rclone copyto "$MANIFEST_FILE" "$REMOTE_UPLOADS_DIR/$(basename "$MANIFEST_FILE")
 
 echo
 echo "[backup] Verifying uploaded archives via MD5..."
-for pair in "$DB_ARCHIVE:$REMOTE_DB_DIR" "$UPLOADS_ARCHIVE:$REMOTE_UPLOADS_DIR" "$JOURNAL_ARCHIVE:$REMOTE_DB_DIR"; do
-    ARCHIVE_PATH="${pair%%:*}"
-    REMOTE_DIR="${pair##*:}"
-    LOCAL_MD5="$(md5sum "$ARCHIVE_PATH" | awk '{print $1}')"
-    REMOTE_MD5="$(rclone md5sum "$REMOTE_DIR/$(basename "$ARCHIVE_PATH")" | awk 'NR==1 {print $1}')"
-    echo "[backup] $(basename "$ARCHIVE_PATH") local_md5=$LOCAL_MD5 remote_md5=$REMOTE_MD5"
-    if [ -z "$REMOTE_MD5" ] || [ "$LOCAL_MD5" != "$REMOTE_MD5" ]; then
-        echo "[backup] ERROR: uploaded file checksum mismatch for $(basename "$ARCHIVE_PATH")"
+# Пълни локален и отдалечен път като отделни аргументи — без разделяне по
+# ':', защото rclone remote пътят съдържа ':' (напр. "pikabg-drive:...").
+verify_uploaded_md5() {
+    local archive_path="$1"
+    local remote_path="$2"
+    local local_md5 remote_md5
+    local_md5="$(md5sum "$archive_path" | awk '{print $1}')"
+    remote_md5="$(rclone md5sum "$remote_path" | awk 'NR==1 {print $1}')"
+    echo "[backup] $(basename "$archive_path") local_md5=$local_md5 remote_md5=$remote_md5"
+    if [ -z "$remote_md5" ] || [ "$local_md5" != "$remote_md5" ]; then
+        echo "[backup] ERROR: uploaded file checksum mismatch for $(basename "$archive_path")"
         exit 1
     fi
-done
+}
+verify_uploaded_md5 "$DB_ARCHIVE" "$REMOTE_DB_DIR/$(basename "$DB_ARCHIVE")"
+verify_uploaded_md5 "$UPLOADS_ARCHIVE" "$REMOTE_UPLOADS_DIR/$(basename "$UPLOADS_ARCHIVE")"
+verify_uploaded_md5 "$JOURNAL_ARCHIVE" "$REMOTE_DB_DIR/$(basename "$JOURNAL_ARCHIVE")"
 
 echo
 echo "[backup] Health after:"
