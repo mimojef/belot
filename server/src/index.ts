@@ -5173,6 +5173,32 @@ function enqueueHeldPayoutRegistrationRetry(record: HeldPayoutRecord, error: str
   ensureHeldPayoutRegistrationRetryTimer()
 }
 
+const HELD_PAYOUT_REPLAY_BLOCKED_MESSAGE =
+  'Преиграването е временно спряно: изплащането за този мач е задържано за проверка и още се записва. Опитайте отново след малко.'
+
+/**
+ * Етап 3Б.2: синхронен опит за запис на незаписаното задържане на масата.
+ * Успех (или няма такова) → false (преиграването продължава нормално).
+ * Неуспех → true: преиграването е отказано, snapshot-ът на приключилия мач
+ * остава (само гласовете се нулират, за да може да се гласува отново),
+ * играчите получават кратко съобщение.
+ */
+function blockReplayIfHeldPayoutUnrecorded(room: ServerRoom): boolean {
+  if (heldPayoutRegistrationGuard.flushRoom(room.id)) return false
+  ensureHeldPayoutRegistrationRetryTimer()
+  console.error(`[match-economy] replay BLOCKED room=${room.id} — held payout not yet recorded`)
+  const resetVotesRoom: ServerRoom = { ...room, replayVotes: [] }
+  serverState = commitServerRoomReplacement(resetVotesRoom)
+  broadcastRoomSnapshots(resetVotesRoom, socketRegistry)
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind === 'human' && participant.connectionId !== null) {
+      safeSendToConnection(participant.connectionId, { type: 'error', message: HELD_PAYOUT_REPLAY_BLOCKED_MESSAGE, code: 'replay_blocked_held_payout' })
+    }
+  }
+  return true
+}
+
 function registerHeldPayoutsForRestoredRoomsOnBoot(state: ServerState): void {
   let recorded = 0
   for (const room of Object.values(state.rooms)) {
@@ -28060,6 +28086,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // друго участие не влиза в него. Неговият глас става „изход“ (същият
         // механизъм като бот без жълтици) и повторният мач не стартира.
         function tryApplyReplayRestart(room: ServerRoom, votes: Seat[]): void {
+          // Етап 3Б.2: „Преиграй“ презаписва snapshot-а на приключилия мач —
+          // забранено, докато задържаното му изплащане не е записано.
+          if (blockReplayIfHeldPayoutUnrecorded(room)) return
           // + „Забрана за съвместна игра“: по-късно гласувалият от ограничена
           // двойка (същият механизъм; при изключен флаг — празно).
           const coPlayConflictSeats = findReplayCoPlayConflictSeats(room, votes)

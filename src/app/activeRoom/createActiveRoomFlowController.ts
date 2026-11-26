@@ -7131,6 +7131,13 @@ export function createActiveRoomFlowController(
         showCoPlayRestrictedNotice(message.message, message.context === 'replay' ? 'replay' : 'private_room')
         return true
       }
+      // Етап 3Б.2: „Преиграй“ временно отказан (задържано изплащане, още
+      // незаписано). Същият информационен прозорец, с неутрално заглавие —
+      // крайният екран не рисува errorText.
+      if (message.code === 'replay_blocked_held_payout') {
+        showCoPlayRestrictedNotice(message.message, 'replay', 'Преиграването е временно спряно')
+        return true
+      }
       // Етап 1: грешка от друга игра (напр. Ludo) не принадлежи на масата —
       // не пипа нито чакащите действия, нито съобщенията (main.ts вече не я
       // подава насам; това е втора защита).

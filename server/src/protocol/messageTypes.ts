@@ -1001,6 +1001,9 @@ export type ErrorMessage = {
     | 'private_room_level_required'
     | 'spectator_action_forbidden'
     | 'svara_commitment_active'
+    // Етап 3Б.2: „Преиграй“ е отказан — задържаното изплащане на мача още не
+    // е записано в регистъра (snapshot-ът на мача се пази).
+    | 'replay_blocked_held_payout'
     | PrivateRoomActionErrorCode
   // Гласов чат (Етап 2б) — само при code 'voice_chat_capacity_reached'.
   voiceActiveTables?: number

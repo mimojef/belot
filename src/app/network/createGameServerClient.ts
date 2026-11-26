@@ -1828,6 +1828,8 @@ export type ErrorMessage = {
     | 'private_room_stake_unavailable'
     | 'private_room_insufficient_balance'
     | 'private_room_level_required'
+    // Етап 3Б.2: „Преиграй“ временно отказан (задържано изплащане, още незаписано).
+    | 'replay_blocked_held_payout'
     | 'ludo_room_not_found'
     | 'ludo_room_full'
     | 'ludo_room_duplicate_member'

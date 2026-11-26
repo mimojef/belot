@@ -63,7 +63,7 @@ export function resolveCoPlayRestrictedNoticeTheme(): CoPlayRestrictedNoticeThem
   return 'desktop'
 }
 
-function renderDesktopCard(text: string): string {
+function renderDesktopCard(text: string, title: string): string {
   return `
     <div
       data-co-play-restricted-notice-backdrop="1"
@@ -87,7 +87,7 @@ function renderDesktopCard(text: string): string {
           id="co-play-restricted-notice-title"
           data-co-play-restricted-notice-title="1"
           style="font-size:19px;font-weight:900;color:#f4c95b;line-height:1.3;margin-bottom:12px;"
-        >${escapeHtml(CO_PLAY_RESTRICTED_TITLE)}</div>
+        >${escapeHtml(title)}</div>
         <div
           data-co-play-restricted-notice-text="1"
           style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.55;margin-bottom:22px;"
@@ -110,7 +110,7 @@ function renderDesktopCard(text: string): string {
 // Светлият мобилен вид — стойностите на светлите попъпи (бяла карта, рамка
 // #E4E7EC, сянка, тъмен текст #17233C / #475467, виолетовият 3D бутон).
 // Текстовете и data-* атрибутите са същите като при desktop.
-function renderMobileCard(text: string): string {
+function renderMobileCard(text: string, title: string): string {
   return `
     <div
       data-co-play-restricted-notice-backdrop="1"
@@ -137,7 +137,7 @@ function renderMobileCard(text: string): string {
           id="co-play-restricted-notice-title"
           data-co-play-restricted-notice-title="1"
           style="font-size:20px;font-weight:800;color:#17233C;line-height:1.3;margin-bottom:10px;"
-        >${escapeHtml(CO_PLAY_RESTRICTED_TITLE)}</div>
+        >${escapeHtml(title)}</div>
         <div
           data-co-play-restricted-notice-text="1"
           style="font-size:15px;font-weight:600;color:#475467;line-height:1.5;margin-bottom:20px;overflow-wrap:anywhere;"
@@ -157,7 +157,8 @@ export function closeCoPlayRestrictedNotice(): void {
   document.querySelectorAll(`[${HOST_ATTRIBUTE}="1"]`).forEach((element) => element.remove())
 }
 
-export function showCoPlayRestrictedNotice(serverMessage: string | null | undefined, context: CoPlayRestrictedContext): void {
+/** title — по подразбиране „Административно ограничение“; друг текст само за не-административни откази (напр. задържано изплащане). */
+export function showCoPlayRestrictedNotice(serverMessage: string | null | undefined, context: CoPlayRestrictedContext, title: string = CO_PLAY_RESTRICTED_TITLE): void {
   closeCoPlayRestrictedNotice()
   const text = resolveCoPlayRestrictedText(serverMessage, context)
   const theme = resolveCoPlayRestrictedNoticeTheme()
@@ -170,7 +171,7 @@ export function showCoPlayRestrictedNotice(serverMessage: string | null | undefi
   host.setAttribute('aria-modal', 'true')
   host.setAttribute('aria-labelledby', 'co-play-restricted-notice-title')
   host.style.cssText = `position:fixed;inset:0;z-index:100001;pointer-events:auto;font-family:${theme === 'mobile' ? MOBILE_LIGHT_FONT_FAMILY : 'Arial,Helvetica,sans-serif'};`
-  host.innerHTML = theme === 'mobile' ? renderMobileCard(text) : renderDesktopCard(text)
+  host.innerHTML = theme === 'mobile' ? renderMobileCard(text, title) : renderDesktopCard(text, title)
 
   const close = (): void => {
     host.remove()
