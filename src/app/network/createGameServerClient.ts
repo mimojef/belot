@@ -2405,7 +2405,16 @@ export type SvaraCommandResultMessage = {
   phase: SvaraPublicTable['phase']
 }
 export type SvaraCommandErrorMessage = { type: 'svara_command_error'; code: SvaraLobbyErrorCode; message: string; commandId?: string }
-export type SvaraTablesListMessage = { type: 'svara_tables_list'; tables: SvaraPublicTable[] }
+/** Приключил мач за раздела „Приключили“ (сървърът го дава само с тестов достъп). */
+export type SvaraFinishedMatch = {
+  matchId: string
+  capacity: 2 | 3 | 4
+  entryFee: number
+  winnerId: string | null
+  finishedAt: number
+  players: Array<{ playerId: string; displayName?: string | null; avatarUrl?: string | null; isBot?: boolean }>
+}
+export type SvaraTablesListMessage = { type: 'svara_tables_list'; tables: SvaraPublicTable[]; finished?: SvaraFinishedMatch[] }
 export type SvaraTableUpdatedMessage = { type: 'svara_table_updated'; table: SvaraPublicTable; requestId?: string }
 export type SvaraTableLeftMessage = { type: 'svara_table_left'; matchId: string; requestId?: string }
 export type SvaraLobbyErrorMessage = { type: 'svara_lobby_error'; code: SvaraLobbyErrorCode; message: string; requestId?: string }

@@ -10,7 +10,7 @@ import type { SvaraTestBotsFactory } from './testBots/createSvaraTestBots.js' //
 import { exitAndAbortTestBotMatch, isLastHumanLeavingTestBotMatch } from './testBots/abortSvaraTestBotMatch.js' // ВРЕМЕННО — тестови ботове
 import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/svaraPersistence.js'
 import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
-import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
+import { parseSvaraLobbyMessage, type SvaraFinishedMatch, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
 import { serializeSvaraSnapshotForClient, type SvaraPublicTable } from './protocol/svaraSnapshotProtocol.js'
 import { participantsIfCommandStartsMatch, reconcileSvaraPaidMatches, type SvaraPaidEconomy } from './svaraPaidEconomy.js'
 import { activeEntryFees, pinGameMatchFinancialTerms, SVARA_DEFAULT_FINANCIAL_CONFIG, type GameFinancialConfig } from '../../economy/gameFinancialConfig.js'
@@ -25,6 +25,10 @@ type Transport = {
 export type SvaraRecoveryState = 'initialization' | 'ready' | 'failed' | 'disabled'
 /** Най-дълго време за преглед на резултата на приключил мач в RAM (после само SQLite историята). */
 export const SVARA_FINISHED_REVIEW_RETENTION_MS = 10 * 60_000
+
+/** Като „Не се сърди човече“ (PRIVATE_ROOM_FINISHED_VISIBILITY_HOURS): приключилите се виждат 2 часа. */
+export const SVARA_FINISHED_VISIBILITY_HOURS = 2
+export const SVARA_FINISHED_LIST_LIMIT = 30
 
 export function createSvaraLobby(deps: {
   hasOtherGameCommitment: (profileId: string) => boolean
@@ -207,19 +211,32 @@ export function createSvaraLobby(deps: {
     return session?.account.role === 'admin' ? session.profile.profileId : null
   }
 
+  /** Публичното представяне на играч (име/аватар/пол) — само при доставка, никога не се записва. */
+  function presentPlayer(playerId: string): { displayName: string | null; avatarUrl: string | null; gender?: 'male' | 'female'; isBot?: true } {
+    // ВРЕМЕННО — тестови ботове: име/аватар от модула, никога от базата.
+    const bot = testBots?.isBot(playerId) ? testBots.publicProfile(playerId) : null
+    if (bot) return { displayName: bot.displayName, avatarUrl: bot.avatarUrl, ...(bot.gender ? { gender: bot.gender } : {}), isBot: true }
+    let profile: ReturnType<NonNullable<typeof deps.getPublicProfile>> = null
+    try { profile = deps.getPublicProfile?.(playerId) ?? null } catch (cause) { deps.onError?.(cause) }
+    // Presentation only: never persist profile data or spread a full profile.
+    // Полът на профила (както в Белот) — само за избора на глас; без пол полето липсва.
+    const gender = profile?.gender === 'male' || profile?.gender === 'female' ? profile.gender : null
+    return { displayName: profile?.displayName?.trim() || null, avatarUrl: profile?.avatarUrl?.trim() || null, ...(gender ? { gender } : {}) }
+  }
+
   function tableWithProfiles(table: SvaraPublicTable, fillViewerId: string | null = null): SvaraPublicTable {
     const canFill = fillViewerId !== null && fillViewerId === table.creatorId && table.phase === 'lobby' && table.players.length < table.capacity
-    return { ...table, ...(canFill ? { testBotFill: true } : {}), prizeAmount: tablePrize(table), paid: paidMode, players: table.players.map(({ playerId, status }) => {
-      // ВРЕМЕННО — тестови ботове: име/аватар от модула, никога от базата.
-      const bot = testBots?.isBot(playerId) ? testBots.publicProfile(playerId) : null
-      if (bot) return { playerId, status, displayName: bot.displayName, avatarUrl: bot.avatarUrl, gender: bot.gender, isBot: true }
-      let profile: ReturnType<NonNullable<typeof deps.getPublicProfile>> = null
-      try { profile = deps.getPublicProfile?.(playerId) ?? null } catch (cause) { deps.onError?.(cause) }
-      // Presentation only: never persist profile data or spread a full profile.
-      // Полът на профила (както в Белот) — само за избора на глас; без пол полето липсва.
-      const gender = profile?.gender === 'male' || profile?.gender === 'female' ? profile.gender : null
-      return { playerId, status, displayName: profile?.displayName?.trim() || null, avatarUrl: profile?.avatarUrl?.trim() || null, ...(gender ? { gender } : {}) }
-    }) }
+    return { ...table, ...(canFill ? { testBotFill: true } : {}), prizeAmount: tablePrize(table), paid: paidMode, players: table.players.map(({ playerId, status }) => ({ playerId, status, ...presentPlayer(playerId) })) }
+  }
+
+  /** Раздел „Приключили“: завършените мачове от последните часове (от записаните snapshot-и). */
+  function finishedList(): SvaraFinishedMatch[] {
+    try {
+      return (deps.persistence?.listRecentFinished?.(SVARA_FINISHED_VISIBILITY_HOURS, SVARA_FINISHED_LIST_LIMIT) ?? []).map((match) => ({
+        matchId: match.matchId, capacity: match.capacity, entryFee: match.entryFee, winnerId: match.winnerId, finishedAt: match.finishedAt,
+        players: match.playerIds.map((playerId) => ({ playerId })),
+      }))
+    } catch (cause) { deps.onError?.(cause); return [] }
   }
 
   function deliver(transport: Transport, payload: SvaraLobbyServerMessage | string) {
@@ -227,7 +244,11 @@ export function createSvaraLobby(deps: {
       if (typeof payload !== 'string' && payload.type === 'svara_table_updated') payload = { ...payload, table: tableWithProfiles(payload.table, testBotFillViewer(transport)) }
       else if (typeof payload !== 'string' && payload.type === 'svara_tables_list') {
         const fillViewerId = testBotFillViewer(transport)
-        payload = { ...payload, tables: payload.tables.map((table) => tableWithProfiles(table, fillViewerId)) }
+        payload = { ...payload, tables: payload.tables.map((table) => tableWithProfiles(table, fillViewerId)),
+          ...(payload.finished ? { finished: payload.finished.map((match) => ({ ...match, players: match.players.map(({ playerId }) => {
+            const { displayName, avatarUrl, isBot } = presentPlayer(playerId)
+            return { playerId, displayName, avatarUrl, ...(isBot ? { isBot } : {}) }
+          }) })) } : {}) }
       }
       transport.send(payload)
     } catch (cause) { deps.onError?.(cause) }
@@ -288,7 +309,7 @@ export function createSvaraLobby(deps: {
       currentViews.delete(transport)
       deliver(transport, { type: 'svara_table_left', matchId, ...(requestId ? { requestId } : {}) })
     }
-    deliver(transport, { type: 'svara_tables_list', tables: tablesFor(playerId) })
+    deliver(transport, { type: 'svara_tables_list', tables: tablesFor(playerId), finished: finishedList() })
   }
   function snapshot(transport: Transport, matchId: string, playerId: string) {
     if (finishedDismissals.get(matchId)?.has(playerId)) { finishedLeft(transport, matchId, playerId); return }
@@ -308,6 +329,7 @@ export function createSvaraLobby(deps: {
     if (recoveryState !== 'ready') return
     const table = runtime.getPublicTable(matchId)
     const tables = publicChanged ? publicTables() : []
+    const finished = publicChanged ? finishedList() : []
     const recipients = new Set([...previousPlayers, ...table.players.map((p) => p.playerId)])
     for (const [connectionId, transport] of connections) {
       if (!subscribers.has(connectionId) && (transport.profileId === null || !recipients.has(transport.profileId))) continue
@@ -322,7 +344,7 @@ export function createSvaraLobby(deps: {
       } else if (previousPlayers.includes(playerId)) {
         if (publicChanged) deliver(transport, { type: 'svara_table_left', matchId })
       }
-      if (publicChanged && subscribers.has(connectionId)) deliver(transport, { type: 'svara_tables_list', tables })
+      if (publicChanged && subscribers.has(connectionId)) deliver(transport, { type: 'svara_tables_list', tables, finished })
     }
     testBots?.onMatchChanged(matchId) // ВРЕМЕННО — тестови ботове: само планира таймер
     if (table.phase === 'finished') scheduleFinishedRelease(matchId)
@@ -455,7 +477,7 @@ export function createSvaraLobby(deps: {
         }
         if (message.type === 'request_svara_tables_list') {
           subscribers.add(connectionId)
-          deliver(transport, { type: 'svara_tables_list', tables: tablesFor(playerId) })
+          deliver(transport, { type: 'svara_tables_list', tables: tablesFor(playerId), finished: finishedList() })
           return
         }
         if (message.type === 'fill_svara_table_with_bots') {

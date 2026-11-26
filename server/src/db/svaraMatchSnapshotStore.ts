@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks'
 import { validateSvaraStoredMatch } from '../games/svara/runtime/svaraStoredMatchValidation.js'
-import { SvaraPersistenceError, type SvaraMatchPersistence, type SvaraStoredMatch } from '../games/svara/runtime/svaraPersistence.js'
+import { SvaraPersistenceError, type SvaraFinishedMatchSummary, type SvaraMatchPersistence, type SvaraStoredMatch } from '../games/svara/runtime/svaraPersistence.js'
 
 type Database = InstanceType<typeof import('node:sqlite').DatabaseSync>
 export type SvaraMatchSnapshotStore = SvaraMatchPersistence & {
@@ -44,6 +44,8 @@ export async function createSvaraMatchSnapshotStore(databaseFilePath: string): P
     const active = database.prepare("SELECT match_id FROM svara_match_snapshots WHERE match_status NOT IN ('finished', 'closed') ORDER BY match_id")
     const commitments = database.prepare(`SELECT match_id, match_status, snapshot_json FROM svara_match_snapshots
       WHERE match_status NOT IN ('finished', 'closed') ORDER BY match_id`)
+    const recentFinished = database.prepare(`SELECT match_id, snapshot_json, finished_at FROM svara_match_snapshots
+      WHERE match_status = 'finished' AND finished_at >= ? ORDER BY finished_at DESC, match_id LIMIT ?`)
     const metrics = { writes: 0, serializeMs: 0, sqliteMs: 0, lastBytes: 0 }
     const store: SvaraMatchSnapshotStore = {
       save(snapshot, expectedRevision) {
@@ -77,6 +79,24 @@ export async function createSvaraMatchSnapshotStore(databaseFilePath: string): P
           if (snapshot.matchId !== matchId || snapshot.formatVersion !== row.format_version || snapshot.revision !== row.revision || snapshot.state.phase !== row.match_status) throw new Error()
           return snapshot
         } catch { throw new SvaraPersistenceError('invalid-snapshot') }
+      },
+      listRecentFinished(withinHours, limit) {
+        // finished_at е CURRENT_TIMESTAMP (UTC, 'YYYY-MM-DD HH:MM:SS').
+        const cutoff = new Date(Date.now() - withinHours * 3_600_000).toISOString().replace('T', ' ').slice(0, 19)
+        const out: SvaraFinishedMatchSummary[] = []
+        for (const row of recentFinished.all(cutoff, limit) as Array<{ match_id: string; snapshot_json: string; finished_at: string }>) {
+          try {
+            const snapshot = JSON.parse(row.snapshot_json) as SvaraStoredMatch, state = snapshot.state
+            const seats = state?.seats, capacity = state?.config?.capacity, entryFee = state?.config?.entryFee
+            const finishedAt = Date.parse(`${row.finished_at.replace(' ', 'T')}Z`)
+            if (snapshot.matchId !== row.match_id || state.phase !== 'finished' || !Array.isArray(seats) || seats.length < 1 || seats.length > 4 ||
+              seats.some((id) => typeof id !== 'string' || !id.trim()) || ![2, 3, 4].includes(capacity) ||
+              !Number.isSafeInteger(entryFee) || !Number.isFinite(finishedAt)) continue
+            const winnerId = typeof state.winnerId === 'string' && seats.includes(state.winnerId) ? state.winnerId : null
+            out.push({ matchId: row.match_id, capacity, entryFee, playerIds: [...seats], winnerId, finishedAt })
+          } catch { /* повреден запис — не се показва */ }
+        }
+        return out
       },
       findActiveMatchId(playerId) {
         try {

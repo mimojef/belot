@@ -26,4 +26,19 @@ export interface SvaraMatchPersistence {
   loadActiveMatches(): SvaraStoredMatch[]
   /** Durable admission guard, including initialization/quarantine. */
   findActiveMatchId(playerId: string): string | null
+  /**
+   * Раздел „Приключили“ в лобито: последните завършени мачове (само публични
+   * полета — без карти и вътрешно състояние). Невалидните записи се пропускат.
+   */
+  listRecentFinished?(withinHours: number, limit: number): SvaraFinishedMatchSummary[]
+}
+
+export type SvaraFinishedMatchSummary = {
+  matchId: string
+  capacity: 2 | 3 | 4
+  entryFee: number
+  playerIds: string[]
+  winnerId: string | null
+  /** Епоха (ms), UTC. */
+  finishedAt: number
 }

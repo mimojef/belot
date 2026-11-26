@@ -32,12 +32,24 @@ export type SvaraLobbyErrorCode =
   // Етап 3В.2 (платена „Свара“, изключена по подразбиране)
   | 'insufficient_coins' | 'paid_unavailable'
 
+/** Приключил мач за раздела „Приключили“ — без карти и вътрешно състояние. */
+export type SvaraFinishedMatch = {
+  matchId: string
+  capacity: 2 | 3 | 4
+  entryFee: number
+  winnerId: string | null
+  /** Епоха (ms). */
+  finishedAt: number
+  players: Array<{ playerId: string; displayName?: string | null; avatarUrl?: string | null; isBot?: boolean }>
+}
+
 export type SvaraLobbyServerMessage =
   | { type: 'svara_match_timing'; matchId: string; revision: number; serverNow: number;
       deadlines: Array<{ kind: SvaraDeadlineKind; deadlineAt: number; remainingMs: number; playerId: string | null }> }
   | { type: 'svara_command_result'; matchId: string; commandId: string; status: 'applied' | 'duplicate'; revision: number; phase: SvaraPublicTable['phase'] }
   | { type: 'svara_command_error'; code: SvaraLobbyErrorCode; message: string; commandId?: string }
-  | { type: 'svara_tables_list'; tables: SvaraPublicTable[] }
+  /** finished — раздел „Приключили“ (последните завършени мачове, само публични полета). */
+  | { type: 'svara_tables_list'; tables: SvaraPublicTable[]; finished?: SvaraFinishedMatch[] }
   | { type: 'svara_table_updated'; table: SvaraPublicTable; requestId?: string }
   | { type: 'svara_table_left'; matchId: string; requestId?: string }
   | { type: 'svara_lobby_error'; code: SvaraLobbyErrorCode; message: string; requestId?: string }

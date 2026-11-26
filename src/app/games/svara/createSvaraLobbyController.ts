@@ -12,6 +12,7 @@ import type {
   SvaraMatchTimingMessage,
   SvaraPlayerLookedMessage,
   SvaraParticipantCommand,
+  SvaraFinishedMatch,
   SvaraPublicTable,
   SvaraSeatStatus,
   SvaraStartMode,
@@ -103,8 +104,11 @@ const DARK_LOBBY_CSS = `
     .svara-action-row { gap:8px; }
     [data-svara-lifecycle-tab] { font-size:12px; }
     .svara-action-row [data-svara-create-open] { padding:0 12px; }
+    .svara-tabs-row { display:grid; grid-template-columns:1fr 1fr; grid-template-areas:"playing finished" "waiting waiting"; gap:6px; }
   }
 `
+
+type SvaraLifecycleTab = 'waiting' | 'playing' | 'finished'
 
 const STATUS_LABEL: Record<SvaraSeatStatus, string> = {
   active: 'активен',
@@ -115,6 +119,9 @@ const STATUS_LABEL: Record<SvaraSeatStatus, string> = {
 
 export function createSvaraLobbyController(options: Options) {
   let tables: SvaraPublicTable[] = []
+  // Раздел „Приключили“ — последните завършени мачове от сървъра.
+  let finishedMatches: SvaraFinishedMatch[] = []
+  let lifecycleTab: SvaraLifecycleTab = 'waiting'
   let myTable: SvaraPublicTable | null = null
   let snapshot: SvaraMatchSnapshotMessage | null = null
   let timing: SvaraMatchTimingMessage | null = null
@@ -235,7 +242,6 @@ export function createSvaraLobbyController(options: Options) {
         </div>
         ${message ? `<div style="margin-bottom:14px;color:#f4c95b;">${esc(message)}</div>` : ''}
         ${renderDarkActionRow()}
-        ${myTable ? '' : `<div class="svara-tabs-row" style="margin-bottom:16px;" role="tablist">${darkWaitingTabHtml()}</div>`}
         ${body}
       </div>
       ${createOpen ? renderCreateModal() : ''}
@@ -278,7 +284,7 @@ export function createSvaraLobbyController(options: Options) {
   // „Създай игра“, докато няма собствена маса.
   function renderLightActionRow(): string {
     const back = `<button type="button" data-svara-back-to-games="1" aria-label="Назад" style="${LIGHT_SECONDARY_BUTTON_STYLE}display:inline-flex;align-items:center;gap:6px;height:42px;padding:0 14px 0 10px;color:#344054;font-size:14px;line-height:normal;flex-shrink:0;">${backChevronSvg}<span>Назад</span></button>`
-    const create = myTable ? '' : `<button type="button" data-svara-create-open="1" class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 14px;flex:1 1 auto;min-width:0;font-size:14px;line-height:normal;">${createPlusSvg}<span>Създай игра</span></button>`
+    const create = myTable || lifecycleTab !== 'waiting' ? '' : `<button type="button" data-svara-create-open="1" class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 14px;flex:1 1 auto;min-width:0;font-size:14px;line-height:normal;">${createPlusSvg}<span>Създай игра</span></button>`
     return `<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;gap:8px;margin-bottom:12px;">${back}${create}</div>`
   }
 
@@ -286,20 +292,91 @@ export function createSvaraLobbyController(options: Options) {
   function renderDarkActionRow(): string {
     return `<div class="svara-action-row" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
       <button type="button" data-svara-back-to-games="1" aria-label="Назад" style="${backButtonStyle}flex-shrink:0;">${backChevronSvg}<span>Назад</span></button>
-      ${myTable ? '' : `<button type="button" data-svara-create-open="1" style="${createButtonStyle}">${createPlusSvg}<span>Създай игра</span></button>`}
+      ${myTable || lifecycleTab !== 'waiting' ? '' : `<button type="button" data-svara-create-open="1" style="${createButtonStyle}">${createPlusSvg}<span>Създай игра</span></button>`}
     </div>`
   }
 
-  // „Свара“ има само списък с чакащи маси (сървърът не дава играещи/приключили) —
-  // затова единственият раздел е „Чакащи“, в стила на табовете на Ludo.
-  function darkWaitingTabHtml(): string {
-    return `<button type="button" data-svara-lifecycle-tab="waiting" data-active="true" aria-selected="true" style="
-      display:flex;align-items:center;gap:4px;min-width:0;
-      background:rgba(212,165,32,0.18);border:1px solid rgba(212,165,32,0.55);
-      border-radius:9px;color:#f4c95b;font-size:13px;font-weight:700;cursor:default;flex:0 1 calc((100% - 16px) / 3);min-width:120px;justify-content:center;padding:7px 4px;
-    "><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">Чакащи</span>
-      <span style="display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 4px;flex-shrink:0;background:rgba(212,165,32,0.35);border-radius:999px;font-size:11px;font-weight:800;">${tables.length}</span>
+  // Раздели „Чакащи“ / „Играещи“ / „Приключили“ — същите стилове като
+  // lifecycleTabButtonHtml в createLudoLobbyController (тъмен и светъл вариант).
+  // Данните: чакащи = маси във фаза lobby, играещи = in-progress (от
+  // svara_tables_list), приключили = finished от сървъра (последните 2 часа).
+  function lifecycleTabButtonHtml(tab: SvaraLifecycleTab, label: string, count: number): string {
+    const isActive = lifecycleTab === tab
+    if (light) {
+      return `<button type="button" data-svara-lifecycle-tab="${tab}" data-active="${isActive ? 'true' : 'false'}" aria-selected="${isActive ? 'true' : 'false'}" style="
+      flex:1 1 0;min-width:0;display:flex;align-items:center;justify-content:center;gap:4px;
+      height:40px;padding:0 4px;box-sizing:border-box;border-radius:10px;
+      border:1px solid ${isActive ? '#D9CCFF' : '#E4E7EC'};background:${isActive ? '#F4F0FF' : '#FFFFFF'};
+      color:${isActive ? '#6941C6' : '#475467'};box-shadow:0 1px 2px rgba(16,24,40,0.05);
+      font-family:inherit;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;
+    "><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${label}</span>
+      <span style="
+        flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;box-sizing:border-box;
+        background:${isActive ? '#7950E8' : '#F2F4F7'};color:${isActive ? '#FFFFFF' : '#475467'};
+        border-radius:999px;font-size:11px;font-weight:800;
+      ">${count}</span>
     </button>`
+    }
+    return `<button type="button" data-svara-lifecycle-tab="${tab}" data-active="${isActive ? 'true' : 'false'}" aria-selected="${isActive ? 'true' : 'false'}" style="
+      display:flex;align-items:center;gap:4px;min-width:0;grid-area:${tab};
+      background:${isActive ? 'rgba(212,165,32,0.18)' : 'rgba(255,255,255,0.05)'};
+      border:1px solid ${isActive ? 'rgba(212,165,32,0.55)' : 'rgba(255,255,255,0.1)'};
+      border-radius:9px;color:${isActive ? '#f4c95b' : 'rgba(255,255,255,0.6)'};
+      font-size:13px;font-weight:700;cursor:pointer;flex:1 1 auto;justify-content:center;padding:7px 4px;
+    "><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${label}</span>
+      <span style="
+        display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 4px;flex-shrink:0;
+        background:${isActive ? 'rgba(212,165,32,0.35)' : 'rgba(255,255,255,0.1)'};
+        border-radius:999px;font-size:11px;font-weight:800;
+      ">${count}</span>
+    </button>`
+  }
+
+  function formatDateTime(timestampMs: number): string {
+    const date = new Date(timestampMs)
+    return `${date.toLocaleDateString('bg-BG', { day: '2-digit', month: '2-digit' })} ${date.toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit' })}`
+  }
+
+  /** Играч в карта на играещ/приключил мач (без бутони за действие). */
+  function playerChipHtml(player: { playerId: string; displayName?: string | null; avatarUrl?: string | null; isBot?: boolean }, trailing: string): string {
+    const displayName = player.displayName?.trim() || 'Профилът не е достъпен'
+    const avatar = player.avatarUrl
+      ? `<img src="${esc(player.avatarUrl)}" alt="" draggable="false" style="width:100%;height:100%;object-fit:cover;display:block;" />`
+      : `<span aria-hidden="true">${esc(displayName.charAt(0).toUpperCase())}</span>`
+    const bot = player.isBot ? `<span data-svara-bot-badge="1" title="Тестов бот" style="flex-shrink:0;${light ? 'border:1px solid #B2DDFF;background:#EFF8FF;color:#175CD3;' : 'border:1px solid rgba(120,190,255,.6);color:#9fd0ff;'}border-radius:6px;padding:1px 5px;font-size:10px;font-weight:800;">БОТ</span>` : ''
+    return `<div style="box-sizing:border-box;display:flex;align-items:center;gap:8px;min-width:0;${light ? 'border:1px solid #E4E7EC;border-radius:10px;background:#F9FAFB;' : 'border:1px solid rgba(255,255,255,.12);border-radius:9px;'}padding:8px 10px;">
+      <span style="width:34px;height:34px;flex:0 0 34px;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;${light ? 'background:#F4F0FF;border:1px solid #D9CCFF;color:#6941C6;' : 'background:#101010;border:1px solid rgba(212,165,32,.34);color:#d4a520;'}font-size:17px;font-weight:800;">${avatar}</span>
+      <span title="${esc(displayName)}" style="font-weight:700;font-size:${light ? '13px' : '12px'};${light ? 'color:#111827;' : ''}min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${esc(displayName)}</span>
+      ${bot}${trailing}
+    </div>`
+  }
+
+  function slotsGridStyle(): string {
+    return light ? 'display:grid;grid-template-columns:minmax(0,1fr);gap:8px;' : 'display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:8px;'
+  }
+
+  function gameCardHtml(header: string, meta: string, slots: string, footer: string): string {
+    return `<article style="${light ? LIGHT_PANEL_STYLE : panel}">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+        ${header}
+        <div style="${light ? LIGHT_META_STYLE : 'color:rgba(255,255,255,.62);font-size:13px;'}">${meta}</div>
+      </div>
+      <div style="${slotsGridStyle()}">${slots}</div>
+      ${footer}
+    </article>`
+  }
+
+  function playingCardHtml(table: SvaraPublicTable): string {
+    const slots = table.players.map((player) => playerChipHtml(player, `<span style="font-size:11px;${light ? 'color:#667085;font-weight:600;' : 'color:rgba(255,255,255,.65);'}flex-shrink:0;">${STATUS_LABEL[player.status]}</span>`)).join('')
+    return gameCardHtml(`<strong style="color:${light ? '#6941C6' : '#f4c95b'};">Играе се</strong>`, `${table.players.length} играчи · Вход ${formatAmount(table.entryFee)}`, slots, '')
+  }
+
+  function finishedCardHtml(match: SvaraFinishedMatch): string {
+    const winner = match.winnerId === null ? null : match.players.find((player) => player.playerId === match.winnerId) ?? null
+    const slots = match.players.map((player) => playerChipHtml(player, player.playerId === match.winnerId ? '<span aria-label="Победител" style="flex-shrink:0;">🏆</span>' : '')).join('')
+    const winnerLine = winner ? `<div style="margin-top:10px;font-size:12px;font-weight:800;color:${light ? '#B54708' : '#f4c95b'};overflow-wrap:anywhere;">🏆 Победител: ${esc(winner.displayName?.trim() || 'Профилът не е достъпен')}</div>` : ''
+    const footer = `${winnerLine}<div style="margin-top:10px;${light ? 'font-size:12px;font-weight:600;color:#667085;' : 'font-size:11px;color:rgba(255,255,255,.45);'}">Приключила: ${formatDateTime(match.finishedAt)}</div>`
+    return gameCardHtml(`<strong style="color:${light ? '#475467' : 'rgba(255,255,255,.85)'};">Приключила</strong>`, `${match.players.length} играчи · Вход ${formatAmount(match.entryFee)}`, slots, footer)
   }
 
   function renderEmptyState(text: string): string {
@@ -345,9 +422,20 @@ export function createSvaraLobbyController(options: Options) {
   }
 
   function renderTableList(): string {
-    return tables.length === 0
-      ? renderEmptyState('В момента няма чакащи маси за Свара.')
-      : `<div style="display:grid;gap:10px;">${tables.map(tableCardHtml).join('')}</div>`
+    const waiting = tables.filter((table) => table.phase === 'lobby')
+    const playing = tables.filter((table) => table.phase === 'in-progress')
+    const tabsHtml = `<div class="svara-tabs-row" style="${light ? 'display:flex;gap:6px;margin-bottom:12px;' : 'margin-bottom:16px;'}" role="tablist">
+      ${lifecycleTabButtonHtml('waiting', 'Чакащи', waiting.length)}
+      ${lifecycleTabButtonHtml('playing', 'Играещи', playing.length)}
+      ${lifecycleTabButtonHtml('finished', 'Приключили', finishedMatches.length)}
+    </div>`
+    const list = (cards: string[]) => `<div style="display:grid;gap:10px;">${cards.join('')}</div>`
+    const content = lifecycleTab === 'waiting'
+      ? (waiting.length === 0 ? renderEmptyState('В момента няма чакащи маси за Свара.') : list(waiting.map(tableCardHtml)))
+      : lifecycleTab === 'playing'
+        ? (playing.length === 0 ? renderEmptyState('В момента няма играещи маси за Свара.') : list(playing.map(playingCardHtml)))
+        : (finishedMatches.length === 0 ? renderEmptyState('В момента няма приключили маси за Свара.') : list(finishedMatches.map(finishedCardHtml)))
+    return `${tabsHtml}${content}`
   }
 
   function seatSlotHtml(table: SvaraPublicTable, index: number): string {
@@ -963,6 +1051,10 @@ export function createSvaraLobbyController(options: Options) {
         render()
       })
     }
+    options.root.querySelectorAll<HTMLElement>('[data-svara-lifecycle-tab]').forEach((el) => on(el, 'click', () => {
+      const tab = el.dataset.svaraLifecycleTab
+      if ((tab === 'waiting' || tab === 'playing' || tab === 'finished') && tab !== lifecycleTab) { lifecycleTab = tab; render() }
+    }))
     on(options.root.querySelector('[data-svara-create-open]'), 'click', () => {
       dialogState.open = createOpen = true
       dialogState.draft = createDraft = { capacity: 2, entryFee: 5000, startMode: 'auto' }
@@ -1110,8 +1202,9 @@ export function createSvaraLobbyController(options: Options) {
     // (вкл. in-progress маси, виж publicTables() филтъра) при всяко mount,
     // а тук откриваме дали локалният профил вече е участник, без да чакаме
     // отделен join-success/table_updated event, който reload-ът е пропуснал.
-    setTables(next: SvaraPublicTable[]) {
+    setTables(next: SvaraPublicTable[], finished?: SvaraFinishedMatch[]) {
       tables = next
+      if (finished) finishedMatches = finished
       if (myTable === null) {
         const owned = next.find((table) => table.players.some((p) => p.playerId === options.localProfileId && p.status !== 'exited'))
         if (owned) {

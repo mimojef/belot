@@ -3976,7 +3976,7 @@ export function createLobbyFlowController(
   // по-горе, за реалния lobby/активна-маса controller.
   let _svaraLobbyController: {
     destroy: () => void
-    setTables: (tables: SvaraPublicTable[]) => void
+    setTables: (tables: SvaraPublicTable[], finished?: import("../network/createGameServerClient").SvaraFinishedMatch[]) => void
     setMyTable: (table: SvaraPublicTable | null) => void
     setSnapshot: (snapshot: SvaraMatchSnapshotMessage | null) => void
     setTiming: (timing: SvaraMatchTimingMessage | null) => void
@@ -22493,7 +22493,7 @@ export function createLobbyFlowController(
         const owned = message.tables.find((table) => table.players.some((p) => p.playerId === profileId && p.status !== 'exited'))
         setSvaraActiveGame(owned !== undefined && owned.phase !== 'lobby')
       }
-      _svaraLobbyController?.setTables(message.tables)
+      _svaraLobbyController?.setTables(message.tables, message.finished)
       return true
     }
     if (message.type === 'svara_table_updated') {
