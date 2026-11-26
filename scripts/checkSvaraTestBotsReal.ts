@@ -127,9 +127,10 @@ async function createViaUi(p: Peer, capacity: 2 | 3 | 4, startMode: 'auto' | 'ma
   return p.frames.slice(offset).findLast((f) => f.type === 'svara_table_updated')!.table.matchId
 }
 
+// Бутонът „Запълни с ботове“ е премахнат от интерфейса — тестът праща същата WS заявка.
 async function fillViaUi(p: Peer, matchId: string, capacity: number) {
-  await p.page.waitForSelector('[data-svara-table-fill-bots]', { timeout: 5000 })
-  await p.page.click('[data-svara-table-fill-bots]')
+  assert.equal(await p.page.locator('[data-svara-table-fill-bots]').count(), 0, 'no visible bot button')
+  await raw(p, { type: 'fill_svara_table_with_bots', matchId, requestId: randomUUID() })
   await wait('bots seated', () => stored(matchId).state.seats.length === capacity, 5000)
 }
 

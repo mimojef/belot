@@ -211,7 +211,7 @@ export function createSvaraLobby(deps: {
 
   /** ВРЕМЕННО — тестови ботове: profileId на получател с право да запълва (admin), иначе null. */
   function testBotFillViewer(transport: Transport): string | null {
-    if (!testBots?.isEnabled()) return null
+    if (!testBots?.isEnabled() || paidMode) return null // платените маси са само с хора
     const session = transport.getSession()
     return session?.account.role === 'admin' ? session.profile.profileId : null
   }

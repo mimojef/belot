@@ -26,6 +26,7 @@ import { isSvaraPaidMatchesEnabled, participantsIfCommandStartsMatch, reconcileS
 import { getSvaraTableCreationOptions, SVARA_TEST_ENTRY_FEES } from '../src/games/svara/svaraTableCreationOptions.js'
 import { pinGameMatchFinancialTerms, SVARA_DEFAULT_FINANCIAL_CONFIG } from '../src/economy/gameFinancialConfig.js'
 import type { SvaraAccessSession } from '../src/games/svara/svaraAccess.js'
+import { createSvaraTestBotsFactory } from '../src/games/svara/testBots/createSvaraTestBots.js'
 
 let passed = 0
 let failed = 0
@@ -170,8 +171,9 @@ console.log('\n[3] Атомарно удържане (store)')
 
 // ─── Lobby + runtime + persistence ────────────────────────────────────────
 type Frames = Map<string, any[]>
-function makeLobby(store: Awaited<ReturnType<typeof createSvaraMatchSnapshotStore>>, paidEconomy: SvaraPaidEconomy | undefined, clock: Clock) {
-  const lobby = createSvaraLobby({ persistence: store, clock, hasOtherGameCommitment: () => false, onError: (e) => silenceErrors.push(e), ...(paidEconomy ? { paidEconomy } : {}) })
+function makeLobby(store: Awaited<ReturnType<typeof createSvaraMatchSnapshotStore>>, paidEconomy: SvaraPaidEconomy | undefined, clock: Clock,
+  testBots?: ReturnType<typeof createSvaraTestBotsFactory>) {
+  const lobby = createSvaraLobby({ persistence: store, clock, hasOtherGameCommitment: () => false, onError: (e) => silenceErrors.push(e), ...(paidEconomy ? { paidEconomy } : {}), ...(testBots ? { testBots } : {}) })
   const frames: Frames = new Map()
   const attach = (id: string) => {
     const session: SvaraAccessSession = { account: { role: 'admin' }, profile: { profileId: id } } as SvaraAccessSession
@@ -213,6 +215,26 @@ let matchA = ''
   lobby.handle('LPOOR', { type: 'create_svara_table', requestId: randomUUID(), capacity: 2, entryFee: 5_000, entryPercent: 1, startMode: 'auto' } as never)
   check('създаване с вход, премахнат от конфигурацията в базата → paid_unavailable, без маса', last(frames, 'LPOOR', 'svara_lobby_error')?.code === 'paid_unavailable' && lobby.findCommitment('LPOOR') === null)
   raw.prepare('INSERT INTO match_rooms (stake_amount, min_level, prize_amount, is_enabled, site_commission_bps) VALUES (5000, 1, 8000, 1, 2000)').run()
+  lobby.shutdown()
+}
+
+console.log('\n[7б] Платени маси: без тестови ботове, дори с директна WebSocket заявка')
+{
+  profile('B1')
+  // Най-лошият случай: ботовете са включени, заявката е от админ-създателя на чакаща маса.
+  const bots = createSvaraTestBotsFactory({ isEnabled: () => true, onError: (e) => silenceErrors.push(e) })
+  const { lobby, frames, attach } = makeLobby(lobbyStore, economy, clock, bots)
+  lobby.initializeRecovery()
+  attach('B1')
+  lobby.handle('B1', { type: 'create_svara_table', requestId: randomUUID(), capacity: 2, entryFee: 5_000, entryPercent: 1, startMode: 'manual' } as never)
+  const table = last(frames, 'B1', 'svara_table_updated').table
+  check('платена маса: няма флаг за бутон с ботове', table.paid === true && table.testBotFill === undefined, table)
+  lobby.handle('B1', { type: 'fill_svara_table_with_bots', matchId: table.matchId, requestId: randomUUID() } as never)
+  const stored = lobbyStore.load(table.matchId)
+  check('директна заявка fill_svara_table_with_bots → not_allowed; никой не сяда, мачът не стартира, нищо не е удържано',
+    last(frames, 'B1', 'svara_lobby_error')?.code === 'not_allowed' && stored?.state.seats.length === 1 && stored.state.phase === 'lobby'
+    && economy.getFinance(table.matchId) === null && balance('B1') === START, { error: last(frames, 'B1', 'svara_lobby_error'), seats: stored?.state.seats })
+  lobby.handle('B1', { type: 'leave_svara_table', matchId: table.matchId, requestId: randomUUID() } as never)
   lobby.shutdown()
 }
 

@@ -63,8 +63,6 @@ type Options = {
   onJoin: (matchId: string) => void
   onLeave: (matchId: string) => void
   onStart: (matchId: string) => void
-  /** ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). */
-  onFillWithBots?: (matchId: string) => void
   onRequestTableState: (matchId: string) => void
   onOpenProfile?: (profileId: string, displayName: string | null) => void
   /** Задание 2Б.3.7.4 §15 — реалните участнически команди (bet/fold/look/all-in/request-return/...). */
@@ -135,8 +133,6 @@ export function createSvaraLobbyController(options: Options) {
   let createDraft = dialogState.draft
   let message = ''
   let leavePending = false
-  // ВРЕМЕННО — тестови ботове: една заявка за запълване до следващото обновяване на масата.
-  let fillBotsPending = false
   let joinPendingMatchId: string | null = null
   // Задание §15 — само ЕДНА игрова команда наведнъж; бутоните са неактивни,
   // докато чакаме отговор (svara_command_result/svara_command_error),
@@ -509,7 +505,6 @@ export function createSvaraLobbyController(options: Options) {
       </div>
       <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:8px;">${slotsHtml}</div>
       ${table.startMode === 'manual' && isHost ? `<button type="button" data-svara-table-start="1" ${canManualStart ? '' : 'disabled'} class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}width:100%;height:44px;margin-top:14px;font-size:15px;${canManualStart ? '' : 'opacity:.55;cursor:not-allowed;'}">Старт</button>` : ''}
-      ${table.testBotFill === true && isHost && options.onFillWithBots ? `<button type="button" data-svara-table-fill-bots="1" ${fillBotsPending ? 'disabled' : ''} style="${LIGHT_SECONDARY_BUTTON_STYLE}width:100%;height:42px;margin-top:10px;border-color:#B2DDFF;color:#175CD3;font-size:14px;${fillBotsPending ? 'opacity:.55;cursor:wait;' : ''}">${fillBotsPending ? 'Запълване…' : 'Запълни с ботове'}</button><div style="margin-top:6px;font-size:11px;font-weight:600;color:#667085;text-align:center;">Само за локално тестване</div>` : ''}
     </div>`
     }
     return `<div data-svara-waiting="1" style="${panel}">
@@ -519,7 +514,6 @@ export function createSvaraLobbyController(options: Options) {
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:8px;">${slotsHtml}</div>
       ${table.startMode === 'manual' && isHost ? `<button data-svara-table-start="1" ${canManualStart ? '' : 'disabled'} style="${button}width:100%;margin-top:16px;background:${canManualStart ? '#d4a520' : '#242424'};color:${canManualStart ? '#050505' : '#777'};cursor:${canManualStart ? 'pointer' : 'not-allowed'};">Старт</button>` : ''}
-      ${table.testBotFill === true && isHost && options.onFillWithBots ? `<button data-svara-table-fill-bots="1" ${fillBotsPending ? 'disabled' : ''} style="${button}width:100%;margin-top:10px;border-color:rgba(120,190,255,.6);color:#9fd0ff;${fillBotsPending ? 'opacity:.55;cursor:wait;' : ''}">${fillBotsPending ? 'Запълване…' : 'Запълни с ботове'}</button><div style="margin-top:6px;font-size:11px;color:rgba(255,255,255,.5);text-align:center;">Само за локално тестване</div>` : ''}
     </div>`
   }
 
@@ -1145,14 +1139,6 @@ export function createSvaraLobbyController(options: Options) {
     // Бутонът „Изход“ в банера на приключил/прекратен мач — същото leave_svara_table.
     on(options.root.querySelector('[data-svara-result-exit]'), 'click', () => requestExit())
     on(options.root.querySelector('[data-svara-table-start]'), 'click', () => { if (myTable) options.onStart(myTable.matchId) })
-    // ВРЕМЕННО — тестови ботове.
-    on(options.root.querySelector('[data-svara-table-fill-bots]'), 'click', () => {
-      if (!myTable || fillBotsPending) return
-      fillBotsPending = true
-      message = ''
-      render()
-      options.onFillWithBots?.(myTable.matchId)
-    })
     on(options.root.querySelector('[data-svara-table-refresh]'), 'click', () => { if (myTable) options.onRequestTableState(myTable.matchId) })
     options.root.querySelectorAll<HTMLElement>('[data-svara-profile-id]').forEach((element) => on(element, 'click', () => {
       const player = myTable?.players.find((participant) => participant.playerId === element.dataset.svaraProfileId)
@@ -1285,7 +1271,6 @@ export function createSvaraLobbyController(options: Options) {
       myTable = table
       if (table === null) { snapshot = null; timing = null; pendingDecision = null; actionPending = false; pendingActionCommandId = null }
       leavePending = false
-      fillBotsPending = false // ВРЕМЕННО — тестови ботове
       joinPendingMatchId = null
       render()
     },
@@ -1307,7 +1292,7 @@ export function createSvaraLobbyController(options: Options) {
     // Отказана lobby заявка (вкл. напускане) освобождава бутоните — иначе
     // „Изход“ остава завинаги неактивен („…“) до следващо обновяване на масата,
     // което при приключил мач никога не идва.
-    showMessage(next: string) { joinPendingMatchId = null; fillBotsPending = false; leavePending = false; message = next; render() },
+    showMessage(next: string) { joinPendingMatchId = null; leavePending = false; message = next; render() },
     // Задание §15 — само СЪЩАТА (или вече изчистената) commandId освобождава
     // бутоните; закъснял отговор за по-стара/отменена команда никога не
     // засяга по-новото pending действие.

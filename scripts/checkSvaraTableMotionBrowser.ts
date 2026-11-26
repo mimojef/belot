@@ -189,7 +189,7 @@ async function createWithBots(p: Peer, capacity: 2 | 3 | 4): Promise<string> {
   await p.page.click('[data-svara-create-form] button[type="submit"]')
   await wait('table', () => p.frames.slice(offset).some((f) => f.type === 'svara_table_updated'), 5_000)
   const matchId = p.frames.slice(offset).findLast((f) => f.type === 'svara_table_updated')!.table.matchId as string
-  await p.page.click('[data-svara-table-fill-bots]')
+  await raw(p, { type: 'fill_svara_table_with_bots', matchId, requestId: randomUUID() }) // без видим бутон: същата WS заявка
   await wait('started', () => latest(p, matchId)?.phase === 'in-progress', 10_000)
   return matchId
 }

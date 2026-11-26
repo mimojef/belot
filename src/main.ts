@@ -7728,7 +7728,6 @@ lobby = createLobbyFlowController({
   onSvaraTableJoin: (matchId) => { client.joinSvaraTable(matchId) },
   onSvaraTableLeave: (matchId) => { client.leaveSvaraTable(matchId) },
   onSvaraTableStart: (matchId) => { client.startSvaraTable(matchId) },
-  onSvaraTableFillWithBots: (matchId) => { client.fillSvaraTableWithBots(matchId) }, // ВРЕМЕННО — тестови ботове
   onSvaraTableStateRequest: (matchId) => { client.requestSvaraTableState(matchId) },
   onSvaraSubmitCommand: (matchId, commandId, expectedRevision, command) => { client.submitSvaraCommand(matchId, commandId, expectedRevision, command) },
   onTournamentMatchesSubscribe: (tournamentId, token) => { client.subscribeTournamentMatches(tournamentId, token) },

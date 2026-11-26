@@ -147,7 +147,10 @@ try {
       await page.click('[data-svara-create-form] button[type="submit"]')
       await wait('table', () => frames.slice(offset).some((f) => f.type === 'svara_table_updated'), 5_000)
       const matchId = frames.slice(offset).findLast((f) => f.type === 'svara_table_updated')!.table.matchId as string
-      await page.click('[data-svara-table-fill-bots]')
+      await page.evaluate((payload) => { // без видим бутон: същата WS заявка
+        const s = (globalThis as unknown as { __svaraSockets: WebSocket[] }).__svaraSockets.findLast((x) => x.readyState === 1 && x.url.endsWith('/ws'))
+        s?.send(JSON.stringify(payload))
+      }, { type: 'fill_svara_table_with_bots', matchId, requestId: randomUUID() })
       await wait('started', () => frames.some((f) => f.type === 'svara_match_snapshot' && f.matchId === matchId && f.phase === 'in-progress'), 10_000)
       await resetMeter(page)
       let a = capacity * 7919
