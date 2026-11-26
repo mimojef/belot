@@ -324,17 +324,25 @@ export function createSvaraLobbyController(options: Options) {
     </div>`
   }
 
+  /** Етап 3В.2: текстът на наградата във формата — само от сървърната стойност. */
+  function createPrizeText(prize: number | null): string {
+    if (prize === null) return ''
+    return creationOptions?.paid ? `Награда за победителя: ${formatAmount(prize)} жълтици` : `Изчислена тестова награда: ${formatAmount(prize)} жълтици (не се изплаща)`
+  }
+
   function tableAmountsHtml(table: SvaraPublicTable): string {
+    // Етап 3В.2: само сървърната награда — без локален разчет.
+    const prize = typeof table.prizeAmount === 'number' && Number.isSafeInteger(table.prizeAmount) && table.prizeAmount > 0 ? table.prizeAmount : null
     const coin = '<img src="/assets/lobby/icon-coin.png" alt="" aria-hidden="true" style="width:17px;height:17px;display:block;object-fit:contain;flex:0 0 auto;" />'
     if (light) {
       return `<div style="display:grid;gap:4px;margin-top:6px;font-size:12.5px;line-height:1.4;font-weight:600;color:#344054;">
       <div data-svara-waiting-entry="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">Вход: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee)} жълтици</span></span></div>
-      <div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#B54708;">Тестова награда: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee * table.capacity * 4 / 5)} жълтици</span></span><span style="font-size:11px;color:#667085;">(Не се изплаща)</span></div>
+      ${prize === null ? '' : `<div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#B54708;">${table.paid ? 'Награда' : 'Тестова награда'}: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(prize)} жълтици</span></span>${table.paid ? '' : '<span style="font-size:11px;color:#667085;">(Не се изплаща)</span>'}</div>`}
     </div>`
     }
     return `<div style="display:grid;gap:5px;margin-top:7px;font-size:13px;line-height:1.4;">
       <div data-svara-waiting-entry="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">Вход: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee)} жълтици</span></span></div>
-      <div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#f4c95b;">Тестова награда: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee * table.capacity * 4 / 5)} жълтици</span></span><span style="font-size:11px;color:rgba(255,255,255,.65);">(Не се изплаща)</span></div>
+      ${prize === null ? '' : `<div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#f4c95b;">${table.paid ? 'Награда' : 'Тестова награда'}: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(prize)} жълтици</span></span>${table.paid ? '' : '<span style="font-size:11px;color:rgba(255,255,255,.65);">(Не се изплаща)</span>'}</div>`}
     </div>`
   }
 
@@ -814,13 +822,15 @@ export function createSvaraLobbyController(options: Options) {
     const radioStyle = 'width:18px;height:18px;margin:0;flex-shrink:0;accent-color:#7950E8;cursor:pointer;'
     const cancel = `<button type="button" data-svara-create-close="1" style="${LIGHT_SECONDARY_BUTTON_STYLE}height:44px;color:#344054;font-size:14px;">Отказ</button>`
     const entry = creationOptions?.entries.find((option) => option.entryFee === createDraft.entryFee)
+    // Етап 3В.2: наградата идва от сървъра (prizeByCapacity) — без локален разчет.
+    const createPrize = entry?.prizeByCapacity?.[createDraft.capacity as 2 | 3 | 4] ?? null
     const content = entry && creationOptions ? `<form data-svara-create-form="1">
       <label style="${labelStyle}">Брой играчи<select name="capacity" style="${LIGHT_FIELD_STYLE}">${[2, 3, 4].map((count) => `<option value="${count}" ${count === createDraft.capacity ? 'selected' : ''}>${count}</option>`).join('')}</select></label>
       <label style="${labelStyle}">Вход<select name="entryFee" style="${LIGHT_FIELD_STYLE}">${creationOptions.entries.map((option) => `<option value="${option.entryFee}" ${option.entryFee === createDraft.entryFee ? 'selected' : ''}>${formatAmount(option.entryFee)} жълтици</option>`).join('')}</select></label>
       <div style="display:grid;gap:4px;margin:0 0 16px;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#F9FAFB;font-size:13px;font-weight:600;line-height:1.4;color:#344054;" aria-live="polite">
         <div data-svara-create-chips="1">Получаваш: ${formatAmount(entry.startingChips)} виртуални чипа</div>
         <div data-svara-create-ante="1">Анте за раздаване: ${formatAmount(entry.entryChips)} чипа</div>
-        <div data-svara-create-prize="1" style="color:#B54708;">Изчислена тестова награда: ${formatAmount(createDraft.entryFee * createDraft.capacity * 4 / 5)} жълтици (не се изплаща)</div>
+        <div data-svara-create-prize="1" style="color:#B54708;" ${createPrize === null ? 'hidden' : ''}>${createPrizeText(createPrize)}</div>
       </div>
       <fieldset style="border:0;padding:0;margin:0 0 18px;display:grid;gap:8px;min-width:0;"><legend style="padding:0;margin-bottom:6px;font-size:13px;font-weight:700;color:#17233C;">Старт</legend><label style="${choiceStyle}"><input type="radio" name="startMode" value="auto" ${createDraft.startMode === 'auto' ? 'checked' : ''} style="${radioStyle}"> При запълване</label><label style="${choiceStyle}"><input type="radio" name="startMode" value="manual" ${createDraft.startMode === 'manual' ? 'checked' : ''} style="${radioStyle}"> Ръчен старт</label></fieldset>
       <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">${cancel}<button type="submit" class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}height:44px;font-size:15px;">Създай</button></div>
@@ -836,13 +846,15 @@ export function createSvaraLobbyController(options: Options) {
     const modalButton = `${button}min-height:42px;`
     const selectStyle = 'width:100%;max-width:100%;min-width:0;box-sizing:border-box;min-height:42px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;'
     const entry = creationOptions?.entries.find((option) => option.entryFee === createDraft.entryFee)
+    // Етап 3В.2: наградата идва от сървъра (prizeByCapacity) — без локален разчет.
+    const createPrize = entry?.prizeByCapacity?.[createDraft.capacity as 2 | 3 | 4] ?? null
     const content = entry && creationOptions ? `<form data-svara-create-form="1">
       <label style="display:grid;gap:7px;margin-bottom:14px;min-width:0;">Брой играчи<select name="capacity" style="${selectStyle}">${[2, 3, 4].map((count) => `<option value="${count}" ${count === createDraft.capacity ? 'selected' : ''}>${count}</option>`).join('')}</select></label>
       <label style="display:grid;gap:7px;margin-bottom:14px;min-width:0;">Вход<select name="entryFee" style="${selectStyle}">${creationOptions.entries.map((option) => `<option value="${option.entryFee}" ${option.entryFee === createDraft.entryFee ? 'selected' : ''}>${formatAmount(option.entryFee)} жълтици</option>`).join('')}</select></label>
       <div style="display:grid;gap:4px;margin:0 0 18px;font-size:13px;line-height:1.4;color:#f4c95b;" aria-live="polite">
         <div data-svara-create-chips="1">Получаваш: ${formatAmount(entry.startingChips)} виртуални чипа</div>
         <div data-svara-create-ante="1">Анте за раздаване: ${formatAmount(entry.entryChips)} чипа</div>
-        <div data-svara-create-prize="1">Изчислена тестова награда: ${formatAmount(createDraft.entryFee * createDraft.capacity * 4 / 5)} жълтици (не се изплаща)</div>
+        <div data-svara-create-prize="1" ${createPrize === null ? 'hidden' : ''}>${createPrizeText(createPrize)}</div>
       </div>
       <fieldset style="border:0;padding:0;margin:0 0 18px;display:grid;gap:10px;"><legend style="margin-bottom:8px;">Старт</legend><label><input type="radio" name="startMode" value="auto" ${createDraft.startMode === 'auto' ? 'checked' : ''}> При запълване</label><label><input type="radio" name="startMode" value="manual" ${createDraft.startMode === 'manual' ? 'checked' : ''}> Ръчен старт</label></fieldset>
       <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" data-svara-create-close="1" style="${modalButton}">Отказ</button><button type="submit" style="${modalButton}background:#d4a520;color:#050505;">Създай</button></div>
@@ -943,7 +955,9 @@ export function createSvaraLobbyController(options: Options) {
       const prize = createForm.querySelector('[data-svara-create-prize]')
       if (chips) chips.textContent = `Получаваш: ${formatAmount(entry.startingChips)} виртуални чипа`
       if (ante) ante.textContent = `Анте за раздаване: ${formatAmount(entry.entryChips)} чипа`
-      if (prize) prize.textContent = `Изчислена тестова награда: ${formatAmount(entry.entryFee * capacity * 4 / 5)} жълтици (не се изплаща)`
+      // Етап 3В.2: сървърната награда за избрания брой играчи (без локален разчет).
+      const serverPrize = entry.prizeByCapacity?.[capacity as 2 | 3 | 4] ?? null
+      if (prize instanceof HTMLElement) { prize.textContent = createPrizeText(serverPrize); prize.hidden = serverPrize === null }
     })
     if (createForm) on(createForm, 'submit', (event) => {
       event.preventDefault()

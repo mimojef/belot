@@ -3,6 +3,8 @@ import { createSvaraLobby } from './createSvaraLobby.js'
 import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/svaraPersistence.js'
 import type { SvaraClock } from './runtime/createSvaraLifecycle.js'
 import type { SvaraTestBotsFactory } from './testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
+import { createSvaraEconomyStore } from '../../db/svaraEconomyStore.js'
+import { isSvaraPaidMatchesEnabled, type SvaraPaidEconomy } from './svaraPaidEconomy.js'
 
 /** Isolate Svara startup failures from the rest of the platform. No migrations here. */
 export async function createPersistentSvaraLobby(deps: {
@@ -29,6 +31,21 @@ export async function createPersistentSvaraLobby(deps: {
       // cannot prove absence: new cross-game admissions must fail closed.
       findActiveMatchId: safe.code === 'schema-missing' ? () => null : unavailable }
   }
-  const lobby = createSvaraLobby({ ...deps, persistence })
+  // Етап 3В.2: платената „Свара“ — САМО при SVARA_PAID_MATCHES_ENABLED=1.
+  // Недостъпна икономика при включен флаг → 'unavailable' (новите маси се отказват).
+  let paidEconomy: SvaraPaidEconomy | 'unavailable' | undefined
+  if (isSvaraPaidMatchesEnabled()) {
+    try {
+      const economy = await createSvaraEconomyStore(deps.databaseFilePath)
+      economy.ensureDefaultConfig()
+      paidEconomy = economy
+      const closeSnapshots = close
+      close = () => { closeSnapshots(); economy.close() }
+    } catch (cause) {
+      deps.onError?.(cause)
+      paidEconomy = 'unavailable'
+    }
+  }
+  const lobby = createSvaraLobby({ ...deps, persistence, ...(paidEconomy !== undefined ? { paidEconomy } : {}) })
   return { lobby, close }
 }

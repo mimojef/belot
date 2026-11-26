@@ -12,6 +12,8 @@ import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/sva
 import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
 import { serializeSvaraSnapshotForClient, type SvaraPublicTable } from './protocol/svaraSnapshotProtocol.js'
+import { participantsIfCommandStartsMatch, reconcileSvaraPaidMatches, type SvaraPaidEconomy } from './svaraPaidEconomy.js'
+import { pinGameMatchFinancialTerms, SVARA_DEFAULT_FINANCIAL_CONFIG } from '../../economy/gameFinancialConfig.js'
 
 type Transport = {
   /** Handshake identity used only to skip unrelated connections during broadcast. */
@@ -34,6 +36,12 @@ export function createSvaraLobby(deps: {
   clock?: SvaraClock
   /** ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). Без него ботове няма. */
   testBots?: SvaraTestBotsFactory
+  /**
+   * Етап 3В.2 — платена „Свара“. Липсва → виртуален режим (както досега).
+   * 'unavailable' → платеният режим е включен, но икономиката не е достъпна:
+   * нови маси се отказват (fail closed).
+   */
+  paidEconomy?: SvaraPaidEconomy | 'unavailable'
 }) {
   // An injected runtime is a test/server-owned dependency. Production always supplies persistence.
   if (deps.runtime && deps.persistence) throw new Error('Provide persistence through the injected Svara runtime')
@@ -50,6 +58,67 @@ export function createSvaraLobby(deps: {
     onChange: (matchId, before) => publish(matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId))),
   })
   let stopped = false
+  // ── Етап 3В.2: платена „Свара“ ────────────────────────────────────────────
+  const paidMode = deps.paidEconomy !== undefined
+  const paidEconomy = deps.paidEconomy === undefined || deps.paidEconomy === 'unavailable' ? null : deps.paidEconomy
+  /** Сървърната награда за победителя; клиентът никога не я смята сам. */
+  function prizeFor(entryFee: number, participants: number): number | null {
+    if (!paidMode) {
+      const terms = pinGameMatchFinancialTerms(SVARA_DEFAULT_FINANCIAL_CONFIG, { entryFee, paidEntries: participants, pinnedAt: 1 })
+      return terms.ok ? terms.terms.prizes[0]! : null
+    }
+    try { return paidEconomy?.previewPrize(entryFee, participants) ?? null } catch (cause) { deps.onError?.(cause); return null }
+  }
+  /** Започнал платен мач — от фиксираните условия; иначе — от активната конфигурация. */
+  function tablePrize(table: SvaraPublicTable): number | null {
+    if (paidEconomy) {
+      try {
+        const finance = paidEconomy.getFinance(table.matchId)
+        if (finance && finance.status !== 'refunded') return (JSON.parse(finance.termsJson) as { prizes: number[] }).prizes[0] ?? null
+      } catch (cause) { deps.onError?.(cause); return null }
+    }
+    return prizeFor(table.entryFee, table.capacity)
+  }
+  /** Приключил платен мач → изплащане (или 'held' без победител). Идемпотентно. */
+  function settlePaidIfFinished(matchId: string): void {
+    if (!paidEconomy || !runtime.hasMatch(matchId) || runtime.getPublicTable(matchId).phase !== 'finished') return
+    try {
+      if (paidEconomy.getFinance(matchId)?.status !== 'collected') return
+      const winnerId = runtime.exportInternalStateForServer(matchId).winnerId
+      const result = paidEconomy.settleMatch(matchId, winnerId)
+      if (!result.ok) deps.onError?.(new Error(`[svara-paid] settlement failed match=${matchId}: ${result.message}`))
+      else if (result.status === 'held') deps.onError?.(new Error(`[svara-paid] match=${matchId} HELD for review: ${result.heldReason}`))
+    } catch (cause) { deps.onError?.(cause) }
+  }
+  /**
+   * Удържа входовете ПРЕДИ командата, която стартира мача. Връща null при
+   * успех (или ако командата не стартира мач); иначе кода за отказ.
+   */
+  function collectBeforeStart(table: SvaraPublicTable, playerId: string, command: 'join-seat' | 'start-match'): SvaraLobbyErrorCode | null {
+    if (!paidMode) return null
+    const participants = participantsIfCommandStartsMatch(table, playerId, command)
+    if (participants === null) return null
+    if (!paidEconomy) return 'paid_unavailable'
+    if (participants.some((id) => testBots?.isBot(id))) return 'not_allowed' // платените маси са само с хора
+    let result = paidEconomy.collectEntries({ matchId: table.matchId, entryFee: table.entryFee, participantIds: participants })
+    if (!result.ok && result.code === 'already-finalized' && paidEconomy.getFinance(table.matchId)?.status === 'collected') {
+      // Остатък от неуспешен старт с други участници (маса още в лобито) — връщане, после нов опит.
+      const refund = paidEconomy.refundEntries(table.matchId)
+      if (refund.ok) result = paidEconomy.collectEntries({ matchId: table.matchId, entryFee: table.entryFee, participantIds: participants })
+    }
+    if (result.ok) return null
+    if (result.code !== 'insufficient-balance') deps.onError?.(new Error(`[svara-paid] entry collection failed match=${table.matchId}: ${result.code} ${result.message}`))
+    return result.code === 'insufficient-balance' ? 'insufficient_coins' : 'paid_unavailable'
+  }
+  /** Стартът не е станал (грешка/друго състояние) → входовете се връщат веднага. */
+  function refundIfNotStarted(matchId: string): void {
+    if (!paidEconomy) return
+    try {
+      if (runtime.hasMatch(matchId) && runtime.getPublicTable(matchId).phase !== 'lobby') return
+      const refund = paidEconomy.refundEntries(matchId)
+      if (!refund.ok) deps.onError?.(new Error(`[svara-paid] refund after failed start failed match=${matchId}: ${refund.message} — boot reconcile will retry`))
+    } catch (cause) { deps.onError?.(cause) }
+  }
   let recoveryState: SvaraRecoveryState = deps.persistence ? 'initialization' : 'ready'
   let recoveryAttempted = false
   const clock = deps.clock ?? createSvaraRealClock()
@@ -111,7 +180,7 @@ export function createSvaraLobby(deps: {
 
   function tableWithProfiles(table: SvaraPublicTable, fillViewerId: string | null = null): SvaraPublicTable {
     const canFill = fillViewerId !== null && fillViewerId === table.creatorId && table.phase === 'lobby' && table.players.length < table.capacity
-    return { ...table, ...(canFill ? { testBotFill: true } : {}), players: table.players.map(({ playerId, status }) => {
+    return { ...table, ...(canFill ? { testBotFill: true } : {}), prizeAmount: tablePrize(table), paid: paidMode, players: table.players.map(({ playerId, status }) => {
       // ВРЕМЕННО — тестови ботове: име/аватар от модула, никога от базата.
       const bot = testBots?.isBot(playerId) ? testBots.publicProfile(playerId) : null
       if (bot) return { playerId, status, displayName: bot.displayName, avatarUrl: bot.avatarUrl, gender: bot.gender, isBot: true }
@@ -165,6 +234,8 @@ export function createSvaraLobby(deps: {
       insufficient_chips: 'Недостатъчно игрови чипове.', look_required: 'Първо погледни собствените си карти.',
       player_absent: 'Отсъстваш. Заяви връщане за следващото раздаване.',
       dealing_in_progress: 'Картите тепърва се раздават.',
+      insufficient_coins: 'Някой от играчите няма достатъчно жълтици за входа. Мачът не започна.',
+      paid_unavailable: 'Платените игри временно не са достъпни.',
     }
     if (gameplay) deliver(transport, { type: 'svara_command_error', code, message: messages[code], ...(commandId ? { commandId } : {}) })
     else deliver(transport, { type: 'svara_lobby_error', code, message: messages[code], ...(requestId ? { requestId } : {}) })
@@ -202,6 +273,9 @@ export function createSvaraLobby(deps: {
     return command.type === 'look' ? { type: 'svara_player_looked', matchId, playerId, revision: runtime.getMatchRevision(matchId) } : undefined
   }
   function publish(matchId: string, previousPlayers: string[], publicChanged = true, event?: SvaraLobbyServerMessage) {
+    // Етап 3В.2: уреждането е преди всичко останало (вкл. по време на
+    // възстановяването) — всеки преход към 'finished' минава оттук.
+    settlePaidIfFinished(matchId)
     if (recoveryState !== 'ready') return
     const table = runtime.getPublicTable(matchId)
     const tables = publicChanged ? publicTables() : []
@@ -235,6 +309,8 @@ export function createSvaraLobby(deps: {
   }
 
   return {
+    /** Етап 3В.2: за формата „Създай игра“ (HTTP). */
+    creationPrize: { paid: paidMode, prizeFor },
     getRecoveryState: () => recoveryState,
     /** Synchronous startup barrier; call only after the other games' commitments are restored. */
     initializeRecovery(): SvaraRecoveryState {
@@ -253,6 +329,20 @@ export function createSvaraLobby(deps: {
         // schedules; committed preceding transitions remain durable for next boot.
         for (const matchId of runtime.listMatchIds()) lifecycle.sync(matchId)
         recoveryState = 'ready'
+        // Етап 3В.2: удържани входове на мачове, които не са започнали /
+        // приключили по време на престоя → връщане / уреждане (идемпотентно).
+        if (paidEconomy && deps.persistence) {
+          const persistence = deps.persistence
+          const report = reconcileSvaraPaidMatches(paidEconomy, (matchId) => {
+            try {
+              const stored = persistence.load(matchId)
+              return stored ? { kind: 'state', phase: stored.state.phase, winnerId: stored.state.winnerId } : { kind: 'missing' }
+            } catch { return { kind: 'unreadable' } }
+          })
+          if (report.refunded.length + report.settled.length + report.unrecoverable.length + report.failed.length > 0) {
+            deps.onError?.(new Error(`[svara-paid] boot reconcile ${JSON.stringify(report)}`))
+          }
+        }
         // ВРЕМЕННО — тестови ботове: възстановените мачове продължават след рестарт.
         for (const matchId of runtime.listMatchIds()) testBots?.onMatchChanged(matchId)
         // Мач, приключил още при възстановяването (напр. изтекло чакане → all-absent).
@@ -343,6 +433,7 @@ export function createSvaraLobby(deps: {
           // ВРЕМЕННО — тестови ботове. Правото се проверява тук (флаг + admin +
           // създател + чакаща маса), не от видимостта на бутона.
           if (!testBots?.isEnabled()) { reject('feature_disabled'); return }
+          if (paidMode) { reject('not_allowed'); return } // Етап 3В.2: платените маси са само с хора
           if (session!.account.role !== 'admin') { reject('forbidden_role'); return }
           if (!runtime.hasMatch(message.matchId)) { reject('match_not_found'); return }
           const before = runtime.getPublicTable(message.matchId)
@@ -370,6 +461,8 @@ export function createSvaraLobby(deps: {
           }
         }
         if (message.type === 'create_svara_table') {
+          // Етап 3В.2: платен режим → само вход от активната конфигурация с точна награда.
+          if (paidMode && prizeFor(message.entryFee, message.capacity) === null) { error(transport, 'paid_unavailable', requestId); return }
           const matchId = randomUUID()
           runtime.registerMatch({ matchId, creator: { playerId }, capacity: message.capacity, entryFee: message.entryFee, entryPercent: message.entryPercent, startMode: message.startMode })
           deps.onAdmission?.(playerId)
@@ -421,6 +514,15 @@ export function createSvaraLobby(deps: {
         // ботове прекратява мача веднага, без победител. Маси само с хора — без промяна.
         if (type === 'exit' && testBots && isLastHumanLeavingTestBotMatch(runtime, message.matchId, playerId, testBots.isBot)) {
           exitAndAbortTestBotMatch(runtime, message.matchId, playerId, message.requestId, testBots.isBot)
+        } else if (type === 'join-seat' || type === 'start-match') {
+          // Етап 3В.2: удържане на ВСИЧКИ входове преди командата, която стартира мача.
+          const refusal = collectBeforeStart(before, playerId, type)
+          if (refusal) { error(transport, refusal, requestId); return }
+          try {
+            runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, { type })
+          } finally {
+            refundIfNotStarted(message.matchId) // no-op, ако мачът е започнал или няма удържане
+          }
         } else runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, { type })
         lifecycle.refresh(message.matchId)
         if (message.type === 'join_svara_table') deps.onAdmission?.(playerId)

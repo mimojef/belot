@@ -17,6 +17,8 @@ export const SVARA_ACCESS_PATH = '/api/games/svara/access'
 export type SvaraHttpDeps = {
   getSessionFromRequest: (req: IncomingMessage) => SvaraAccessSession
   sendJsonResponse: (res: ServerResponse, statusCode: number, payload: unknown, headers?: Record<string, string>) => void
+  /** Етап 3В.2: сървърната награда за формата „Създай игра“. */
+  prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null }
 }
 
 const NO_STORE_HEADERS = { 'Cache-Control': 'no-store' }
@@ -36,7 +38,7 @@ export function handleSvaraHttpRequest(
 
   const decision = evaluateSvaraAccess(deps.getSessionFromRequest(req))
   if (decision.allowed) {
-    deps.sendJsonResponse(res, 200, { ok: true, access: 'granted', creationOptions: getSvaraTableCreationOptions() }, NO_STORE_HEADERS)
+    deps.sendJsonResponse(res, 200, { ok: true, access: 'granted', creationOptions: getSvaraTableCreationOptions(deps.prize) }, NO_STORE_HEADERS)
     return true
   }
 

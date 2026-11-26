@@ -58,6 +58,14 @@ export type SvaraPublicTable = {
     isBot?: boolean }>
   /** ВРЕМЕННО — тестови ботове: само за получател с право на „Запълни с ботове“. */
   testBotFill?: boolean
+  /**
+   * Етап 3В.2: наградата за победителя, изчислена от СЪРВЪРА (добавя се от
+   * lobby при доставка): при започнал платен мач — от фиксираните условия;
+   * иначе — от активната конфигурация за пълна маса. null — недостъпна.
+   */
+  prizeAmount?: number | null
+  /** Етап 3В.2: true — платена маса (реално удържане и изплащане). */
+  paid?: boolean
 }
 
 /** Explicit public whitelist; never copies cards or internal state. */

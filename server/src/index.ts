@@ -26311,6 +26311,8 @@ async function handleHttpRequest(
   if (handleSvaraHttpRequest(req, res, requestUrl.pathname, {
     getSessionFromRequest: (request) => authStore.getSession(getSessionTokenFromCookieHeader(request.headers.cookie)),
     sendJsonResponse,
+    // Етап 3В.2: наградата във формата се изчислява от сървъра.
+    prize: svaraService.lobby.creationPrize,
   })) {
     return
   }

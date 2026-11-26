@@ -9,12 +9,21 @@ export function isSvaraTestEntryFee(value: unknown): value is number {
   return typeof value === 'number' && (SVARA_TEST_ENTRY_FEES as readonly number[]).includes(value)
 }
 
-export function getSvaraTableCreationOptions() {
+/**
+ * Етап 3В.2: prize — сървърна функция за наградата (вход, участници) → сума
+ * или null. paid — дали масите са платени. Без prize наградите липсват
+ * (клиентът не смята сам).
+ */
+export function getSvaraTableCreationOptions(prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null }) {
   return {
     entryPercent: SVARA_TEST_ENTRY_PERCENT,
+    ...(prize ? { paid: prize.paid } : {}),
     entries: SVARA_TEST_ENTRY_FEES.map((entryFee) => {
       const startingChips = svaraStartingChipsForEntry(entryFee)
-      return { entryFee, startingChips, entryChips: computeSvaraEntryChips(startingChips, SVARA_TEST_ENTRY_PERCENT) }
+      const prizeByCapacity = prize
+        ? { 2: prize.prizeFor(entryFee, 2), 3: prize.prizeFor(entryFee, 3), 4: prize.prizeFor(entryFee, 4) }
+        : undefined
+      return { entryFee, startingChips, entryChips: computeSvaraEntryChips(startingChips, SVARA_TEST_ENTRY_PERCENT), ...(prizeByCapacity ? { prizeByCapacity } : {}) }
     }),
   }
 }

@@ -29,6 +29,8 @@ export type SvaraLobbyErrorCode =
   | 'other_game_commitment' | 'svara_commitment' | 'server_unavailable'
   | 'stale_action' | 'invalid_action' | 'not_your_turn' | 'insufficient_chips' | 'look_required'
   | 'player_absent' | 'dealing_in_progress'
+  // Етап 3В.2 (платена „Свара“, изключена по подразбиране)
+  | 'insufficient_coins' | 'paid_unavailable'
 
 export type SvaraLobbyServerMessage =
   | { type: 'svara_match_timing'; matchId: string; revision: number; serverNow: number;

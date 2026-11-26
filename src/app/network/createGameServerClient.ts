@@ -1300,6 +1300,10 @@ export type SvaraPublicTable = {
     isBot?: boolean }>
   /** ВРЕМЕННО — тестови ботове: сървърът го праща само на получател с право на „Запълни с ботове“. */
   testBotFill?: boolean
+  /** Етап 3В.2: наградата за победителя, изчислена от сървъра (null/липсва — не се показва). */
+  prizeAmount?: number | null
+  /** Етап 3В.2: true — платена маса. */
+  paid?: boolean
 }
 
 export type SvaraBettingAction =

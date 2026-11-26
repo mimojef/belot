@@ -26,7 +26,10 @@ export type SvaraAccessCheckResult = 'granted' | 'denied' | 'unauthenticated' | 
 
 export type SvaraTableCreationOptions = {
   entryPercent: 1
-  entries: Array<{ entryFee: number; startingChips: number; entryChips: number }>
+  /** Етап 3В.2: true — платени маси (реално удържане и изплащане). */
+  paid?: boolean
+  /** prizeByCapacity — наградата за победителя, изчислена от сървъра (null — недостъпна). */
+  entries: Array<{ entryFee: number; startingChips: number; entryChips: number; prizeByCapacity?: Partial<Record<2 | 3 | 4, number | null>> }>
 }
 
 /** Read-only server configuration; never guess an ante or use stale defaults. */
@@ -42,6 +45,8 @@ export async function fetchSvaraTableCreationOptions(apiBaseUrl: string): Promis
       if (!entry || !Number.isSafeInteger(entry.entryFee) || entry.entryFee <= 0 || seen.has(entry.entryFee)
         || !Number.isSafeInteger(entry.startingChips) || entry.startingChips * 10 !== entry.entryFee
         || !Number.isSafeInteger(entry.entryChips) || entry.entryChips * 100 !== entry.startingChips) return null
+      if (entry.prizeByCapacity !== undefined && (typeof entry.prizeByCapacity !== 'object' || entry.prizeByCapacity === null
+        || Object.values(entry.prizeByCapacity).some((prize) => prize !== null && !(Number.isSafeInteger(prize) && (prize as number) > 0)))) return null
       seen.add(entry.entryFee)
     }
     return options
