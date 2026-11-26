@@ -14,6 +14,13 @@
 // изисква профил, затова за гост картата е data-lobby-guest-auth-gate
 // (подканата за вход), както "Създай игра" в гост лобито; за регистриран
 // (isMember) — data-ludo-play-button.
+// Картите на игрите са в обща мрежа: по 2 на ред при достатъчно ширина
+// (десктоп/таблет), по 1 на тесен екран; всяка следваща игра автоматично
+// продължава на нов ред. Колоните са с еднаква ширина (auto-fill), картите не
+// се разтягат по височина (align-items:start), изображенията пазят пропорциите
+// си (width:100%;height:auto).
+const GAMES_GRID_STYLE = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));align-items:start;'
+
 export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, showSvara = false, light = false, isMember = false): string {
   if (light) return renderLightMoreGamesScreen(showLudo, showSvara, isMember)
   const padding = useMobileLayout ? '14px 12px 40px' : '28px 40px 60px'
@@ -26,6 +33,7 @@ export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, 
         style="display:block;width:100%;height:auto;margin-bottom:${useMobileLayout ? '18px' : '26px'};border-radius:14px;"
       />
 
+      <div data-more-games-grid="1" style="${GAMES_GRID_STYLE}gap:${useMobileLayout ? '14px' : '18px'};">
       ${showLudo ? `<div
         data-ludo-play-card="1"
         data-ludo-play-button="1"
@@ -54,7 +62,6 @@ export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, 
         tabindex="0"
         aria-label="Играй Свара"
         style="
-          margin-top:${useMobileLayout ? '14px' : '18px'};
           background:#000000;
           border:2px solid rgba(212,165,32,0.78);
           border-radius:14px;
@@ -68,6 +75,7 @@ export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true, 
           alt="Свара — играй"
           style="display:block;width:100%;height:auto;border-radius:12px;"
         /></div>` : ''}
+      </div>
     </article>
   `
 }
@@ -84,12 +92,13 @@ function renderLightMoreGamesScreen(showLudo: boolean, showSvara: boolean, isMem
         />
       </div>
 
+      <div data-more-games-grid="1" style="${GAMES_GRID_STYLE}gap:14px;margin-top:14px;">
       ${showLudo ? `<button
         type="button"
         data-ludo-play-card="1"
         ${isMember ? 'data-ludo-play-button="1"' : 'data-lobby-guest-auth-gate="1"'}
         aria-label="Играй Не се сърди човече"
-        style="${card}display:block;width:100%;margin-top:14px;padding:8px;cursor:pointer;line-height:0;font:inherit;text-align:left;"
+        style="${card}display:block;width:100%;padding:8px;cursor:pointer;line-height:0;font:inherit;text-align:left;"
       ><img
           src="/images/games/ludo-banner.webp"
           alt="Не се сърди човече — играй"
@@ -102,12 +111,13 @@ function renderLightMoreGamesScreen(showLudo: boolean, showSvara: boolean, isMem
         role="button"
         tabindex="0"
         aria-label="Играй Свара"
-        style="${card}display:block;width:100%;margin-top:14px;padding:8px;cursor:pointer;line-height:0;"
+        style="${card}display:block;width:100%;padding:8px;cursor:pointer;line-height:0;"
       ><img
           src="/images/games/svara-banner.webp"
           alt="Свара — играй"
           style="display:block;width:100%;height:auto;border-radius:8px;"
         /></div>` : ''}
+      </div>
     </article>
   `
 }
