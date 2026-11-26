@@ -29,6 +29,9 @@
 //      ОТДЕЛНО, като WARNING (не твърд fail/retry trigger) — виж §1
 //      рационалето в финалния отчет защо тук умишлено е по-мек от A.
 //
+// Изключение от A: исторически редове (показани известия за подаръци,
+// изтрити подаръци — виж HISTORICAL_URL_ROWS) са само WARNING.
+//
 // Излиза с JSON резултат на stdout; exit code 0 = консистентно, 1 =
 // намерени липсващи категория-A референции (retry-able), 2 = грешка.
 
@@ -100,30 +103,60 @@ function listDirectoryEntries(uploadsParentDir) {
   return entries
 }
 
+// Исторически записи, които по дизайн НЕ пазят файла на диска (сървърът
+// изтрива изображението, щом никой актуален запис не го ползва — виж
+// giftItemStore.isImageUrlRetentionReferenced и tryFinalizeDeletedGiftImage
+// в server/src/index.ts):
+//   - gift_item_delivery_log с shown_at NOT NULL — вече показано известие,
+//     snapshot на image_url към момента на подаряването;
+//   - gift_items с deleted_at NOT NULL — логически изтрит (tombstone) подарък.
+// Липса на файл САМО от такива редове е предупреждение, не fail/retry.
+// Непоказаните известия (shown_at IS NULL) и живите подаръци остават строги.
+// Ако колоната-условие липсва в схемата, всичко от таблицата остава строго.
+const HISTORICAL_URL_ROWS = {
+  'gift_item_delivery_log.image_url': { column: 'shown_at', condition: '"shown_at" IS NOT NULL' },
+  'gift_items.image_url': { column: 'deleted_at', condition: '"deleted_at" IS NOT NULL' },
+}
+
 function collectUrlReferences(dbPath) {
   const db = new DatabaseSync(dbPath, { readOnly: true })
-  const out = {}
+  const strict = {}
+  const historical = {}
   try {
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
       .all()
       .map((r) => r.name)
 
+    const selectValues = (table, column, extraWhere) => db
+      .prepare(`SELECT DISTINCT "${column}" AS v FROM "${table}" WHERE "${column}" LIKE '/uploads/%'${extraWhere};`)
+      .all()
+      .map((r) => r.v)
+      .filter(Boolean)
+
     for (const table of tables) {
       const columns = db.prepare(`PRAGMA table_info('${table}');`).all().map((r) => r.name)
       for (const column of columns) {
         if (!column.endsWith('_url')) continue
-        const rows = db
-          .prepare(`SELECT DISTINCT "${column}" AS v FROM "${table}" WHERE "${column}" LIKE '/uploads/%';`)
-          .all()
-        const values = rows.map((r) => r.v).filter(Boolean)
-        if (values.length > 0) out[`${table}.${column}`] = values
+        const source = `${table}.${column}`
+        const rule = HISTORICAL_URL_ROWS[source]
+        if (rule && columns.includes(rule.column)) {
+          const strictValues = selectValues(table, column, ` AND NOT (${rule.condition})`)
+          if (strictValues.length > 0) strict[source] = strictValues
+          // URL, който е и в актуален ред, се проверява само строго.
+          const strictSet = new Set(strictValues)
+          const historicalValues = selectValues(table, column, ` AND (${rule.condition})`).filter((v) => !strictSet.has(v))
+          if (historicalValues.length > 0) historical[source] = historicalValues
+          continue
+        }
+        const values = selectValues(table, column, '')
+        if (values.length > 0) strict[source] = values
       }
     }
   } finally {
     db.close()
   }
-  return out
+  return { strict, historical }
 }
 
 function collectStorageFilenameReferences(dbPath) {
@@ -166,9 +199,10 @@ function main() {
   }
 
   let urlRefs
+  let historicalUrlRefs
   let filenameRefs
   try {
-    urlRefs = collectUrlReferences(args.db)
+    ;({ strict: urlRefs, historical: historicalUrlRefs } = collectUrlReferences(args.db))
     filenameRefs = collectStorageFilenameReferences(args.db)
   } catch (error) {
     console.log(JSON.stringify({ ok: false, error: `sqlite error: ${error.message}` }))
@@ -183,6 +217,17 @@ function main() {
       const relativePath = url.replace(/^\/+/, '')
       if (!entries.has(relativePath)) {
         ;(missingHard[source] ??= []).push(url)
+      }
+    }
+  }
+
+  const missingHistorical = {}
+  let checkedHistorical = 0
+  for (const [source, urls] of Object.entries(historicalUrlRefs)) {
+    for (const url of urls) {
+      checkedHistorical += 1
+      if (!entries.has(url.replace(/^\/+/, ''))) {
+        ;(missingHistorical[source] ??= []).push(url)
       }
     }
   }
@@ -202,6 +247,8 @@ function main() {
     ok: Object.keys(missingHard).length === 0,
     checked_url_references: checkedHard,
     missing_url_references: missingHard,
+    checked_historical_url_references: checkedHistorical,
+    missing_historical_url_references_warning_only: missingHistorical,
     checked_storage_filename_references: checkedSoft,
     missing_storage_filename_references_warning_only: missingSoft,
     archive_entry_count: entries.size,
