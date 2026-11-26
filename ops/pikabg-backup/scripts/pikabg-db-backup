@@ -10,6 +10,11 @@ umask 077
 # не задава тия env vars, затова поведението на VPS е 100% същото като преди.
 DB="${PIKABG_DB_PATH:-/var/www/belot-v2/server/database/data/belot-v2.sqlite}"
 UPLOADS_DIR="${PIKABG_UPLOADS_DIR:-/var/www/belot-v2/server/uploads}"
+# Етап 3Б.2: резервният файлов журнал на задържаните изплащания в Белот
+# (виж server/src/economy/heldPayoutJournal.ts). Липсваща директория е
+# нормално (още няма задържан случай) — архивира се празна.
+JOURNAL_DIR="${PIKABG_HELD_PAYOUT_JOURNAL_DIR:-/var/www/belot-v2/server/database/data/belot-v2.held-payout-journal}"
+JOURNAL_NAME="belot-v2.held-payout-journal"
 LOCAL_ROOT="${PIKABG_LOCAL_ROOT:-/var/backups/pikabg-db}"
 REMOTE_DB_ROOT="${PIKABG_REMOTE_DB_ROOT:-pikabg-drive:PikaBG-Backups/database}"
 REMOTE_UPLOADS_ROOT="${PIKABG_REMOTE_UPLOADS_ROOT:-pikabg-drive:PikaBG-Backups/uploads}"
@@ -40,6 +45,8 @@ DB_ARCHIVE="$LOCAL_ROOT/${BASE}.sqlite.zst"
 DB_SHA_FILE="$DB_ARCHIVE.sha256"
 UPLOADS_ARCHIVE="$LOCAL_ROOT/${BASE}-uploads.tar.zst"
 UPLOADS_SHA_FILE="$UPLOADS_ARCHIVE.sha256"
+JOURNAL_ARCHIVE="$LOCAL_ROOT/${BASE}-held-payout-journal.tar.zst"
+JOURNAL_SHA_FILE="$JOURNAL_ARCHIVE.sha256"
 MANIFEST_FILE="$LOCAL_ROOT/${BASE}.manifest.json"
 REMOTE_DB_DIR="$REMOTE_DB_ROOT/$DAY"
 REMOTE_UPLOADS_DIR="$REMOTE_UPLOADS_ROOT/$DAY"
@@ -49,12 +56,64 @@ REMOTE_UPLOADS_DIR="$REMOTE_UPLOADS_ROOT/$DAY"
 # мястото, което retention/upload логиката по-долу реално разглежда.
 cleanup() {
     rm -f "$DB_SNAPSHOT" "$LOCAL_ROOT"/*.attempt.* 2>/dev/null || true
+    # Временната staging директория на журнала (само наше копие, никога живия журнал).
+    rm -rf -- "$LOCAL_ROOT/${BASE}-journal-stage" 2>/dev/null || true
+}
+
+# Етап 3Б.2 — snapshot на файловия журнал. Копира всеки held-* файл в
+# собствена staging директория и архивира копието (не живата директория —
+# сървърът трие файлове по всяко време). Изчезнал по време на копирането файл
+# е нормален: сървърът трие файл САМО след потвърден запис в SQLite, а DB
+# snapshot-ът се прави СЛЕД това → случаят е в него. Не-обикновен файл
+# (symlink и т.н.) или неуспешно копиране на още съществуващ файл → грешка.
+snapshot_held_payout_journal() {
+    local out="$1"
+    local stage="$LOCAL_ROOT/${BASE}-journal-stage"
+    rm -rf -- "$stage"
+    mkdir -p "$stage/$JOURNAL_NAME"
+    chmod 700 "$stage" "$stage/$JOURNAL_NAME"
+    if [ -e "$JOURNAL_DIR" ] && [ ! -d "$JOURNAL_DIR" ]; then
+        echo "[backup] ERROR: held payout journal path is not a directory: $JOURNAL_DIR"
+        return 1
+    fi
+    if [ -d "$JOURNAL_DIR" ]; then
+        local f
+        for f in "$JOURNAL_DIR"/held-*; do
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            if [ -L "$f" ]; then
+                echo "[backup] ERROR: symlink in held payout journal: $f"
+                return 1
+            fi
+            if [ ! -f "$f" ]; then
+                if [ -e "$f" ]; then
+                    echo "[backup] ERROR: non-regular file in held payout journal: $f"
+                    return 1
+                fi
+                continue   # изчезнал току-що → вече е в SQLite (виж по-горе)
+            fi
+            if ! cp -p -- "$f" "$stage/$JOURNAL_NAME/" 2>/dev/null; then
+                if [ -e "$f" ]; then
+                    echo "[backup] ERROR: could not copy held payout journal file: $f"
+                    return 1
+                fi
+                echo "[backup] journal file transferred to SQLite during copy (will be in the DB snapshot): $(basename "$f")"
+            fi
+        done
+    fi
+    # Функцията се вика в `if !` (set -e не действа там) — изричен статус.
+    if ! tar -cf - -C "$stage" "$JOURNAL_NAME" | zstd -q -3 -o "$out"; then
+        echo "[backup] ERROR: could not archive held payout journal"
+        rm -rf -- "$stage"
+        return 1
+    fi
+    rm -rf -- "$stage"
 }
 trap cleanup EXIT
 
 echo "[backup] START $STAMP"
 echo "[backup] db_source=$DB"
 echo "[backup] uploads_source=$UPLOADS_DIR"
+echo "[backup] held_payout_journal_source=$JOURNAL_DIR"
 
 if [ ! -s "$DB" ]; then
     echo "[backup] ERROR: source database missing or empty"
@@ -114,6 +173,19 @@ while [ "$attempt" -le "$MAX_CONSISTENCY_ATTEMPTS" ]; do
         | zstd -q -3 -T2 -o "$UPLOADS_TMP"
     echo "[backup] uploads_archive_bytes=$(stat -c %s "$UPLOADS_TMP")"
 
+    # Етап 3Б.2: журналът — СЛЕД uploads и ПРЕДИ DB snapshot-а (същият
+    # принцип като uploads): сървърът трие файл от журнала само след commit в
+    # SQLite, затова всеки случай е или в този архив, или в по-късния DB
+    # snapshot (или и в двата — прехвърлянето е идемпотентно). Обратният ред
+    # би позволил случай да бъде прехвърлен и изтрит между двата снимка.
+    JOURNAL_TMP="$LOCAL_ROOT/${BASE}-held-payout-journal.tar.zst.attempt.$attempt"
+    echo "[backup] Archiving held payout journal (before the DB snapshot)..."
+    if ! snapshot_held_payout_journal "$JOURNAL_TMP"; then
+        rm -f "$UPLOADS_TMP" "$JOURNAL_TMP"
+        exit 1
+    fi
+    echo "[backup] held_payout_journal_archive_bytes=$(stat -c %s "$JOURNAL_TMP")"
+
     # Тестов hook, НИКОГА зададен от production — позволява детерминистично
     # (без timing race) да се докаже retry-on-inconsistency пътя (§6 тест
     # "Подмяна на изображение по време на backup"): симулира "admin replace
@@ -136,13 +208,13 @@ SQL
     INTEGRITY="$(sqlite3 -bail -batch -readonly "$DB_SNAPSHOT_TMP" 'PRAGMA integrity_check;')"
     if [ "$INTEGRITY" != "ok" ]; then
         echo "[backup] ERROR: integrity_check=$INTEGRITY"
-        rm -f "$UPLOADS_TMP" "$DB_SNAPSHOT_TMP"
+        rm -f "$UPLOADS_TMP" "$JOURNAL_TMP" "$DB_SNAPSHOT_TMP"
         exit 1
     fi
     FK_COUNT="$(sqlite3 -bail -batch -readonly "$DB_SNAPSHOT_TMP" 'PRAGMA foreign_key_check;' | wc -l)"
     if [ "$FK_COUNT" -ne 0 ]; then
         echo "[backup] ERROR: foreign_key_violations=$FK_COUNT"
-        rm -f "$UPLOADS_TMP" "$DB_SNAPSHOT_TMP"
+        rm -f "$UPLOADS_TMP" "$JOURNAL_TMP" "$DB_SNAPSHOT_TMP"
         exit 1
     fi
     echo "[backup] integrity_check=ok foreign_key_violations=0"
@@ -151,13 +223,14 @@ SQL
     if node "$VERIFY_SCRIPT" --db "$DB_SNAPSHOT_TMP" --uploads-archive "$UPLOADS_TMP"; then
         echo "[backup] consistency=ok"
         mv "$UPLOADS_TMP" "$UPLOADS_ARCHIVE.raw"
+        mv "$JOURNAL_TMP" "$JOURNAL_ARCHIVE.raw"
         mv "$DB_SNAPSHOT_TMP" "$DB_SNAPSHOT"
         consistent=1
         break
     fi
 
     echo "[backup] WARNING: inconsistent snapshot (race with an image replace/remove) — retrying"
-    rm -f "$UPLOADS_TMP" "$DB_SNAPSHOT_TMP"
+    rm -f "$UPLOADS_TMP" "$JOURNAL_TMP" "$DB_SNAPSHOT_TMP"
     attempt=$((attempt + 1))
 done
 
@@ -171,6 +244,7 @@ fi
 # zstd-decompress-натия tar listing) — преименуваме го на крайното .zst име;
 # .raw суфикса по-горе е само за да не се обърка с незавършено .attempt.N.
 mv "$UPLOADS_ARCHIVE.raw" "$UPLOADS_ARCHIVE"
+mv "$JOURNAL_ARCHIVE.raw" "$JOURNAL_ARCHIVE"
 
 echo
 echo "[backup] Compressing DB snapshot with zstd..."
@@ -183,6 +257,14 @@ echo "[backup] Validating archives (no partial writes survive)..."
 zstd -t "$DB_ARCHIVE"
 zstd -t "$UPLOADS_ARCHIVE"
 zstd -dc "$UPLOADS_ARCHIVE" | tar -tf - >/dev/null
+zstd -t "$JOURNAL_ARCHIVE"
+# Журналът: само директорията и обикновени held-* файлове в нея.
+BAD_JOURNAL_MEMBERS="$(zstd -dc "$JOURNAL_ARCHIVE" | tar -tf - | grep -v -E "^${JOURNAL_NAME}/?$" | grep -v -E "^${JOURNAL_NAME}/held-[^/]+$" || true)"
+if [ -n "$BAD_JOURNAL_MEMBERS" ]; then
+    echo "[backup] ERROR: unexpected members in held payout journal archive:"
+    printf '%s\n' "$BAD_JOURNAL_MEMBERS" | head -20
+    exit 1
+fi
 echo "[backup] archive_validation=ok"
 
 echo
@@ -190,14 +272,17 @@ echo "[backup] Creating SHA256 checksums..."
 (cd "$LOCAL_ROOT" && sha256sum "$(basename "$DB_ARCHIVE")" > "$(basename "$DB_SHA_FILE")")
 (cd "$LOCAL_ROOT" && sha256sum "$(basename "$UPLOADS_ARCHIVE")" > "$(basename "$UPLOADS_SHA_FILE")")
 cat "$DB_SHA_FILE"
+(cd "$LOCAL_ROOT" && sha256sum "$(basename "$JOURNAL_ARCHIVE")" > "$(basename "$JOURNAL_SHA_FILE")")
 cat "$UPLOADS_SHA_FILE"
+cat "$JOURNAL_SHA_FILE"
 
 UPLOADS_FILE_COUNT="$(zstd -dc "$UPLOADS_ARCHIVE" | tar -tf - | wc -l)"
+JOURNAL_FILE_COUNT="$(zstd -dc "$JOURNAL_ARCHIVE" | tar -tf - | grep -c -E "^${JOURNAL_NAME}/held-" || true)"
 cat > "$MANIFEST_FILE" <<JSON
 {
   "stamp": "$STAMP",
   "day": "$DAY",
-  "scope": ["sqlite_database", "uploads_directory"],
+  "scope": ["sqlite_database", "uploads_directory", "held_payout_journal"],
   "db_archive": "$(basename "$DB_ARCHIVE")",
   "db_archive_sha256": "$(awk '{print $1}' "$DB_SHA_FILE")",
   "db_archive_bytes": $(stat -c %s "$DB_ARCHIVE"),
@@ -205,6 +290,11 @@ cat > "$MANIFEST_FILE" <<JSON
   "uploads_archive_sha256": "$(awk '{print $1}' "$UPLOADS_SHA_FILE")",
   "uploads_archive_bytes": $(stat -c %s "$UPLOADS_ARCHIVE"),
   "uploads_file_count": $UPLOADS_FILE_COUNT,
+  "held_payout_journal_archive": "$(basename "$JOURNAL_ARCHIVE")",
+  "held_payout_journal_archive_sha256": "$(awk '{print $1}' "$JOURNAL_SHA_FILE")",
+  "held_payout_journal_archive_bytes": $(stat -c %s "$JOURNAL_ARCHIVE"),
+  "held_payout_journal_file_count": $JOURNAL_FILE_COUNT,
+  "held_payout_journal_order": "archived_before_db_snapshot",
   "consistency_attempts_used": $attempt,
   "created_at_utc": "$(date -u +%FT%TZ)"
 }
@@ -218,6 +308,7 @@ if [ "$LOCAL_ONLY" = "1" ]; then
     find "$LOCAL_ROOT" -maxdepth 1 -type f \
         \( -name 'belot-v2-*.sqlite.zst' -o -name 'belot-v2-*.sqlite.zst.sha256' \
         -o -name 'belot-v2-*-uploads.tar.zst' -o -name 'belot-v2-*-uploads.tar.zst.sha256' \
+        -o -name 'belot-v2-*-held-payout-journal.tar.zst' -o -name 'belot-v2-*-held-payout-journal.tar.zst.sha256' \
         -o -name 'belot-v2-*.manifest.json' \) \
         -mmin +1440 -print -delete
     echo
@@ -232,6 +323,9 @@ rclone copyto "$DB_ARCHIVE" "$REMOTE_DB_DIR/$(basename "$DB_ARCHIVE")" \
     --transfers 1 --checkers 2 --drive-chunk-size 64M --retries 5 --low-level-retries 10 \
     --stats 30s --stats-one-line
 rclone copyto "$DB_SHA_FILE" "$REMOTE_DB_DIR/$(basename "$DB_SHA_FILE")" --transfers 1 --retries 5
+# Етап 3Б.2: журналът — до базата (същата папка, същият stamp).
+rclone copyto "$JOURNAL_ARCHIVE" "$REMOTE_DB_DIR/$(basename "$JOURNAL_ARCHIVE")" --transfers 1 --retries 5 --low-level-retries 10
+rclone copyto "$JOURNAL_SHA_FILE" "$REMOTE_DB_DIR/$(basename "$JOURNAL_SHA_FILE")" --transfers 1 --retries 5
 
 echo
 echo "[backup] Uploading uploads archive to Google Drive..."
@@ -244,7 +338,7 @@ rclone copyto "$MANIFEST_FILE" "$REMOTE_UPLOADS_DIR/$(basename "$MANIFEST_FILE")
 
 echo
 echo "[backup] Verifying uploaded archives via MD5..."
-for pair in "$DB_ARCHIVE:$REMOTE_DB_DIR" "$UPLOADS_ARCHIVE:$REMOTE_UPLOADS_DIR"; do
+for pair in "$DB_ARCHIVE:$REMOTE_DB_DIR" "$UPLOADS_ARCHIVE:$REMOTE_UPLOADS_DIR" "$JOURNAL_ARCHIVE:$REMOTE_DB_DIR"; do
     ARCHIVE_PATH="${pair%%:*}"
     REMOTE_DIR="${pair##*:}"
     LOCAL_MD5="$(md5sum "$ARCHIVE_PATH" | awk '{print $1}')"
@@ -267,6 +361,7 @@ echo "[backup] Local retention: keeping last 24 hours..."
 find "$LOCAL_ROOT" -maxdepth 1 -type f \
     \( -name 'belot-v2-*.sqlite.zst' -o -name 'belot-v2-*.sqlite.zst.sha256' \
     -o -name 'belot-v2-*-uploads.tar.zst' -o -name 'belot-v2-*-uploads.tar.zst.sha256' \
+    -o -name 'belot-v2-*-held-payout-journal.tar.zst' -o -name 'belot-v2-*-held-payout-journal.tar.zst.sha256' \
     -o -name 'belot-v2-*.manifest.json' \) \
     -mmin +1440 -print -delete
 
@@ -274,4 +369,5 @@ echo
 echo "[backup] SUCCESS"
 echo "[backup] db_local=$DB_ARCHIVE db_remote=$REMOTE_DB_DIR/$(basename "$DB_ARCHIVE")"
 echo "[backup] uploads_local=$UPLOADS_ARCHIVE uploads_remote=$REMOTE_UPLOADS_DIR/$(basename "$UPLOADS_ARCHIVE")"
+echo "[backup] held_payout_journal_local=$JOURNAL_ARCHIVE held_payout_journal_remote=$REMOTE_DB_DIR/$(basename "$JOURNAL_ARCHIVE")"
 echo "[backup] completed=$(date -u +%FT%TZ)"

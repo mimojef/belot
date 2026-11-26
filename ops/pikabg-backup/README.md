@@ -464,6 +464,60 @@ instead of depending on real timing luck — it
 was used to prove the retry mechanism actually
 recovers.
 
+## Held payout journal (Етап 3Б.2)
+
+Файловият журнал на задържаните изплащания в
+Белот (`server/database/data/belot-v2.held-payout-journal/`,
+по един `held-<id>.json` на мач) се архивира от
+`pikabg-db-backup` в СЪЩОТО изпълнение като
+`belot-v2-<stamp>-held-payout-journal.tar.zst`
+(+ `.sha256`, полета `held_payout_journal_*` в
+манифеста), качва се в `database/<ден>/` до DB
+архива и се трие от `pikabg-db-retention` заедно
+с него.
+
+Ред в един опит: uploads → **журнал** → DB
+snapshot. Сървърът трие файл от журнала само
+след потвърден запис в SQLite, затова всеки
+случай е в архива на журнала, в DB snapshot-а
+или и в двата (прехвърлянето е идемпотентно).
+Обратният ред би позволил случай да бъде
+прехвърлен и изтрит между двата snapshot-а.
+Журналът се копира файл по файл в staging
+директория (файл, изчезнал по време на
+копирането, вече е в SQLite); symlink или друг
+не-обикновен файл спира backup-а.
+
+Restore: `pikabg-restore ... --journal-archive
+<path>-held-payout-journal.tar.zst` (по избор;
+без него — изрично предупреждение). Журналът се
+възстановява ЗАЕДНО с базата от СЪЩИЯ backup:
+файловете се добавят в
+`server/database/data/belot-v2.held-payout-journal/`
+(без да се трие съществуващото), после
+`chown -R <PM2 потребител>:<група>`, `chmod 700`
+на директорията и `chmod 600` на файловете.
+При старт сървърът ги прехвърля идемпотентно в
+`belot_held_payouts` (без автоматично изплащане).
+
+Права: директорията се създава от самия сървър
+(`0700`, файлове `0600`); при старт той затяга
+по-широки права, проверява собственика и прави
+тестов запис. При проблем логва
+`HELD PAYOUT JOURNAL NOT WRITABLE` с точната
+команда за поправка.
+
+Инсталация: Smart Deploy НЕ инсталира тези
+скриптове — след merge обновените
+`pikabg-db-backup`, `pikabg-db-retention` и
+`pikabg-restore` се копират ръчно в
+`/usr/local/sbin/` (като root, `install -m 0755`),
+извън прозореца на ежечасния backup (не в :40–:45).
+
+Тест (Windows dev, stub-ове по методологията
+по-горе):
+`server/scripts/checkHeldPayoutJournalBackupRestoreStage3B2.ts`.
+
 ## Deletion ledger (Етап 4C)
 
 Регистърът на окончателните изтривания на профили

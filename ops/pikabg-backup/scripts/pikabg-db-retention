@@ -121,6 +121,18 @@ function deleteArchive(remoteRoot, path, sidecarSuffixes, extraPaths) {
 // различни базови имена за СЪЩИЯ backup round (виж pikabg-db-backup), затова
 // манифестът не е просто "<path>.manifest.json" sidecar suffix, а отделно
 // извлечено име.
+// Етап 3Б.2: архивът на файловия журнал на задържаните изплащания е в
+// database/ папката със СЪЩИЯ stamp — трие се заедно с DB архива (иначе
+// никога не би съвпаднал с DB_PATTERN и би се трупал безкрайно). check:false
+// при изтриване — по-стари backup-и нямат такъв архив.
+function dbJournalPaths(dbArchivePath) {
+  const m = DB_PATTERN.exec(dbArchivePath)
+  if (!m) return []
+  const directory = m.groups.dir || ''
+  const journal = `${directory}belot-v2-${m.groups.stamp}-held-payout-journal.tar.zst`
+  return [journal, `${journal}.sha256`]
+}
+
 function uploadsManifestPath(uploadsArchivePath) {
   const m = UPLOADS_PATTERN.exec(uploadsArchivePath)
   if (!m) return []
@@ -158,7 +170,7 @@ function main() {
   console.log(`[retention] now=${now.toISOString()}`)
   console.log()
 
-  processCategory('database', REMOTE_DB_ROOT, DB_PATTERN, now, ['.sha256'])
+  processCategory('database', REMOTE_DB_ROOT, DB_PATTERN, now, ['.sha256'], dbJournalPaths)
   console.log()
   processCategory('uploads', REMOTE_UPLOADS_ROOT, UPLOADS_PATTERN, now, ['.sha256'], uploadsManifestPath)
 
@@ -172,7 +184,7 @@ function main() {
   console.log('[retention] COMPLETE')
 }
 
-module.exports = { computeKeepDelete, uploadsManifestPath }
+module.exports = { computeKeepDelete, uploadsManifestPath, dbJournalPaths }
 
 if (require.main === module) {
   main()

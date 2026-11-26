@@ -5249,6 +5249,15 @@ function replayHeldPayoutJournalOnBoot(): void {
 }
 
 function registerHeldPayoutsForRestoredRoomsOnBoot(state: ServerState): void {
+  // Права за запис на журнала (създава директорията 0700, затяга по-широки
+  // права, проверява собственика, тестов запис). Неуспех НЕ спира сървъра —
+  // регистърът в SQLite остава основният път; грешката е изрична.
+  const journalCheck = heldPayoutJournal.verifyWritable()
+  if (!journalCheck.ok) {
+    console.error(`[match-economy] HELD PAYOUT JOURNAL NOT WRITABLE dir=${heldPayoutJournal.directory}: ${journalCheck.message} — fix: ${journalCheck.fix}`)
+  } else if (journalCheck.tightened.length > 0) {
+    console.warn(`[match-economy] held payout journal permissions tightened: ${journalCheck.tightened.join(", ")}`)
+  }
   // Първо журналът (най-пълните данни), после възстановените маси и диагностиката.
   replayHeldPayoutJournalOnBoot()
   let recorded = 0

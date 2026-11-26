@@ -12,13 +12,17 @@ umask 077
 # Usage:
 #   pikabg-restore --db-archive <path/to/belot-v2-<stamp>.sqlite.zst> \
 #                   --uploads-archive <path/to/belot-v2-<stamp>-uploads.tar.zst> \
-#                   --target-dir <empty or scratch directory>
+#                   --target-dir <empty or scratch directory> \
+#                   [--journal-archive <path/to/belot-v2-<stamp>-held-payout-journal.tar.zst>]
 #
 # Резултат (при success):
 #   <target-dir>/belot-v2.sqlite        — възстановената база
 #   <target-dir>/uploads/...            — възстановената структура, вкл.
 #                                          campaign-themes/<campaignId>/
 #                                          icons|tables|card-backs/
+#   <target-dir>/belot-v2.held-payout-journal/ — (Етап 3Б.2, ако е подаден
+#                                          --journal-archive) файловият журнал
+#                                          на задържаните изплащания в Белот
 #
 # Продукционен restore (презапис на реалните /var/www/belot-v2/server/...
 # пътища) изисква ръчно, обмислено копиране от оператора СЛЕД проверка тук —
@@ -29,6 +33,8 @@ VERIFY_SCRIPT="$SCRIPT_DIR/pikabg-backup-verify-consistency.mjs"
 
 DB_ARCHIVE=""
 UPLOADS_ARCHIVE=""
+JOURNAL_ARCHIVE=""
+JOURNAL_NAME="belot-v2.held-payout-journal"
 TARGET_DIR=""
 SKIP_CHECKSUM=0
 
@@ -37,6 +43,7 @@ while [ $# -gt 0 ]; do
         --db-archive) DB_ARCHIVE="$2"; shift 2 ;;
         --uploads-archive) UPLOADS_ARCHIVE="$2"; shift 2 ;;
         --target-dir) TARGET_DIR="$2"; shift 2 ;;
+        --journal-archive) JOURNAL_ARCHIVE="$2"; shift 2 ;;
         --skip-checksum) SKIP_CHECKSUM=1; shift ;;
         *) echo "[restore] Unknown argument: $1"; exit 2 ;;
     esac
@@ -76,12 +83,16 @@ if [ ! -f "$UPLOADS_ARCHIVE" ]; then
     echo "[restore] ERROR: uploads archive not found: $UPLOADS_ARCHIVE"
     exit 1
 fi
+if [ -n "$JOURNAL_ARCHIVE" ] && [ ! -f "$JOURNAL_ARCHIVE" ]; then
+    echo "[restore] ERROR: held payout journal archive not found: $JOURNAL_ARCHIVE"
+    exit 1
+fi
 
 mkdir -p "$TARGET_DIR"
 
 if [ "$SKIP_CHECKSUM" != "1" ]; then
     echo "[restore] Verifying archive checksums..."
-    for ARCHIVE in "$DB_ARCHIVE" "$UPLOADS_ARCHIVE"; do
+    for ARCHIVE in "$DB_ARCHIVE" "$UPLOADS_ARCHIVE" ${JOURNAL_ARCHIVE:+"$JOURNAL_ARCHIVE"}; do
         SHA_FILE="$ARCHIVE.sha256"
         # Фаза 12.1: липсващ .sha256 = непълен backup (pikabg-db-backup пише
         # sidecar-а едва след успешна валидация) — отказ, не WARNING.
@@ -99,6 +110,7 @@ echo
 echo "[restore] Validating archive integrity (zstd -t)..."
 zstd -t "$DB_ARCHIVE"
 zstd -t "$UPLOADS_ARCHIVE"
+if [ -n "$JOURNAL_ARCHIVE" ]; then zstd -t "$JOURNAL_ARCHIVE"; fi
 echo "[restore] archive_integrity=ok"
 echo
 echo "[restore] Validating uploads archive members (before extraction)..."
@@ -120,6 +132,18 @@ if [ -n "$BAD_NAMES" ]; then
     exit 1
 fi
 echo "[restore] archive_members=ok"
+
+# Етап 3Б.2: журналът — само директорията и обикновени held-* файлове в нея.
+if [ -n "$JOURNAL_ARCHIVE" ]; then
+    BAD_JOURNAL_TYPES="$(zstd -dc "$JOURNAL_ARCHIVE" | tar -tvf - | cut -c1 | grep -v -e '^-$' -e '^d$' | sort -u | tr '\n' ' ' || true)"
+    BAD_JOURNAL_NAMES="$(zstd -dc "$JOURNAL_ARCHIVE" | tar -tf - | grep -v -E "^${JOURNAL_NAME}/?$" | grep -v -E "^${JOURNAL_NAME}/held-[^/]+$" || true)"
+    if [ -n "$BAD_JOURNAL_TYPES" ] || [ -n "$BAD_JOURNAL_NAMES" ]; then
+        echo "[restore] ERROR: held payout journal archive contains unexpected members — refusing:"
+        printf '%s\n' "$BAD_JOURNAL_TYPES" "$BAD_JOURNAL_NAMES" | head -20
+        exit 1
+    fi
+    echo "[restore] journal_archive_members=ok"
+fi
 
 echo
 echo "[restore] Restoring SQLite database -> $TARGET_DIR/belot-v2.sqlite"
@@ -144,6 +168,20 @@ fi
 RESTORED_FILE_COUNT="$(find "$TARGET_DIR/uploads" -type f | wc -l)"
 echo "[restore] restored_file_count=$RESTORED_FILE_COUNT"
 
+if [ -n "$JOURNAL_ARCHIVE" ]; then
+    echo
+    echo "[restore] Restoring held payout journal -> $TARGET_DIR/$JOURNAL_NAME/"
+    zstd -dc "$JOURNAL_ARCHIVE" | tar --no-same-owner -xf - -C "$TARGET_DIR"
+    mkdir -p "$TARGET_DIR/$JOURNAL_NAME"
+    chmod 700 "$TARGET_DIR/$JOURNAL_NAME"
+    find "$TARGET_DIR/$JOURNAL_NAME" -maxdepth 1 -type f -exec chmod 600 {} +
+    echo "[restore] restored_journal_file_count=$(find "$TARGET_DIR/$JOURNAL_NAME" -maxdepth 1 -type f -name 'held-*' | wc -l)"
+else
+    echo
+    echo "[restore] WARNING: no --journal-archive given — held payout cases that existed ONLY in the journal at"
+    echo "[restore]          backup time are not restored (backups before Етап 3Б.2 have no journal archive)."
+fi
+
 echo
 echo "[restore] Verifying DB URLs resolve to restored files..."
 if node "$VERIFY_SCRIPT" --db "$TARGET_DIR/belot-v2.sqlite" --uploads-dir "$TARGET_DIR"; then
@@ -157,6 +195,13 @@ echo
 echo "[restore] SUCCESS"
 echo "[restore] database=$TARGET_DIR/belot-v2.sqlite"
 echo "[restore] uploads=$TARGET_DIR/uploads"
+if [ -n "$JOURNAL_ARCHIVE" ]; then
+    echo "[restore] held_payout_journal=$TARGET_DIR/$JOURNAL_NAME"
+fi
 echo "[restore] Campaign theme folders preserved as campaign-themes/<campaignId>/icons|tables|card-backs/."
 echo "[restore] To apply to production: stop writes, manually copy these two paths over the real"
 echo "[restore] server/database/data/belot-v2.sqlite and server/uploads/ ONLY after independent review."
+echo "[restore] Held payout journal (Етап 3Б.2): restore it TOGETHER with the database from the SAME backup —"
+echo "[restore]   copy $TARGET_DIR/$JOURNAL_NAME/held-* into server/database/data/$JOURNAL_NAME/"
+echo "[restore]   (merge — never delete files already there), then: chown -R <node user>:<node group> that dir,"
+echo "[restore]   chmod 700 the dir, chmod 600 the files. The server re-applies them idempotently on start."

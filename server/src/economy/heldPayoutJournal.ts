@@ -23,7 +23,9 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  chmodSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs'
@@ -54,7 +56,17 @@ export type HeldPayoutJournal = {
   /** Изтрива конкретни файлове (финален + временни) на прехвърлен мач. */
   removeFiles: (files: readonly string[]) => { ok: true } | { ok: false; message: string }
   scan: () => HeldPayoutJournalScan
+  /**
+   * Самопроверка при старт: създава директорията (0700), затяга по-широки
+   * права (директория 0700, файлове 0600), проверява собственика и прави
+   * реален тестов запис с fsync. Не хвърля.
+   */
+  verifyWritable: () => HeldPayoutJournalWritableCheck
 }
+
+export type HeldPayoutJournalWritableCheck =
+  | { ok: true; tightened: string[] }
+  | { ok: false; message: string; fix: string }
 
 export type HeldPayoutJournalFs = {
   mkdirSync: typeof mkdirSync
@@ -66,9 +78,11 @@ export type HeldPayoutJournalFs = {
   unlinkSync: typeof unlinkSync
   readdirSync: typeof readdirSync
   readFileSync: typeof readFileSync
+  statSync: typeof statSync
+  chmodSync: typeof chmodSync
 }
 
-const NODE_FS: HeldPayoutJournalFs = { mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, readdirSync, readFileSync }
+const NODE_FS: HeldPayoutJournalFs = { mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, readdirSync, readFileSync, statSync, chmodSync }
 
 export function heldPayoutJournalId(matchScope: string): string {
   return createHash('sha256').update(matchScope, 'utf8').digest('hex').slice(0, 32)
@@ -203,7 +217,50 @@ export function createHeldPayoutJournal(directory: string, fs: HeldPayoutJournal
     return result
   }
 
-  return { directory, write, remove, removeFiles, scan }
+  function verifyWritable(): HeldPayoutJournalWritableCheck {
+    const fix = `chown -R <PM2 user>:<PM2 group> ${directory} && chmod 700 ${directory} && chmod 600 ${directory}/held-*`
+    const tightened: string[] = []
+    try {
+      ensureDirectory()
+      const stat = fs.statSync(directory)
+      if (!stat.isDirectory()) return { ok: false, message: `не е директория: ${directory}`, fix }
+      // POSIX права/собственик — само извън Windows (там mode битовете са условни).
+      if (process.platform !== 'win32') {
+        const uid = typeof process.getuid === 'function' ? process.getuid() : null
+        if (uid !== null && stat.uid !== uid) {
+          return { ok: false, message: `директорията е собственост на uid=${stat.uid}, процесът е uid=${uid}`, fix }
+        }
+        if ((stat.mode & 0o077) !== 0) {
+          fs.chmodSync(directory, 0o700)
+          tightened.push(directory)
+        }
+        for (const name of (fs.readdirSync(directory) as string[]).filter((n) => n.startsWith('held-'))) {
+          const file = join(directory, name)
+          const fileStat = fs.statSync(file)
+          if (fileStat.isFile() && (fileStat.mode & 0o077) !== 0) {
+            fs.chmodSync(file, 0o600)
+            tightened.push(file)
+          }
+        }
+      }
+      // Реален тестов запис (не започва с held- → не се вижда от scan()).
+      const probe = join(directory, `.probe-${process.pid}-${randomUUID()}`)
+      const fd = fs.openSync(probe, 'wx', 0o600)
+      try {
+        fs.writeSync(fd, 'probe')
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
+      fs.unlinkSync(probe)
+      syncDirectory()
+      return { ok: true, tightened }
+    } catch (error) {
+      return { ok: false, message: messageOf(error), fix }
+    }
+  }
+
+  return { directory, write, remove, removeFiles, scan, verifyWritable }
 }
 
 
