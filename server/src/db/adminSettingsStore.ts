@@ -96,6 +96,13 @@ export type AdminSettingsSnapshot = {
    * пазят интервала в собственото си състояние.
    */
   svaraAnteIncreaseIntervalMinutes: number
+  /**
+   * „Свара — Достъпна за всички“ — SERVER-AUTHORITATIVE, default false
+   * (затворен режим: само служебните роли). true → всички регистрирани
+   * профили. index.ts кешира стойността (setSvaraPublicAccessProvider) и я
+   * обновява при запис — важи веднага, без deploy/рестарт.
+   */
+  svaraPublicAccessEnabled: boolean
 }
 
 export type AdminSettingsStore = {
@@ -175,6 +182,8 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   belotRandomTableWaitSeconds: 180,
   // Липсващ ред (не е нужна seed migration) или невалидна стойност → 10 минути.
   svaraAnteIncreaseIntervalMinutes: 10,
+  // Липсващ ред (не е нужна seed migration) или невалидна стойност → изключено.
+  svaraPublicAccessEnabled: false,
 }
 
 const SETTING_KEYS = {
@@ -191,6 +200,7 @@ const SETTING_KEYS = {
   physicalShuffleMode: 'physical_shuffle_mode',
   belotRandomTableWaitSeconds: 'belot_random_table_wait_seconds',
   svaraAnteIncreaseIntervalMinutes: 'svara_ante_increase_interval_minutes',
+  svaraPublicAccessEnabled: 'svara_public_access_enabled',
 } as const
 
 export const SVARA_ANTE_INTERVAL_MIN_MINUTES = 1
@@ -328,7 +338,8 @@ export async function createAdminSettingsStore(
       'anti_bad_luck_threshold',
       'physical_shuffle_mode',
       'belot_random_table_wait_seconds',
-      'svara_ante_increase_interval_minutes'
+      'svara_ante_increase_interval_minutes',
+      'svara_public_access_enabled'
     );
   `)
 
@@ -407,6 +418,8 @@ export async function createAdminSettingsStore(
       svaraAnteIncreaseIntervalMinutes: parseStoredSvaraAnteIntervalMinutes(
         values.get(SETTING_KEYS.svaraAnteIncreaseIntervalMinutes),
       ),
+      // Само точно '1' включва публичния достъп (fail-closed).
+      svaraPublicAccessEnabled: values.get(SETTING_KEYS.svaraPublicAccessEnabled) === '1',
     }
   }
 
@@ -557,6 +570,9 @@ export async function createAdminSettingsStore(
       input.svaraAnteIncreaseIntervalMinutes === undefined
         ? undefined
         : normalizeSettingNumber(input.svaraAnteIncreaseIntervalMinutes, SVARA_ANTE_INTERVAL_MIN_MINUTES, SVARA_ANTE_INTERVAL_MAX_MINUTES)
+    if (input.svaraPublicAccessEnabled !== undefined && typeof input.svaraPublicAccessEnabled !== 'boolean') {
+      return { ok: false, message: '„Свара — Достъпна за всички“ трябва да е включено или изключено.' }
+    }
     if (input.svaraAnteIncreaseIntervalMinutes !== undefined && nextSvaraAnteIntervalMinutes === null) {
       return {
         ok: false,
@@ -641,6 +657,10 @@ export async function createAdminSettingsStore(
 
       if (nextSvaraAnteIntervalMinutes !== undefined) {
         upsertSettingStatement.run(SETTING_KEYS.svaraAnteIncreaseIntervalMinutes, String(nextSvaraAnteIntervalMinutes))
+      }
+
+      if (input.svaraPublicAccessEnabled !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.svaraPublicAccessEnabled, input.svaraPublicAccessEnabled ? '1' : '0')
       }
 
       database.exec('COMMIT;')

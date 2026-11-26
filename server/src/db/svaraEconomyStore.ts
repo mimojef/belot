@@ -115,6 +115,32 @@ export type SvaraSettleResult =
   | { ok: true; status: SvaraFinanceStatus; alreadySettled: boolean; heldReason: SvaraHeldReason | null; prize: number | null }
   | { ok: false; message: string }
 
+/** Задържан или ръчно уреден мач — за админ преглед (без карти/игрово състояние). */
+export type SvaraHeldCase = {
+  matchId: string
+  status: SvaraFinanceStatus
+  heldReason: SvaraHeldReason | null
+  participants: string[]
+  /** Удържаните входове (ledger). */
+  debits: Array<{ profileId: string; amount: number }>
+  /** От фиксираните условия; null — условията са невалидни (само връщане). */
+  terms: { entryFee: number; pot: number; prize: number; commissionBps: number; siteCommission: number } | null
+  winnerProfileId: string | null
+  createdAt: string
+  updatedAt: string
+  resolution: { action: 'payout' | 'refund'; resolvedAt: string; resolvedBy: string; note: string; evidence: string | null; heldReason: string | null } | null
+}
+
+export type SvaraSettleHeldInput =
+  | { matchId: string; action: 'payout'; winnerProfileId: string; resolvedBy: string; note: string; evidence: string }
+  | { matchId: string; action: 'refund'; resolvedBy: string; note: string; evidence?: string }
+
+export type SvaraSettleHeldErrorCode = 'invalid-input' | 'not-found' | 'not-held' | 'invalid-terms' | 'winner-not-participant' | 'ledger-mismatch' | 'already-settled' | 'db-error'
+
+export type SvaraSettleHeldResult =
+  | { ok: true; status: 'paid' | 'refunded'; movements: Array<{ profileId: string; amount: number; entryType: 'svara_winner_payout' | 'svara_entry_refund' }> }
+  | { ok: false; code: SvaraSettleHeldErrorCode; message: string }
+
 export type SvaraEconomyStore = {
   getActiveConfig: () => { ok: true; config: GameFinancialConfig } | { ok: false; message: string }
   /** Сървърната награда за победителя (null — недостъпна/неточна конфигурация). */
@@ -126,6 +152,14 @@ export type SvaraEconomyStore = {
   markUnrecoverable: (matchId: string) => { ok: true; changed: boolean } | { ok: false; message: string }
   getFinance: (matchId: string) => SvaraFinanceRow | null
   listCollectedMatchIds: () => string[]
+  /** Админ преглед: задържаните (status='held') и последните ръчно уредени. */
+  listHeldCases: (input?: { resolvedLimit?: number }) => { held: SvaraHeldCase[]; resolved: SvaraHeldCase[] }
+  /**
+   * Ръчно уреждане на задържан мач от администратор: изплащане на победителя
+   * САМО по фиксираните условия или връщане на входовете. Една транзакция, само
+   * от 'held', с одит; повторно/паралелно уреждане не плаща втори път.
+   */
+  settleHeldCase: (input: SvaraSettleHeldInput) => SvaraSettleHeldResult
   close: () => void
 }
 
@@ -173,6 +207,15 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
     UPDATE svara_match_finance SET status = ?, winner_profile_id = ?, held_reason = ?, updated_at = CURRENT_TIMESTAMP
     WHERE match_id = ? AND status = 'collected';
   `)
+
+  const hasResolutionColumns = (database.prepare('PRAGMA table_info(svara_match_finance)').all() as Array<{ name: string }>).some((c) => c.name === 'resolved_at')
+  const caseColumns = `match_id, status, terms_json, participants_json, winner_profile_id, held_reason, ledger_scope, created_at, updated_at${hasResolutionColumns ? ', resolved_at, resolved_by, resolution_action, resolution_note, resolution_evidence, resolved_held_reason' : ''}`
+  const countSettlements = database.prepare(`SELECT COUNT(*) AS n FROM svara_match_economy_ledger WHERE match_id = ? AND entry_type IN ('svara_winner_payout', 'svara_entry_refund');`)
+  const resolveHeld = hasResolutionColumns ? database.prepare(`
+    UPDATE svara_match_finance SET status = ?, winner_profile_id = ?, resolved_held_reason = held_reason, held_reason = NULL,
+      resolved_at = CURRENT_TIMESTAMP, resolved_by = ?, resolution_action = ?, resolution_note = ?, resolution_evidence = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE match_id = ? AND status = 'held';
+  `) : null
 
   const balanceOf = (profileId: string) => (selectBalance.get(profileId) as { b: number } | undefined)?.b ?? 0
   const rowOf = (matchId: string): SvaraFinanceRow | null => {
@@ -318,7 +361,102 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
     }
   }
 
+  type CaseRow = { match_id: string; status: SvaraFinanceStatus; terms_json: string; participants_json: string; winner_profile_id: string | null; held_reason: SvaraHeldReason | null; ledger_scope: string; created_at: string; updated_at: string
+    resolved_at?: string | null; resolved_by?: string | null; resolution_action?: 'payout' | 'refund' | null; resolution_note?: string | null; resolution_evidence?: string | null; resolved_held_reason?: string | null }
+
+  /** Валидните фиксирани условия на мача (или null). */
+  function termsOf(termsJson: string, participants: readonly string[]): GameMatchFinancialTerms | null {
+    let parsed: unknown
+    try { parsed = JSON.parse(termsJson) } catch { return null }
+    const valid = validateGameMatchFinancialTerms(parsed)
+    return valid.ok && valid.terms.gameKey === 'svara' && valid.terms.paidEntries === participants.length && isExactSvaraSplit(valid.terms) ? valid.terms : null
+  }
+
+  function caseOf(row: CaseRow): SvaraHeldCase {
+    let participants: string[] = []
+    try { participants = JSON.parse(row.participants_json) as string[] } catch { participants = [] }
+    const terms = termsOf(row.terms_json, participants)
+    return {
+      matchId: row.match_id, status: row.status, heldReason: row.held_reason, participants,
+      debits: (selectDebits.all(row.ledger_scope) as Array<{ profile_id: string; amount: number }>).map((d) => ({ profileId: d.profile_id, amount: d.amount })),
+      terms: terms ? { entryFee: terms.entryFee, pot: terms.pot, prize: terms.prizes[0]!, commissionBps: terms.commissionBps, siteCommission: terms.siteCommission } : null,
+      winnerProfileId: row.winner_profile_id, createdAt: row.created_at, updatedAt: row.updated_at,
+      resolution: row.resolved_at && row.resolution_action && row.resolved_by
+        ? { action: row.resolution_action, resolvedAt: row.resolved_at, resolvedBy: row.resolved_by, note: row.resolution_note ?? '', evidence: row.resolution_evidence ?? null, heldReason: row.resolved_held_reason ?? null }
+        : null,
+    }
+  }
+
+  function listHeldCases(input: { resolvedLimit?: number } = {}): { held: SvaraHeldCase[]; resolved: SvaraHeldCase[] } {
+    const held = (database.prepare(`SELECT ${caseColumns} FROM svara_match_finance WHERE status = 'held' ORDER BY created_at, match_id;`).all() as CaseRow[]).map(caseOf)
+    const limit = Math.max(0, Math.min(200, Math.trunc(input.resolvedLimit ?? 50)))
+    const resolved = hasResolutionColumns
+      ? (database.prepare(`SELECT ${caseColumns} FROM svara_match_finance WHERE resolved_at IS NOT NULL ORDER BY resolved_at DESC, match_id LIMIT ?;`).all(limit) as CaseRow[]).map(caseOf)
+      : []
+    return { held, resolved }
+  }
+
+  function settleHeldCase(input: SvaraSettleHeldInput): SvaraSettleHeldResult {
+    const text = (value: unknown, max: number) => typeof value === 'string' && value.trim() !== '' && value.length <= max
+    if (!input || typeof input !== 'object' || !text(input.matchId, 128) || !text(input.resolvedBy, 128) || !text(input.note, 2000)) {
+      return { ok: false, code: 'invalid-input', message: 'Мачът, администраторът и бележката са задължителни.' }
+    }
+    if (input.action !== 'payout' && input.action !== 'refund') return { ok: false, code: 'invalid-input', message: 'Действието трябва да е изплащане или връщане.' }
+    if (input.action === 'payout' && (!text(input.winnerProfileId, 128) || !text(input.evidence, 2000))) {
+      return { ok: false, code: 'invalid-input', message: 'Изплащането изисква победител и описание на доказателството.' }
+    }
+    if (input.evidence !== undefined && input.evidence !== '' && !text(input.evidence, 2000)) return { ok: false, code: 'invalid-input', message: 'Невалидно доказателство.' }
+    if (!resolveHeld) return { ok: false, code: 'db-error', message: 'Липсва миграцията за одит на уреждането.' }
+    const abort = (code: SvaraSettleHeldErrorCode, message: string): SvaraSettleHeldResult => { rollback(); return { ok: false, code, message } }
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const row = rowOf(input.matchId)
+      if (!row) return abort('not-found', 'Няма финансов запис за мача.')
+      if (row.status !== 'held') return abort('not-held', `Случаят не е задържан (status=${row.status}).`)
+      if (((countSettlements.get(row.ledgerScope) as { n: number }).n) > 0) return abort('already-settled', 'За мача вече има изплащане или връщане в ledger-а.')
+      const debits = selectDebits.all(row.ledgerScope) as Array<{ profile_id: string; amount: number }>
+      const debitIds = debits.map((d) => d.profile_id).sort()
+      if (debits.length === 0 || JSON.stringify(debitIds) !== JSON.stringify([...row.participants].sort())) {
+        return abort('ledger-mismatch', 'Удържаните входове не съответстват на участниците — нужна е ръчна проверка в базата.')
+      }
+      const movements: Array<{ profileId: string; amount: number; entryType: 'svara_winner_payout' | 'svara_entry_refund' }> = []
+      let winner: string | null = null
+      if (input.action === 'payout') {
+        const terms = termsOf(row.termsJson, row.participants)
+        if (!terms) return abort('invalid-terms', 'Фиксираните условия са невалидни — допустимо е само връщане на входовете.')
+        if (debits.some((d) => d.amount !== terms.entryFee) || debits.reduce((sum, d) => sum + d.amount, 0) !== terms.pot) {
+          return abort('ledger-mismatch', 'Удържаните суми не съответстват на фиксираните условия.')
+        }
+        if (!row.participants.includes(input.winnerProfileId)) return abort('winner-not-participant', 'Победителят не е участник в мача.')
+        winner = input.winnerProfileId
+        const prize = terms.prizes[0]!
+        ensureWallet.run(winner)
+        creditWallet.run(prize, winner)
+        insertLedger.run(randomUUID(), row.ledgerScope, winner, 'svara_winner_payout', prize, balanceOf(winner))
+        movements.push({ profileId: winner, amount: prize, entryType: 'svara_winner_payout' })
+      } else {
+        for (const debit of debits) {
+          ensureWallet.run(debit.profile_id)
+          creditWallet.run(debit.amount, debit.profile_id)
+          insertLedger.run(randomUUID(), row.ledgerScope, debit.profile_id, 'svara_entry_refund', debit.amount, balanceOf(debit.profile_id))
+          movements.push({ profileId: debit.profile_id, amount: debit.amount, entryType: 'svara_entry_refund' })
+        }
+      }
+      const status = input.action === 'payout' ? 'paid' : 'refunded'
+      const evidence = typeof input.evidence === 'string' && input.evidence.trim() !== '' ? input.evidence.trim() : null
+      const updated = resolveHeld.run(status, winner, input.resolvedBy.trim(), input.action, input.note.trim(), evidence, input.matchId) as { changes?: number }
+      if ((updated.changes ?? 0) !== 1) return abort('not-held', 'Статусът се промени по време на уреждането.')
+      database.exec('COMMIT;')
+      return { ok: true, status, movements }
+    } catch (error) {
+      rollback()
+      return { ok: false, code: 'db-error', message: messageOf(error) }
+    }
+  }
+
   return {
+    listHeldCases,
+    settleHeldCase,
     getActiveConfig,
     previewPrize,
     collectEntries,

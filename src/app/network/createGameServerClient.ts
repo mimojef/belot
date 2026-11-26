@@ -545,6 +545,8 @@ export type AdminSettingsSnapshot = {
   belotRandomTableWaitSeconds: number
   /** „Свара — интервал за увеличаване на антето“ — цели минути 1..30, default 10. SERVER-AUTHORITATIVE; важи само за НОВИ маси — започнатите пазят своя интервал. */
   svaraAnteIncreaseIntervalMinutes: number
+  /** „Свара — Достъпна за всички“ — default false (само служебните роли). SERVER-AUTHORITATIVE; важи веднага. */
+  svaraPublicAccessEnabled: boolean
 }
 
 export type AdminPaymentPeriodStats = {

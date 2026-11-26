@@ -1,5 +1,6 @@
 import './style.css'
 
+import type { AdminSvaraHeldData } from './app/lobby/adminSvaraHeldPayouts'
 import {
   initPwa,
   isRunningAsStandalone,
@@ -6001,6 +6002,21 @@ type MatchRoomsApiResponse = { ok: boolean; rooms?: MatchRoomSnapshot[]; gamePri
 type AdminMatchRoomsResult = { ok: true; rooms: MatchRoomSnapshot[]; gamePrizes: AdminMatchRoomGamePrizes[] } | { ok: false; message: string }
 
 /** Етап 4В: общият каталог на масите с наградите по игри (само за админ). */
+/** „Свара“ — задържани изплащания (само пълен admin; сървърът валидира и уражда). */
+async function requestAdminSvaraHeld(init?: RequestInit): Promise<{ ok: true; data: AdminSvaraHeldData } | { ok: false; message: string }> {
+  try {
+    const path = init ? '/api/admin/svara/held-payouts/settle' : '/api/admin/svara/held-payouts'
+    const response = await fetch(`${getApiBaseUrl()}${path}`, { credentials: 'include', ...(init ?? {}) })
+    const data = (await response.json()) as Partial<AdminSvaraHeldData> & { ok?: boolean; message?: string }
+    if (!response.ok || data.ok !== true || !Array.isArray(data.held) || !Array.isArray(data.resolved)) {
+      return { ok: false, message: data.message ?? 'Задържаните изплащания не бяха заредени.' }
+    }
+    return { ok: true, data: { paidMatchesEnabled: data.paidMatchesEnabled === true, held: data.held, resolved: data.resolved, names: data.names ?? {} } }
+  } catch {
+    return { ok: false, message: 'Няма връзка.' }
+  }
+}
+
 async function loadAdminMatchRooms(): Promise<AdminMatchRoomsResult> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/rooms`, { credentials: 'include' })
@@ -7639,6 +7655,8 @@ lobby = createLobbyFlowController({
   onAdminMissionDelete: (missionId) => deleteAdminMission(missionId),
   onMatchRoomsLoad: () => loadMatchRooms(),
   onAdminMatchRoomsLoad: () => loadAdminMatchRooms(),
+  onAdminSvaraHeldLoad: () => requestAdminSvaraHeld(),
+  onAdminSvaraHeldSettle: (input) => requestAdminSvaraHeld({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }),
   onAdminMatchRoomUpsert: (room) => upsertAdminMatchRoom(room),
   onAdminMatchRoomDelete: (stakeAmount) => deleteAdminMatchRoom(stakeAmount),
   onPrivateRoomsOpen: () => { client.requestPrivateRoomsList() },

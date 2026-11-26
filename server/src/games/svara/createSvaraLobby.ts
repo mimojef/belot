@@ -37,6 +37,12 @@ export function createSvaraLobby(deps: {
   persistence?: SvaraMatchPersistence
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void
+  /**
+   * Ролята на профил по profileId (без сесия) — при старт на мач се проверява
+   * достъпът на ВСИЧКИ човешки участници (напр. след изключване на публичния
+   * достъп). Без нея (само тестове) участниците се приемат за допуснати.
+   */
+  getProfileRole?: (profileId: string) => string | null
   clock?: SvaraClock
   /** ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). Без него ботове няма. */
   testBots?: SvaraTestBotsFactory
@@ -295,6 +301,32 @@ export function createSvaraLobby(deps: {
       && table.players.some((p) => p.playerId === playerId && p.status !== 'exited')
       && !finishedDismissals.get(table.matchId)?.has(playerId))
   }
+  /** Може ли профилът (по роля, без сесия) да влезе в НОВ мач сега. */
+  function profileMayStartMatch(profileId: string): boolean {
+    if (testBots?.isBot(profileId)) return true // ВРЕМЕННО — тестови ботове
+    if (!deps.getProfileRole) return true
+    try {
+      const role = deps.getProfileRole(profileId)
+      return role !== null && evaluateSvaraAccess({ account: { role }, profile: { profileId } }).allowed
+    } catch (cause) { deps.onError?.(cause); return false }
+  }
+  /**
+   * Профил без достъп (напр. публичният достъп е изключен), който вече е в мач:
+   * може само да го довърши — игрови команди, състояние, напускане и преглед на
+   * резултата за СОБСТВЕНИЯ си мач. Нови маси, присъединяване, старт и списъци — не.
+   */
+  function mayContinueOwnMatch(profileId: string, input: SvaraLobbyClientMessage): boolean {
+    if (input.type !== 'submit_svara_command' && input.type !== 'request_svara_table_state' && input.type !== 'leave_svara_table') return false
+    const matchId = 'matchId' in input && typeof input.matchId === 'string' ? input.matchId : null
+    if (!matchId) return false
+    const commitment = findCommitment(profileId)
+    if (commitment && commitment.matchId === matchId) return true
+    return finishedView(profileId)?.matchId === matchId
+  }
+  function isContinuingParticipant(profileId: string): boolean {
+    const commitment = findCommitment(profileId)
+    return (commitment !== null && commitment.matchId !== '') || finishedView(profileId) !== undefined
+  }
   function tablesFor(playerId: string) {
     const tables = publicTables()
     // Only this authenticated participant may restore their unfinished review.
@@ -334,9 +366,12 @@ export function createSvaraLobby(deps: {
     for (const [connectionId, transport] of connections) {
       if (!subscribers.has(connectionId) && (transport.profileId === null || !recipients.has(transport.profileId))) continue
       const session = transport.getSession()
-      if (!evaluateSvaraAccess(session).allowed || !session?.profile.profileId || session.profile.profileId !== transport.profileId) continue
+      if (!session?.profile.profileId || session.profile.profileId !== transport.profileId) continue
+      const access = evaluateSvaraAccess(session)
       const playerId = session.profile.profileId
       const player = table.players.find((p) => p.playerId === playerId)
+      // Без достъп → само участник в СОБСТВЕНИЯ си мач (довършване), без списъци.
+      if (!access.allowed && !(access.reason === 'forbidden_role' && player !== undefined)) continue
       if (player && player.status !== 'exited' && !finishedDismissals.get(matchId)?.has(playerId)) {
         if (publicChanged) deliver(transport, { type: 'svara_table_updated', table })
         snapshot(transport, matchId, playerId)
@@ -344,7 +379,7 @@ export function createSvaraLobby(deps: {
       } else if (previousPlayers.includes(playerId)) {
         if (publicChanged) deliver(transport, { type: 'svara_table_left', matchId })
       }
-      if (publicChanged && subscribers.has(connectionId)) deliver(transport, { type: 'svara_tables_list', tables, finished })
+      if (access.allowed && publicChanged && subscribers.has(connectionId)) deliver(transport, { type: 'svara_tables_list', tables, finished })
     }
     testBots?.onMatchChanged(matchId) // ВРЕМЕННО — тестови ботове: само планира таймер
     if (table.phase === 'finished') scheduleFinishedRelease(matchId)
@@ -411,7 +446,9 @@ export function createSvaraLobby(deps: {
       const transport = connections.get(connectionId)
       if (!transport || stopped || recoveryState !== 'ready') return
       const session = transport.getSession()
-      if (!evaluateSvaraAccess(session).allowed || session?.profile.profileId !== transport.profileId || !transport.profileId) return
+      const access = evaluateSvaraAccess(session)
+      if (session?.profile.profileId !== transport.profileId || !transport.profileId) return
+      if (!access.allowed && !(access.reason === 'forbidden_role' && isContinuingParticipant(transport.profileId))) return
       const table = findCommitment(transport.profileId) ?? finishedView(transport.profileId)
       if (!table || !runtime.hasMatch(table.matchId)) return
       progress(table.matchId)
@@ -430,6 +467,7 @@ export function createSvaraLobby(deps: {
       finishedDismissals.clear()
     },
     findCommitment,
+    isContinuingParticipant,
     handle(connectionId: string, input: SvaraLobbyClientMessage, shuttingDown = false) {
       const transport = connections.get(connectionId)
       if (!transport) return
@@ -439,7 +477,9 @@ export function createSvaraLobby(deps: {
       const isGameplay = input.type === 'submit_svara_command'
       const commandId = isGameplay && typeof input.commandId === 'string' && input.commandId.trim() && input.commandId.length <= 64 ? input.commandId : undefined
       const reject = (code: SvaraLobbyErrorCode) => error(transport, code, requestId, isGameplay, commandId)
-      if (!decision.allowed) { reject(decision.reason); return }
+      const continuing = !decision.allowed && decision.reason === 'forbidden_role' && recoveryState === 'ready'
+        && !!transport.profileId && session?.profile.profileId === transport.profileId && mayContinueOwnMatch(transport.profileId, input)
+      if (!decision.allowed && !continuing) { reject(decision.reason); return }
       if (session?.profile.profileId !== transport.profileId) { reject('unauthenticated'); return }
       if (shuttingDown || stopped || recoveryState !== 'ready') { reject('server_unavailable'); return }
       // Defense in depth for direct callers as well as the network parser.
@@ -571,6 +611,10 @@ export function createSvaraLobby(deps: {
         if (type === 'exit' && testBots && isLastHumanLeavingTestBotMatch(runtime, message.matchId, playerId, testBots.isBot)) {
           exitAndAbortTestBotMatch(runtime, message.matchId, playerId, message.requestId, testBots.isBot)
         } else if (type === 'join-seat' || type === 'start-match') {
+          // Нов мач само ако ВСИЧКИ човешки участници имат достъп в момента
+          // (напр. публичният достъп е изключен, докато обикновен играч чака на масата).
+          const starters = participantsIfCommandStartsMatch(before, playerId, type)
+          if (starters && starters.some((id) => !profileMayStartMatch(id))) { error(transport, 'not_allowed', requestId); return }
           // Етап 3В.2: удържане на ВСИЧКИ входове преди командата, която стартира мача.
           const refusal = collectBeforeStart(before, playerId, type)
           if (refusal) { error(transport, refusal, requestId); return }

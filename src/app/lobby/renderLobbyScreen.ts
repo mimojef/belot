@@ -1,4 +1,5 @@
 import { getCampaignPackageUnits, renderCampaignPackageUnitsBadge } from './campaignShopBonus'
+import { bindAdminSvaraHeldSection, renderAdminSvaraHeldSection, type AdminSvaraHeldCallbacks, type AdminSvaraHeldState } from './adminSvaraHeldPayouts'
 import {
   DEFAULT_HUMAN_TURN_TIMEOUT_MS,
   HUMAN_TURN_TIMEOUT_OPTIONS_MS,
@@ -1012,6 +1013,8 @@ export type LobbyScreenState = {
   adminMatchRoomEdit: MatchRoomSnapshot | 'new' | null
   /** Етап 4В: сървърно изчислените награди по игри (общ каталог). */
   adminMatchRoomPrizes: AdminMatchRoomGamePrizes[]
+  /** „Свара“ — задържани изплащания (Админ → Настройки). */
+  adminSvaraHeld: AdminSvaraHeldState
   privateRoomsCreatePopupOpen: boolean
   /**
    * Избраните настройки в отворения прозорец „Нова маса“ (null = стойностите по
@@ -1464,6 +1467,8 @@ export type RenderLobbyScreenOptions = {
   onDailyRewardsClose: () => void
   onDailyRewardClaim: (tierId: string) => void
   onAdminSettingsSubmit: (settings: AdminSettingsSnapshot) => void
+  onAdminSvaraHeldReload: AdminSvaraHeldCallbacks['onAdminSvaraHeldReload']
+  onAdminSvaraHeldSettle: AdminSvaraHeldCallbacks['onAdminSvaraHeldSettle']
   onAdminCoinPackageSubmit: (input: CoinPackageInput) => void
   onAdminCoinPackageStatusChange: (
     packageId: string,
@@ -12894,6 +12899,8 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     belotRandomTableWaitSeconds: 180,
     // Етап 4Б: fallback, консистентен със server DEFAULT_SETTINGS (10 минути).
     svaraAnteIncreaseIntervalMinutes: 10,
+    // Fallback, консистентен със server DEFAULT_SETTINGS (изключено).
+    svaraPublicAccessEnabled: false,
   }
   const adminPackages = state.adminCoinPackages
   const adminBundlePackages = state.adminBundlePackages
@@ -13090,6 +13097,16 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">На всеки интервал от началото на мача антето се увеличава с 1 процентен пункт (стартира от 1%). Промяната важи само за нови маси — започнатите мачове пазят своя интервал.</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Свара — Достъпна за всички
+              <select name="svaraPublicAccessEnabled" data-admin-svara-public-access="1" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+                <option value="0" ${settings.svaraPublicAccessEnabled ? '' : 'selected'}>Не — само служебните роли</option>
+                <option value="1" ${settings.svaraPublicAccessEnabled ? 'selected' : ''}>Да — всички регистрирани профили</option>
+              </select>
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Важи веднага, без рестарт: секция „Игри“, страницата и всички сървърни проверки. При изключване започнатите мачове продължават до край и се изплащат; нови маси и присъединяване — само за служебните роли.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -13110,6 +13127,8 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
           </button>
         </div>
       </form>
+
+      ${renderAdminSvaraHeldSection(state.adminSvaraHeld)}
 
       ${renderAdminBelotVisualSection(state, isMobile)}
 
@@ -20269,8 +20288,11 @@ export function renderLobbyScreen(
         physicalShuffleMode,
         belotRandomTableWaitSeconds,
         svaraAnteIncreaseIntervalMinutes,
+        svaraPublicAccessEnabled: String(data.get('svaraPublicAccessEnabled') ?? '0') === '1',
       })
     })
+
+  bindAdminSvaraHeldSection(root, state.adminSvaraHeld, options)
 
   // Live „Минути и секунди“ преглед до полето за изчакване на случайна маса.
   const adminRandomTableWaitInput = root.querySelector<HTMLInputElement>(

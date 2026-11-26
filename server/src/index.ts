@@ -128,9 +128,10 @@ import {
 } from './uploads/campaignThemeAssets.js'
 import { createCampaignScheduler } from './campaigns/campaignScheduler.js'
 import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
-import { canSessionAccessSvara } from './games/svara/svaraAccess.js'
+import { canSessionAccessSvara, setSvaraPublicAccessProvider } from './games/svara/svaraAccess.js'
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import { createPersistentSvaraLobby } from './games/svara/createPersistentSvaraLobby.js'
+import { isSvaraPaidMatchesEnabled } from './games/svara/svaraPaidEconomy.js'
 import { createSvaraRealClock } from './games/svara/runtime/createSvaraLifecycle.js'
 import { createSvaraTestBotsFactory } from './games/svara/testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
 import { isSvaraTestBotsEnabled } from './games/svara/testBots/svaraTestBotsFeatureFlag.js' // ВРЕМЕННО — тестови ботове
@@ -1194,6 +1195,10 @@ if (cleanedUpTempBots > 0) {
 const adminSettingsStore = await createAdminSettingsStore(
   databaseBootstrap.databaseFilePath,
 )
+// „Свара — Достъпна за всички“: кеш в паметта (проверява се при всяко Свара
+// съобщение), обновява се веднага при запис от админ панела — без рестарт.
+let svaraPublicAccessEnabled = adminSettingsStore.getSettings().svaraPublicAccessEnabled
+setSvaraPublicAccessProvider(() => svaraPublicAccessEnabled)
 // "Визия на Белот" — ръчна приоритетна визия (admin_settings ключове).
 const belotVisualOverrideStore = await createBelotVisualOverrideStore(databaseBootstrap.databaseFilePath)
 // "Персонализация на профила" — store-ът се създава винаги (само схема и
@@ -5503,6 +5508,8 @@ const svaraService = await createPersistentSvaraLobby({
   // Етап 4Б: „Интервал за увеличаване на антето“ (Админ → Настройки), само за нови маси.
   getAnteIncreaseIntervalMs: () => adminSettingsStore.getSettings().svaraAnteIncreaseIntervalMinutes * 60_000,
   getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
+  // Достъпът на всички човешки участници се проверява при старт на нов мач.
+  getProfileRole: (profileId) => authStore.getAccountRoleForProfile(profileId),
   hasOtherGameCommitment: (profileId) =>
     isProfileInActiveGame(profileId) || findProfileInGameSession(profileId) !== null ||
     findActiveBelotCommitment(profileId) !== null || findActiveLudoCommitment(profileId) !== null ||
@@ -11892,7 +11899,8 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
     // UI-only сигнал за бутона "Свара" в секция "Игри" (флаг + роля, виж
     // games/svara/svaraAccess.ts). Authoritative проверката остава
     // GET /api/games/svara/access и бъдещите Свара операции.
-    svaraTestAccess: canSessionAccessSvara(session),
+    svaraTestAccess: canSessionAccessSvara(session)
+      || (session?.profile.profileId ? svaraLobby.isContinuingParticipant(session.profile.profileId) : false),
     // Самоизтриване, Етап 4I — UI-only сигнал за бутона "Изтрий" в собствения
     // профил (флаг + същите правила за роля/официален профил като
     // handleAccountDeletionSubmit). Authoritative проверките остават в
@@ -21091,8 +21099,19 @@ async function handleAdminSettingsRequest(
       nextPhysicalShuffleMode = rawPhysicalShuffleMode
     }
 
+    // „Свара — Достъпна за всички“: само true/false.
+    let nextSvaraPublicAccessEnabled: boolean | undefined
+    if ('svaraPublicAccessEnabled' in body) {
+      if (typeof body.svaraPublicAccessEnabled !== 'boolean') {
+        sendJsonResponse(res, 400, { ok: false, message: 'Полето "svaraPublicAccessEnabled" трябва да е true или false.' })
+        return true
+      }
+      nextSvaraPublicAccessEnabled = body.svaraPublicAccessEnabled
+    }
+
     const previousAntiBadLuckConfig = antiBadLuckRuntimeConfig
     const result = adminSettingsStore.updateSettings({
+      svaraPublicAccessEnabled: nextSvaraPublicAccessEnabled,
       signupBonusYellowCoins: getNumberField(body, 'signupBonusYellowCoins') ?? undefined,
       profileNameChangePrice: getNumberField(body, 'profileNameChangePrice') ?? undefined,
       vipPrice30DaysCents: getNumberField(body, 'vipPrice30DaysCents') ?? undefined,
@@ -21114,6 +21133,11 @@ async function handleAdminSettingsRequest(
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
       return true
+    }
+
+    if (nextSvaraPublicAccessEnabled !== undefined && result.settings.svaraPublicAccessEnabled !== svaraPublicAccessEnabled) {
+      svaraPublicAccessEnabled = result.settings.svaraPublicAccessEnabled
+      console.log(`[svara-access] admin profile=${session.profile.profileId} set public access ${svaraPublicAccessEnabled ? 'ON' : 'OFF'}`)
     }
 
     if (nextAntiBadLuckThreshold !== undefined || nextPhysicalShuffleMode !== undefined) {
@@ -25675,6 +25699,60 @@ function adminMatchRoomsPayload() {
   }
 }
 
+/**
+ * „Свара“ — задържани изплащания (Админ): преглед и ръчно уреждане на
+ * доказаните случаи — изплащане на победителя по фиксираните условия или
+ * връщане на входовете. Само пълен admin; одит (кой/кога/бележка/доказателство)
+ * в svara_match_finance; двойно уреждане е невъзможно (само от 'held' + UNIQUE).
+ */
+/** Имената на участниците (само за админ прегледа). */
+function svaraHeldPayoutsPayload(finance: NonNullable<typeof svaraService.finance>) {
+  const cases = finance.listHeldCases({ resolvedLimit: 50 })
+  const ids = new Set([...cases.held, ...cases.resolved].flatMap((item) => item.participants))
+  const names: Record<string, string | null> = {}
+  for (const id of ids) {
+    try { names[id] = playerProgressStore.getPublicProfile(id)?.displayName ?? null } catch { names[id] = null }
+  }
+  return { paidMatchesEnabled: isSvaraPaidMatchesEnabled(), ...cases, names }
+}
+
+async function handleAdminSvaraHeldPayoutsRequest(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
+  if (pathname !== '/api/admin/svara/held-payouts' && pathname !== '/api/admin/svara/held-payouts/settle') return false
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+  const finance = svaraService.finance
+  if (!finance) {
+    sendJsonResponse(res, 503, { ok: false, message: 'Финансите на „Свара“ са временно недостъпни.' })
+    return true
+  }
+  if (pathname === '/api/admin/svara/held-payouts' && req.method === 'GET') {
+    sendJsonResponse(res, 200, { ok: true, ...svaraHeldPayoutsPayload(finance) })
+    return true
+  }
+  if (pathname === '/api/admin/svara/held-payouts/settle' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+    const record = isRecord(body) ? body : {}
+    const action = record['action']
+    const resolvedBy = `${session.profile.profileId}${session.profile.displayName ? ` (${session.profile.displayName})` : ''}`
+    const input = action === 'payout'
+      ? { matchId: String(record['matchId'] ?? ''), action: 'payout' as const, winnerProfileId: String(record['winnerProfileId'] ?? ''), resolvedBy, note: String(record['note'] ?? ''), evidence: String(record['evidence'] ?? '') }
+      : { matchId: String(record['matchId'] ?? ''), action: (action === 'refund' ? 'refund' : 'invalid') as 'refund', resolvedBy, note: String(record['note'] ?? ''), evidence: String(record['evidence'] ?? '') }
+    const result = finance.settleHeldCase(input)
+    if (!result.ok) {
+      sendJsonResponse(res, 400, { ok: false, code: result.code, message: result.message })
+      return true
+    }
+    console.log(`[svara-held] admin=${resolvedBy} match=${input.matchId} action=${input.action} status=${result.status} movements=${JSON.stringify(result.movements)}`)
+    sendJsonResponse(res, 200, { ok: true, status: result.status, movements: result.movements, ...svaraHeldPayoutsPayload(finance) })
+    return true
+  }
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
 async function handleAdminMatchRoomsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -26362,6 +26440,8 @@ async function handleHttpRequest(
     sendJsonResponse,
     // Етап 3В.2: наградата във формата се изчислява от сървъра.
     prize: svaraService.lobby.creationPrize,
+    // Без достъп, но в започнат мач (напр. публичният достъп е изключен) → само довършване.
+    isContinuingParticipant: (profileId) => svaraService.lobby.isContinuingParticipant(profileId),
   })) {
     return
   }
@@ -26828,6 +26908,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminMatchRoomsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminSvaraHeldPayoutsRequest(req, res, requestUrl.pathname)) {
     return
   }
 

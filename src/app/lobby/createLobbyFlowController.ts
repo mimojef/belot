@@ -1,6 +1,7 @@
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 import { isErrorResponseTo, isOtherGameErrorForLudo, LUDO_GAMEPLAY_ACTION_REQUEST_TYPES } from '../network/serverErrorCorrelation'
+import type { AdminSvaraHeldData, AdminSvaraHeldSettleInput, AdminSvaraHeldState } from './adminSvaraHeldPayouts'
 import {
   PERSONAL_CHAT_MESSAGE_LIMITS,
   SUPPORT_MESSAGE_LIMITS,
@@ -1009,6 +1010,9 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onMatchRoomsLoad?: () => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
+  /** „Свара“ — задържани изплащания (Админ → Настройки). */
+  onAdminSvaraHeldLoad?: () => Promise<{ ok: true; data: AdminSvaraHeldData } | { ok: false; message: string }>
+  onAdminSvaraHeldSettle?: (input: AdminSvaraHeldSettleInput) => Promise<{ ok: true; data: AdminSvaraHeldData } | { ok: false; message: string }>
   /** Етап 4В: общият каталог на масите с наградите по игри (само за админ). */
   onAdminMatchRoomsLoad?: () => Promise<{ ok: true; rooms: MatchRoomSnapshot[]; gamePrizes: AdminMatchRoomGamePrizes[] } | { ok: false; message: string }>
   onAdminMatchRoomUpsert?: (room: AdminMatchRoomInput) => Promise<{ ok: true; rooms: MatchRoomSnapshot[]; gamePrizes: AdminMatchRoomGamePrizes[] } | { ok: false; message: string }>
@@ -2416,6 +2420,7 @@ type InternalLobbyFlowState = {
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: MatchRoomSnapshot | 'new' | null
   adminMatchRoomPrizes: AdminMatchRoomGamePrizes[]
+  adminSvaraHeld: AdminSvaraHeldState
   privateRoomsCreatePopupOpen: boolean
   /** Избраните настройки в отворения прозорец „Нова маса“ (null = по подразбиране; нулира се при отваряне). */
   privateRoomCreateDraft: PrivateRoomCreateDraft | null
@@ -3239,6 +3244,7 @@ function createInitialState(): InternalLobbyFlowState {
     matchRoomsErrorText: null,
     adminMatchRoomEdit: null,
     adminMatchRoomPrizes: [],
+    adminSvaraHeld: { data: null, loading: false, errorText: null, pending: false },
     privateRoomsCreatePopupOpen: false,
     privateRoomCreateDraft: null,
     privateRoomVoiceCreateOption: null,
@@ -6182,6 +6188,7 @@ export function createLobbyFlowController(
       matchRoomsErrorText: state.matchRoomsErrorText,
       adminMatchRoomEdit: state.adminMatchRoomEdit,
       adminMatchRoomPrizes: state.adminMatchRoomPrizes,
+      adminSvaraHeld: state.adminSvaraHeld,
       privateRoomsCreatePopupOpen: state.privateRoomsCreatePopupOpen,
       privateRoomCreateDraft: state.privateRoomCreateDraft,
       privateRoomVoiceCreateOption: state.privateRoomVoiceCreateOption,
@@ -7302,6 +7309,19 @@ export function createLobbyFlowController(
       },
       onAdminSettingsSubmit: (settings) => {
         void submitAdminSettings(settings)
+      },
+      onAdminSvaraHeldReload: () => { void loadAdminSvaraHeld() },
+      onAdminSvaraHeldSettle: (input) => {
+        void (async () => {
+          if (!options.onAdminSvaraHeldSettle || state.adminSvaraHeld.pending) return
+          state.adminSvaraHeld = { ...state.adminSvaraHeld, pending: true, errorText: null }
+          render()
+          const result = await options.onAdminSvaraHeldSettle(input)
+          state.adminSvaraHeld = result.ok
+            ? { data: result.data, loading: false, errorText: null, pending: false }
+            : { ...state.adminSvaraHeld, pending: false, errorText: result.message }
+          render()
+        })()
       },
       onAdminCoinPackageSubmit: (input) => {
         void submitAdminCoinPackage(input)
@@ -15533,7 +15553,7 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     render()
 
-    await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadAdminMatchRooms(), loadAdminBelotVisual()])
+    await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadAdminMatchRooms(), loadAdminBelotVisual(), loadAdminSvaraHeld()])
   }
 
   // Кошчето в „Поддръжка“ — HARD DELETE на собствено admin съобщение.
@@ -25241,6 +25261,18 @@ export function createLobbyFlowController(
     state.matchRooms = result.rooms
     state.adminMatchRoomPrizes = result.gamePrizes
     state.matchRoomsErrorText = null
+    scheduleRender()
+  }
+
+  /** „Свара“ — задържани изплащания (админ панел). */
+  async function loadAdminSvaraHeld(): Promise<void> {
+    if (!options.onAdminSvaraHeldLoad) return
+    state.adminSvaraHeld = { ...state.adminSvaraHeld, loading: true, errorText: null }
+    scheduleRender()
+    const result = await options.onAdminSvaraHeldLoad()
+    state.adminSvaraHeld = result.ok
+      ? { data: result.data, loading: false, errorText: null, pending: false }
+      : { ...state.adminSvaraHeld, loading: false, errorText: result.message }
     scheduleRender()
   }
 

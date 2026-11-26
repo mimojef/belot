@@ -44,7 +44,7 @@ export async function fetchSvaraTableCreationOptions(apiBaseUrl: string): Promis
     for (const entry of options.entries) {
       if (!entry || !Number.isSafeInteger(entry.entryFee) || entry.entryFee <= 0 || seen.has(entry.entryFee)
         || !Number.isSafeInteger(entry.startingChips) || entry.startingChips * 10 !== entry.entryFee
-        || !Number.isSafeInteger(entry.entryChips) || entry.entryChips * 100 !== entry.startingChips) return null
+        || !Number.isSafeInteger(entry.entryChips) || entry.entryChips !== Math.ceil(entry.startingChips / 100)) return null // анте 1%, нагоре до цял чип
       if (entry.prizeByCapacity !== undefined && (typeof entry.prizeByCapacity !== 'object' || entry.prizeByCapacity === null
         || Object.values(entry.prizeByCapacity).some((prize) => prize !== null && !(Number.isSafeInteger(prize) && (prize as number) > 0)))) return null
       seen.add(entry.entryFee)

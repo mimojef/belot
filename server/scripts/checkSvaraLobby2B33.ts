@@ -407,8 +407,10 @@ try {
     send(reconnected, { type: 'join_matchmaking', stake: 5000 })
     assert.equal((await frame(reconnected, (f) => f.type === 'error')).code, 'svara_commitment_active')
     db((database) => database.prepare("UPDATE accounts SET role = 'player' WHERE email = ?").run(passive.email!))
-    send(passive, { type: 'submit_svara_command', matchId, commandId: requestId(), expectedRevision: own.revision, command: { type: 'look' } })
-    assert.equal((await frame(passive, (f) => f.type === 'svara_command_error')).code, 'forbidden_role')
+    // Загубен достъп по време на мач: собственият мач може да се довърши (не се
+    // прекъсва), но нова маса / присъединяване — не.
+    send(passive, { type: 'create_svara_table', requestId: requestId(), capacity: 2, entryFee: 5000, entryPercent: 1, startMode: 'auto' })
+    assert.equal((await frame(passive, (f) => f.type === 'svara_lobby_error')).code, 'forbidden_role')
     db((database) => database.prepare("UPDATE accounts SET role = 'admin' WHERE email = ?").run(passive.email!))
     await http('/api/auth/logout', {}, stranger.cookie)
     if (stranger.ws.readyState === WebSocket.OPEN) {

@@ -19,6 +19,8 @@ export type SvaraHttpDeps = {
   sendJsonResponse: (res: ServerResponse, statusCode: number, payload: unknown, headers?: Record<string, string>) => void
   /** Етап 3В.2: сървърната награда за формата „Създай игра“. */
   prize?: { paid: boolean; prizeFor: (entryFee: number, participants: number) => number | null; entryFees?: () => readonly number[] }
+  /** Профил без достъп, който е в започнат/непрегледан мач — може само да го довърши (страницата се зарежда). */
+  isContinuingParticipant?: (profileId: string) => boolean
 }
 
 const NO_STORE_HEADERS = { 'Cache-Control': 'no-store' }
@@ -36,7 +38,8 @@ export function handleSvaraHttpRequest(
     return true
   }
 
-  const decision = evaluateSvaraAccess(deps.getSessionFromRequest(req))
+  const session = deps.getSessionFromRequest(req)
+  const decision = evaluateSvaraAccess(session)
   if (decision.allowed) {
     deps.sendJsonResponse(res, 200, { ok: true, access: 'granted', creationOptions: getSvaraTableCreationOptions(deps.prize) }, NO_STORE_HEADERS)
     return true
@@ -50,6 +53,11 @@ export function handleSvaraHttpRequest(
       deps.sendJsonResponse(res, 401, { ok: false, reason: 'unauthenticated', message: 'Трябва да влезеш в профила си.' }, NO_STORE_HEADERS)
       return true
     case 'forbidden_role':
+      if (session?.profile.profileId && deps.isContinuingParticipant?.(session.profile.profileId)) {
+        // Само довършване на собствения мач — без опции за нова маса.
+        deps.sendJsonResponse(res, 200, { ok: true, access: 'granted', continueOnly: true }, NO_STORE_HEADERS)
+        return true
+      }
       deps.sendJsonResponse(res, 403, { ok: false, reason: 'forbidden', message: 'Нямаш достъп.' }, NO_STORE_HEADERS)
       return true
   }

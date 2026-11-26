@@ -13,6 +13,8 @@ export async function createPersistentSvaraLobby(deps: {
   getPublicProfile?: (profileId: string) => { displayName: string; avatarUrl: string | null; gender?: 'male' | 'female' | null } | null
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void
+  /** Ролята по profileId — достъпът на всички участници при старт на нов мач. */
+  getProfileRole?: (profileId: string) => string | null
   clock?: SvaraClock
   /** ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). */
   testBots?: SvaraTestBotsFactory
@@ -49,5 +51,6 @@ export async function createPersistentSvaraLobby(deps: {
   }
   const paidEconomy: SvaraPaidEconomy | 'unavailable' | undefined = isSvaraPaidMatchesEnabled() ? (economy ?? 'unavailable') : undefined
   const lobby = createSvaraLobby({ ...deps, persistence, svaraConfig: economy ?? 'unavailable', ...(paidEconomy !== undefined ? { paidEconomy } : {}) })
-  return { lobby, close }
+  /** Финансовият store (null — недостъпен) — за админ прегледа на задържаните изплащания. */
+  return { lobby, close, finance: economy }
 }
