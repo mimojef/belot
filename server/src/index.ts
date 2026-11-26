@@ -331,6 +331,7 @@ import { createLudoEconomyStore } from './db/ludoEconomyStore.js'
 import { createActiveLudoMatchSnapshotStore } from './db/activeLudoMatchSnapshotStore.js'
 import { createAttemptLudoRoomStart } from './game/attemptLudoRoomStart.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
+import { createEntryLevelCatalogReader, tryBuildPublicEntryCatalogPayload } from './economy/entryLevelCatalogReader.js'
 import { createVipStore } from './db/vipStore.js'
 import {
   createVipPurchaseStore,
@@ -4176,6 +4177,9 @@ const tableExitPenaltyStore = await createTableExitPenaltyStore(
 const matchRoomsStore = await createMatchRoomsStore(databaseBootstrap.databaseFilePath)
 setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
 setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
+// Етап 2: общ read-only каталог на входните нива (match_rooms). Само информационен —
+// не участва в изплащанията (те остават през prize_amount по-горе).
+const entryLevelCatalogReader = createEntryLevelCatalogReader(matchRoomsStore)
 
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
@@ -25341,7 +25345,12 @@ async function handlePublicRoomsRequest(
   pathname: string,
 ): Promise<boolean> {
   if (pathname !== '/api/rooms' || req.method !== 'GET') return false
-  sendJsonResponse(res, 200, { ok: true, rooms: matchRoomsStore.listRooms() })
+  // `rooms` остава непроменено; `entryCatalog` е допълнително информационно поле
+  // (null при грешка — никога не чупи отговора).
+  const entryCatalog = tryBuildPublicEntryCatalogPayload(entryLevelCatalogReader, (error) => {
+    console.warn('[entry-catalog] /api/rooms: каталогът не беше изграден', error)
+  })
+  sendJsonResponse(res, 200, { ok: true, rooms: matchRoomsStore.listRooms(), entryCatalog })
   return true
 }
 
