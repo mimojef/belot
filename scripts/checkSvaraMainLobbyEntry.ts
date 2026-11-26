@@ -120,6 +120,35 @@ try {
   })
   await check('няма JS грешки', async () => { assert(errors.length === 0, errors.join('; ')) })
   await page.context().close()
+
+  console.log('\n[4] Отстояния: игра → „Частни маси“ 8px, между групите 18px, преди „Ежедневни награди“ 24px')
+  for (const width of [360, 390]) {
+    const context = await browser!.newContext({ baseURL: `http://127.0.0.1:${port}`, viewport: { width, height: 800 }, hasTouch: true, isMobile: true, deviceScaleFactor: 1 })
+    await context.addInitScript({ content: 'window.__name = (f) => f' })
+    const p = await context.newPage()
+    await p.goto('/scripts/fixtures/svaraMainLobbyHarness.html?access=1&role=player')
+    await p.waitForSelector('[data-lobby-stakes-scroll="1"] > *')
+    await check(`${width}px`, async () => {
+      const g = await p.evaluate(() => {
+        const r = (s: string) => document.querySelector(s)!.getBoundingClientRect()
+        const card = document.querySelector('[data-lobby-stakes-scroll="1"] > *')!.getBoundingClientRect()
+        return {
+          belotPair: r('[data-lobby-guest-belot-private="1"]').top - card.bottom,
+          ludoPair: r('[data-lobby-guest-ludo-private="1"]').top - r('[data-lobby-guest-ludo-section="1"] article').bottom,
+          svaraPair: r('[data-lobby-svara-private="1"]').top - r('[data-lobby-svara-section="1"] article').bottom,
+          belotToLudo: r('[data-lobby-guest-ludo-section="1"]').top - r('[data-lobby-guest-belot-private="1"]').bottom,
+          ludoToSvara: r('[data-lobby-svara-section="1"]').top - r('[data-lobby-guest-ludo-private="1"]').bottom,
+          toRewards: r('[data-lobby-guest-rows="1"]').top - r('[data-lobby-svara-private="1"]').bottom,
+          overflow: document.documentElement.scrollWidth > window.innerWidth,
+        }
+      })
+      const eq = (a: number, b: number) => Math.abs(a - b) < 0.6
+      assert(eq(g.belotPair, 8) && eq(g.ludoPair, 8) && eq(g.svaraPair, 8) && eq(g.belotToLudo, 18) && eq(g.ludoToSvara, 18) && eq(g.toRewards, 24) && !g.overflow, JSON.stringify(g))
+    })
+    if (process.env.SCREENSHOT_DIR) await p.waitForTimeout(3000) // началният екран за зареждане
+    if (process.env.SCREENSHOT_DIR) await p.screenshot({ path: `${process.env.SCREENSHOT_DIR}/svara-lobby-spacing-${width}.png`, fullPage: true })
+    await context.close()
+  }
   console.log(`\nРезултат: ${passed} PASS, ${failed} FAIL`)
   if (failed > 0) process.exitCode = 1
 } finally {

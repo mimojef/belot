@@ -8057,7 +8057,7 @@ function renderGuestMobileLobbyLudoSection(isMember = false): string {
     <section data-lobby-guest-ludo-section="1" style="margin-top:6px;">
       ${renderGuestMobileLobbySectionTitle('icon-ludo-section', 'Не се сърди човече')}
       <article style="
-        margin:0 12px 18px;background:#FFFFFF;border-radius:12px;padding:8px;box-sizing:border-box;
+        margin:0 12px 8px;background:#FFFFFF;border-radius:12px;padding:8px;box-sizing:border-box;
         border:1px solid rgba(20,20,43,0.05);box-shadow:${GUEST_LOBBY_CARD_SHADOW};
       ">
         ${renderGuestLobbyMediaSlot('ludo-banner', '15 / 4', GUEST_LOBBY_LUDO_BANNER_IMAGE_URL)}
@@ -8114,8 +8114,10 @@ function renderGuestLobbyRow(options: {
 // "Ежедневни награди"); същите атрибути, текстове и иконки.
 function renderGuestMobileLobbyBelotPrivateRow(privateRoomsCount: number, isMember = false): string {
   const attributes = isMember ? 'data-lobby-private-rooms-card="1"' : 'data-lobby-guest-auth-gate="1" data-lobby-guest-belot-private-row="1"'
+  // margin-top -8px: каруселът пази 16px долен padding (сенки, центриране на
+  // стрелките) → редът е на 8px от картите на Белот, както при Ludo/Свара.
   return `
-    <section data-lobby-guest-belot-private="1" style="margin:0 12px 18px;display:grid;">
+    <section data-lobby-guest-belot-private="1" style="margin:-8px 12px 18px;display:grid;">
       ${renderGuestLobbyRow({ tag: 'button', attributes, iconName: 'icon-private-tables-belot', iconTint: '#F1ECFF', title: 'Частни маси – Белот', subtitle: 'Създай маса и играй с приятели.', badgeHtml: guestLobbyCountPill(privateRoomsCount, 'violet') })}
     </section>
   `
@@ -8125,7 +8127,7 @@ function renderGuestMobileLobbyLudoPrivateRow(isMember = false): string {
   if (!isLudoFeatureEnabled()) return ''
   const attributes = isMember ? 'data-ludo-play-button="1"' : 'data-lobby-guest-auth-gate="1" data-lobby-guest-ludo-private-row="1"'
   return `
-    <section data-lobby-guest-ludo-private="1" style="margin:0 12px 9px;display:grid;">
+    <section data-lobby-guest-ludo-private="1" style="margin:0 12px 18px;display:grid;">
       ${renderGuestLobbyRow({ tag: 'button', attributes, iconName: 'icon-private-tables-ludo', iconTint: '#E7F7EE', title: 'Частни маси – Не се сърди човече', subtitle: 'Създай маса за 2 или 4 играчи.' })}
     </section>
   `
@@ -8140,13 +8142,14 @@ function renderGuestMobileLobbyLudoPrivateRow(isMember = false): string {
 // (data-svara-play-button). Броячът = масите във фаза lobby от svara_tables_list.
 function renderGuestMobileLobbySvaraSection(canShowSvaraEntry: boolean): string {
   if (!canShowSvaraEntry) return ''
-  // Вертикалните полета се сливат: 18px = същото отстояние като между реда на
-  // Белот (18px) и секцията на Ludo (6px), след реда на Ludo (9px).
+  // Отстояния в мобилното лоби: игра → нейните "Частни маси" 8px (свързани),
+  // между групите 18px (вертикалните полета се сливат), преди "Ежедневни
+  // награди" 24px (margin-top на data-lobby-guest-rows).
   return `
     <section data-lobby-svara-section="1" style="margin-top:18px;">
       ${renderGuestMobileLobbySectionTitle('icon-private-tables-svara', 'Свара')}
       <article style="
-        margin:0 12px 18px;background:#FFFFFF;border-radius:12px;padding:8px;box-sizing:border-box;
+        margin:0 12px 8px;background:#FFFFFF;border-radius:12px;padding:8px;box-sizing:border-box;
         border:1px solid rgba(20,20,43,0.05);box-shadow:${GUEST_LOBBY_CARD_SHADOW};
       ">
         ${renderGuestLobbyMediaSlot('svara-banner', '15 / 4', GUEST_LOBBY_SVARA_BANNER_IMAGE_URL)}
@@ -8162,7 +8165,7 @@ function renderGuestMobileLobbySvaraSection(canShowSvaraEntry: boolean): string 
 function renderGuestMobileLobbySvaraPrivateRow(canShowSvaraEntry: boolean, waitingTablesCount: number): string {
   if (!canShowSvaraEntry) return ''
   return `
-    <section data-lobby-svara-private="1" style="margin:0 12px 9px;display:grid;">
+    <section data-lobby-svara-private="1" style="margin:0 12px 18px;display:grid;">
       ${renderGuestLobbyRow({ tag: 'button', attributes: 'data-svara-play-button="1" data-lobby-svara-private-row="1"', iconName: 'icon-private-tables-svara', iconTint: '#FFF6E0', title: 'Частни маси – Свара', subtitle: 'Създай маса за 2, 3 или 4 играчи.', badgeHtml: guestLobbyCountPill(waitingTablesCount, 'violet') })}
     </section>
   `
@@ -8170,7 +8173,7 @@ function renderGuestMobileLobbySvaraPrivateRow(canShowSvaraEntry: boolean, waiti
 
 function renderGuestMobileLobbyRows(unclaimedMissionsCount: number, hasUnclaimedDailyReward: boolean): string {
   return `
-    <section data-lobby-guest-rows="1" style="margin:0 12px;display:grid;gap:9px;">
+    <section data-lobby-guest-rows="1" style="margin:24px 12px 0;display:grid;gap:9px;">
       ${renderGuestLobbyRow({ tag: 'button', attributes: 'data-lobby-daily-rewards-card="1"', iconName: 'icon-rewards', iconTint: '#FFF0F0', title: 'Ежедневни награди', subtitle: 'Влизай всеки ден и вземи своите награди.', badgeHtml: guestLobbyCountPill(hasUnclaimedDailyReward ? 1 : 0) })}
       ${renderGuestLobbyRow({ tag: 'button', attributes: 'data-lobby-missions-card="1"', iconName: 'icon-missions', iconTint: '#EEF3FF', title: 'Дневни мисии', subtitle: 'Изпълнявай дневни мисии и печели жълтици.', badgeHtml: guestLobbyCountPill(unclaimedMissionsCount) })}
       ${renderGuestLobbyRow({ tag: 'a', attributes: 'href="/rules" data-lobby-rules-card="1"', iconName: 'icon-rules', iconTint: '#FFF3E6', title: 'Правила на белота', subtitle: 'Виж правилата, анонсите и точкуването.' })}
