@@ -194,7 +194,7 @@ await check('B7. renderSvaraPage: checking hides both mounts; granted exposes th
     const checking = renderSvaraPage('checking', mobile)
     const granted = renderSvaraPage('granted', mobile)
     assert(checking.includes('data-svara-page="checking"') && !checking.includes('data-svara-lobby-mount') && !checking.includes('data-svara-demo-mount') && !checking.includes('>Свара<'), `checking mobile=${mobile}`)
-    assert(granted.includes('>Свара</h1>') && granted.includes('Тестов режим') && granted.includes('data-svara-lobby-mount="1"') && !granted.includes('data-svara-demo-mount'), `granted mobile=${mobile}`)
+    assert(granted.includes('>Свара</h1>') && !granted.includes('Тестов режим') && granted.includes('data-svara-lobby-mount="1"') && !granted.includes('data-svara-demo-mount'), `granted mobile=${mobile}`)
     // „Назад“ към „Игри“ е в реда с действията на лоби контролера (като Ludo) — страницата не дублира бутона.
     assert(!granted.includes('data-svara-back-to-games="1"'), `back link mobile=${mobile}`)
   }

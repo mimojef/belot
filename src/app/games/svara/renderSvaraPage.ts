@@ -1,4 +1,4 @@
-// "Свара" — начална страница: заглавие („Тестов режим“), истинската игра
+// "Свара" — начална страница: заглавие, истинската игра
 // (реалният WS мултиплейър) и връзка обратно към "Игри".
 //
 // status==='checking' рендира само неутрален loader — съдържанието се
@@ -68,7 +68,6 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
       <article data-svara-page="granted" style="padding:${padding};width:100%;max-width:1180px;box-sizing:border-box;">
         <div data-svara-page-title="1" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
           <h1 style="margin:0;color:#fff;font-size:${useMobileLayout ? '18px' : '22px'};font-weight:900;letter-spacing:0.3px;">Свара</h1>
-          <div style="padding:2px 9px;border:1px solid rgba(212,165,32,0.55);border-radius:999px;background:rgba(212,165,32,0.10);color:#f5d06f;font-size:10px;font-weight:800;">Тестов режим</div>
         </div>
         ${realSection}
       </article>
