@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
 
@@ -334,6 +334,7 @@ import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { createEntryLevelCatalogReader, tryBuildPublicEntryCatalogPayload } from './economy/entryLevelCatalogReader.js'
 import { pinLegacyBelotFinancialTerms, withPinnedBelotFinancialTerms } from './economy/belotFinancialTerms.js'
 import { createHeldPayoutRegistrationGuard } from './economy/heldPayoutRegistrationGuard.js'
+import { createHeldPayoutJournal } from './economy/heldPayoutJournal.js'
 import { createVipStore } from './db/vipStore.js'
 import {
   createVipPurchaseStore,
@@ -4186,7 +4187,16 @@ const entryLevelCatalogReader = createEntryLevelCatalogReader(matchRoomsStore)
 // маса (фиксиране), не при изплащане. Същата стойност като payout resolver-а.
 const resolveCurrentBelotPrizeForPinning = (stake: number): number | null => matchRoomsStore.getPrizeAmount(stake)
 
-const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
+// Етап 3Б.2: резервен файлов журнал (write-ahead) за задържаните изплащания —
+// до файла на базата (server/database/data, не се пипа от Smart Deploy),
+// по една директория на база (не се смесват отделните режими/бази).
+const heldPayoutJournal = createHeldPayoutJournal(
+  join(
+    dirname(databaseBootstrap.databaseFilePath),
+    `${basename(databaseBootstrap.databaseFilePath, extname(databaseBootstrap.databaseFilePath))}.held-payout-journal`,
+  ),
+)
+const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath, { heldPayoutJournal })
 const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
 const activeLudoMatchSnapshotStore = await createActiveLudoMatchSnapshotStore(databaseBootstrap.databaseFilePath)
 const campaignsStore = isCampaignsFeatureEnabled()
@@ -5151,7 +5161,12 @@ function reconcileOrphanedQueueStakesOnBoot(state: ServerState): void {
 const HELD_PAYOUT_REGISTRATION_RETRY_MS = 30_000
 let heldPayoutRegistrationRetryTimer: ReturnType<typeof setInterval> | null = null
 const heldPayoutRegistrationGuard = createHeldPayoutRegistrationGuard({
-  recordHeldPayout: (record) => matchEconomyStore.recordHeldPayout(record),
+  // Повторният опит е СЪЩОТО задържане → replay (без hold_count++).
+  recordHeldPayout: (record) => matchEconomyStore.recordHeldPayout(record, { replay: true }),
+  afterRecorded: (matchScope) => {
+    const removed = heldPayoutJournal.remove(matchScope)
+    if (!removed.ok) console.error(`[match-economy] held payout journal file kept (re-applied on boot) scope=${matchScope}: ${removed.message}`)
+  },
   removeRoomSnapshot: (roomId) => activeRoomSnapshotStore.markRoomRemoved(roomId),
   isRoomActive: (roomId) => serverState.rooms[roomId] !== undefined,
 })
@@ -5199,7 +5214,43 @@ function blockReplayIfHeldPayoutUnrecorded(room: ServerRoom): boolean {
   return true
 }
 
+/**
+ * Етап 3Б.2: прехвърля останалите случаи от файловия журнал в регистъра.
+ * Файлът се трие САМО след потвърден запис (replay → ON CONFLICT DO NOTHING:
+ * без дубликат при срив между записа и изтриването). Неуспех → случаят
+ * остава във файла и в RAM за повторни опити. Изпълнява се ПРЕДИ
+ * диагностиката, за да се запази по-пълният запис (причина, условия).
+ */
+function replayHeldPayoutJournalOnBoot(): void {
+  let scan: ReturnType<typeof heldPayoutJournal.scan>
+  try {
+    scan = heldPayoutJournal.scan()
+  } catch (error) {
+    console.error(`[match-economy] HELD PAYOUT JOURNAL UNREADABLE dir=${heldPayoutJournal.directory} — cases stay on disk for the next boot`, error)
+    return
+  }
+  let transferred = 0
+  for (const { files, entry } of scan.entries) {
+    const recorded = matchEconomyStore.recordHeldPayout(entry.record, { replay: true })
+    if (!recorded.ok) {
+      enqueueHeldPayoutRegistrationRetry(entry.record, `journal replay: ${recorded.message}`)
+      continue
+    }
+    transferred += 1
+    const removed = heldPayoutJournal.removeFiles(files)
+    if (!removed.ok) console.error(`[match-economy] held payout journal file kept (re-applied on next boot) scope=${entry.matchScope}: ${removed.message}`)
+  }
+  for (const item of scan.unreadable) {
+    console.error(`[match-economy] HELD PAYOUT JOURNAL FILE NEEDS REVIEW file=${item.file}: ${item.message}`)
+  }
+  if (scan.entries.length > 0 || scan.unreadable.length > 0) {
+    console.warn(`[match-economy] held payout journal replay entries=${scan.entries.length} transferred=${transferred} unreadable=${scan.unreadable.length}`)
+  }
+}
+
 function registerHeldPayoutsForRestoredRoomsOnBoot(state: ServerState): void {
+  // Първо журналът (най-пълните данни), после възстановените маси и диагностиката.
+  replayHeldPayoutJournalOnBoot()
   let recorded = 0
   for (const room of Object.values(state.rooms)) {
     try {

@@ -6,6 +6,7 @@ import {
 } from '../core/serverTypes.js'
 import { escapeSqlLikePattern } from './normalizeProfileIdentityText.js'
 import { resolvePinnedBelotPrize } from '../economy/belotFinancialTerms.js'
+import type { HeldPayoutJournal } from '../economy/heldPayoutJournal.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -83,7 +84,7 @@ export type MatchEconomyStore = {
    * belot_held_payouts. Ползва се за повторен опит, когато първоначалният
    * запис в payoutMatchWinners не е успял.
    */
-  recordHeldPayout: (record: HeldPayoutRecord) => { ok: true } | { ok: false; message: string }
+  recordHeldPayout: (record: HeldPayoutRecord, options?: { replay?: boolean }) => { ok: true } | { ok: false; message: string }
   /**
    * Етап 3Б.2: за възстановена при старт маса — ако мачът е приключил, а
    * изплащането би било задържано и още не е регистрирано, го регистрира.
@@ -207,7 +208,10 @@ export type HeldPayoutRecord = {
   context: Record<string, unknown>
 }
 
-export type HeldPayoutNotice = { matchScope: string; recorded: true } | { matchScope: string; recorded: false; record: HeldPayoutRecord; error: string }
+/** journaled — дали записът е във файловия журнал (write-ahead) към момента на връщане. */
+export type HeldPayoutNotice =
+  | { matchScope: string; recorded: true; journaled: boolean }
+  | { matchScope: string; recorded: false; record: HeldPayoutRecord; error: string; journaled: boolean }
 
 export type HeldPayoutRow = Omit<HeldPayoutRecord, 'context'> & {
   context: Record<string, unknown>
@@ -401,11 +405,16 @@ function getWinningSeatEntries(room: ServerRoom, winnerTeam: Team): WinningSeatE
 
 export async function createMatchEconomyStore(
   databaseFilePath: string,
-  options: { getPrize?: (stakeAmount: number) => number | null } = {},
+  options: {
+    getPrize?: (stakeAmount: number) => number | null
+    /** Етап 3Б.2: резервен файлов журнал (write-ahead) за задържаните изплащания. */
+    heldPayoutJournal?: HeldPayoutJournal | null
+  } = {},
 ): Promise<MatchEconomyStore> {
   if (options.getPrize) {
     setMatchPrizeResolver(options.getPrize)
   }
+  const heldPayoutJournal: HeldPayoutJournal | null = options.heldPayoutJournal ?? null
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
     open: true,
@@ -811,19 +820,38 @@ export async function createMatchEconomyStore(
           + ` stake=${stakeAmount} winners=${winningSeatEntries.map((entry) => entry.profileId).join(',')}`
           + ` financialTerms=${JSON.stringify(room.config.financialTerms ?? null)}`,
       )
-      let record: HeldPayoutRecord | null = null
-      let held: HeldPayoutNotice
+      // Записът се изгражда изцяло в паметта; ако четенето на входовете от
+      // базата не успее — минимален запис (без входове), никога без случай.
+      let record: HeldPayoutRecord
       try {
         record = buildHeldPayoutRecord(room, stakeAmount, winnerTeam, winningSeatEntries, prizeResolution.reason)
-        const recorded = recordHeldPayout(record)
-        held = recorded.ok
-          ? { matchScope, recorded: true }
-          : { matchScope, recorded: false, record, error: recorded.message }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        held = record === null
-          ? { matchScope, recorded: false, record: buildMinimalHeldPayoutRecord(room, stakeAmount, winnerTeam, winningSeatEntries, prizeResolution.reason), error: message }
-          : { matchScope, recorded: false, record, error: message }
+        const minimal = buildMinimalHeldPayoutRecord(room, stakeAmount, winnerTeam, winningSeatEntries, prizeResolution.reason)
+        record = { ...minimal, context: { ...minimal.context, stakeDebitsReadError: error instanceof Error ? error.message : String(error) } }
+      }
+      // Write-ahead: 1) файлов журнал (fsync) → 2) регистър → 3) изтриване на
+      // файла САМО след потвърден запис в регистъра.
+      const journaled = heldPayoutJournal !== null
+        ? heldPayoutJournal.write(record)
+        : { ok: false as const, message: 'файловият журнал не е конфигуриран' }
+      const recorded = recordHeldPayout(record)
+      let held: HeldPayoutNotice
+      if (recorded.ok) {
+        if (journaled.ok) {
+          const removed = heldPayoutJournal!.remove(matchScope)
+          if (!removed.ok) {
+            console.error(`[match-economy] held payout journal file kept (will be re-applied idempotently on boot) scope=${matchScope}: ${removed.message}`)
+          }
+        }
+        held = { matchScope, recorded: true, journaled: journaled.ok }
+      } else {
+        if (!journaled.ok) {
+          console.error(
+            `[match-economy] HELD PAYOUT UNPROTECTED scope=${matchScope} — registry: ${recorded.message}; journal: ${journaled.message};`
+              + ` record=${JSON.stringify(record)}`,
+          )
+        }
+        held = { matchScope, recorded: false, record, error: recorded.message, journaled: journaled.ok }
       }
       return {
         ok: false,
@@ -1277,18 +1305,20 @@ export async function createMatchEconomyStore(
     return { ...record, stakeDebits: findMatchStakeDebits(room, record.participants) }
   }
 
-  function recordHeldPayout(record: HeldPayoutRecord): { ok: true } | { ok: false; message: string } {
+  function recordHeldPayout(record: HeldPayoutRecord, options: { replay?: boolean } = {}): { ok: true } | { ok: false; message: string } {
     try {
       // Повторно регистриране: първоначалните доказателства остават; само
       // брояч и последно време. Статусът (вкл. вече уреден) не се пипа.
+      // replay (повторен опит / прехвърляне от журнала) — СЪЩОТО задържане,
+      // не ново: при съществуващ ред нищо не се променя.
       database.prepare(`
         INSERT INTO belot_held_payouts (
           match_scope, room_id, stake_amount, rules_version, hold_reason, financial_terms_json,
           winner_team, participants_json, winners_json, stake_debits_json, context_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(match_scope) DO UPDATE SET
-          hold_count = hold_count + 1,
-          last_held_at = CURRENT_TIMESTAMP;
+        ${options.replay === true
+          ? 'ON CONFLICT(match_scope) DO NOTHING;'
+          : 'ON CONFLICT(match_scope) DO UPDATE SET hold_count = hold_count + 1, last_held_at = CURRENT_TIMESTAMP;'}
       `).run(
         record.matchScope,
         record.roomId,

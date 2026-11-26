@@ -18,6 +18,8 @@ export type HeldPayoutRegistrationGuardDeps = {
   /** Суровото изтриване на snapshot-а (може да хвърли). */
   removeRoomSnapshot: (roomId: string) => void
   isRoomActive: (roomId: string) => boolean
+  /** След потвърден запис в регистъра (напр. изтриване на файла от журнала). */
+  afterRecorded?: (matchScope: string) => void
   log?: (message: string) => void
   error?: (message: string) => void
 }
@@ -52,6 +54,11 @@ export function createHeldPayoutRegistrationGuard(deps: HeldPayoutRegistrationGu
     if (result.ok) {
       pending.delete(matchScope)
       log(`[match-economy] held payout recorded after retry scope=${matchScope}`)
+      try {
+        deps.afterRecorded?.(matchScope)
+      } catch (thrown) {
+        error(`[match-economy] afterRecorded failed scope=${matchScope}: ${thrown instanceof Error ? thrown.message : String(thrown)}`)
+      }
       return true
     }
     error(`[match-economy] held payout still NOT recorded scope=${matchScope}: ${result.message}`)
