@@ -230,7 +230,7 @@ export function createSvaraLobbyController(options: Options) {
       <style>${DARK_LOBBY_CSS}</style>
       <div style="max-width:920px;margin:0 auto;">
         <div style="position:relative;border:2px solid rgba(212,165,32,0.78);border-radius:14px;overflow:hidden;line-height:0;margin-bottom:18px;background:#000000;">
-          <img src="/images/games/svara-banner.webp" alt="Свара" style="display:block;width:100%;height:auto;border-radius:12px;">
+          <img src="/images/games/svara-lobby-banner.webp" alt="Свара" width="1643" height="458" style="display:block;width:100%;height:auto;border-radius:12px;">
           <span data-svara-test-mode-badge="1" style="position:absolute;top:10px;left:10px;line-height:normal;padding:3px 10px;border:1px solid rgba(212,165,32,0.7);border-radius:999px;background:rgba(0,0,0,0.72);color:#f5d06f;font-size:11px;font-weight:800;">Тестов режим</span>
         </div>
         ${message ? `<div style="margin-bottom:14px;color:#f4c95b;">${esc(message)}</div>` : ''}
