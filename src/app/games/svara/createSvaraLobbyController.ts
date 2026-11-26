@@ -91,6 +91,21 @@ const LIGHT_EMPTY_ICON_URL = '/assets/lobby-mobile/icons/icon-private-tables-sva
 const backChevronSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>'
 const createPlusSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg>'
 
+// Тъмният (десктоп/таблет) вариант на предигровите екрани — правилата на
+// .ludo-lobby-page/.ludo-action-row/.ludo-tabs-row от createLudoLobbyController.
+const DARK_LOBBY_CSS = `
+  [data-svara-lobby] .svara-action-row [data-svara-back-to-games]:hover { border-color:rgba(212,165,32,.55); color:#f4c95b; background:rgba(212,165,32,.08); }
+  .svara-lobby-page { padding:clamp(14px,3vw,32px); }
+  .svara-action-row { flex-wrap:nowrap; gap:10px; }
+  .svara-tabs-row { display:flex; gap:8px; }
+  @media (max-width: 480px) {
+    .svara-lobby-page { padding:12px 7px; margin:0 -12px; }
+    .svara-action-row { gap:8px; }
+    [data-svara-lifecycle-tab] { font-size:12px; }
+    .svara-action-row [data-svara-create-open] { padding:0 12px; }
+  }
+`
+
 const STATUS_LABEL: Record<SvaraSeatStatus, string> = {
   active: 'активен',
   absent: 'отсъства',
@@ -167,7 +182,9 @@ export function createSvaraLobbyController(options: Options) {
 
   const button = 'border:1px solid rgba(212,165,32,.55);border-radius:7px;background:#0b0b0b;color:#f4c95b;min-height:40px;padding:0 16px;font-weight:800;cursor:pointer;'
   const panel = 'background:#090909;border:1px solid rgba(212,165,32,.35);border-radius:8px;padding:16px;'
-  const createButtonStyle = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 20px;border:1px solid rgba(244,201,91,.5);border-radius:10px;background:linear-gradient(135deg,#f6d27a 0%,#d4a520 55%,#c98f13 100%);color:#1a1200;font-size:14px;font-weight:800;cursor:pointer;white-space:nowrap;'
+  // Бутоните „Назад“ / „+ Създай игра“ — същите стилове като createLudoLobbyController.
+  const backButtonStyle = 'box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:38px;padding:0 16px 0 12px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgba(255,255,255,.03);color:rgba(255,255,255,.82);font-size:14px;line-height:normal;font-weight:700;cursor:pointer;transition:border-color .15s ease,color .15s ease,background .15s ease;'
+  const createButtonStyle = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 20px;flex:1 1 auto;min-width:0;max-width:220px;border:1px solid rgba(244,201,91,.5);border-radius:10px;background:linear-gradient(135deg,#f6d27a 0%,#d4a520 55%,#c98f13 100%);color:#1a1200;font-size:14px;line-height:normal;font-weight:800;cursor:pointer;box-shadow:0 1px 0 rgba(255,255,255,.25) inset,0 6px 16px rgba(212,165,32,.22);white-space:nowrap;'
   // Светлият вариант — преизчислява се в началото на всеки render().
   let light = false
 
@@ -198,10 +215,27 @@ export function createSvaraLobbyController(options: Options) {
     const flashes = Array.from(options.root.querySelectorAll<HTMLElement>('[data-svara-bet-flash]'))
     // Активната маса заема цялата налична ширина (сукното е без рамка, като
     // в Белот); списъкът/чакащата маса остават в 860px panel layout.
-    const html = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:${isActiveTable ? '0' : 'clamp(10px,2.4vw,32px)'};overflow-x:hidden;">
-      <div style="max-width:${isActiveTable ? 'none' : '860px'};margin:0 auto;">
-        ${myTable ? '' : `<div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button data-svara-create-open="1" style="${createButtonStyle}">+ Създай игра</button></div>`}
+    // Предигровите екрани следват структурата на „Не се сърди човече“
+    // (createLudoLobbyController, тъмният вариант): голям банер, 920px
+    // центриран контейнер, ред „Назад“ / „+ Създай игра“, раздел „Чакащи“.
+    const html = isActiveTable
+      ? `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:0;overflow-x:hidden;">
+      <div style="max-width:none;margin:0 auto;">
         ${message ? `<div style="margin-bottom:12px;color:#f4c95b;font-weight:700;">${esc(message)}</div>` : ''}
+        ${body}
+      </div>
+      ${createOpen ? renderCreateModal() : ''}
+    </section>`
+      : `<section data-svara-lobby="1" class="svara-lobby-page" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;overflow-x:hidden;">
+      <style>${DARK_LOBBY_CSS}</style>
+      <div style="max-width:920px;margin:0 auto;">
+        <div style="position:relative;border:2px solid rgba(212,165,32,0.78);border-radius:14px;overflow:hidden;line-height:0;margin-bottom:18px;background:#000000;">
+          <img src="/images/games/svara-banner.webp" alt="Свара" style="display:block;width:100%;height:auto;border-radius:12px;">
+          <span data-svara-test-mode-badge="1" style="position:absolute;top:10px;left:10px;line-height:normal;padding:3px 10px;border:1px solid rgba(212,165,32,0.7);border-radius:999px;background:rgba(0,0,0,0.72);color:#f5d06f;font-size:11px;font-weight:800;">Тестов режим</span>
+        </div>
+        ${message ? `<div style="margin-bottom:14px;color:#f4c95b;">${esc(message)}</div>` : ''}
+        ${renderDarkActionRow()}
+        ${myTable ? '' : `<div class="svara-tabs-row" style="margin-bottom:16px;" role="tablist">${darkWaitingTabHtml()}</div>`}
         ${body}
       </div>
       ${createOpen ? renderCreateModal() : ''}
@@ -248,6 +282,26 @@ export function createSvaraLobbyController(options: Options) {
     return `<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;gap:8px;margin-bottom:12px;">${back}${create}</div>`
   }
 
+  // Тъмен ред с действия — същите стилове като „Не се сърди човече“.
+  function renderDarkActionRow(): string {
+    return `<div class="svara-action-row" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <button type="button" data-svara-back-to-games="1" aria-label="Назад" style="${backButtonStyle}flex-shrink:0;">${backChevronSvg}<span>Назад</span></button>
+      ${myTable ? '' : `<button type="button" data-svara-create-open="1" style="${createButtonStyle}">${createPlusSvg}<span>Създай игра</span></button>`}
+    </div>`
+  }
+
+  // „Свара“ има само списък с чакащи маси (сървърът не дава играещи/приключили) —
+  // затова единственият раздел е „Чакащи“, в стила на табовете на Ludo.
+  function darkWaitingTabHtml(): string {
+    return `<button type="button" data-svara-lifecycle-tab="waiting" data-active="true" aria-selected="true" style="
+      display:flex;align-items:center;gap:4px;min-width:0;
+      background:rgba(212,165,32,0.18);border:1px solid rgba(212,165,32,0.55);
+      border-radius:9px;color:#f4c95b;font-size:13px;font-weight:700;cursor:default;flex:0 1 calc((100% - 16px) / 3);min-width:120px;justify-content:center;padding:7px 4px;
+    "><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">Чакащи</span>
+      <span style="display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 4px;flex-shrink:0;background:rgba(212,165,32,0.35);border-radius:999px;font-size:11px;font-weight:800;">${tables.length}</span>
+    </button>`
+  }
+
   function renderEmptyState(text: string): string {
     if (light) {
       return `<div style="${LIGHT_PANEL_STYLE}padding:28px 16px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;">
@@ -255,7 +309,10 @@ export function createSvaraLobbyController(options: Options) {
         <div style="font-size:15px;font-weight:700;color:#667085;line-height:1.45;">${esc(text)}</div>
       </div>`
     }
-    return `<div style="${panel}text-align:center;color:rgba(255,255,255,.6);">${esc(text)}</div>`
+    return `<div style="background:linear-gradient(180deg,#0d0d0d 0%,#080808 100%);border:1px solid rgba(212,165,32,.4);border-radius:16px;padding:clamp(28px,5vw,44px) 20px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 14px 34px rgba(0,0,0,.35);display:flex;flex-direction:column;align-items:center;text-align:center;gap:14px;">
+      <img src="${LIGHT_EMPTY_ICON_URL}" alt="" width="80" height="80" decoding="async" style="width:80px;height:80px;display:block;object-fit:contain;">
+      <div style="font-size:17px;font-weight:800;color:#fff;">${esc(text)}</div>
+    </div>`
   }
 
   function tableCardHtml(table: SvaraPublicTable): string {
