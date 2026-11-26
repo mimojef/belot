@@ -342,7 +342,7 @@ export function createSvaraLobbyController(options: Options) {
     const avatar = player.avatarUrl
       ? `<img src="${esc(player.avatarUrl)}" alt="" draggable="false" style="width:100%;height:100%;object-fit:cover;display:block;" />`
       : `<span aria-hidden="true">${esc(displayName.charAt(0).toUpperCase())}</span>`
-    const bot = player.isBot ? `<span data-svara-bot-badge="1" title="Тестов бот" style="flex-shrink:0;${light ? 'border:1px solid #B2DDFF;background:#EFF8FF;color:#175CD3;' : 'border:1px solid rgba(120,190,255,.6);color:#9fd0ff;'}border-radius:6px;padding:1px 5px;font-size:10px;font-weight:800;">БОТ</span>` : ''
+    const bot = player.isBot ? `<span data-svara-bot-badge="1" title="Бот" style="flex-shrink:0;${light ? 'border:1px solid #B2DDFF;background:#EFF8FF;color:#175CD3;' : 'border:1px solid rgba(120,190,255,.6);color:#9fd0ff;'}border-radius:6px;padding:1px 5px;font-size:10px;font-weight:800;">БОТ</span>` : ''
     return `<div style="box-sizing:border-box;display:flex;align-items:center;gap:8px;min-width:0;${light ? 'border:1px solid #E4E7EC;border-radius:10px;background:#F9FAFB;' : 'border:1px solid rgba(255,255,255,.12);border-radius:9px;'}padding:8px 10px;">
       <span style="width:34px;height:34px;flex:0 0 34px;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;${light ? 'background:#F4F0FF;border:1px solid #D9CCFF;color:#6941C6;' : 'background:#101010;border:1px solid rgba(212,165,32,.34);color:#d4a520;'}font-size:17px;font-weight:800;">${avatar}</span>
       <span title="${esc(displayName)}" style="font-weight:700;font-size:${light ? '13px' : '12px'};${light ? 'color:#111827;' : ''}min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${esc(displayName)}</span>
@@ -452,7 +452,7 @@ export function createSvaraLobbyController(options: Options) {
         <span style="width:34px;height:34px;flex:0 0 34px;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#F4F0FF;border:1px solid #D9CCFF;color:#6941C6;font-size:17px;font-weight:800;">${avatar}</span>
         <span data-svara-player-name="1" title="${esc(displayName)}" style="font-weight:700;font-size:13px;color:#111827;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayName)}</span>
         ${isCreator ? '<span data-svara-creator="1" aria-label="Създател на масата" style="color:#6941C6;flex-shrink:0;">★</span>' : ''}
-        ${player.isBot ? '<span data-svara-bot-badge="1" title="Тестов бот" style="flex-shrink:0;border:1px solid #B2DDFF;border-radius:6px;background:#EFF8FF;padding:1px 5px;font-size:10px;font-weight:800;color:#175CD3;">БОТ</span>' : ''}
+        ${player.isBot ? '<span data-svara-bot-badge="1" title="Бот" style="flex-shrink:0;border:1px solid #B2DDFF;border-radius:6px;background:#EFF8FF;padding:1px 5px;font-size:10px;font-weight:800;color:#175CD3;">БОТ</span>' : ''}
       </button>
       <span data-svara-player-status="1" style="font-size:11.5px;font-weight:600;color:#667085;flex-shrink:0;">${STATUS_LABEL[player.status]}</span>
     </div>`
@@ -462,7 +462,7 @@ export function createSvaraLobbyController(options: Options) {
         <span style="width:34px;height:34px;flex:0 0 34px;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#101010;border:1px solid rgba(212,165,32,.34);color:#d4a520;font-size:18px;font-weight:900;">${avatar}</span>
         <span data-svara-player-name="1" title="${esc(displayName)}" style="font-weight:700;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayName)}</span>
         ${isCreator ? '<span data-svara-creator="1" aria-label="Създател на масата" style="color:#f4c95b;flex-shrink:0;">★</span>' : ''}
-        ${player.isBot ? '<span data-svara-bot-badge="1" title="Тестов бот" style="flex-shrink:0;border:1px solid rgba(120,190,255,.6);border-radius:5px;padding:1px 5px;font-size:10px;font-weight:800;color:#9fd0ff;">БОТ</span>' : ''}
+        ${player.isBot ? '<span data-svara-bot-badge="1" title="Бот" style="flex-shrink:0;border:1px solid rgba(120,190,255,.6);border-radius:5px;padding:1px 5px;font-size:10px;font-weight:800;color:#9fd0ff;">БОТ</span>' : ''}
       </button>
       <span data-svara-player-status="1" style="font-size:11px;color:rgba(255,255,255,.65);flex-shrink:0;">${STATUS_LABEL[player.status]}</span>
     </div>`
@@ -471,7 +471,7 @@ export function createSvaraLobbyController(options: Options) {
   /** Етап 3В.2: текстът на наградата във формата — само от сървърната стойност. */
   function createPrizeText(prize: number | null): string {
     if (prize === null) return ''
-    return creationOptions?.paid ? `Награда за победителя: ${formatAmount(prize)} жълтици` : `Изчислена тестова награда: ${formatAmount(prize)} жълтици (не се изплаща)`
+    return `Награда за победителя: ${formatAmount(prize)} жълтици`
   }
 
   function tableAmountsHtml(table: SvaraPublicTable): string {
@@ -481,12 +481,12 @@ export function createSvaraLobbyController(options: Options) {
     if (light) {
       return `<div style="display:grid;gap:4px;margin-top:6px;font-size:12.5px;line-height:1.4;font-weight:600;color:#344054;">
       <div data-svara-waiting-entry="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">Вход: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee)} жълтици</span></span></div>
-      ${prize === null ? '' : `<div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#B54708;">${table.paid ? 'Награда' : 'Тестова награда'}: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(prize)} жълтици</span></span>${table.paid ? '' : '<span style="font-size:11px;color:#667085;">(Не се изплаща)</span>'}</div>`}
+      ${prize === null ? '' : `<div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#B54708;">Награда: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(prize)} жълтици</span></span></div>`}
     </div>`
     }
     return `<div style="display:grid;gap:5px;margin-top:7px;font-size:13px;line-height:1.4;">
       <div data-svara-waiting-entry="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">Вход: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee)} жълтици</span></span></div>
-      ${prize === null ? '' : `<div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#f4c95b;">${table.paid ? 'Награда' : 'Тестова награда'}: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(prize)} жълтици</span></span>${table.paid ? '' : '<span style="font-size:11px;color:rgba(255,255,255,.65);">(Не се изплаща)</span>'}</div>`}
+      ${prize === null ? '' : `<div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#f4c95b;">Награда: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(prize)} жълтици</span></span></div>`}
     </div>`
   }
 

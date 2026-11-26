@@ -203,8 +203,8 @@ await check('B7. renderSvaraPage: checking hides both mounts; granted exposes th
 await check('B8. отказите имат обяснение и retry/back, без игрови или демо mount (desktop + mobile)', () => {
   const reasons = {
     unauthenticated: 'Влез в профила си',
-    forbidden: 'няма разрешение',
-    unavailable: 'не е достъпна на този сървър',
+    forbidden: 'Нямате достъп до Свара',
+    unavailable: 'Свара не е достъпна в момента',
     denied: 'не завърши успешно',
   } as const
   for (const mobile of [false, true]) {

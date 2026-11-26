@@ -33,9 +33,9 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
 
   if (status !== 'granted') {
     const messages = {
-      unauthenticated: 'Влез в профила си, за да проверим тестовия ти достъп.',
-      forbidden: 'Този профил няма разрешение за тестов достъп до Свара.',
-      unavailable: 'Тестовата игра не е достъпна на този сървър.',
+      unauthenticated: 'Влез в профила си, за да играеш Свара.',
+      forbidden: 'Нямате достъп до Свара.',
+      unavailable: 'Свара не е достъпна в момента.',
       denied: 'Проверката за достъп не завърши успешно. Опитай отново.',
     }
     return `
@@ -94,9 +94,9 @@ function renderLightSvaraPage(status: SvaraPageStatus): string {
   }
   if (status !== 'granted') {
     const messages = {
-      unauthenticated: 'Влез в профила си, за да проверим тестовия ти достъп.',
-      forbidden: 'Този профил няма разрешение за тестов достъп до Свара.',
-      unavailable: 'Тестовата игра не е достъпна на този сървър.',
+      unauthenticated: 'Влез в профила си, за да играеш Свара.',
+      forbidden: 'Нямате достъп до Свара.',
+      unavailable: 'Свара не е достъпна в момента.',
       denied: 'Проверката за достъп не завърши успешно. Опитай отново.',
     }
     const secondary = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 14px;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;color:#344054;font-family:inherit;font-size:14px;font-weight:800;text-decoration:none;cursor:pointer;white-space:nowrap;'

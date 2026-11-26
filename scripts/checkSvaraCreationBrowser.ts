@@ -111,7 +111,7 @@ try {
           assert.equal(await form.locator('[name="entryFee"] option:checked').textContent(), `${grouped(fee)} жълтици`)
           assert.equal(await form.locator('[data-svara-create-chips]').textContent(), `Получаваш: ${grouped(fee / 10)} виртуални чипа`)
           assert.equal(await form.locator('[data-svara-create-ante]').textContent(), `Анте за раздаване: ${grouped(fee / 1000)} чипа`)
-          assert.equal(await form.locator('[data-svara-create-prize]').textContent(), `Изчислена тестова награда: ${grouped(fee * count * 4 / 5)} жълтици (не се изплаща)`)
+          assert.equal(await form.locator('[data-svara-create-prize]').textContent(), `Награда за победителя: ${grouped(fee * count * 4 / 5)} жълтици`)
         }
         // Compare the actual Ludo dialog, read-only; never create a Ludo room.
         const ludo = await open(users.at(-1)!, '/games/ludo')
@@ -190,7 +190,7 @@ try {
         const waiting = page.locator('[data-svara-waiting="1"]')
         await waiting.waitFor()
         assert.equal((await waiting.locator('[data-svara-waiting-entry]').innerText()).replace(/\n/g, ' '), `Вход: ${grouped(fee)} жълтици`)
-        assert.equal((await waiting.locator('[data-svara-waiting-prize]').innerText()).replace(/\n/g, ' '), `Тестова награда: ${grouped(fee * capacity * 4 / 5)} жълтици (Не се изплаща)`)
+        assert.equal((await waiting.locator('[data-svara-waiting-prize]').innerText()).replace(/\n/g, ' '), `Награда: ${grouped(fee * capacity * 4 / 5)} жълтици`)
         await waitForHarnessCondition('live participant rendering', async () => await waiting.locator('[data-svara-waiting-seat]').count() === participants.length, 5000)
         for (const user of participants) {
           const seat = waiting.locator(`[data-svara-waiting-seat="${user.id}"]`)
