@@ -225,6 +225,9 @@ const ADMIN_PHYSICAL_SHUFFLE_MODE_OPTIONS: ReadonlyArray<{ value: AdminSettingsS
 ]
 // "Белот — изчакване на случайна маса" — mirror на server границите
 // (adminSettingsStore.ts); сървърът re-validate-ва независимо.
+// Етап 4Б: „Свара — интервал за увеличаване на антето“ (огледало на сървърните граници).
+const ADMIN_SVARA_ANTE_INTERVAL_MIN_MINUTES = 1
+const ADMIN_SVARA_ANTE_INTERVAL_MAX_MINUTES = 30
 const ADMIN_BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS = 20
 const ADMIN_BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS = 600
 
@@ -12864,6 +12867,8 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // Само fallback докато state.adminSettings се зарежда — консистентен със
     // server DEFAULT_SETTINGS (adminSettingsStore.ts, 180).
     belotRandomTableWaitSeconds: 180,
+    // Етап 4Б: fallback, консистентен със server DEFAULT_SETTINGS (10 минути).
+    svaraAnteIncreaseIntervalMinutes: 10,
   }
   const adminPackages = state.adminCoinPackages
   const adminBundlePackages = state.adminBundlePackages
@@ -13049,6 +13054,17 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </div>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Колко време случайна маса в Белот изчаква реални играчи, преди свободните места да се запълнят с ботове (един по един през последните 3 секунди). Цели секунди от ${ADMIN_BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS} до ${ADMIN_BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS}. Промяната важи веднага за всяка НОВА маса, без restart; вече чакащите маси запазват своя краен момент. Не засяга масите с ниво над 7 (60 сек, без ботове), частните маси и другите игри.</div>
+        </div>
+
+        <div data-lobby-admin-svara-settings="1" style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Свара</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Интервал за увеличаване на антето (минути)
+              <input name="svaraAnteIncreaseIntervalMinutes" type="number" min="${ADMIN_SVARA_ANTE_INTERVAL_MIN_MINUTES}" max="${ADMIN_SVARA_ANTE_INTERVAL_MAX_MINUTES}" step="1" required value="${settings.svaraAnteIncreaseIntervalMinutes}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">На всеки интервал от началото на мача антето се увеличава с 1 процентен пункт (стартира от 1%). Промяната важи само за нови маси — започнатите мачове пазят своя интервал.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -20205,6 +20221,11 @@ export function renderLobbyScreen(
       if (!isValidAdminRandomTableWaitSeconds(belotRandomTableWaitSeconds)) {
         return
       }
+      // Етап 4Б: цели минути 1..30 (сървърът re-validate-ва).
+      const svaraAnteIncreaseIntervalMinutes = Number(data.get('svaraAnteIncreaseIntervalMinutes'))
+      if (!Number.isInteger(svaraAnteIncreaseIntervalMinutes) || svaraAnteIncreaseIntervalMinutes < ADMIN_SVARA_ANTE_INTERVAL_MIN_MINUTES || svaraAnteIncreaseIntervalMinutes > ADMIN_SVARA_ANTE_INTERVAL_MAX_MINUTES) {
+        return
+      }
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
@@ -20219,6 +20240,7 @@ export function renderLobbyScreen(
         antiBadLuckThreshold,
         physicalShuffleMode,
         belotRandomTableWaitSeconds,
+        svaraAnteIncreaseIntervalMinutes,
       })
     })
 

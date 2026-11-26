@@ -5496,6 +5496,8 @@ let matchmakingCapacityRetryAt = 0
 const socketRegistry = new Map<ConnectionId, WebSocket>()
 const svaraService = await createPersistentSvaraLobby({
   databaseFilePath: databaseBootstrap.databaseFilePath,
+  // Етап 4Б: „Интервал за увеличаване на антето“ (Админ → Настройки), само за нови маси.
+  getAnteIncreaseIntervalMs: () => adminSettingsStore.getSettings().svaraAnteIncreaseIntervalMinutes * 60_000,
   getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
   hasOtherGameCommitment: (profileId) =>
     isProfileInActiveGame(profileId) || findProfileInGameSession(profileId) !== null ||
@@ -21022,6 +21024,7 @@ async function handleAdminSettingsRequest(
       'marketingDailyGiftLimit',
       'freeTopicsVipDays',
       'belotRandomTableWaitSeconds',
+      'svaraAnteIncreaseIntervalMinutes',
     ] as const
     for (const key of numericFieldKeys) {
       if (key in body && getNumberField(body, key) === null) {
@@ -21097,6 +21100,8 @@ async function handleAdminSettingsRequest(
       // Цели секунди 20..600 — store-ът отказва всичко друго (400). Важи само
       // за НОВИ случайни маси; чакащите пазят своя таймер.
       belotRandomTableWaitSeconds: getNumberField(body, 'belotRandomTableWaitSeconds') ?? undefined,
+      // „Свара“ (Етап 4Б): цели минути 1..30 — важи само за НОВИ маси.
+      svaraAnteIncreaseIntervalMinutes: getNumberField(body, 'svaraAnteIncreaseIntervalMinutes') ?? undefined,
       registrationVerificationMode: nextRegistrationVerificationMode,
       antiBadLuckThreshold: nextAntiBadLuckThreshold,
       physicalShuffleMode: nextPhysicalShuffleMode,

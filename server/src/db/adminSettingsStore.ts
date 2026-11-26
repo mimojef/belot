@@ -90,6 +90,12 @@ export type AdminSettingsSnapshot = {
    * ниво > 7 (60 сек, без ботове), частните маси и другите игри.
    */
   belotRandomTableWaitSeconds: number
+  /**
+   * „Свара“ — интервал за увеличаване на антето (Етап 4Б), цели минути 1..30,
+   * default 10. Чете се САМО при създаване на нова маса; започнатите мачове
+   * пазят интервала в собственото си състояние.
+   */
+  svaraAnteIncreaseIntervalMinutes: number
 }
 
 export type AdminSettingsStore = {
@@ -167,6 +173,8 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // Липсващ ред (не е нужна seed migration) → 180 сек. Трябва да остане
   // РАВЕН на MATCHMAKING_WAIT_MS (matchmaking/matchmakingTypes.ts).
   belotRandomTableWaitSeconds: 180,
+  // Липсващ ред (не е нужна seed migration) или невалидна стойност → 10 минути.
+  svaraAnteIncreaseIntervalMinutes: 10,
 }
 
 const SETTING_KEYS = {
@@ -182,7 +190,11 @@ const SETTING_KEYS = {
   antiBadLuckThreshold: 'anti_bad_luck_threshold',
   physicalShuffleMode: 'physical_shuffle_mode',
   belotRandomTableWaitSeconds: 'belot_random_table_wait_seconds',
+  svaraAnteIncreaseIntervalMinutes: 'svara_ante_increase_interval_minutes',
 } as const
+
+export const SVARA_ANTE_INTERVAL_MIN_MINUTES = 1
+export const SVARA_ANTE_INTERVAL_MAX_MINUTES = 30
 
 const BELOT_RANDOM_TABLE_WAIT_MIN_SECONDS = 20
 const BELOT_RANDOM_TABLE_WAIT_MAX_SECONDS = 600
@@ -267,6 +279,12 @@ function parseStoredBelotRandomTableWaitSeconds(value: string | undefined): numb
     ?? DEFAULT_SETTINGS.belotRandomTableWaitSeconds
 }
 
+function parseStoredSvaraAnteIntervalMinutes(value: string | undefined): number {
+  const parsed = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN
+  return normalizeSettingNumber(parsed, SVARA_ANTE_INTERVAL_MIN_MINUTES, SVARA_ANTE_INTERVAL_MAX_MINUTES)
+    ?? DEFAULT_SETTINGS.svaraAnteIncreaseIntervalMinutes
+}
+
 function parseStoredResetGeneration(value: string | undefined): number {
   const parsed = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0
@@ -309,7 +327,8 @@ export async function createAdminSettingsStore(
       'registration_verification_mode',
       'anti_bad_luck_threshold',
       'physical_shuffle_mode',
-      'belot_random_table_wait_seconds'
+      'belot_random_table_wait_seconds',
+      'svara_ante_increase_interval_minutes'
     );
   `)
 
@@ -384,6 +403,9 @@ export async function createAdminSettingsStore(
       physicalShuffleMode: parseStoredPhysicalShuffleMode(values.get(SETTING_KEYS.physicalShuffleMode)),
       belotRandomTableWaitSeconds: parseStoredBelotRandomTableWaitSeconds(
         values.get(SETTING_KEYS.belotRandomTableWaitSeconds),
+      ),
+      svaraAnteIncreaseIntervalMinutes: parseStoredSvaraAnteIntervalMinutes(
+        values.get(SETTING_KEYS.svaraAnteIncreaseIntervalMinutes),
       ),
     }
   }
@@ -531,6 +553,17 @@ export async function createAdminSettingsStore(
       }
     }
 
+    const nextSvaraAnteIntervalMinutes =
+      input.svaraAnteIncreaseIntervalMinutes === undefined
+        ? undefined
+        : normalizeSettingNumber(input.svaraAnteIncreaseIntervalMinutes, SVARA_ANTE_INTERVAL_MIN_MINUTES, SVARA_ANTE_INTERVAL_MAX_MINUTES)
+    if (input.svaraAnteIncreaseIntervalMinutes !== undefined && nextSvaraAnteIntervalMinutes === null) {
+      return {
+        ok: false,
+        message: `Интервалът за увеличаване на антето трябва да е цяло число между ${SVARA_ANTE_INTERVAL_MIN_MINUTES} и ${SVARA_ANTE_INTERVAL_MAX_MINUTES} минути.`,
+      }
+    }
+
     if (input.belotRandomTableWaitSeconds !== undefined && nextBelotRandomTableWaitSeconds === null) {
       return {
         ok: false,
@@ -604,6 +637,10 @@ export async function createAdminSettingsStore(
 
       if (nextBelotRandomTableWaitSeconds !== undefined) {
         upsertSettingStatement.run(SETTING_KEYS.belotRandomTableWaitSeconds, String(nextBelotRandomTableWaitSeconds))
+      }
+
+      if (nextSvaraAnteIntervalMinutes !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.svaraAnteIncreaseIntervalMinutes, String(nextSvaraAnteIntervalMinutes))
       }
 
       database.exec('COMMIT;')

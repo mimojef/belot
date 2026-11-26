@@ -292,9 +292,9 @@ console.log('\n[10] Флаг, тестови ботове, интерфейс')
 console.log('\n[11] Белот / Ludo / турнири — без промени')
 {
   const { execFileSync } = await import('node:child_process')
-  const diff = execFileSync('git', ['diff', '--name-only', 'HEAD', '--', 'src/db/matchEconomyStore.ts', 'src/db/ludoEconomyStore.ts', 'src/db/tournamentEconomyStore.ts', 'src/tournament', 'src/economy/gameFinancialConfig.ts', 'src/economy/prizeFormula.ts', 'src/games/svara/engine'],
+  const diff = execFileSync('git', ['diff', '--name-only', 'HEAD', '--', 'src/db/matchEconomyStore.ts', 'src/db/ludoEconomyStore.ts', 'src/db/tournamentEconomyStore.ts', 'src/tournament', 'src/economy/gameFinancialConfig.ts', 'src/economy/prizeFormula.ts'],
     { cwd: join(import.meta.dirname, '..'), encoding: 'utf8' }).trim()
-  check('икономиките на Белот/Ludo/турнири, формулите и двигателят на „Свара“ — непроменени', diff === '', diff)
+  check('икономиките на Белот/Ludo/турнири и формулите — непроменени (двигателят на „Свара“ се променя в 4Б по замисъл)', diff === '', diff)
 }
 
 raw.close()

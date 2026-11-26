@@ -182,6 +182,8 @@ export type SvaraRegisterMatchInput = {
   entryFee: number
   entryPercent?: SvaraEntryPercent
   startMode: SvaraStartMode
+  /** Етап 4Б: интервал за увеличаване на антето (ms); липсва → фиксирано анте (стар режим). */
+  anteIncreaseIntervalMs?: number
 }
 
 export type SvaraMatchRuntime = {
@@ -324,10 +326,11 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
     writing.add(matchId)
     const started = performance.now()
     try {
-      const result = applySvaraMatchCommand(entry.state, command, env)
+      // Етап 4Б: едно и също сървърно време за двигателя (динамично анте) и за часовниците.
+      const at = now()
+      const result = applySvaraMatchCommand(entry.state, command, { ...env, now: at })
       if (result.status === 'applied') {
         const revision = entry.revision + 1
-        const at = now()
         // Общият бюджет за отсъствие: отваря/затваря часовниците по новите статуси.
         updateSvaraAbsenceClocks(result.state, at)
         const planned = planSvaraDeadlines(result.state, revision, entry.deadlines, entry.deadlineSequence, at)
@@ -379,7 +382,8 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
       if (matches.has(matchId)) fail('match-exists', `match ${matchId} is already registered`)
       let state: SvaraMatchState
       try {
-        state = createSvaraMatch({ tableId: matchId, capacity: input.capacity, entryFee: input.entryFee, entryPercent: input.entryPercent, startMode: input.startMode, creatorId })
+        state = createSvaraMatch({ tableId: matchId, capacity: input.capacity, entryFee: input.entryFee, entryPercent: input.entryPercent, startMode: input.startMode, creatorId,
+          ...(input.anteIncreaseIntervalMs !== undefined ? { anteIncreaseIntervalMs: input.anteIncreaseIntervalMs } : {}) })
       } catch (error) {
         if (error instanceof SvaraInvalidInputError) fail('invalid-input', error.message)
         throw error

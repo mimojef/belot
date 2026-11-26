@@ -16,6 +16,8 @@ export async function createPersistentSvaraLobby(deps: {
   clock?: SvaraClock
   /** ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). */
   testBots?: SvaraTestBotsFactory
+  /** Етап 4Б: интервалът за увеличаване на антето (ms) — от админ настройката. */
+  getAnteIncreaseIntervalMs?: () => number
 }) {
   let persistence: SvaraMatchPersistence
   let close = () => {}

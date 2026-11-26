@@ -1,4 +1,4 @@
-import { assertSvaraMatchInvariants, describeSvaraLifecycle, type SvaraMatchState } from '../engine/svaraMatch.js'
+import { assertSvaraMatchInvariants, describeSvaraLifecycle, SVARA_ANTE_INTERVAL_MAX_MS, SVARA_ANTE_INTERVAL_MIN_MS, svaraAnteChipsFor, type SvaraMatchState } from '../engine/svaraMatch.js'
 import { parseSvaraCardCode } from '../engine/svaraCards.js'
 import { svaraStartingChipsForEntry } from '../engine/svaraChips.js'
 import { planSvaraDeadlines } from './svaraDeadlines.js'
@@ -73,7 +73,17 @@ function validateStructure(state: SvaraMatchState): void {
   const s: any = state
   require(object(s.config) && [2, 3, 4].includes(s.config.capacity) && [1, 2, 3, 5].includes(s.config.entryPercent) && ['auto', 'manual'].includes(s.config.startMode))
   require(text(s.config.creatorId) && integer(s.config.entryFee) && s.startingChips === svaraStartingChipsForEntry(s.config.entryFee))
-  require(s.entryChips === Math.ceil(s.startingChips * s.config.entryPercent / 100))
+  // Етап 4Б: при динамично анте текущото анте следва записания процент; иначе — фиксираното.
+  if (s.dynamicAnte === undefined) require(s.entryChips === Math.ceil(s.startingChips * s.config.entryPercent / 100))
+  else {
+    const d = s.dynamicAnte
+    require(object(d) && exactKeys(d, ['intervalMs', 'startedAt', 'percent', 'appliedTimeSteps', 'pendingRemovals', 'changes'])
+      && integer(d.intervalMs) && d.intervalMs >= SVARA_ANTE_INTERVAL_MIN_MS && d.intervalMs <= SVARA_ANTE_INTERVAL_MAX_MS
+      && (d.startedAt === null || (integer(d.startedAt) && d.startedAt > 0)) && integer(d.percent) && d.percent >= 1 && integer(d.appliedTimeSteps)
+      && Array.isArray(d.pendingRemovals) && d.pendingRemovals.every((at: unknown) => at === null || integer(at))
+      && Array.isArray(d.changes) && d.changes.every((c: any) => object(c) && ['time', 'removal'].includes(c.kind) && integer(c.percent) && integer(c.roundCounter) && (c.at === null || integer(c.at))))
+    require(s.entryChips === svaraAnteChipsFor(s.startingChips, d.percent))
+  }
   require(strings(s.seats) && s.seats.length <= s.config.capacity && s.seats.every((id: string) => id.length <= 128))
   require(s.phase === 'closed' ? s.seats.length === 0 : s.seats.length > 0)
   require(object(s.status) && exactKeys(s.status, s.seats) && Object.values(s.status).every((status) => ['active', 'absent', 'exited', 'eliminated'].includes(status as string)))

@@ -271,6 +271,12 @@ export type SvaraMatchState = {
   finishReason?: 'prolonged-absence' | 'all-absent' | null
   /** Часовници на общия бюджет за отсъствие — пише ги само runtime-ът (двигателят е без време). */
   absence?: Record<string, SvaraAbsenceClock>
+  /**
+   * Етап 4Б: динамично анте. Липсва при по-стари мачове (фиксирано анте).
+   * Записва се със състоянието → оцелява при рестарт; броячите гарантират,
+   * че никое увеличение не се прилага повторно.
+   */
+  dynamicAnte?: SvaraDynamicAnte
   /** Archive containers are immutable after commit; live-linked history is copied with the game. */
   ledger: SvaraMatchLedgerEntry[]
   history: SvaraRoundRecord[]
@@ -336,6 +342,11 @@ export class SvaraMatchError extends Error {
 export type SvaraMatchEnv = {
   /** Криптографски източник по подразбиране. */
   random?: SvaraRandomSource
+  /**
+   * Етап 4Б: сървърното време на командата (ms). Подава го runtime-ът; само
+   * динамичното анте го ползва. Без него времевите увеличения не се прилагат.
+   */
+  now?: number
   /** Само за тестове: контролирано тесте за следващото раздаване. */
   createDeck?: () => readonly SvaraCard[]
 }
@@ -382,7 +393,70 @@ function inSeatOrder(seats: readonly string[], members: readonly string[]): stri
 
 // ── Създаване ───────────────────────────────────────────────────────────────
 
-export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; entryFee: number; entryPercent?: SvaraEntryPercent; startMode: SvaraStartMode; creatorId: string }): SvaraMatchState {
+// ── Етап 4Б: динамично анте ─────────────────────────────────────────────────
+//   - старт: 1% от първоначалните чипове на ЕДИН играч (не от текущия баланс);
+//   - на всеки intervalMs от началото на мача: +1 процентен пункт;
+//   - при отпадане на играч (0 чипа, доброволен изход, изчерпан бюджет за
+//     отсъствие): текущото анте × 2;
+//   - събитията се прилагат последователно по време (при равно време —
+//     първо времевото увеличение, после удвояването) и САМО на границата
+//     между раздаванията (start-next-round); никога по средата на раздаване.
+export const SVARA_ANTE_INTERVAL_MIN_MS = 60_000
+export const SVARA_ANTE_INTERVAL_MAX_MS = 30 * 60_000
+
+export type SvaraDynamicAnte = {
+  intervalMs: number
+  /** Сървърното време на старта на мача; null — стартиран без часовник (само тестове). */
+  startedAt: number | null
+  /** Текущ процент от първоначалните чипове на един играч. */
+  percent: number
+  /** Колко времеви увеличения вече са приложени. */
+  appliedTimeSteps: number
+  /** Времената на отпаданията, чакащи следващата граница (null — без часовник). */
+  pendingRemovals: Array<number | null>
+  /** Приложените промени — за проверка и показване. */
+  changes: Array<{ at: number | null; kind: 'time' | 'removal'; percent: number; roundCounter: number }>
+}
+
+export function svaraAnteChipsFor(startingChips: number, percent: number): number {
+  return Math.max(1, Math.floor((startingChips * percent) / 100))
+}
+
+function recordAnteRemoval(ctx: Ctx): void {
+  const ante = ctx.state.dynamicAnte
+  if (!ante || ctx.state.phase !== 'in-progress') return
+  ante.pendingRemovals.push(ctx.env.now ?? null)
+}
+
+/** Прилага всички дължими промени. Вика се САМО при start-next-round (няма активно раздаване). */
+function applyDueAnteChanges(ctx: Ctx): void {
+  const { state } = ctx
+  const ante = state.dynamicAnte
+  if (!ante) return
+  const events: Array<{ at: number | null; order: number; kind: 'time' | 'removal' }> = []
+  const now = ctx.env.now
+  if (ante.startedAt !== null && typeof now === 'number' && now >= ante.startedAt) {
+    const due = Math.floor((now - ante.startedAt) / ante.intervalMs)
+    for (let step = ante.appliedTimeSteps + 1; step <= due; step += 1) events.push({ at: ante.startedAt + step * ante.intervalMs, order: 0, kind: 'time' })
+    ante.appliedTimeSteps = Math.max(ante.appliedTimeSteps, due)
+  }
+  for (const at of ante.pendingRemovals) events.push({ at, order: 1, kind: 'removal' })
+  ante.pendingRemovals = []
+  if (events.length === 0) return
+  const key = (at: number | null) => (at === null ? Number.MAX_SAFE_INTEGER : at)
+  events.sort((a, b) => key(a.at) - key(b.at) || a.order - b.order)
+  for (const event of events) {
+    ante.percent = event.kind === 'time' ? ante.percent + 1 : ante.percent * 2
+    ante.changes.push({ at: event.at, kind: event.kind, percent: ante.percent, roundCounter: state.roundCounter })
+  }
+  state.entryChips = svaraAnteChipsFor(state.startingChips, ante.percent)
+}
+
+export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; entryFee: number; entryPercent?: SvaraEntryPercent; startMode: SvaraStartMode; creatorId: string; anteIncreaseIntervalMs?: number }): SvaraMatchState {
+  if (input.anteIncreaseIntervalMs !== undefined && (!Number.isSafeInteger(input.anteIncreaseIntervalMs)
+    || input.anteIncreaseIntervalMs < SVARA_ANTE_INTERVAL_MIN_MS || input.anteIncreaseIntervalMs > SVARA_ANTE_INTERVAL_MAX_MS)) {
+    throw new SvaraInvalidInputError(`anteIncreaseIntervalMs must be an integer from ${SVARA_ANTE_INTERVAL_MIN_MS} to ${SVARA_ANTE_INTERVAL_MAX_MS}`)
+  }
   if (!isNonEmptyString(input?.tableId)) throw new SvaraInvalidInputError('tableId required')
   if (![2, 3, 4].includes(input.capacity)) throw new SvaraInvalidInputError('capacity must be 2, 3 or 4')
   if (input.startMode !== 'auto' && input.startMode !== 'manual') throw new SvaraInvalidInputError('startMode must be auto or manual')
@@ -413,6 +487,9 @@ export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; 
     ledger: [],
     history: [],
     processedCommands: {},
+    ...(input.anteIncreaseIntervalMs !== undefined
+      ? { dynamicAnte: { intervalMs: input.anteIncreaseIntervalMs, startedAt: null, percent: entryPercent, appliedTimeSteps: 0, pendingRemovals: [], changes: [] } }
+      : {}),
   }
 }
 
@@ -738,6 +815,7 @@ function startMatchByCreator(ctx: Ctx, playerId: string): void {
 function startMatch(ctx: Ctx): void {
   const { state } = ctx
   state.phase = 'in-progress'
+  if (state.dynamicAnte) state.dynamicAnte.startedAt = ctx.env.now ?? null
   state.totalChips = state.startingChips * state.seats.length
   for (const id of state.seats) {
     state.stacks[id] = state.startingChips
@@ -759,6 +837,8 @@ function startNextRound(ctx: Ctx): void {
   const { state } = ctx
   if (state.round) fail('not-allowed', `round ${state.round.roundId} is still in progress`)
   if (describeSvaraLifecycle(state).readyPlayerIds.length < 2) fail('no-round-available', 'waiting for a second active player')
+  // Етап 4Б: границата между раздаванията — единственото място за промяна на антето.
+  applyDueAnteChanges(ctx)
   activateReturns(ctx)
   // §6.12: заключените обикновени Свари се разиграват последователно; Свара
   // с отсъстващ правоимащ може да изчаква (§8).
@@ -1094,6 +1174,7 @@ function finishRound(ctx: Ctx, record: SvaraRoundRecord | null): void {
     const status = state.status[id]
     if ((status === 'active' || status === 'absent') && state.stacks[id] === 0 && !state.lockedPots.some((pot) => pot.eligible.includes(id))) {
       state.status[id] = 'eliminated'
+      recordAnteRemoval(ctx)
     }
   }
   const alive = alivePlayers(state)
@@ -1506,6 +1587,8 @@ function removeFromMatch(ctx: Ctx, playerId: string): void {
     state.removedChips += unused
     pushLedger(ctx, { type: 'exit-removed', from: `stack:${playerId}`, to: 'removed', amount: unused, roundId: state.round?.roundId ?? null, potId: null, playerId })
   }
+  // Етап 4Б: отпадане само ако играчът е бил още в играта (не повторно за вече отпаднал).
+  if (state.status[playerId] === 'active' || state.status[playerId] === 'absent') recordAnteRemoval(ctx)
   state.status[playerId] = 'exited'
   state.pendingReturns = (state.pendingReturns ?? []).filter((id) => id !== playerId)
   const round = state.round

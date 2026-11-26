@@ -42,6 +42,11 @@ export function createSvaraLobby(deps: {
    * нови маси се отказват (fail closed).
    */
   paidEconomy?: SvaraPaidEconomy | 'unavailable'
+  /**
+   * Етап 4Б: интервалът за увеличаване на антето (ms) от админ настройката.
+   * Чете се при създаване на маса и остава в мача. Липсва → фиксирано анте.
+   */
+  getAnteIncreaseIntervalMs?: () => number
 }) {
   // An injected runtime is a test/server-owned dependency. Production always supplies persistence.
   if (deps.runtime && deps.persistence) throw new Error('Provide persistence through the injected Svara runtime')
@@ -464,7 +469,10 @@ export function createSvaraLobby(deps: {
           // Етап 3В.2: платен режим → само вход от активната конфигурация с точна награда.
           if (paidMode && prizeFor(message.entryFee, message.capacity) === null) { error(transport, 'paid_unavailable', requestId); return }
           const matchId = randomUUID()
-          runtime.registerMatch({ matchId, creator: { playerId }, capacity: message.capacity, entryFee: message.entryFee, entryPercent: message.entryPercent, startMode: message.startMode })
+          let anteIncreaseIntervalMs: number | undefined
+          try { anteIncreaseIntervalMs = deps.getAnteIncreaseIntervalMs?.() } catch (cause) { deps.onError?.(cause) }
+          runtime.registerMatch({ matchId, creator: { playerId }, capacity: message.capacity, entryFee: message.entryFee, entryPercent: message.entryPercent, startMode: message.startMode,
+            ...(anteIncreaseIntervalMs !== undefined ? { anteIncreaseIntervalMs } : {}) })
           deps.onAdmission?.(playerId)
           currentViews.set(transport, matchId)
           deliver(transport, { type: 'svara_table_updated', table: runtime.getPublicTable(matchId), requestId })

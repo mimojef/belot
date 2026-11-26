@@ -525,6 +525,8 @@ export type AdminSettingsSnapshot = {
   physicalShuffleMode: 'RANDOM_INSERT' | 'ALTERNATING_ENDS'
   /** "Белот — изчакване на случайна маса" — цели секунди 20..600, default 180. SERVER-AUTHORITATIVE (валидация в server/src/db/adminSettingsStore.ts); важи само за НОВИ случайни маси — чакащите пазят своя таймер. */
   belotRandomTableWaitSeconds: number
+  /** „Свара — интервал за увеличаване на антето“ — цели минути 1..30, default 10. SERVER-AUTHORITATIVE; важи само за НОВИ маси — започнатите пазят своя интервал. */
+  svaraAnteIncreaseIntervalMinutes: number
 }
 
 export type AdminPaymentPeriodStats = {
