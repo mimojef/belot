@@ -1,4 +1,3 @@
-import { bindAdminSvaraEntries, renderAdminMatchRoomsTabs, renderAdminSvaraEntriesSection, type AdminSvaraCallbacks, type AdminSvaraState } from './adminSvaraEntries'
 import { getCampaignPackageUnits, renderCampaignPackageUnitsBadge } from './campaignShopBonus'
 import {
   DEFAULT_HUMAN_TURN_TIMEOUT_MS,
@@ -1009,8 +1008,6 @@ export type LobbyScreenState = {
   matchRoomsLoading: boolean
   matchRoomsErrorText: string | null
   adminMatchRoomEdit: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean } | 'new' | null
-  /** Етап 4В: „Стаи за мач“ — избор Белот/Свара и входовете на „Свара“. */
-  adminSvara: AdminSvaraState
   privateRoomsCreatePopupOpen: boolean
   /**
    * Избраните настройки в отворения прозорец „Нова маса“ (null = стойностите по
@@ -1607,10 +1604,6 @@ export type RenderLobbyScreenOptions = {
   onAdminMatchRoomEditCancel: () => void
   onAdminMatchRoomSubmit: (room: { stakeAmount: number; minLevel: number; prizeAmount: number; isEnabled: boolean }) => void
   onAdminMatchRoomDelete: (stakeAmount: number) => void
-  onAdminMatchRoomsGameSelect: AdminSvaraCallbacks['onAdminMatchRoomsGameSelect']
-  onAdminSvaraEditStart: AdminSvaraCallbacks['onAdminSvaraEditStart']
-  onAdminSvaraEditCancel: AdminSvaraCallbacks['onAdminSvaraEditCancel']
-  onAdminSvaraEntrySubmit: AdminSvaraCallbacks['onAdminSvaraEntrySubmit']
   onPrivateRoomsOpen: () => void
   onPrivateRoomsClose: () => void
   onPrivateRoomsTabChange: (tab: 'all' | 'mine') => void
@@ -13484,8 +13477,6 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
         <div style="font-size:12px;color:rgba(255,255,255,0.45);font-weight:500;">Вход, награда и минимално ниво за влизане.</div>
       </div>
 
-      ${renderAdminMatchRoomsTabs(state.adminSvara.game)}
-      ${state.adminSvara.game === 'svara' ? renderAdminSvaraEntriesSection(state.adminSvara) : `
       ${state.matchRoomsLoading ? `
         <div style="color:#34d399;font-size:13px;font-weight:800;margin-bottom:16px;">Зареждане...</div>
       ` : state.matchRoomsErrorText ? `
@@ -13554,7 +13545,6 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
           </form>
         `
       })()}
-      `}
     </section>
 
     <section style="margin-top:28px;">
@@ -20610,9 +20600,6 @@ export function renderLobbyScreen(
     ?.addEventListener('click', () => {
       options.onAdminMatchRoomEditStart(null)
     })
-
-  // Етап 4В: „Стаи за мач → Свара“.
-  bindAdminSvaraEntries(root, state.adminSvara, options)
 
   root.querySelector<HTMLButtonElement>('[data-admin-room-form-cancel="1"]')
     ?.addEventListener('click', () => {

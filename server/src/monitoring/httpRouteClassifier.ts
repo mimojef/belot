@@ -71,7 +71,6 @@ export const HTTP_ROUTE_TEMPLATES: readonly string[] = [
   '/api/admin/rooms/:id',
   '/api/admin/settings',
   '/api/admin/stats',
-  '/api/admin/svara/entries',
   '/api/admin/topic-reports',
   '/api/admin/topic-reports/:id/review',
   '/api/admin/topics/:id/moderation-log',

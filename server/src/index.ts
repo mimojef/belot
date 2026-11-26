@@ -25651,45 +25651,6 @@ async function handleGuestTrialStatusRequest(
   return true
 }
 
-// Етап 4В — „Стаи за мач → Свара“: входовете и комисионите на „Свара“ от
-// общата финансова конфигурация (game_financial_configs). Само пълен admin.
-// Нищо не се трие; започнатите мачове пазят своите условия (фиксирани при старта).
-async function handleAdminSvaraEntriesRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
-  pathname: string,
-): Promise<boolean> {
-  if (pathname !== '/api/admin/svara/entries') return false
-  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
-  if (!isFullAdminSession(session)) {
-    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
-    return true
-  }
-  const admin = svaraService.admin
-  if (admin === null) {
-    sendJsonResponse(res, 503, { ok: false, message: 'Настройките на „Свара“ временно не са достъпни.' })
-    return true
-  }
-  if (req.method === 'GET') {
-    const result = admin.listSvaraEntries()
-    sendJsonResponse(res, result.ok ? 200 : 503, result.ok ? { ok: true, ...result.value } : result)
-    return true
-  }
-  if (req.method === 'POST') {
-    const body = await readJsonRequestBody(req)
-    const record = isRecord(body) ? body : {}
-    const result = admin.upsertSvaraEntry({
-      entryFee: record['entryFee'],
-      isEnabled: record['isEnabled'],
-      commissionPercent: record['commissionPercent'] ?? null,
-    })
-    sendJsonResponse(res, result.ok ? 200 : 400, result.ok ? { ok: true, ...result.value } : result)
-    return true
-  }
-  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
-  return true
-}
-
 async function handleAdminMatchRoomsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -26823,10 +26784,6 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminMatchRoomsRequest(req, res, requestUrl.pathname)) {
-    return
-  }
-
-  if (await handleAdminSvaraEntriesRequest(req, res, requestUrl.pathname)) {
     return
   }
 

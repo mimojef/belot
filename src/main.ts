@@ -1,4 +1,3 @@
-import type { AdminSvaraEntries, AdminSvaraEntryInput } from './app/lobby/adminSvaraEntries'
 import './style.css'
 
 import {
@@ -6049,41 +6048,6 @@ async function deleteAdminMatchRoom(
   }
 }
 
-// Етап 4В — „Стаи за мач → Свара“: входовете от сървърната конфигурация.
-type AdminSvaraEntriesApiResponse = { ok: boolean; message?: string } & Partial<AdminSvaraEntries>
-
-function parseAdminSvaraEntries(data: AdminSvaraEntriesApiResponse): AdminSvaraEntries | null {
-  if (!data.ok || typeof data.configVersion !== 'string' || typeof data.defaultCommissionBps !== 'number' || !Array.isArray(data.entries)) return null
-  return { configVersion: data.configVersion, defaultCommissionBps: data.defaultCommissionBps, entries: data.entries }
-}
-
-async function loadAdminSvaraEntries(): Promise<{ ok: true; entries: AdminSvaraEntries } | { ok: false; message: string }> {
-  try {
-    const response = await fetch(`${getApiBaseUrl()}/api/admin/svara/entries`, { credentials: 'include', cache: 'no-store' })
-    const data = (await response.json()) as AdminSvaraEntriesApiResponse
-    const entries = response.ok ? parseAdminSvaraEntries(data) : null
-    return entries ? { ok: true, entries } : { ok: false, message: data.message ?? 'Входовете на „Свара“ не бяха заредени.' }
-  } catch {
-    return { ok: false, message: 'Няма връзка.' }
-  }
-}
-
-async function upsertAdminSvaraEntry(input: AdminSvaraEntryInput): Promise<{ ok: true; entries: AdminSvaraEntries } | { ok: false; message: string }> {
-  try {
-    const response = await fetch(`${getApiBaseUrl()}/api/admin/svara/entries`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    })
-    const data = (await response.json()) as AdminSvaraEntriesApiResponse
-    const entries = response.ok ? parseAdminSvaraEntries(data) : null
-    return entries ? { ok: true, entries } : { ok: false, message: data.message ?? 'Записът не беше успешен.' }
-  } catch {
-    return { ok: false, message: 'Няма връзка.' }
-  }
-}
-
 async function loadProfileById(
   profileId: string,
 ): Promise<
@@ -7659,8 +7623,6 @@ lobby = createLobbyFlowController({
   onMatchRoomsLoad: () => loadMatchRooms(),
   onAdminMatchRoomUpsert: (room) => upsertAdminMatchRoom(room),
   onAdminMatchRoomDelete: (stakeAmount) => deleteAdminMatchRoom(stakeAmount),
-  onAdminSvaraEntriesLoad: () => loadAdminSvaraEntries(),
-  onAdminSvaraEntryUpsert: (input) => upsertAdminSvaraEntry(input),
   onPrivateRoomsOpen: () => { client.requestPrivateRoomsList() },
   onPrivateRoomsClose: () => {},
   onPrivateGamesOpen: () => { client.requestPrivateGamesList() },
