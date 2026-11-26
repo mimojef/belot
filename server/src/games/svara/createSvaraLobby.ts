@@ -28,7 +28,6 @@ export const SVARA_FINISHED_REVIEW_RETENTION_MS = 10 * 60_000
 
 /** Като „Не се сърди човече“ (PRIVATE_ROOM_FINISHED_VISIBILITY_HOURS): приключилите се виждат 2 часа. */
 export const SVARA_FINISHED_VISIBILITY_HOURS = 2
-export const SVARA_FINISHED_LIST_LIMIT = 30
 
 export function createSvaraLobby(deps: {
   hasOtherGameCommitment: (profileId: string) => boolean
@@ -238,7 +237,7 @@ export function createSvaraLobby(deps: {
   /** Раздел „Приключили“: завършените мачове от последните часове (от записаните snapshot-и). */
   function finishedList(): SvaraFinishedMatch[] {
     try {
-      return (deps.persistence?.listRecentFinished?.(SVARA_FINISHED_VISIBILITY_HOURS, SVARA_FINISHED_LIST_LIMIT) ?? []).map((match) => ({
+      return (deps.persistence?.listRecentFinished?.(SVARA_FINISHED_VISIBILITY_HOURS) ?? []).map((match) => ({
         matchId: match.matchId, capacity: match.capacity, entryFee: match.entryFee, winnerId: match.winnerId, finishedAt: match.finishedAt,
         players: match.playerIds.map((playerId) => ({ playerId })),
       }))

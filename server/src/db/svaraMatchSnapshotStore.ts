@@ -45,7 +45,7 @@ export async function createSvaraMatchSnapshotStore(databaseFilePath: string): P
     const commitments = database.prepare(`SELECT match_id, match_status, snapshot_json FROM svara_match_snapshots
       WHERE match_status NOT IN ('finished', 'closed') ORDER BY match_id`)
     const recentFinished = database.prepare(`SELECT match_id, snapshot_json, finished_at FROM svara_match_snapshots
-      WHERE match_status = 'finished' AND finished_at >= ? ORDER BY finished_at DESC, match_id LIMIT ?`)
+      WHERE match_status = 'finished' AND finished_at >= ? ORDER BY finished_at DESC, match_id DESC`)
     const metrics = { writes: 0, serializeMs: 0, sqliteMs: 0, lastBytes: 0 }
     const store: SvaraMatchSnapshotStore = {
       save(snapshot, expectedRevision) {
@@ -80,11 +80,11 @@ export async function createSvaraMatchSnapshotStore(databaseFilePath: string): P
           return snapshot
         } catch { throw new SvaraPersistenceError('invalid-snapshot') }
       },
-      listRecentFinished(withinHours, limit) {
+      listRecentFinished(withinHours) {
         // finished_at е CURRENT_TIMESTAMP (UTC, 'YYYY-MM-DD HH:MM:SS').
         const cutoff = new Date(Date.now() - withinHours * 3_600_000).toISOString().replace('T', ' ').slice(0, 19)
         const out: SvaraFinishedMatchSummary[] = []
-        for (const row of recentFinished.all(cutoff, limit) as Array<{ match_id: string; snapshot_json: string; finished_at: string }>) {
+        for (const row of recentFinished.all(cutoff) as Array<{ match_id: string; snapshot_json: string; finished_at: string }>) {
           try {
             const snapshot = JSON.parse(row.snapshot_json) as SvaraStoredMatch, state = snapshot.state
             const seats = state?.seats, capacity = state?.config?.capacity, entryFee = state?.config?.entryFee

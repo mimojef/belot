@@ -30,7 +30,8 @@ export interface SvaraMatchPersistence {
    * Раздел „Приключили“ в лобито: последните завършени мачове (само публични
    * полета — без карти и вътрешно състояние). Невалидните записи се пропускат.
    */
-  listRecentFinished?(withinHours: number, limit: number): SvaraFinishedMatchSummary[]
+  /** Всички приключили мачове от последните `withinHours` часа, най-новите първи (без лимит). */
+  listRecentFinished?(withinHours: number): SvaraFinishedMatchSummary[]
 }
 
 export type SvaraFinishedMatchSummary = {

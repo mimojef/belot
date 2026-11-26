@@ -110,6 +110,24 @@ console.log('\n[2б] Реално приключване → автоматич�
     status === 'finished' && counts(list)?.playing === 0 && list.finished.some((m: any) => m.matchId === matchId && m.winnerId === 'a2'), { status, counts: counts(list), finished: list?.finished?.map((m: any) => m.matchId) })
 }
 
+console.log('\n[2в] Всички мачове от последните 2 часа (без лимит 30), най-новите първи, без измислен победител')
+{
+  const row = raw.prepare('SELECT snapshot_json FROM svara_match_snapshots WHERE match_id = ?').get(matchId) as { snapshot_json: string }
+  const insert = raw.prepare(`INSERT INTO svara_match_snapshots (match_id, format_version, revision, match_status, snapshot_json, finished_at) VALUES (?, 1, ?, 'finished', ?, datetime('now', ?))`)
+  for (let i = 0; i < 35; i++) {
+    const snap = JSON.parse(row.snapshot_json)
+    snap.matchId = `bulk-${String(i).padStart(2, '0')}`; snap.state.winnerId = i === 0 ? null : 'a1'
+    insert.run(snap.matchId, snap.revision, JSON.stringify(snap), `-${20 + i * 2} minutes`)
+  }
+  lobby.handle('viewer', { type: 'request_svara_tables_list' } as never)
+  const finished = lastList('viewer')?.finished ?? []
+  const total = (raw.prepare(`SELECT count(*) AS c FROM svara_match_snapshots WHERE match_status = 'finished' AND match_id <> 'fin-broken' AND finished_at >= datetime('now', '-${SVARA_FINISHED_VISIBILITY_HOURS} hours')`).get() as { c: number }).c
+  check(`брояч = действителен брой (${total} > 30)`, total > 30 && finished.length === total, { total, got: finished.length })
+  check('най-новите първи', finished.every((m: any, i: number) => i === 0 || finished[i - 1].finishedAt >= m.finishedAt))
+  const noWinner = finished.find((m: any) => m.matchId === 'bulk-00')
+  check('мач без определен победител → winnerId null (не се измисля)', noWinner !== undefined && noWinner.winnerId === null, noWinner)
+}
+
 console.log('\n[3] Ограничен достъп')
 {
   const before = frames.get('plain')!.length
@@ -122,6 +140,7 @@ console.log('\n[4] Клиент (статично)')
 {
   const src = readFileSync(join(import.meta.dirname, '../../src/app/games/svara/createSvaraLobbyController.ts'), 'utf8')
   check('три раздела с реални броячи (lobby / in-progress / finished)', src.includes("lifecycleTabButtonHtml('waiting', 'Чакащи', waiting.length)") && src.includes("lifecycleTabButtonHtml('playing', 'Играещи', playing.length)") && src.includes("lifecycleTabButtonHtml('finished', 'Приключили', finishedMatches.length)"))
+  check('победител: 🏆 до името + ред „Победител:“; иначе „Няма определен победител“', src.includes("'<span aria-label=\"Победител\" style=\"flex-shrink:0;\">🏆</span>'") && src.includes('🏆 Победител: ') && src.includes('Няма определен победител'))
   check('стиловете на табовете са тези на Ludo (тъмен и светъл)', src.includes("rgba(212,165,32,0.18)") && src.includes("#F4F0FF") && src.includes('grid-template-areas:"playing finished" "waiting waiting"'))
 }
 

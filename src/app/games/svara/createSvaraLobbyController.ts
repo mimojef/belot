@@ -376,7 +376,10 @@ export function createSvaraLobbyController(options: Options) {
   function finishedCardHtml(match: SvaraFinishedMatch): string {
     const winner = match.winnerId === null ? null : match.players.find((player) => player.playerId === match.winnerId) ?? null
     const slots = match.players.map((player) => playerChipHtml(player, player.playerId === match.winnerId ? '<span aria-label="Победител" style="flex-shrink:0;">🏆</span>' : '')).join('')
-    const winnerLine = winner ? `<div style="margin-top:10px;font-size:12px;font-weight:800;color:${light ? '#B54708' : '#f4c95b'};overflow-wrap:anywhere;">🏆 Победител: ${esc(winner.displayName?.trim() || 'Профилът не е достъпен')}</div>` : ''
+    // Победител само ако сървърът го е определил (state.winnerId); никога не се извежда.
+    const winnerLine = winner
+      ? `<div data-svara-finished-winner="1" style="margin-top:10px;font-size:12px;font-weight:800;color:${light ? '#B54708' : '#f4c95b'};overflow-wrap:anywhere;">🏆 Победител: ${esc(winner.displayName?.trim() || 'Профилът не е достъпен')}</div>`
+      : `<div data-svara-finished-winner="0" style="margin-top:10px;font-size:12px;font-weight:700;color:${light ? '#667085' : 'rgba(255,255,255,.6)'};">Няма определен победител</div>`
     const footer = `${winnerLine}<div style="margin-top:10px;${light ? 'font-size:12px;font-weight:600;color:#667085;' : 'font-size:11px;color:rgba(255,255,255,.45);'}">Приключила: ${formatDateTime(match.finishedAt)}</div>`
     return gameCardHtml(`<strong style="color:${light ? '#475467' : 'rgba(255,255,255,.85)'};">Приключила</strong>`, `${match.players.length} играчи · Вход ${formatAmount(match.entryFee)}`, slots, footer)
   }
