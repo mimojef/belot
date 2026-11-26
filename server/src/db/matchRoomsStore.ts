@@ -20,6 +20,12 @@ export type MatchRoomsStore = {
   }) => { ok: true; room: MatchRoomSnapshot } | { ok: false; message: string }
   deleteRoom: (stakeAmount: number) => boolean
   getPrizeAmount: (stakeAmount: number) => number | null
+  /**
+   * Етап 3А: суровата стойност на match_rooms.site_commission_bps по вход —
+   * САМО за общия информационен каталог. Липсващ ключ = NULL (не е
+   * конфигурирана). Не участва в изплащанията. Валидацията е в каталога.
+   */
+  getSiteCommissionBpsByStake: () => ReadonlyMap<number, unknown>
   getEnabledStakes: () => number[]
   reload: () => void
 }
@@ -51,14 +57,30 @@ export async function createMatchRoomsStore(databaseFilePath: string): Promise<M
 
   // In-memory cache — reloaded on every write
   let cache: MatchRoomSnapshot[] = []
+  let commissionByStake: ReadonlyMap<number, unknown> = new Map()
+
+  // Колоната идва от миграция 20261126_001; при база без нея (стари тестови
+  // схеми) store-ът работи както преди и всички комисиони са NULL.
+  function hasSiteCommissionColumn(): boolean {
+    const columns = db.prepare(`PRAGMA table_info(match_rooms)`).all() as Array<{ name: string }>
+    return columns.some((column) => column.name === 'site_commission_bps')
+  }
 
   function loadCache(): void {
+    const withCommission = hasSiteCommissionColumn()
     const rows = db.prepare(
-      `SELECT stake_amount, min_level, prize_amount, is_enabled
+      `SELECT stake_amount, min_level, prize_amount, is_enabled${withCommission ? ', site_commission_bps' : ''}
        FROM match_rooms
        ORDER BY stake_amount ASC`,
-    ).all() as MatchRoomRow[]
+    ).all() as Array<MatchRoomRow & { site_commission_bps?: unknown }>
     cache = rows.map(rowToSnapshot)
+    const commissions = new Map<number, unknown>()
+    for (const row of rows) {
+      if (row.site_commission_bps !== undefined && row.site_commission_bps !== null) {
+        commissions.set(row.stake_amount, row.site_commission_bps)
+      }
+    }
+    commissionByStake = commissions
   }
 
   loadCache()
@@ -136,6 +158,7 @@ export async function createMatchRoomsStore(databaseFilePath: string): Promise<M
     upsertRoom,
     deleteRoom,
     getPrizeAmount,
+    getSiteCommissionBpsByStake: () => commissionByStake,
     getEnabledStakes,
     reload,
   }

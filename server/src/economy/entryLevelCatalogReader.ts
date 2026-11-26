@@ -1,13 +1,17 @@
-// Общ интерфейс за четене на входните нива (Етап 2 на общата финансова
+// Общ интерфейс за четене на входните нива (Етапи 2–3А на общата финансова
 // основа) + информационния блок `entryCatalog` в GET /api/rooms.
 //
 // Източник: match_rooms, чрез кеша на matchRoomsStore (без втора връзка към
 // базата и без запис). prize_amount НЕ участва — действащите изплащания на
 // Белот продължават да идват от setMatchPrizeResolver(prize_amount).
 //
-// Наградите в `entryCatalog` са САМО ПРИМЕРНИ: индивидуална комисиона още не
-// се съхранява в match_rooms, затова се ползва допускане от 20%, обозначено
-// изрично като `assumed`, а `configuredCommissionBps` е null.
+// Комисиона (Етап 3А): match_rooms.site_commission_bps.
+//   - зададена (1 000–5 000 bps) → примерните награди ползват реалния процент;
+//   - NULL → процентът НЕ е конфигуриран; примерът ползва предполагаеми 20%,
+//     обозначени изрично като `assumed-default`.
+// Зададена стойност извън политиката (DB CHECK-ът не би я допуснал) →
+// fail-closed: нивото не влиза в каталога и се брои в excludedRowCount.
+// Наградите в `entryCatalog` винаги са САМО ПРИМЕРНИ.
 
 import {
   buildEntryLevelCatalog,
@@ -16,11 +20,18 @@ import {
   type EntryLevelCatalog,
   type EntryLevelRow,
 } from './entryLevelCatalog.js'
-import { checkEntryFeePolicy, ENTRY_LEVEL_POLICY, type EntryLevelPolicyViolationCode } from './entryLevelPolicy.js'
+import {
+  checkCommissionBpsPolicy,
+  checkEntryFeePolicy,
+  ENTRY_LEVEL_POLICY,
+  type EntryLevelPolicyViolationCode,
+} from './entryLevelPolicy.js'
 
 /** Минималният договор към matchRoomsStore — само четене. */
 export type MatchRoomsReadSource = {
   listRooms: () => readonly { stakeAmount: number; minLevel: number; isEnabled: boolean }[]
+  /** Сурови стойности на site_commission_bps; липсващ ключ = NULL. Незадължително (стари източници). */
+  getSiteCommissionBpsByStake?: () => ReadonlyMap<number, unknown>
 }
 
 export type EntryLevelCatalogReader = {
@@ -41,18 +52,37 @@ function toRows(rooms: readonly { stakeAmount: number; minLevel: number; isEnabl
 }
 
 /**
+ * Само стойности в одобрения диапазон стават override. Всяка друга не-NULL
+ * стойност се подава като NaN → каталогът я отчита като
+ * `invalid-commission-override` и изключва нивото (никога тихо 20%).
+ */
+function toCommissionOverrides(raw: ReadonlyMap<number, unknown>): Map<number, number> {
+  const overrides = new Map<number, number>()
+  for (const [entryFee, value] of raw) {
+    if (value === null || value === undefined) continue
+    overrides.set(entryFee, checkCommissionBpsPolicy(value).length === 0 ? (value as number) : Number.NaN)
+  }
+  return overrides
+}
+
+const EMPTY_COMMISSIONS: ReadonlyMap<number, unknown> = new Map()
+
+/**
  * Каталогът се преизчислява само когато matchRoomsStore подмени кеша си
- * (listRooms() връща нов масив след всеки запис/reload).
+ * (listRooms() и картата на комисионите са нови обекти след всеки reload).
  */
 export function createEntryLevelCatalogReader(source: MatchRoomsReadSource): EntryLevelCatalogReader {
-  let cachedFor: unknown = null
+  let cachedRooms: unknown = null
+  let cachedCommissions: unknown = null
   let cached: EntryLevelCatalog | null = null
 
   function getCatalog(): EntryLevelCatalog {
     const rooms = source.listRooms()
-    if (cached === null || cachedFor !== rooms) {
-      cached = buildEntryLevelCatalog(toRows(rooms))
-      cachedFor = rooms
+    const commissions = source.getSiteCommissionBpsByStake?.() ?? EMPTY_COMMISSIONS
+    if (cached === null || cachedRooms !== rooms || cachedCommissions !== commissions) {
+      cached = buildEntryLevelCatalog(toRows(rooms), { commissionBpsByEntryFee: toCommissionOverrides(commissions) })
+      cachedRooms = rooms
+      cachedCommissions = commissions
     }
     return cached
   }
@@ -91,13 +121,20 @@ export type PublicEntryLevel = {
   /** Съответства ли на одобрената политика (5 000 … 1 000 000 000, кратно на 100). Legacy нива остават, само се отбелязват. */
   policyCompliant: boolean
   policyViolations: EntryLevelPolicyViolationCode[]
-  /** Реално зададена комисиона от администратора — null, докато няма такава конфигурация. */
-  configuredCommissionBps: null
+  /** true само ако site_commission_bps е зададена за това ниво. */
+  commissionConfigured: boolean
+  /** Реално зададена комисиона от администратора — null, докато не е конфигурирана. */
+  configuredCommissionBps: number | null
+  /** Само при NULL: обяснение, че процентът не е конфигуриран. */
+  commissionNotice: string | null
   prizePreview: {
-    /** Винаги true в Етап 2 — НЕ са действащите изплащания. */
+    /** Винаги true — НЕ са действащите изплащания. */
     illustrative: true
-    commissionBasis: 'assumed-default'
-    assumedCommissionBps: number
+    commissionBasis: 'configured' | 'assumed-default'
+    /** Процентът, с който е сметнат примерът (реален или предполагаем). */
+    commissionBps: number
+    /** Етап 2 поле: предполагаемият процент при NULL; null при зададен. */
+    assumedCommissionBps: number | null
     items: PublicEntryPrizePreviewItem[]
   }
 }
@@ -107,7 +144,9 @@ export type PublicEntryCatalogPayload = {
   source: 'match_rooms'
   /** Информационно — действащите изплащания идват от rooms[].prizeAmount. */
   informationalOnly: true
-  commissionConfigured: false
+  /** true само ако ВСИЧКИ активни нива (поне едно) имат зададен процент. */
+  commissionConfigured: boolean
+  configuredLevelCount: number
   policy: {
     minEntryFee: number
     maxEntryFee: number
@@ -123,12 +162,16 @@ export type PublicEntryCatalogPayload = {
   notice: string
 }
 
-const ILLUSTRATIVE_NOTICE =
-  'Примерни награди при допусната комисиона 20%. Индивидуалната комисиона още не е конфигурирана; действащите изплащания не се променят.'
+const LEVEL_NOT_CONFIGURED_NOTICE = 'Процентът не е конфигуриран — примерът е при предполагаеми 20%.'
+const NOTICE_ALL_CONFIGURED =
+  'Примерни награди при зададената комисиона за всяко ниво. Действащите изплащания не се променят.'
+const NOTICE_PARTIAL =
+  'Примерни награди: при нива без конфигуриран процент се ползват предполагаеми 20%. Действащите изплащания не се променят.'
 
 export function buildPublicEntryCatalogPayload(catalog: EntryLevelCatalog): PublicEntryCatalogPayload {
   const levels = catalog.enabledLevels.map((level): PublicEntryLevel => {
     const violations = checkEntryFeePolicy(level.entryFee).map((error) => error.code as EntryLevelPolicyViolationCode)
+    const configured = level.commissionSource === 'override'
     const previews = catalog.previewPrizes(level.entryFee, GAME_PRIZE_FORMATS) ?? []
     const items = previews.map((preview): PublicEntryPrizePreviewItem => {
       const base = {
@@ -148,21 +191,28 @@ export function buildPublicEntryCatalogPayload(catalog: EntryLevelCatalog): Publ
       minLevel: level.minLevel,
       policyCompliant: violations.length === 0,
       policyViolations: violations,
-      configuredCommissionBps: null,
+      commissionConfigured: configured,
+      configuredCommissionBps: configured ? level.siteCommissionBps : null,
+      commissionNotice: configured ? null : LEVEL_NOT_CONFIGURED_NOTICE,
       prizePreview: {
         illustrative: true,
-        commissionBasis: 'assumed-default',
-        assumedCommissionBps: level.siteCommissionBps,
+        commissionBasis: configured ? 'configured' : 'assumed-default',
+        commissionBps: level.siteCommissionBps,
+        assumedCommissionBps: configured ? null : level.siteCommissionBps,
         items,
       },
     }
   })
 
+  const configuredLevelCount = levels.filter((level) => level.commissionConfigured).length
+  const allConfigured = levels.length > 0 && configuredLevelCount === levels.length
+
   return {
     version: PUBLIC_ENTRY_CATALOG_VERSION,
     source: 'match_rooms',
     informationalOnly: true,
-    commissionConfigured: false,
+    commissionConfigured: allConfigured,
+    configuredLevelCount,
     policy: {
       minEntryFee: ENTRY_LEVEL_POLICY.minEntryFee,
       maxEntryFee: ENTRY_LEVEL_POLICY.maxEntryFee,
@@ -173,7 +223,7 @@ export function buildPublicEntryCatalogPayload(catalog: EntryLevelCatalog): Publ
     },
     levels,
     excludedRowCount: catalog.issues.length,
-    notice: ILLUSTRATIVE_NOTICE,
+    notice: allConfigured ? NOTICE_ALL_CONFIGURED : NOTICE_PARTIAL,
   }
 }
 
