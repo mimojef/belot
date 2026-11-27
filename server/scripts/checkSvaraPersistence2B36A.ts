@@ -180,7 +180,7 @@ try {
   await check('bet/blind/call/all-in/fold retain chips, contributions, pots, ledger and history', () => {
     const t = fixture()
     t.p('b', { type: 'act', action: { kind: 'blind-bet', total: 2 } }); t.roundtrip()
-    t.p('c', { type: 'look' }); t.p('c', { type: 'act', action: { kind: 'bet', total: 4 } }); t.roundtrip()
+    t.p('c', { type: 'look' }); t.p('c', { type: 'act', action: { kind: 'bet', total: 5 } }); t.roundtrip() // над тъмния 2 (= 4 на светло; 27.11.2026)
     t.p('a', { type: 'act', action: { kind: 'fold' } }); t.p('b', { type: 'act', action: { kind: 'call' } }); t.roundtrip()
     t.resolveShowdownDisplayIfNeeded(); t.roundtrip()
     assert(t.stored().state.history.length > 0); assert(t.stored().state.ledger.some((e) => e.type === 'bet'))

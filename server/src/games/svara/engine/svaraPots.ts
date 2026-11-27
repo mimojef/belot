@@ -44,6 +44,13 @@ export type SvaraPotInput = {
   participants: readonly SvaraPlayerId[]
   contributions: Readonly<Record<SvaraPlayerId, number>>
   folded: readonly SvaraPlayerId[]
+  /**
+   * 27.11.2026 — тъмният залог се брои двойно: за всеки играч, чийто залог
+   * е още на тъмно, реално внесените на тъмно чипове (част от вноската му).
+   * Нивото му (за слоевете и правото на банка) е вноска + тази част;
+   * реалните чипове в слоевете НЕ се удвояват. Без поле — както досега.
+   */
+  blindDoubled?: Readonly<Record<SvaraPlayerId, number>>
 }
 
 function assertChipAmount(value: unknown, label: string): asserts value is number {
@@ -69,7 +76,23 @@ export function buildSvaraPotLayers(input: SvaraPotInput): SvaraPotLayer[] {
     return value
   }
 
-  const all = participants.map(amountOf)
+  const doubledOf = (id: SvaraPlayerId) => {
+    const value = input.blindDoubled?.[id] ?? 0
+    assertChipAmount(value, `pots: blind-doubled part of ${id}`)
+    if (value > amountOf(id)) throw new SvaraInvalidInputError(`pots: blind-doubled part of ${id} exceeds the contribution`)
+    return value
+  }
+  // Ниво на играча в „светла“ стойност: тъмната част се брои двойно.
+  const levelOf = (id: SvaraPlayerId) => amountOf(id) + doubledOf(id)
+  // Реалните чипове на играча до ниво x: до основата 1:1, в тъмната част 1:2
+  // (цяло число; сумата по всички слоеве е точно реалната вноска).
+  const realUpTo = (id: SvaraPlayerId, x: number) => {
+    const base = amountOf(id) - doubledOf(id)
+    if (x <= base) return x
+    return base + Math.floor((Math.min(x, levelOf(id)) - base) / 2)
+  }
+
+  const all = participants.map(levelOf)
   const maxContribution = Math.max(0, ...all)
   if (maxContribution === 0) return []
   const levels = new Set<number>(all.filter((value) => value > 0))
@@ -80,24 +103,27 @@ export function buildSvaraPotLayers(input: SvaraPotInput): SvaraPotLayer[] {
     const layerContributions: Record<SvaraPlayerId, number> = {}
     let amount = 0
     for (const id of participants) {
-      const value = amountOf(id)
-      const part = Math.min(value, level) - Math.min(value, previous)
+      const part = realUpTo(id, level) - realUpTo(id, previous)
       if (part > 0) {
         layerContributions[id] = part
         amount += part
       }
     }
     const contributors = participants.filter((id) => (layerContributions[id] ?? 0) > 0)
-    raw.push({
-      index: raw.length,
-      fromLevel: previous,
-      toLevel: level,
-      amount,
-      contributions: Object.freeze(layerContributions),
-      contributors: Object.freeze(contributors),
-      eligible: Object.freeze(participants.filter((id) => !foldedSet.has(id) && amountOf(id) >= level)),
-      kind: contributors.length === 1 ? 'uncalled' : 'contested',
-    })
+    // Непокрит е слой, до който достига само един играч (по ниво).
+    const reaching = participants.filter((id) => levelOf(id) > previous)
+    if (amount > 0) {
+      raw.push({
+        index: raw.length,
+        fromLevel: previous,
+        toLevel: level,
+        amount,
+        contributions: Object.freeze(layerContributions),
+        contributors: Object.freeze(contributors),
+        eligible: Object.freeze(participants.filter((id) => !foldedSet.has(id) && levelOf(id) >= level)),
+        kind: reaching.length === 1 ? 'uncalled' : 'contested',
+      })
+    }
     previous = level
   }
 

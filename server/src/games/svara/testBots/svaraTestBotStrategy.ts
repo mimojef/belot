@@ -65,6 +65,8 @@ function decideBetting(snapshot: SvaraMatchSnapshotMessage, options: SvaraBettin
   const you = snapshot.you
   // Непогледнал: понякога залог на тъмно, обикновено „Погледни“.
   if (!you.looked && options.lookRequired) {
+    // 27.11.2026: изравнен двоен тъмен залог — понякога „Оставам на тъмно“.
+    if (options.stayBlind && random() < 0.35) return { type: 'act', action: { kind: 'stay-blind' } }
     if (options.blindBet && random() < 0.12) return { type: 'act', action: { kind: 'blind-bet', total: options.blindBet.min } }
     return { type: 'look' }
   }

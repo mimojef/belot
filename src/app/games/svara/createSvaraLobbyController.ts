@@ -36,7 +36,7 @@ import {
   type RenderSvaraActiveTableInput,
 } from './table/renderSvaraActiveTable'
 import { deriveSvaraActionButtons } from './table/svaraBettingActions'
-import { createSvaraBetAnimationTracker, detectSvaraFinalCall, isSvaraOpeningPay, svaraRaiseAmount, type SvaraNewBetEntry } from './table/svaraBetAnimationTracker'
+import { createSvaraBetAnimationTracker, detectSvaraFinalCall, detectSvaraFinalStayBlind, isSvaraOpeningPay, svaraRaiseAmount, type SvaraNewBetEntry } from './table/svaraBetAnimationTracker'
 import { createSvaraFoldAnimationTracker, detectSvaraFinalFold } from './table/svaraFoldAnimationTracker'
 import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTracker'
 import { playSvaraLookVoice, preloadSvaraLookVoice } from './table/svaraLookVoice'
@@ -867,6 +867,14 @@ export function createSvaraLobbyController(options: Options) {
   function flushFinalCall(): void {
     const prev = previousSnapshotForBets
     previousSnapshotForBets = snapshot
+    // „Оставам на тъмно“ като последно действие (27.11.2026): без чипове — само обявата.
+    const finalStay = detectSvaraFinalStayBlind(prev, snapshot)
+    if (finalStay && snapshot && !finalCallsShown.has(`${snapshot.matchId}:${finalStay.roundId}`)) {
+      finalCallsShown.add(`${snapshot.matchId}:${finalStay.roundId}`)
+      const staySeat = snapshot.seats.find((s) => s.playerId === finalStay.playerId)
+      if (staySeat) announceStayBlind(staySeat.seatIndex)
+      return
+    }
     const finalCall = detectSvaraFinalCall(prev, snapshot)
     if (!finalCall || !snapshot || finalCallsShown.has(`${snapshot.matchId}:${finalCall.roundId}`)) return
     finalCallsShown.add(`${snapshot.matchId}:${finalCall.roundId}`)
@@ -892,6 +900,12 @@ export function createSvaraLobbyController(options: Options) {
     tableScene.showSpeech(seatIndex, `Плащам ${formatAmount(added)}`)
     tableScene.showPotRaise(formatAmount(added))
     playSvaraPayVoice(seatVoiceGender(seatIndex))
+  }
+
+  // „Оставам на тъмно“ (27.11.2026): двойният тъмен залог вече е равен на
+  // текущия — без нови чипове, без „+N“ и без чипове към банката.
+  function announceStayBlind(seatIndex: number): void {
+    tableScene.showSpeech(seatIndex, 'Оставам на тъмно')
   }
 
   // „Заложи“ или ×N при първо откриване на светло (виж isSvaraOpeningPay): гласът
@@ -946,6 +960,7 @@ export function createSvaraLobbyController(options: Options) {
     if (newEntries.length === 0 || !snapshot) return
     for (const entry of newEntries) {
       const seat = snapshot.seats.find((s) => s.playerId === entry.playerId)
+      if (entry.kind === 'stay-blind') { if (seat) announceStayBlind(seat.seatIndex); continue }
       if (seat) playBetFlash(seat.seatIndex, entry.added)
       if (seat && (entry.allIn || entry.kind === 'all-in')) { announceAllIn(seat.seatIndex, entry.added); continue }
       if (seat && entry.kind === 'call') announcePay(seat.seatIndex, entry.added)
@@ -954,7 +969,7 @@ export function createSvaraLobbyController(options: Options) {
       // „Вдигам“ и не е „Плащам“ — балонче „Залагам N“, „+N“ и глас „Залагам!“.
       if (seat && isSvaraOpeningPay(entry)) announceOpeningBet(seat.seatIndex, entry.added)
     }
-    tableScene.onBets(newEntries.flatMap((entry) => {
+    tableScene.onBets(newEntries.filter((entry) => entry.added > 0).flatMap((entry) => {
       const seat = snapshot?.seats.find((s) => s.playerId === entry.playerId)
       return seat ? [{ seatIndex: seat.seatIndex, added: entry.added }] : []
     }))

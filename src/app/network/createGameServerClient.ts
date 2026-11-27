@@ -1329,7 +1329,7 @@ export type SvaraPublicTable = {
 }
 
 export type SvaraBettingAction =
-  | { kind: 'fold' | 'call' | 'all-in' | 'no-bet' }
+  | { kind: 'fold' | 'call' | 'all-in' | 'no-bet' | 'stay-blind' }
   | { kind: 'bet' | 'blind-bet'; total: number }
 
 /** Само тези участнически команди са позволени през submit_svara_command. */
@@ -1353,6 +1353,8 @@ export type SvaraBettingOptions = {
   /** Пълният целеви общ залог при ол-ин (voluntary + stack), НЕ булев флаг — виж server/src/games/svara/engine/svaraBetting.ts's SvaraBettingOptions. */
   allIn: number | null
   lookRequired: boolean
+  /** „Оставам на тъмно“ (27.11.2026): двойният тъмен залог вече е равен на текущия; липсва при стари сървъри. */
+  stayBlind?: boolean
 }
 
 export type SvaraSnapshotSeat = {
@@ -1396,6 +1398,8 @@ export type SvaraSnapshotBettingRound = {
   participants: string[]
   currentBet: number
   blind: { status: 'available' | 'active' | 'closed'; lastBlindTotal: number }
+  /** 27.11.2026: играчите на тъмно, чийто залог се брои двойно (currentBet е в светла стойност). */
+  blindPlayers?: string[]
   carriedIn: number
   potTotal: number
   provisionalPots: SvaraSnapshotPotLayer[]

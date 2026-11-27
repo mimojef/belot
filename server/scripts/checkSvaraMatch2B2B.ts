@@ -343,26 +343,29 @@ check('B4. ол-ин за по-малко при плащане не проме�
   assert(b.s.complete, 'complete')
 })
 
-check('B5. тъмно: само първият, преди да погледне; ≥ 2 × Вход; следващите ≥ 2 × предишния; погледналият ≥ 2 × последния → край', () => {
+check('B5. тъмно: само първият, преди да погледне; ≥ 2 × Вход; следващите ≥ 2 × предишния; погледналият плаща двойния тъмен (call) или вдига с +1 Вход → край (27.11.2026)', () => {
   const b = bet({ p1: 500, p2: 500, p3: 500, d: 500 })
   expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'bet', total: 10 }, 500), 'look-required', 'unlooked normal bet')
   expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'blind-bet', total: 19 }, 500), 'below-minimum', 'blind < 2E')
   b.go('p1', { kind: 'blind-bet', total: 20 })
   assert(b.s.blind.status === 'active' && b.s.blind.lastBlindTotal === 20, 'blind started')
   expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'blind-bet', total: 39 }, 500), 'below-minimum', 'next blind < 2×')
-  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'call' }, 500), 'invalid-action', 'no call in blind phase')
+  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'call' }, 500), 'look-required', 'no paying blind — look first or continue blind')
   b.go('p2', { kind: 'blind-bet', total: 40 })
+  assert(b.s.currentBet === 80, 'the blind bet counts double: 40 → current bet 80')
   b.s = lookAtSvaraCards(b.s, 'p3')
   expectError(() => applySvaraBettingAction(b.s, 'p3', { kind: 'blind-bet', total: 80 }, 500), 'blind-not-allowed', 'looked cannot blind')
-  expectError(() => applySvaraBettingAction(b.s, 'p3', { kind: 'bet', total: 79 }, 500), 'below-minimum', 'seen < 2× last blind')
-  b.go('p3', { kind: 'bet', total: 80 })
-  assert(b.s.blind.status === 'closed', 'blind phase over for everyone')
+  expectError(() => applySvaraBettingAction(b.s, 'p3', { kind: 'bet', total: 80 }, 500), 'invalid-action', 'matching the double blind is a call, not a bet')
+  expectError(() => applySvaraBettingAction(b.s, 'p3', { kind: 'bet', total: 89 }, 500), 'below-minimum', 'raise must be at least +1 Entry over 80')
+  b.go('p3', { kind: 'bet', total: 90 })
+  assert(b.s.blind.status === 'closed', 'a light raise ends the blind phase for everyone')
+  b.s = revealUnlookedHands(b.s) // както svaraMatch: останалите виждат картите си
   // d не е гледал: вече важат обикновените правила (плащане или +1 Вход).
-  b.go('d', { kind: 'bet', total: 90 })
+  b.go('d', { kind: 'bet', total: 100 })
   b.go('p1', { kind: 'call' })
   b.go('p2', { kind: 'call' })
   b.go('p3', { kind: 'call' })
-  assert(b.s.complete && b.s.currentBet === 90, 'normal betting after blind')
+  assert(b.s.complete && b.s.currentBet === 100, 'normal betting after blind')
 })
 
 check('B6. погледналият няма право сам да залага на тъмно; след обикновен залог тъмната фаза е затворена за всички (включително недействали)', () => {
@@ -422,7 +425,7 @@ check('B6g. revealUnlookedHands: разкрива останалите акти�
   b.go('p1', { kind: 'blind-bet', total: 20 })
   b.go('p2', { kind: 'fold' })
   b.s = lookAtSvaraCards(b.s, 'p3')
-  b.go('p3', { kind: 'bet', total: 40 }) // обикновен залог — приключва тъмната фаза
+  b.go('p3', { kind: 'bet', total: 50 }) // повишаване на светло над 40 (тъмният 20 = 40) — приключва тъмната фаза
   assert(b.s.blind.status === 'closed', 'blind closed')
   assert(!b.s.looked.includes('p1') && !b.s.looked.includes('d'), 'преди извикването p1/d още не са маркирани като погледнали')
   const revealed = revealUnlookedHands(b.s, ['d']) // d се третира като отсъстващ в този пример
@@ -458,22 +461,28 @@ check('B7. Решение №1: пълна забрана на непълен з
   assert(c.s.blind.lastBlindTotal === 40, 'exact next minimum still allowed')
 })
 
-check('B7b. Решение №2: погледнал играч с недостатъчни чипове → нормален (непълен) ол-ин; тъмната фаза приключва; без ново право за повишаване', () => {
+check('B7b. Решение №2 (27.11.2026): погледнал с недостатъчни чипове — ол-ин за плащане не затваря тъмната фаза; ол-ин над текущия залог е непълно повишаване и я затваря', () => {
+  // Част 1: ол-ин до/под текущия залог = плащане (тъмният 20 се брои за 40).
   const b = bet({ p1: 500, p2: 30, d: 500 })
-  b.go('p1', { kind: 'blind-bet', total: 20 }) // пълно отваряне; currentBet = 20
+  b.go('p1', { kind: 'blind-bet', total: 20 }) // currentBet = 40 (двойно)
   b.s = lookAtSvaraCards(b.s, 'p2')
-  // p2 погледна; следващ минимум = 2×20 = 40; p2 има само 30.
-  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'bet', total: 39 }, 30), 'insufficient-chips', 'cannot reach 39 with 30')
-  b.go('p2', { kind: 'all-in' }) // 30 (> 20, < 40) → непълно повишаване, не тъмно
-  assert(b.s.voluntary.p2 === 30 && b.s.allIn.includes('p2') && b.s.currentBet === 30, 'accepted as a plain (incomplete) all-in raise')
-  assert(b.s.blind.status === 'closed', 'the blind phase ends for everyone, even players who have not looked yet')
-  expectError(() => applySvaraBettingAction(b.s, 'd', { kind: 'blind-bet', total: 60 }, 500), 'blind-not-allowed', 'blind already closed for d too, even though d never acted')
-  b.go('d', { kind: 'call' }) // d просто плаща добавените 30; p1 остава единственият чакащ
-  assert(b.s.toAct === 'p1' && JSON.stringify(b.s.raiseLocked) === '["p1"]', `p1 (already acted) may now only call or fold: ${JSON.stringify(b.s.raiseLocked)}`)
-  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'bet', total: 50 }, b.stacks.p1!), 'raise-not-allowed', 'p1 gets no new raise right from the incomplete all-in')
-  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'blind-bet', total: 60 }, b.stacks.p1!), 'blind-not-allowed', 'blind sequence is closed for everyone')
-  b.go('p1', { kind: 'call' }) // p1 вече само плаща/отказва
+  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'call' }, 30), 'insufficient-chips', 'call needs 40, only 30')
+  b.go('p2', { kind: 'all-in' }) // 30 ≤ 40 → ол-ин за плащане
+  assert(b.s.voluntary.p2 === 30 && b.s.allIn.includes('p2') && b.s.currentBet === 40, 'all-in for a call; the current bet stays 40')
+  assert(b.s.blind.status === 'active', 'a call does not close the blind phase')
+  expectError(() => applySvaraBettingAction(b.s, 'd', { kind: 'call' }, 500), 'look-required', 'an unlooked player cannot pay blind')
+  b.s = lookAtSvaraCards(b.s, 'd')
+  b.go('d', { kind: 'call' })
+  assert(b.s.voluntary.d === 40 && b.s.toAct === 'p1', 'd pays 40; p1 (blind 20 = 40) decides')
+  b.go('p1', { kind: 'stay-blind' })
   assert(b.s.complete, 'complete')
+  // Част 2: ол-ин над текущия залог, но под минималното повишаване → непълно повишаване, затваря.
+  const c = bet({ p1: 500, p2: 42, d: 500 })
+  c.go('p1', { kind: 'blind-bet', total: 20 }) // currentBet = 40
+  c.s = lookAtSvaraCards(c.s, 'p2')
+  c.go('p2', { kind: 'all-in' }) // 42 > 40, < 40 + Вход → непълно повишаване
+  assert(c.s.currentBet === 42 && c.s.blind.status === 'closed', 'incomplete all-in raise closes the blind phase')
+  expectError(() => applySvaraBettingAction(c.s, 'd', { kind: 'blind-bet', total: 60 }, 500), 'blind-not-allowed', 'blind already closed for d too')
 })
 
 check('B7c. Решение №1/№2 на ниво команда (applySvaraMatchCommand): директна тъмна команда с недостатъчни чипове се отказва без промяна на състоянието, дори изпратена directно', () => {
@@ -1292,7 +1301,7 @@ check('H3b. автоматично разкриване: когато обикн
   t.act('a', { kind: 'blind-bet', total: 20 }) // a отваря на тъмно, без да е гледал
   t.act('b', { kind: 'fold' }) // b се отказва, без да е гледал и без залог
   t.look('c')
-  t.act('c', { kind: 'bet', total: 40 }) // обикновен залог след поглеждане → приключва тъмната фаза
+  t.act('c', { kind: 'bet', total: 50 }) // повишаване на светло над 40 (тъмният 20 = 40) → приключва тъмната фаза
   const round = t.state.round as { betting: SvaraBettingState }
   assert(round.betting.blind.status === 'closed', 'тъмната фаза е приключена')
   // d не е гледал изрично, но е активен и неотказал — вижда картите си автоматично.
@@ -1320,7 +1329,7 @@ check('H3c. таймерните данни (actionVersion) не се проме
   t.look('b')
   const afterLook = describeSvaraLifecycle(t.state).actionVersion
   assert(afterLook === afterBlind, '„Погледни“ не увеличава actionVersion (не рестартира таймера)')
-  t.act('b', { kind: 'bet', total: 40 }) // приключва тъмната фаза и предизвиква автоматичното разкриване за d
+  t.act('b', { kind: 'bet', total: 50 }) // повишаване на светло над 40 — приключва тъмната фаза и предизвиква автоматичното разкриване за d
   const afterReveal = describeSvaraLifecycle(t.state).actionVersion
   assert(afterReveal === afterBlind + 1, 'само реалните доброволни действия (не автоматичното разкриване) увеличават actionVersion')
   assert(before === 0 && afterBlind === 1, JSON.stringify({ before, afterBlind, afterReveal }))
@@ -1335,6 +1344,7 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
   let rounds = 0
   let ordinaryChecked = 0
   let chipsCrossChecked = 0
+  let blindDoubledChecked = 0
   let svaras = 0
   let allins = 0
   let multiPotAllins = 0
@@ -1355,6 +1365,7 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
         if (record.kind === 'ordinary') {
           verifyOrdinaryAgainstReference(t.state, record.roundId)
           ordinaryChecked += 1
+          if (record.blindDoubled) blindDoubledChecked += 1
           if (crossCheckWithChipTable(t.state, record.roundId)) chipsCrossChecked += 1
         }
       }
@@ -1421,10 +1432,16 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
           // поредицата от тестета за всичко след първия единствен победител
           // (покритието на вариантите „покажи“/изтичане е в targeted тестове).
           if (round.decision === 'pending') {
-            if (s.status[round.winnerId] !== 'active') {
+            if (s.status[round.winnerId] === 'absent') {
               // Отсъствие по време на избора не е повод за отказ (§2Б.3.7.1) —
               // изтичането би го решило автоматично; тук го връщаме веднага.
               t.run({ type: 'set-absent', playerId: round.winnerId, absent: false }, env)
+              continue
+            }
+            if (s.status[round.winnerId] !== 'active') {
+              // Излязъл победител не може да избира — изборът изтича (както при сървъра).
+              t.run({ type: 'expire-reveal-choice', roundId: round.roundId }, env)
+              revealChoices += 1
               continue
             }
             t.run({ type: 'hide-cards', playerId: round.winnerId }, env)
@@ -1451,6 +1468,7 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
           if (options.call !== null) choices.push({ kind: 'call' })
           if (options.bet) choices.push({ kind: 'bet', total: options.bet.min + pick(Math.min(3, options.bet.max - options.bet.min + 1)) })
           if (options.blindBet) choices.push({ kind: 'blind-bet', total: options.blindBet.min })
+          if (options.stayBlind) choices.push({ kind: 'stay-blind' }) // 27.11.2026
           if (options.allIn !== null && pick(3) === 0) choices.push({ kind: 'all-in' })
           if (choices.length === 0) choices.push({ kind: 'fold' })
           const action = choices[pick(choices.length)]!
@@ -1476,6 +1494,8 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
   // за избора покажи/скрий изместват детерминираната seeded поредица за
   // всичко след първия единствен победител (виж коментара по-горе).
   assert(ordinaryChecked > 1500 && chipsCrossChecked > 1000 && svaras > 50 && allins > 5 && finished > 150, 'coverage')
+  console.log(`      раздавания с останал на тъмно (двойно броене, сверени с еталона): ${blindDoubledChecked}`)
+  assert(blindDoubledChecked > 20, 'random play reaches showdowns with a player who stayed blind (27.11.2026)')
   assert(revealChoices > 100, 'random play repeatedly reaches the sole-remaining-player reveal choice (2Б.3.7.1)')
   assert(multiPotAllins > 0, 'random play reaches the previously blocked multi-side-pot scenario at least once')
 })
@@ -1489,6 +1509,8 @@ function crossCheckWithChipTable(state: SvaraMatchState, roundId: string): boole
   const record = state.history.find((r) => r.roundId === roundId)!
   const entries = state.ledger.filter((e) => e.roundId === roundId)
   if (entries.some((e) => e.type === 'carry-in' || e.type === 'pot-carry')) return false
+  // 27.11.2026: 2Б.2А не познава двойно броения тъмен залог — такива раздавания се пропускат.
+  if (record.blindDoubled && Object.keys(record.blindDoubled).length > 0) return false
   const participants = record.participants
   const maxContribution = Math.max(...participants.map((id) => record.contributions[id] ?? 0))
   let chips = createSvaraChipTable({ tableId: 'x', entryFee: 10 * (maxContribution + 1), playerIds: participants })
@@ -1523,15 +1545,24 @@ function verifyOrdinaryAgainstReference(state: SvaraMatchState, roundId: string)
   const contributions = record.contributions
   const folded = new Set(record.folded)
   const participants = record.participants
-  const max = Math.max(0, ...participants.map((id) => contributions[id] ?? 0))
+  // 27.11.2026: останалите на тъмно — нивото е вноска + тъмната част (двойно);
+  // реалните чипове на единица: до основата по 1, в тъмната част — по 1 на 2 единици.
+  const doubled = record.blindDoubled ?? {}
+  const level = (id: string) => (contributions[id] ?? 0) + (doubled[id] ?? 0)
+  const realUpTo = (id: string, x: number) => {
+    const base = (contributions[id] ?? 0) - (doubled[id] ?? 0)
+    return x <= base ? x : base + Math.floor((Math.min(x, level(id)) - base) / 2)
+  }
+  const max = Math.max(0, ...participants.map(level))
   const expectedCredit: Record<string, number> = {}
   const expectedUncalled: Record<string, number> = {}
   let expectedLocked = 0
   let expectedCarried = 0
   for (let k = 1; k <= max; k += 1) {
-    const payers = participants.filter((id) => (contributions[id] ?? 0) >= k)
+    const payers = participants.filter((id) => level(id) >= k)
     const eligible = payers.filter((id) => !folded.has(id))
-    const amount = payers.length + (k === 1 ? deadMoney : 0)
+    const amount = payers.reduce((sum, id) => sum + realUpTo(id, k) - realUpTo(id, k - 1), 0) + (k === 1 ? deadMoney : 0)
+    if (amount === 0) continue
     if (eligible.length === 0) { expectedCarried += amount; continue }
     if (payers.length === 1) { expectedUncalled[payers[0]!] = (expectedUncalled[payers[0]!] ?? 0) + amount; continue }
     const top = Math.max(...eligible.map((id) => record.points[id] ?? -1))

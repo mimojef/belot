@@ -12,6 +12,7 @@
 //   Ол-ин   = реалната цел (voluntary + stack), директно от сървъра
 //   Бягам   = fold
 //   Без залог = само когато allowNoBet (специалното 4-то раздаване)
+//   Остани на тъмно = само при изравнен двоен тъмен залог (stayBlind; 27.11.2026)
 //   Виж     = („Погледни“) само когато играчът е на ход и още не е погледнал
 //
 // Сървърът валидира всяка команда независимо — тези бутони са само удобство,
@@ -20,7 +21,7 @@
 import type { SvaraBettingOptions, SvaraParticipantCommand } from '../../../network/createGameServerClient'
 
 export type SvaraMultiplierKind = 'x5' | 'x10' | 'x20' | 'x50'
-export type SvaraActionButtonKind = 'look' | 'pay' | SvaraMultiplierKind | 'all-in' | 'no-bet' | 'fold'
+export type SvaraActionButtonKind = 'look' | 'pay' | SvaraMultiplierKind | 'all-in' | 'no-bet' | 'stay-blind' | 'fold'
 
 export type SvaraActionButton = {
   kind: SvaraActionButtonKind
@@ -106,6 +107,12 @@ export function deriveSvaraActionButtons(betting: SvaraBettingOptions | null, lo
       command: { type: 'act', action: { kind: 'all-in' } },
       disabled: false,
     })
+  }
+
+  // „Остани на тъмно“ (27.11.2026): двойният тъмен залог вече е равен на
+  // текущия — без нови чипове и без повишаване (не е обикновен „Пас“).
+  if (betting.stayBlind) {
+    buttons.push({ kind: 'stay-blind', label: 'Остани на тъмно', amount: null, command: { type: 'act', action: { kind: 'stay-blind' } }, disabled: false })
   }
 
   if (betting.noBet) {

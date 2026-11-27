@@ -220,7 +220,7 @@ export type SvaraRuntimeClientFacade = Pick<SvaraMatchRuntime, 'hasMatch' | 'isP
 
 const PARTICIPANT_TYPES = new Set(['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit', 'reveal-cards', 'hide-cards'])
 const SYSTEM_TYPES = new Set(['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'absence-limit-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing', 'advance-showdown-display', 'close-payout-display'])
-const ACTION_KINDS = new Set(['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet'])
+const ACTION_KINDS = new Set(['fold', 'call', 'all-in', 'no-bet', 'stay-blind', 'bet', 'blind-bet'])
 
 const fail = (code: SvaraRuntimeErrorCode, message: string): never => {
   throw new SvaraRuntimeError(code, message)

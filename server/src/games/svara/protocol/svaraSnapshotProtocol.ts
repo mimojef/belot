@@ -24,7 +24,7 @@
 
 import { buildSvaraPotLayers } from '../engine/svaraPots.js'
 import { svaraAbsenceDeadlineAt } from '../runtime/svaraAbsenceBudget.js'
-import type { SvaraBettingAction, SvaraBettingOptions, SvaraBlindStatus } from '../engine/svaraBetting.js'
+import { svaraBlindDoubledContributions, svaraBlindPlayers, type SvaraBettingAction, type SvaraBettingOptions, type SvaraBlindStatus } from '../engine/svaraBetting.js'
 import { parseSvaraCardCode, type SvaraCardCode } from '../engine/svaraCards.js'
 import { evaluateSvaraHand } from '../engine/svaraHandEvaluation.js'
 import {
@@ -135,6 +135,8 @@ export type SvaraSnapshotBettingRound = {
   participants: string[]
   currentBet: number
   blind: { status: SvaraBlindStatus; lastBlindTotal: number }
+  /** 27.11.2026: играчите на тъмно, чийто залог в момента се брои двойно (currentBet е в светла стойност). */
+  blindPlayers: string[]
   /** Пренесени чипове в основната банка на това раздаване (§6.11). */
   carriedIn: number
   potTotal: number
@@ -358,7 +360,8 @@ function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
   const betting = round.betting
   const carriedIn = round.kind === 'ordinary' ? round.deadMoney : 0
   const contributed = round.participants.reduce((sum, id) => sum + (round.contributions[id] ?? 0), 0)
-  const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded })
+  // 27.11.2026: тъмният залог се брои двойно и за правото на банката.
+  const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded, blindDoubled: svaraBlindDoubledContributions(betting) })
   return {
     kind: round.kind,
     roundId: round.roundId,
@@ -367,6 +370,7 @@ function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
     participants: [...round.participants],
     currentBet: betting.currentBet,
     blind: { status: betting.blind.status, lastBlindTotal: betting.blind.lastBlindTotal },
+    blindPlayers: svaraBlindPlayers(betting),
     carriedIn,
     potTotal: contributed + carriedIn,
     provisionalPots: layers.map((layer) => ({ index: layer.index, amount: layer.amount, kind: layer.kind, eligible: [...layer.eligible] })),
@@ -458,6 +462,7 @@ export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMat
             blindBet: options.blindBet ? { min: options.blindBet.min, max: options.blindBet.max } : null,
             allIn: options.allIn,
             lookRequired: options.lookRequired,
+            stayBlind: options.stayBlind,
           }
         : null,
       revealChoice: round?.kind === 'reveal-choice' && round.winnerId === viewerId ? { canDecide: round.decision === 'pending' } : null,

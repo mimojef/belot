@@ -43,11 +43,25 @@
 //
 // Суми: total = общият ДОБРОВОЛЕН залог на играча в раздаването (без Входа).
 
+// Решение на собственика (27.11.2026) — тъмният залог се брои двойно:
+//   • Залогът на играч, който е залагал на тъмно и още не е погледнал, се
+//     брои ДВОЙНО за изравняване със светъл залог (реалните чипове не се
+//     удвояват). currentBet е в „светла“ стойност: тъмен залог T → 2T.
+//   • Погледнал играч, който изравнява двойния тъмен залог, ПЛАЩА (call) —
+//     не повишава и не затваря тъмната фаза. Играчите на тъмно, чийто
+//     двоен залог вече е равен на текущия, получават ход за решение:
+//     „Оставам на тъмно“ (stay-blind, без чипове — не е „Пас“), поглеждане
+//     и плащане/повишаване, нов тъмен залог или „Бягам“.
+//   • Повишаване на светло = над текущия залог с поне 1 Вход; то (както
+//     досега, правило 4) затваря тъмната фаза и разкрива картите на всички.
+//   • При сравняване тъмният залог се брои двойно и за правото на банката
+//     (svaraPots.ts, blindDoubled).
 export type SvaraBettingAction =
   | { kind: 'fold' }
   | { kind: 'call' }
   | { kind: 'all-in' }
   | { kind: 'no-bet' }
+  | { kind: 'stay-blind' }
   | { kind: 'bet'; total: number }
   | { kind: 'blind-bet'; total: number }
 
@@ -85,6 +99,14 @@ export type SvaraBettingState = {
   toAct: string | null
   /** lastBlindTotal = последният ПЪЛЕН тъмен залог (непълен ол-ин не го променя). */
   blind: { status: SvaraBlindStatus; lastBlindTotal: number }
+  /**
+   * Заложилите на тъмно (27.11.2026). Докато такъв играч не е погледнал,
+   * залогът му се брои двойно (svaraEffectiveBet). Липсва в състояния,
+   * записани преди промяната — тогава се приема за празен.
+   */
+  blindBettors?: string[]
+  /** Играчи на тъмно, избрали „Оставам на тъмно“ след последното повишаване. */
+  blindConfirmed?: string[]
   allowNoBet: boolean
   noBet: string[]
   complete: boolean
@@ -139,6 +161,8 @@ export function createSvaraBetting(input: {
     raiseLocked: [],
     toAct: firstActor,
     blind: { status: firstActor ? 'available' : 'closed', lastBlindTotal: 0 },
+    blindBettors: [],
+    blindConfirmed: [],
     allowNoBet: input.allowNoBet,
     noBet: [],
     complete: false,
@@ -181,12 +205,47 @@ function remove(list: string[], id: string): void {
   if (index >= 0) list.splice(index, 1)
 }
 
+/** Залогът на играча се брои двойно: залагал е на тъмно, не е погледнал и не е отказал. */
+export function isSvaraBlindCountedDouble(state: SvaraBettingState, playerId: string): boolean {
+  return (state.blindBettors ?? []).includes(playerId) && !state.looked.includes(playerId) && !state.folded.includes(playerId)
+}
+
+/** Залогът на играча в „светла“ стойност (тъмният — двойно). Сравнява се с currentBet. */
+export function svaraEffectiveBet(state: SvaraBettingState, playerId: string): number {
+  const voluntary = state.voluntary[playerId] ?? 0
+  return isSvaraBlindCountedDouble(state, playerId) ? 2 * voluntary : voluntary
+}
+
+/** Играчите, чийто залог в момента се брои двойно (публично — показва се на масата). */
+export function svaraBlindPlayers(state: SvaraBettingState): string[] {
+  return state.order.filter((id) => isSvaraBlindCountedDouble(state, id))
+}
+
+/**
+ * За банката при приключване: реално внесените на тъмно чипове на всеки
+ * играч, чийто залог се брои двойно (виж svaraPots.ts blindDoubled).
+ */
+export function svaraBlindDoubledContributions(state: SvaraBettingState): Record<string, number> {
+  const doubled: Record<string, number> = {}
+  for (const id of svaraBlindPlayers(state)) {
+    const voluntary = state.voluntary[id] ?? 0
+    if (voluntary > 0) doubled[id] = voluntary
+  }
+  return doubled
+}
+
+function markBlindBettor(state: SvaraBettingState, playerId: string): void {
+  state.blindBettors = state.blindBettors ?? []
+  if (!state.blindBettors.includes(playerId)) state.blindBettors.push(playerId)
+}
+
 /** Пълно залагане/повишаване: всички останали с възможност за действие трябва да отговорят. */
 function applyFullRaise(state: SvaraBettingState, playerId: string, total: number): void {
   state.currentBet = total
   state.anyVoluntaryBet = true
   state.acted = [playerId]
   state.raiseLocked = []
+  state.blindConfirmed = []
   state.pending = state.order.filter((id) => id !== playerId && canAct(state, id))
 }
 
@@ -195,9 +254,24 @@ function applyShortRaise(state: SvaraBettingState, playerId: string, total: numb
   const previouslyActed = state.acted.filter((id) => id !== playerId)
   state.currentBet = total
   state.anyVoluntaryBet = true
+  state.blindConfirmed = []
   state.pending = state.order.filter((id) => id !== playerId && canAct(state, id))
   state.raiseLocked = previouslyActed.filter((id) => state.pending.includes(id))
   state.acted = [...previouslyActed, playerId]
+}
+
+/**
+ * След плащане (вкл. ол-ин за плащане): играчите на тъмно, чийто двоен
+ * залог вече е равен на текущия и които още не са решили след последното
+ * повишаване, получават ход за решение (не дължат автоматично доплащане).
+ */
+function offerBlindDecision(state: SvaraBettingState, callerId: string): void {
+  const confirmed = state.blindConfirmed ?? []
+  for (const id of state.order) {
+    if (id === callerId || !canAct(state, id) || !isSvaraBlindCountedDouble(state, id)) continue
+    if (svaraEffectiveBet(state, id) !== state.currentBet || confirmed.includes(id) || state.pending.includes(id)) continue
+    state.pending.push(id)
+  }
 }
 
 export type SvaraBettingResult = { state: SvaraBettingState; added: number }
@@ -220,6 +294,11 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
   // никой не е заложил нищо (на тъмно или обикновено) — не само на литералния
   // firstActor. Отказ без залог го предава естествено на следващия (виж 'fold').
   const canOpenBlind = state.blind.status === 'available' && state.currentBet === 0
+  // Залогът на играча в „светла“ стойност (тъмният — двойно; 27.11.2026).
+  const effective = svaraEffectiveBet(state, playerId)
+  const countedDouble = isSvaraBlindCountedDouble(state, playerId)
+  state.blindBettors = state.blindBettors ?? []
+  state.blindConfirmed = state.blindConfirmed ?? []
   let added = 0
   let blind = false
 
@@ -249,17 +328,30 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       break
     }
     case 'call': {
-      // В активна тъмна фаза няма „плащане“ — залогът винаги е ≥ 2 × предишния
-      // тъмен залог (пълен) или нормален ол-ин под минимума (Решение №2, който
-      // веднага затваря тъмната фаза). raiseLocked е винаги празен тук.
-      if (state.blind.status === 'active' && !state.raiseLocked.includes(playerId)) fail('invalid-action', 'during the blind phase a bet must be at least double the last blind bet')
-      if (state.currentBet <= voluntary) fail('invalid-action', 'nothing to call')
-      const need = state.currentBet - voluntary
+      // 27.11.2026: погледнал играч ПЛАЩА и срещу тъмен залог — изравнява
+      // „светлата“ стойност (тъмният залог се брои двойно). Не повишава и не
+      // затваря тъмната фаза; на тъмно не се плаща (нов тъмен залог е ≥ 2×).
+      if (state.blind.status === 'active' && !looked) fail('look-required', 'during the blind phase look at the cards before paying, or continue blind')
+      if (state.currentBet <= effective) fail('invalid-action', 'nothing to call')
+      const need = state.currentBet - effective
       if (need > stack) fail('insufficient-chips', `call needs ${need}, ${playerId} has ${stack}; use all-in`)
-      commitTotal(state.currentBet)
+      commitTotal(voluntary + need)
       remove(state.pending, playerId)
       remove(state.raiseLocked, playerId)
       state.acted.push(playerId)
+      offerBlindDecision(state, playerId)
+      break
+    }
+    case 'stay-blind': {
+      // „Оставам на тъмно“ (27.11.2026): двойният тъмен залог вече е равен на
+      // текущия — без нови чипове и без повишаване. Не е обикновен „Пас“:
+      // възможно е само за играч на тъмно с изравнен залог.
+      if (state.blind.status !== 'active' || !countedDouble) fail('invalid-action', 'only a player who is still betting blind can stay blind')
+      if (effective !== state.currentBet) fail('invalid-action', 'staying blind is only possible when the blind bet already matches the current bet')
+      remove(state.pending, playerId)
+      if (!state.blindConfirmed.includes(playerId)) state.blindConfirmed.push(playerId)
+      if (!state.acted.includes(playerId)) state.acted.push(playerId)
+      blind = true
       break
     }
     case 'bet':
@@ -276,23 +368,26 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         if (total < minimum) fail('below-minimum', `blind bet must be at least ${minimum}; a player without enough free chips may not bet blind`)
         if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
         commitTotal(total)
-        applyFullRaise(state, playerId, total)
+        markBlindBettor(state, playerId)
+        // Тъмният залог се брои двойно: текущият залог става 2 × total.
+        applyFullRaise(state, playerId, 2 * total)
         state.blind = { status: 'active', lastBlindTotal: total }
         blind = true
         break
       }
-      // Обикновен (с погледнати карти или след тъмната фаза) залог.
+      // Повишаване на светло по време на тъмната фаза (27.11.2026): над
+      // текущия („светъл“) залог с поне 1 Вход; изравняването е „Плати“ (call).
+      // Затваря тъмната фаза (правило 4) — останалите виждат картите си.
       if (state.blind.status === 'active') {
         if (!looked) fail('look-required', 'during the blind phase look at the cards first or continue blind')
         if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
-        const minimum = 2 * state.blind.lastBlindTotal
+        if (total <= state.currentBet) fail('invalid-action', `total ${total} does not exceed the current bet ${state.currentBet}; use call`)
+        const minimum = state.currentBet + entry
         if (total < minimum) {
-          if (total !== maxTotal) fail('below-minimum', `after looking, the bet must be at least ${minimum}`)
-          // Решение №2: погледнал играч с недостатъчни чипове за минимума →
-          // нормален ол-ин (не пълно повишаване); тъмната фаза приключва.
+          if (total !== maxTotal) fail('below-minimum', `minimum raise is ${minimum}`)
+          // Погледнал играч с недостатъчни чипове → непълно ол-ин повишаване.
           commitTotal(total)
-          if (total > state.currentBet) applyShortRaise(state, playerId, total)
-          else { remove(state.pending, playerId); remove(state.raiseLocked, playerId); state.acted.push(playerId) }
+          applyShortRaise(state, playerId, total)
           state.blind.status = 'closed'
           break
         }
@@ -319,28 +414,35 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       if (stack === 0) fail('invalid-action', `${playerId} has no free chips`)
       const total = maxTotal
       if (state.blind.status === 'active') {
-        const minimum = 2 * state.blind.lastBlindTotal
-        if (total < minimum) {
-          // Решение №1: непогледнал играч с недостатъчни чипове няма право
-          // да продължи на тъмно — отказ, без промяна на състоянието.
-          if (!looked) fail('blind-not-allowed', `${playerId} has only ${total}, below the blind minimum ${minimum}; look at the cards to continue`)
-          // Решение №2: погледнал играч с недостатъчни чипове → нормален
-          // ол-ин (не пълно повишаване); тъмната фаза приключва за всички.
+        if (!looked) {
+          // Ол-ин на тъмно = тъмен залог за цялата наличност (брои се двойно).
+          // Решение №1: под минимума на тъмно не е позволен — погледни.
+          const minimum = 2 * state.blind.lastBlindTotal
+          if (total < minimum) fail('blind-not-allowed', `${playerId} has only ${total}, below the blind minimum ${minimum}; look at the cards to continue`)
           if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
           commitTotal(total)
-          if (total > state.currentBet) applyShortRaise(state, playerId, total)
-          else { remove(state.pending, playerId); remove(state.raiseLocked, playerId); state.acted.push(playerId) }
-          state.blind.status = 'closed'
-          break
-        }
-        if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
-        commitTotal(total)
-        applyFullRaise(state, playerId, total)
-        if (looked) state.blind.status = 'closed'
-        else {
+          markBlindBettor(state, playerId)
+          applyFullRaise(state, playerId, 2 * total)
           state.blind.lastBlindTotal = total
           blind = true
+          break
         }
+        if (total <= state.currentBet) {
+          // Погледнал играч: ол-ин за плащане (пълно или непълно) — не
+          // повишава и не затваря тъмната фаза (27.11.2026).
+          commitTotal(total)
+          remove(state.pending, playerId)
+          remove(state.raiseLocked, playerId)
+          state.acted.push(playerId)
+          offerBlindDecision(state, playerId)
+          break
+        }
+        // Погледнал играч: ол-ин повишаване на светло — затваря тъмната фаза.
+        if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
+        commitTotal(total)
+        if (total >= state.currentBet + entry) applyFullRaise(state, playerId, total)
+        else applyShortRaise(state, playerId, total)
+        state.blind.status = 'closed'
         break
       }
       if (canOpenBlind && !looked) {
@@ -348,7 +450,8 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         // играчът трябва да погледне (и да залага нормално) или да се откаже.
         if (total < 2 * entry) fail('blind-not-allowed', `${playerId} has only ${total}, below the blind minimum ${2 * entry}; look at the cards to continue`)
         commitTotal(total)
-        applyFullRaise(state, playerId, total)
+        markBlindBettor(state, playerId)
+        applyFullRaise(state, playerId, 2 * total)
         state.blind = { status: 'active', lastBlindTotal: total }
         blind = true
         break
@@ -444,11 +547,13 @@ export type SvaraBettingOptions = {
   blindBet: { min: number; max: number } | null
   allIn: number | null
   lookRequired: boolean
+  /** „Оставам на тъмно“ (27.11.2026): двойният тъмен залог вече е равен на текущия. */
+  stayBlind: boolean
 }
 
 /** Позволените действия (за UI/тестове); applySvaraBettingAction валидира независимо. */
 export function describeSvaraBettingOptions(state: SvaraBettingState, playerId: string, stack: number): SvaraBettingOptions {
-  const none: SvaraBettingOptions = { canAct: false, fold: false, noBet: false, call: null, bet: null, blindBet: null, allIn: null, lookRequired: false }
+  const none: SvaraBettingOptions = { canAct: false, fold: false, noBet: false, call: null, bet: null, blindBet: null, allIn: null, lookRequired: false, stayBlind: false }
   if (state.complete || state.toAct !== playerId) return none
   const entry = state.entryChips
   const voluntary = state.voluntary[playerId] ?? 0
@@ -458,15 +563,26 @@ export function describeSvaraBettingOptions(state: SvaraBettingState, playerId: 
   const options: SvaraBettingOptions = { ...none, canAct: true, fold: true }
   options.noBet = state.allowNoBet && state.currentBet === 0
   if (state.blind.status === 'active') {
-    const minimum = 2 * state.blind.lastBlindTotal
     const locked = state.raiseLocked.includes(playerId)
-    if (locked && state.currentBet > voluntary && state.currentBet - voluntary <= stack) options.call = state.currentBet
-    if (!locked && !looked && maxTotal >= minimum) options.blindBet = { min: minimum, max: maxTotal }
-    if (!locked && looked && maxTotal >= minimum) options.bet = { min: minimum, max: maxTotal }
+    if (looked) {
+      // 27.11.2026: погледналият плаща до текущия („светъл“) залог или вдига
+      // с поне 1 Вход над него; ол-ин — винаги (за плащане или повишаване).
+      if (state.currentBet > voluntary && state.currentBet - voluntary <= stack) options.call = state.currentBet
+      const minimum = state.currentBet + entry
+      if (!locked && maxTotal >= minimum) options.bet = { min: minimum, max: maxTotal }
+      if (stack > 0 && (!locked || maxTotal <= state.currentBet)) options.allIn = maxTotal
+      return options
+    }
+    // На тъмно: нов тъмен залог (≥ 2 × последния), „Оставам на тъмно“ при
+    // изравнен двоен залог, поглеждане или отказ.
     // Решение №1: непогледнал играч под минимума няма опция за ол-ин на тъмно.
-    // Решение №2: погледнал играч може да ол-ин дори под минимума (нормален ол-ин).
-    if (stack > 0 && (locked ? maxTotal <= state.currentBet : looked || maxTotal >= minimum)) options.allIn = maxTotal
-    options.lookRequired = !looked && !locked
+    const minimum = 2 * state.blind.lastBlindTotal
+    if (!locked && maxTotal >= minimum) {
+      options.blindBet = { min: minimum, max: maxTotal }
+      if (stack > 0) options.allIn = maxTotal
+    }
+    options.stayBlind = isSvaraBlindCountedDouble(state, playerId) && svaraEffectiveBet(state, playerId) === state.currentBet
+    options.lookRequired = !locked
     return options
   }
   if (canOpenBlind && !looked) {

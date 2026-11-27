@@ -31,6 +31,7 @@ import {
   forceSvaraFold,
   lookAtSvaraCards,
   revealUnlookedHands,
+  svaraBlindDoubledContributions,
   SvaraBettingError,
   type SvaraBettingAction,
   type SvaraBettingOptions,
@@ -132,6 +133,12 @@ export type SvaraRoundRecord = {
   shownHands: Record<string, SvaraCardCode[]>
   points: Record<string, number>
   contributions: Record<string, number>
+  /**
+   * 27.11.2026: реално внесените на тъмно чипове на играчите, останали на
+   * тъмно до края на наддаването (броят се двойно за правото на банката).
+   * Липсва, когато няма такива (и в по-стари записи).
+   */
+  blindDoubled?: Record<string, number>
   folded: string[]
   anyVoluntaryBet: boolean
   pots: SvaraRoundPotRecord[]
@@ -1017,7 +1024,8 @@ function settleOrdinary(ctx: Ctx): void {
   // Случай №3: ако поне двама неотказали не са могли да направят доброволен
   // залог (ол-ин от Входа), картите се сравняват автоматично — без печалба на
   // дилъра. Дилърът печели само когато е единственият останал (§4.7).
-  const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded })
+  // 27.11.2026: тъмният залог се брои двойно и за правото на банката.
+  const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded, blindDoubled: svaraBlindDoubledContributions(betting) })
   if (round.deadMoney > 0 && layers[0]) {
     layers[0] = { ...layers[0], amount: layers[0].amount + round.deadMoney }
   }
@@ -1101,6 +1109,7 @@ function baseRecord(round: OrdinaryRound | SvaraDealRound, dealerId: string | nu
     shownHands: shown.length >= 2 ? Object.fromEntries(shown.map((id) => [id, [...round.hands[id]!]])) : {},
     points: { ...points },
     contributions: { ...round.contributions },
+    ...(Object.keys(svaraBlindDoubledContributions(round.betting)).length > 0 ? { blindDoubled: svaraBlindDoubledContributions(round.betting) } : {}),
     folded: [...round.betting.folded],
     anyVoluntaryBet: round.betting.anyVoluntaryBet,
     pots: [],
@@ -1357,7 +1366,8 @@ function settleSvaraDeal(ctx: Ctx): void {
   const pot = lockedPot(state, round.potId)
   const remaining = round.participants.filter((id) => !betting.folded.includes(id))
   const points = remaining.length >= 2 ? pointsFor(round.hands, remaining) : {}
-  const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded })
+  // 27.11.2026: тъмният залог се брои двойно и за правото на банката.
+  const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded, blindDoubled: svaraBlindDoubledContributions(betting) })
   const contested = layers.filter((layer) => layer.kind === 'contested')
   // Решение №3 (§6.13, случай №2): новите залози образуват собствени
   // основна/странични банки, отделно от старата заключена банка, и се

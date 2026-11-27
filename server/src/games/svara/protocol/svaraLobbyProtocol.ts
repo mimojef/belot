@@ -87,7 +87,7 @@ export function parseSvaraLobbyMessage(input: Record<string, unknown>): SvaraLob
       if (a.kind === 'bet' || a.kind === 'blind-bet') {
         if (typeof a.total !== 'number' || !Number.isSafeInteger(a.total) || a.total <= 0) return null
         normalized = { type: 'act', action: { kind: a.kind, total: a.total } }
-      } else if (a.kind === 'fold' || a.kind === 'call' || a.kind === 'all-in' || a.kind === 'no-bet') {
+      } else if (a.kind === 'fold' || a.kind === 'call' || a.kind === 'all-in' || a.kind === 'no-bet' || a.kind === 'stay-blind') {
         normalized = { type: 'act', action: { kind: a.kind } }
       } else return null
     } else return null

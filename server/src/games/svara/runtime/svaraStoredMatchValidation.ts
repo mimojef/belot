@@ -15,7 +15,7 @@ const member = (value: unknown, ids: string[]) => typeof value === 'string' && i
 const subset = (value: unknown, ids: string[]) => strings(value) && value.every((id) => ids.includes(id))
 const amounts = (value: unknown, ids: string[]) => object(value) && Object.entries(value).every(([id, amount]) => ids.includes(id) && integer(amount))
 const exactKeys = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
-const actions = ['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet']
+const actions = ['fold', 'call', 'all-in', 'no-bet', 'stay-blind', 'bet', 'blind-bet']
 const participantTypes = ['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit', 'reveal-cards', 'hide-cards']
 const systemTypes = ['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'absence-limit-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing', 'advance-showdown-display', 'close-payout-display']
 const ledgerTypes = ['absence-pot-award', 'abandoned-pot-removed', 'starting-chips', 'entry', 'bet', 'svara-join-fee', 'carry-in', 'uncalled-return', 'pot-award', 'pot-lock', 'pot-carry', 'pot-split', 'split-remainder-removed', 'exit-removed']
@@ -40,6 +40,7 @@ function validateRecord(record: any, seats: string[]): void {
   require(record.dealerId === null || member(record.dealerId, seats))
   hands(record.shownHands, record.participants, false)
   require(amounts(record.points, record.participants) && amounts(record.contributions, record.participants) && typeof record.anyVoluntaryBet === 'boolean' && Array.isArray(record.pots))
+  require(record.blindDoubled === undefined || amounts(record.blindDoubled, record.participants))
   for (const pot of record.pots) {
     require(object(pot) && text(pot.potId) && ['round', 'locked'].includes(pot.source) && integer(pot.amount) && amounts(pot.contributions, seats) && subset(pot.eligible, seats) && object(pot.outcome))
     // 2Б.3.7.6А: ново, незадължително поле — по-стар (преди тази стъпка)
@@ -64,6 +65,8 @@ function betting(value: any, players: string[]): void {
   require(value.firstActor === null || member(value.firstActor, players))
   require(value.complete ? value.toAct === null : member(value.toAct, value.pending))
   require(object(value.blind) && ['available', 'active', 'closed'].includes(value.blind.status) && integer(value.blind.lastBlindTotal))
+  // 27.11.2026: незадължителни (липсват в по-стари записи).
+  for (const field of ['blindBettors', 'blindConfirmed']) require(value[field] === undefined || subset(value[field], players))
   require(Array.isArray(value.log))
   for (const item of value.log) require(object(item) && member(item.playerId, players) && [...actions, 'forced-fold'].includes(item.kind) &&
     integer(item.total) && integer(item.added) && typeof item.allIn === 'boolean' && typeof item.blind === 'boolean')

@@ -16,14 +16,15 @@
 import type { SvaraSnapshotAction, SvaraSnapshotRound } from '../../../network/createGameServerClient'
 
 /**
- * previousBet: текущият залог непосредствено преди действието (най-високото ниво в журнала преди него).
+ * previousBet: текущият залог непосредствено преди действието (най-високото ниво в журнала преди него,
+ * в „светла“ стойност — тъмните залози двойно; 27.11.2026).
  * allIn: действието изразходва цялата наличност на играча (сървърният флаг) — реален Ол-ин,
  * независимо дали е бутонът Ол-ин, залог/плащане за всичко или на тъмно.
  */
 export type SvaraNewBetEntry = { playerId: string; kind: SvaraSnapshotAction['kind']; total: number; added: number; blind: boolean; allIn: boolean; previousBet: number }
 
 export type SvaraBetAnimationTracker = {
-  /** Връща само РЕАЛНО новите (неанимирани досега) записи с added>0 за ТЕКУЩИЯ round. */
+  /** Връща само РЕАЛНО новите (неанимирани досега) записи с added>0 (и „Оставам на тъмно“) за ТЕКУЩИЯ round. */
   detectNewEntries: (round: SvaraSnapshotRound | null) => SvaraNewBetEntry[]
   reset: () => void
 }
@@ -34,6 +35,39 @@ type SvaraSnapshotForFinalCall = {
   toActId: string | null
   round: SvaraSnapshotRound | null
   seats: ReadonlyArray<{ playerId: string; stack: number }>
+}
+
+/**
+ * Залогът от записа в „светла“ стойност (27.11.2026): действие на тъмно
+ * (blind: true — тъмен залог, ол-ин на тъмно, „Оставам на тъмно“) се брои
+ * двойно. Текущият залог преди действие = най-високата такава стойност.
+ */
+export function svaraEntryLightTotal(entry: Pick<SvaraNewBetEntry, 'total' | 'blind'>): number {
+  return entry.blind ? 2 * entry.total : entry.total
+}
+
+/** Точка на прехода (виж detectSvaraFinalCall): последният на ход в предишния snapshot. */
+function finalTransition(prev: SvaraSnapshotForFinalCall | null, next: SvaraSnapshotForFinalCall | null) {
+  if (!prev || !next || prev.matchId !== next.matchId || next.revision !== prev.revision + 1) return null
+  const before = prev.round
+  const after = next.round
+  if (!before || (before.kind !== 'ordinary' && before.kind !== 'svara')) return null
+  if (!after || after.kind !== 'showdown-display' || after.displayPhase !== 'showdown') return null
+  const actor = prev.toActId
+  if (!actor || !after.comparedPlayers.includes(actor)) return null
+  return { before, actor }
+}
+
+/**
+ * Последното действие беше „Оставам на тъмно“ (27.11.2026): играчът на ход е
+ * бил на тъмно (blindPlayers) и наддаването мина направо в сравняване — без
+ * нови чипове (затова не е „Плащам“).
+ */
+export function detectSvaraFinalStayBlind(prev: SvaraSnapshotForFinalCall | null, next: SvaraSnapshotForFinalCall | null): { playerId: string; roundId: string } | null {
+  const transition = finalTransition(prev, next)
+  if (!transition) return null
+  const round = transition.before
+  return round.blindPlayers?.includes(transition.actor) ? { playerId: transition.actor, roundId: round.roundId } : null
 }
 
 /**
@@ -51,15 +85,15 @@ type SvaraSnapshotForFinalCall = {
 export function detectSvaraFinalCall(prev: SvaraSnapshotForFinalCall | null, next: SvaraSnapshotForFinalCall | null): { playerId: string; added: number; roundId: string; call: boolean; allIn: boolean } | null {
   // Само непосредствено следващият snapshot: ако междинен е пропуснат, играчът
   // „на ход“ в предишния може да не е последният платил — тогава без анимация.
-  if (!prev || !next || prev.matchId !== next.matchId || next.revision !== prev.revision + 1) return null
-  const before = prev.round
-  const after = next.round
-  if (!before || (before.kind !== 'ordinary' && before.kind !== 'svara')) return null
-  if (!after || after.kind !== 'showdown-display' || after.displayPhase !== 'showdown') return null
-  const actor = prev.toActId
-  if (!actor || !after.comparedPlayers.includes(actor)) return null
+  const transition = finalTransition(prev, next)
+  if (!transition) return null
+  const { actor } = transition
+  const before = transition.before
+  // Играч на тъмно (27.11.2026): залогът му се брои двойно — ако вече е
+  // равен на текущия, последното действие е „Оставам на тъмно“, не плащане.
+  if (before.blindPlayers?.includes(actor)) return null
   const voluntary = before.actions.filter((entry) => entry.playerId === actor).reduce((sum, entry) => sum + entry.added, 0)
-  const stack = prev.seats.find((seat) => seat.playerId === actor)?.stack ?? 0
+  const stack = prev!.seats.find((seat) => seat.playerId === actor)?.stack ?? 0
   const need = Math.max(0, before.currentBet - voluntary)
   const added = Math.min(need, stack)
   return added > 0 ? { playerId: actor, added, roundId: before.roundId, call: need <= stack, allIn: added === stack } : null
@@ -73,11 +107,13 @@ export function detectSvaraFinalCall(prev: SvaraSnapshotForFinalCall | null, nex
  * над текущия залог преди действието. Изключение: първото откриване на
  * светло („Залагам“, виж isSvaraOpeningPay).
  */
-export function svaraRaiseAmount(entry: Pick<SvaraNewBetEntry, 'kind' | 'total' | 'previousBet'>): number | null {
+export function svaraRaiseAmount(entry: Pick<SvaraNewBetEntry, 'kind' | 'total' | 'previousBet' | 'blind'>): number | null {
   if (entry.kind !== 'bet' && entry.kind !== 'all-in' && entry.kind !== 'blind-bet') return null
-  if (entry.total <= entry.previousBet) return null
+  // Сравнява се в „светла“ стойност (тъмният залог — двойно; 27.11.2026).
+  const light = svaraEntryLightTotal(entry)
+  if (light <= entry.previousBet) return null
   if (isSvaraOpeningPay(entry)) return null
-  return entry.total - entry.previousBet
+  return light - entry.previousBet
 }
 
 /**
@@ -104,8 +140,9 @@ export function createSvaraBetAnimationTracker(): SvaraBetAnimationTracker {
     if (actions.length <= seenCount) return []
     const newEntries: SvaraNewBetEntry[] = []
     actions.forEach((entry, index) => {
-      if (index < seenCount || entry.added <= 0) return
-      const previousBet = actions.slice(0, index).reduce((max, prior) => Math.max(max, prior.total), 0)
+      // „Оставам на тъмно“ е без чипове, но се обявява (27.11.2026).
+      if (index < seenCount || (entry.added <= 0 && entry.kind !== 'stay-blind')) return
+      const previousBet = actions.slice(0, index).reduce((max, prior) => Math.max(max, svaraEntryLightTotal(prior)), 0)
       newEntries.push({ playerId: entry.playerId, kind: entry.kind, total: entry.total, added: entry.added, blind: entry.blind, allIn: entry.allIn, previousBet })
     })
     seenCountByRoundId.set(roundId, actions.length)

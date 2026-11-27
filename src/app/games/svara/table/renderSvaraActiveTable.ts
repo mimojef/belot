@@ -331,7 +331,8 @@ function actionButtonVariant(kind: SvaraActionButton['kind']): 'default' | 'prim
 // „Върни се“ заемат мястото на „Виж“, когато то не е нужно. „Без залог“ не
 // изключва „Плати“ (там то открива с минимума), затова в единственото
 // решение, в което „Без залог“ и „Виж“ са нужни едновременно (преди „Виж“),
-// „Без залог“ заема мястото на „×50“.
+// „Без залог“ заема мястото на „×50“. „Остани на тъмно“ (27.11.2026) също
+// заема мястото на „×50“ — двете никога не са нужни едновременно.
 
 /** Телефон: ширина на екрана, до която панелът е 2 реда по 4 (виж stageSize в svaraRealScene.ts). */
 export const SVARA_ACTION_PANEL_PHONE_MAX_WIDTH_PX = 559
@@ -366,6 +367,8 @@ function actionButtonContent(label: string, amount: number | null, kind: SvaraAc
     const title = label.startsWith('Тъмни') ? 'Тъмни' : label.startsWith('Заложи') ? 'Заложи' : 'Плати'
     return `${title}<span data-svara-pay-amount="1" style="display:block;">${esc(actionAmountFormatter.format(amount))}</span>`
   }
+  // „Остани на тъмно“: на два реда, за да не се изрязва в тесния бутон.
+  if (kind === 'stay-blind') return 'Остани<span style="display:block;">на тъмно</span>'
   // Ол-ин: сумата от сървъра на втори ред (надписът остава „Ол-ин“).
   return kind === 'all-in' && amount !== null
     ? `${esc(label)}<span style="display:block;font-size:10px;font-weight:700;opacity:.85;">${amount}</span>`
@@ -383,7 +386,11 @@ export function renderSvaraActionPanelHtml(buttons: SvaraActionButton[], actionP
   const returnButton = `<button type="button" data-svara-action-button="request-return" ${actionPending ? 'disabled' : ''} style="${ACTION_BUTTON_BASE}${ACTION_BUTTON_STYLE.default}${actionPending ? DISABLED_STYLE : ''}">Върни се</button>`
   const noBet = byKind.get('no-bet')
   const noBetSlot = noBet ? (byKind.has('look') ? 'x50' : 'look') : null
+  // „Остани на тъмно“ (27.11.2026) — само за непогледнал играч (има „Виж“),
+  // затова заема мястото на „×50“ (като „Без залог“ преди „Виж“).
+  const stayBlind = byKind.get('stay-blind')
   const cells = ACTION_SLOTS.map((slot, i) => {
+    if (stayBlind && slot.kind === 'x50') return real(stayBlind)
     if (noBet && slot.kind === noBetSlot) return real(noBet)
     const button = byKind.get(slot.kind)
     if (button) return real(button)
