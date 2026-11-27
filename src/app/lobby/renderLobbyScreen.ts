@@ -1,5 +1,5 @@
 import { getCampaignPackageUnits, renderCampaignPackageUnitsBadge } from './campaignShopBonus'
-import { ensureMobileCreateFormStyles, MOBILE_CREATE_BACKDROP_STYLE, MOBILE_CREATE_CARD_STYLE, MOBILE_CREATE_ICONS, renderMobileCreateHeader, renderMobileCreateSelect, renderMobileCreateSubmit, renderMobileCreateToggleRow } from './mobileCreateForm'
+import { DESKTOP_CREATE_BACKDROP_STYLE, DESKTOP_CREATE_CARD_STYLE, DESKTOP_CREATE_THEME_ATTRIBUTE, ensureMobileCreateFormStyles, MOBILE_CREATE_BACKDROP_STYLE, MOBILE_CREATE_CARD_STYLE, MOBILE_CREATE_ICONS, renderMobileCreateHeader, renderMobileCreateSelect, renderMobileCreateSubmit, renderMobileCreateToggleRow } from './mobileCreateForm'
 import { bindMobileEntryPicker, mobileEntryPickerCardAttributes, renderMobileEntryPickerField, renderMobileEntryPickerScreen, type MobileEntryPickerConfig } from './mobileEntryPicker'
 import { bindAdminSvaraHeldSection, renderAdminSvaraHeldSection, type AdminSvaraHeldCallbacks, type AdminSvaraHeldState } from './adminSvaraHeldPayouts'
 import {
@@ -15500,13 +15500,12 @@ export function readPrivateRoomCreateForm(form: HTMLFormElement): PrivateRoomCre
   }
 }
 
-function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState, light = true): string {
+function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState): string {
   const option = state.privateRoomVoiceCreateOption
   if (option === null || !option.visible) return ''
   // Изборът се пази при прерисуване, докато прозорецът е отворен.
   const checkedAttr = state.privateRoomCreateDraft?.voiceEnabled === true ? ' checked' : ''
-  if (!light) return renderPrivateRoomVoiceCreateRowDark(option.canCreate, checkedAttr)
-  // Мобилният дизайн на „Нова маса“ (mobileCreateForm.ts): превключвател,
+  // Дизайнът на „Нова маса“ (mobileCreateForm.ts; мобилен и десктоп): превключвател,
   // а без VIP — заключен ред, който отваря VIP прозореца (не е поле на формата).
   const vipBadge = '<span style="display:inline-flex;align-items:center;height:18px;padding:0 7px;border-radius:999px;background:linear-gradient(180deg,#F8D978 0%,#D9A520 100%);color:#3B2600;font-size:10px;font-weight:900;letter-spacing:0.04em;">VIP</span>'
   const title = `Гласов чат ${vipBadge}`
@@ -15520,26 +15519,6 @@ function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState, light = true):
     `
   }
   return renderMobileCreateToggleRow(`name="voiceEnabled" data-private-room-voice-checkbox="1"${checkedAttr}`, MOBILE_CREATE_ICONS.mic, title, 'Разговор с микрофон между играчите на масата')
-}
-
-/** Desktop (Етап 5): същият ред в тъмния стил на desktop формата „Нова маса“. */
-function renderPrivateRoomVoiceCreateRowDark(canCreate: boolean, checkedAttr = ''): string {
-  const vipBadge = '<span style="display:inline-flex;align-items:center;height:17px;padding:0 6px;border-radius:999px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#101010;font-size:10px;font-weight:900;letter-spacing:0.04em;">VIP</span>'
-  const title = `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:#a78bfa;display:inline-flex;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>Гласов чат ${vipBadge}</span>`
-  if (!canCreate) {
-    return `
-      <button type="button" data-private-room-voice-vip="1" style="display:flex;align-items:center;gap:10px;width:100%;padding:0;border:0;background:transparent;cursor:pointer;text-align:left;font-family:inherit;user-select:none;">
-        <span style="width:17px;height:17px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.45);">${PRIVATE_ROOM_VOICE_LOCK_ICON}</span>
-        <span style="font-size:13px;color:rgba(255,255,255,0.7);">${title} <span style="color:rgba(255,255,255,0.4);">(създаването е VIP привилегия)</span></span>
-      </button>
-    `
-  }
-  return `
-    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1"${checkedAttr} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
-      <span style="font-size:13px;color:rgba(255,255,255,0.7);">${title} <span style="color:rgba(255,255,255,0.4);">(разговор с микрофон)</span></span>
-    </label>
-  `
 }
 
 function renderPrivateRoomVoiceCreatePopups(state: LobbyScreenState, light = true): string {
@@ -15608,164 +15587,53 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
   const draft = state.privateRoomCreateDraft ?? null
   const selectedWaitMinutes = draft?.waitMinutes ?? PRIVATE_ROOM_CREATE_DEFAULT_WAIT_MINUTES
   const selectedHumanTurnTimeoutMs = draft?.humanTurnTimeoutMs ?? DEFAULT_HUMAN_TURN_TIMEOUT_MS
-  const stakeSelectedAttr = (stake: number): string => (draft?.stake === stake ? ' selected' : '')
   const checkedAttr = (field: 'isLocked' | 'manualStart' | 'invitePartner'): string => (draft?.[field] === true ? ' checked' : '')
 
-  // Светъл мобилен вариант — същите полета (name/стойности/по подразбиране)
-  // и data-* атрибути; формата се обработва от същия submit handler.
-  if (light) {
-    // Мобилният дизайн на прозореца (mobileCreateForm.ts) — общ с Ludo и Свара.
-    ensureMobileCreateFormStyles()
-    const lightHeaderHtml = renderMobileCreateHeader('Нова маса', 'data-private-rooms-create-close="1"')
-    // Мобилен избор на вход: наградата е сървърната (match_rooms snapshot),
-    // ограниченията са същите като сървърните при създаване (ниво, баланс).
-    const profileLevel = state.profile.level ?? 1
-    const balance = state.profile.yellowCoinsBalance
-    const entryPickerConfig: MobileEntryPickerConfig = {
-      fieldName: 'stake',
-      iconUrl: '/assets/lobby-mobile/icons/icon-private-tables-belot.webp',
-      selected: draft?.stake ?? AVAILABLE_STAKES[0] ?? null,
-      variant: '',
-      rows: state.matchRooms.filter((r) => r.isEnabled).map((room) => ({
-        value: room.stakeAmount,
-        prizes: { '': room.prizeAmount },
-        unavailableReason: profileLevel < room.minLevel
-          ? `Изисква ниво ${room.minLevel}`
-          : balance !== null && balance < room.stakeAmount ? 'Недостатъчен баланс' : null,
-      })),
-    }
-    const bodyHtml = AVAILABLE_STAKES.length === 0
-      ? `<p class="mcf-message">В момента няма налични конфигурирани залози за частни маси.</p>`
-      : `
-        <form data-private-room-create-form="1" class="mcf-form">
-          ${renderMobileEntryPickerField(entryPickerConfig)}
-          ${renderMobileCreateToggleRow(`name="isLocked"${checkedAttr('isLocked')}`, MOBILE_CREATE_ICONS.lock, 'Заключена маса', 'Само с покана')}
-          ${renderMobileCreateToggleRow(`name="manualStart"${checkedAttr('manualStart')}`, MOBILE_CREATE_ICONS.play, 'Ръчен старт от създателя', 'Маса 4/4 чака бутон „СТАРТ“')}
-          ${renderMobileCreateToggleRow(`name="invitePartner" data-private-room-invite-partner-checkbox="1"${checkedAttr('invitePartner')}`, MOBILE_CREATE_ICONS.users, 'Покани партньор', 'Мястото до вас се пази за поканен приятел')}
-          ${renderPrivateRoomVoiceCreateRow(state)}
-          ${renderMobileCreateSelect('Време за изчакване на играчи', MOBILE_CREATE_ICONS.clock, 'name="waitMinutes"', WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === selectedWaitMinutes ? ' selected' : ''}>${m} минути</option>`).join(''))}
-          ${renderMobileCreateSelect('Време за реакция', MOBILE_CREATE_ICONS.bolt, 'name="humanTurnTimeoutMs" data-private-room-reaction-time="1"', HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === selectedHumanTurnTimeoutMs ? ' selected' : ''}>${ms / 1000} секунди</option>`).join(''))}
-          <div class="mcf-actions">${renderMobileCreateSubmit('Създай маса', `lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}`)}</div>
-        </form>
-      `
-    return `
-      <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="${MOBILE_CREATE_BACKDROP_STYLE}">
-        <div role="dialog" aria-modal="true" aria-label="Нова маса" ${AVAILABLE_STAKES.length === 0 ? '' : mobileEntryPickerCardAttributes()} style="${MOBILE_CREATE_CARD_STYLE}width:400px;">
-          ${lightHeaderHtml}
-          ${bodyHtml}
-          ${AVAILABLE_STAKES.length === 0 ? '' : renderMobileEntryPickerScreen(entryPickerConfig)}
-        </div>
-      </div>
-    `
+  // Мобилен (светъл) и десктоп (тъмен) вариант — една структура, същите полета
+  // (name/стойности/по подразбиране) и data-* атрибути; формата се обработва
+  // от същия submit handler. Видът — mobileCreateForm.ts / mobileEntryPicker.ts.
+  ensureMobileCreateFormStyles()
+  const dark = !light
+  const headerHtml = renderMobileCreateHeader('Нова маса', 'data-private-rooms-create-close="1"')
+  // Избор на вход: наградата е сървърната (match_rooms snapshot), ограниченията
+  // са същите като сървърните при създаване (ниво, баланс).
+  const profileLevel = state.profile.level ?? 1
+  const balance = state.profile.yellowCoinsBalance
+  const entryPickerConfig: MobileEntryPickerConfig = {
+    fieldName: 'stake',
+    iconUrl: '/assets/lobby-mobile/icons/icon-private-tables-belot.webp',
+    selected: draft?.stake ?? AVAILABLE_STAKES[0] ?? null,
+    variant: '',
+    theme: dark ? 'dark' : 'light',
+    rows: state.matchRooms.filter((r) => r.isEnabled).map((room) => ({
+      value: room.stakeAmount,
+      prizes: { '': room.prizeAmount },
+      unavailableReason: profileLevel < room.minLevel
+        ? `Изисква ниво ${room.minLevel}`
+        : balance !== null && balance < room.stakeAmount ? 'Недостатъчен баланс' : null,
+    })),
   }
-
-  if (AVAILABLE_STAKES.length === 0) {
-    return `
-      <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="
-        position:fixed;inset:0;z-index:9500;
-        background:rgba(0,0,0,0.7);
-        display:flex;align-items:center;justify-content:center;
-        padding:16px;
-      ">
-        <div style="
-          background:#1a1a2e;
-          border:1px solid rgba(167,139,250,0.4);
-          border-radius:16px;
-          width:380px;
-          max-width:100%;
-          padding:28px;
-          box-shadow:0 8px 40px rgba(0,0,0,0.7);
-        ">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-            <div style="font-size:17px;font-weight:900;color:#a78bfa;">Нова маса</div>
-            <button type="button" data-private-rooms-create-close="1" style="
-              width:30px;height:30px;border:none;background:rgba(255,255,255,0.08);
-              border-radius:7px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;
-              cursor:pointer;display:flex;align-items:center;justify-content:center;
-            ">×</button>
-          </div>
-          <div style="font-size:14px;color:rgba(255,255,255,0.6);text-align:center;padding:12px 0 4px;">
-            В момента няма налични конфигурирани залози за частни маси.
-          </div>
-        </div>
-      </div>
+  const bodyHtml = AVAILABLE_STAKES.length === 0
+    ? `<p class="mcf-message">В момента няма налични конфигурирани залози за частни маси.</p>`
+    : `
+      <form data-private-room-create-form="1" class="mcf-form">
+        ${renderMobileEntryPickerField(entryPickerConfig)}
+        ${renderMobileCreateToggleRow(`name="isLocked"${checkedAttr('isLocked')}`, MOBILE_CREATE_ICONS.lock, 'Заключена маса', 'Само с покана')}
+        ${renderMobileCreateToggleRow(`name="manualStart"${checkedAttr('manualStart')}`, MOBILE_CREATE_ICONS.play, 'Ръчен старт от създателя', 'Маса 4/4 чака бутон „СТАРТ“')}
+        ${renderMobileCreateToggleRow(`name="invitePartner" data-private-room-invite-partner-checkbox="1"${checkedAttr('invitePartner')}`, MOBILE_CREATE_ICONS.users, 'Покани партньор', 'Мястото до вас се пази за поканен приятел')}
+        ${renderPrivateRoomVoiceCreateRow(state)}
+        ${renderMobileCreateSelect('Време за изчакване на играчи', MOBILE_CREATE_ICONS.clock, 'name="waitMinutes"', WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === selectedWaitMinutes ? ' selected' : ''}>${m} минути</option>`).join(''))}
+        ${renderMobileCreateSelect('Време за реакция', MOBILE_CREATE_ICONS.bolt, 'name="humanTurnTimeoutMs" data-private-room-reaction-time="1"', HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === selectedHumanTurnTimeoutMs ? ' selected' : ''}>${ms / 1000} секунди</option>`).join(''))}
+        <div class="mcf-actions">${renderMobileCreateSubmit('Създай маса', dark ? '' : `lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}`)}</div>
+      </form>
     `
-  }
-
+  const cardAttributes = [dark ? DESKTOP_CREATE_THEME_ATTRIBUTE : '', AVAILABLE_STAKES.length === 0 ? '' : mobileEntryPickerCardAttributes()].filter(Boolean).join(' ')
   return `
-    <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="
-      position:fixed;inset:0;z-index:9500;
-      background:rgba(0,0,0,0.7);
-      display:flex;align-items:center;justify-content:center;
-      padding:16px;
-    ">
-      <div style="
-        background:#1a1a2e;
-        border:1px solid rgba(167,139,250,0.4);
-        border-radius:16px;
-        width:380px;
-        max-width:100%;
-        padding:28px;
-        box-shadow:0 8px 40px rgba(0,0,0,0.7);
-      ">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-          <div style="font-size:17px;font-weight:900;color:#a78bfa;">Нова маса</div>
-          <button type="button" data-private-rooms-create-close="1" style="
-            width:30px;height:30px;border:none;background:rgba(255,255,255,0.08);
-            border-radius:7px;color:rgba(255,255,255,0.6);font-size:18px;font-weight:700;
-            cursor:pointer;display:flex;align-items:center;justify-content:center;
-          ">×</button>
-        </div>
-        <form data-private-room-create-form="1" style="display:flex;flex-direction:column;gap:14px;">
-          <div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Вход</div>
-            <select name="stake" style="
-              width:100%;padding:10px 12px;background:#2a2a3e;
-              border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
-              color-scheme:dark;
-            ">
-              ${AVAILABLE_STAKES.map((s) => `<option value="${s}"${stakeSelectedAttr(s)}>${formatStake(s)} жълтици</option>`).join('')}
-            </select>
-          </div>
-          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-            <input type="checkbox" name="isLocked"${checkedAttr('isLocked')} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
-            <span style="font-size:13px;color:rgba(255,255,255,0.7);">Заключена маса <span style="color:rgba(255,255,255,0.4);">(само с покана)</span></span>
-          </label>
-          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-            <input type="checkbox" name="manualStart"${checkedAttr('manualStart')} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
-            <span style="font-size:13px;color:rgba(255,255,255,0.7);">Ръчен старт от създателя <span style="color:rgba(255,255,255,0.4);">(маса 4/4 чака бутон „СТАРТ“)</span></span>
-          </label>
-          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-            <input type="checkbox" name="invitePartner" data-private-room-invite-partner-checkbox="1"${checkedAttr('invitePartner')} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
-            <span style="font-size:13px;color:rgba(255,255,255,0.7);">Покани партньор <span style="color:rgba(255,255,255,0.4);">(мястото до вас се пази за поканен приятел)</span></span>
-          </label>
-          ${renderPrivateRoomVoiceCreateRow(state, false)}
-          <div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Време за изчакване на играчи</div>
-            <select name="waitMinutes" style="
-              width:100%;padding:10px 12px;background:#2a2a3e;
-              border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
-              color-scheme:dark;
-            ">
-              ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === selectedWaitMinutes ? ' selected' : ''}>${m} минути</option>`).join('')}
-            </select>
-          </div>
-          <div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Време за реакция</div>
-            <select name="humanTurnTimeoutMs" data-private-room-reaction-time="1" style="
-              width:100%;padding:10px 12px;background:#2a2a3e;
-              border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
-              color-scheme:dark;
-            ">
-              ${HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === selectedHumanTurnTimeoutMs ? ' selected' : ''}>${ms / 1000} секунди</option>`).join('')}
-            </select>
-          </div>
-          <button type="submit" style="
-            padding:11px;background:rgba(167,139,250,0.2);
-            border:1px solid rgba(167,139,250,0.5);border-radius:10px;
-            color:#a78bfa;font-size:15px;font-weight:700;cursor:pointer;margin-top:4px;
-          ">Създай маса</button>
-        </form>
+    <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="${dark ? DESKTOP_CREATE_BACKDROP_STYLE : MOBILE_CREATE_BACKDROP_STYLE}">
+      <div role="dialog" aria-modal="true" aria-label="Нова маса" ${cardAttributes} style="${dark ? DESKTOP_CREATE_CARD_STYLE : `${MOBILE_CREATE_CARD_STYLE}width:400px;`}">
+        ${headerHtml}
+        ${bodyHtml}
+        ${AVAILABLE_STAKES.length === 0 ? '' : renderMobileEntryPickerScreen(entryPickerConfig)}
       </div>
     </div>
   `

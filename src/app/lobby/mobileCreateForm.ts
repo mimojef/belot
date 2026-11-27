@@ -15,6 +15,15 @@ export const MOBILE_CREATE_BACKDROP_STYLE = 'position:fixed;inset:0;z-index:9500
 /** Картата на прозореца (ширина — от извикващия). */
 export const MOBILE_CREATE_CARD_STYLE = 'position:relative;max-width:100%;max-height:calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;margin:auto;padding:16px 14px 16px;border-radius:24px;border:1.5px solid rgba(214,170,56,0.75);background:radial-gradient(120% 60% at 50% 0%,#FFFFFF 0%,rgba(255,255,255,0) 60%),linear-gradient(180deg,#F6F1FF 0%,#EEE6FE 50%,#E6DBFC 100%);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.75),0 24px 56px rgba(30,10,90,0.38),0 0 0 4px rgba(214,170,56,0.12);color:#1C1442;'
 
+/**
+ * Десктоп вариантът (тъмна тема): атрибут на картата + фон и карта на прозореца.
+ * Височината се дели на --lobby-scale: прозорецът на Белот/Ludo е под zoom на
+ * десктоп обвивката (извън нея — диалогът на Свара в body — мащабът е 1).
+ */
+export const DESKTOP_CREATE_THEME_ATTRIBUTE = 'data-create-theme="dark"'
+export const DESKTOP_CREATE_BACKDROP_STYLE = 'position:fixed;inset:0;z-index:9500;background:rgba(4,2,10,0.74);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;overflow-y:auto;font-family:inherit;'
+export const DESKTOP_CREATE_CARD_STYLE = 'position:relative;width:min(100%,600px);max-width:100%;max-height:calc((100dvh - 48px) / var(--lobby-scale, 1));overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;margin:auto;padding:24px 26px 26px;border-radius:24px;border:1.5px solid rgba(239,194,90,0.6);background:radial-gradient(120% 40% at 50% 0%,rgba(124,58,237,0.30) 0%,rgba(124,58,237,0) 65%),linear-gradient(180deg,#1E1438 0%,#150E2A 100%);box-shadow:inset 0 0 0 1px rgba(167,139,250,0.16),0 30px 80px rgba(0,0,0,0.65),0 0 44px rgba(124,58,237,0.20);color:#F3EEFF;scrollbar-color:rgba(167,139,250,0.45) transparent;'
+
 const CSS = `
   .mcf-head { position:relative; display:flex; align-items:center; justify-content:center; min-height:40px; padding:0 44px; }
   .mcf-title { margin:0; font-size:26px; font-weight:900; line-height:1.15; color:#1C1442; letter-spacing:0; text-align:center; }
@@ -76,7 +85,7 @@ const CSS = `
     background:rgba(255,255,255,0.6); border:1.5px solid rgba(214,170,56,0.45); box-shadow:inset 0 1px 3px rgba(76,52,160,0.10);
   }
   .mcf-seg-option { position:relative; display:flex; align-items:center; justify-content:center; gap:6px; min-height:42px; padding:0 8px; border-radius:10px; cursor:pointer; font-size:14px; font-weight:800; color:#5E5880; text-align:center; }
-  .mcf-seg-option input { position:absolute; opacity:0; width:1px; height:1px; margin:0; pointer-events:none; }
+  .mcf-seg-option input { position:absolute; inset:0; width:100%; height:100%; margin:0; opacity:0; cursor:pointer; }
   .mcf-seg-option:has(input:checked) { background:linear-gradient(180deg,#34D058 0%,#16A34A 100%); color:#FFFFFF; box-shadow:0 2px 8px rgba(22,163,74,0.35); text-shadow:0 1px 1px rgba(0,60,20,0.3); }
   .mcf-seg-option:has(input:focus-visible) { outline:2px solid #7950E8; outline-offset:2px; }
   .mcf-info {
@@ -115,6 +124,63 @@ const CSS = `
     .mcf-select { height:44px; }
     .mcf-cta { height:48px; font-size:18px; }
   }
+
+  /* ─── Десктоп (тъмна тема): data-create-theme="dark" на картата ─── */
+  [data-create-theme="dark"] .mcf-head { min-height:46px; padding:0 54px; }
+  [data-create-theme="dark"] .mcf-title {
+    font-size:32px; color:#F6D27A;
+    background:linear-gradient(180deg,#FFF3CF 0%,#F4CB62 55%,#D99A1C 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+  }
+  [data-create-theme="dark"] .mcf-close {
+    width:42px; height:42px; background:rgba(255,255,255,0.08); color:#FFFFFF; border:1px solid rgba(255,255,255,0.14); box-shadow:none;
+    transition:background 0.15s ease, border-color 0.15s ease;
+  }
+  [data-create-theme="dark"] .mcf-close:hover { background:rgba(255,255,255,0.15); border-color:rgba(239,194,90,0.5); }
+  [data-create-theme="dark"] .mcf-divider { margin:8px 60px 20px; color:#E9B949; }
+  [data-create-theme="dark"] .mcf-form { gap:12px; }
+  [data-create-theme="dark"] .mcf-row {
+    grid-template-columns:44px minmax(0,1fr) auto; column-gap:14px; min-height:70px; padding:12px 18px 12px 14px;
+    background:linear-gradient(180deg,rgba(46,32,84,0.88) 0%,rgba(29,20,55,0.88) 100%); border:1px solid rgba(167,139,250,0.26);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.05),0 4px 12px rgba(0,0,0,0.25);
+    transition:border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  [data-create-theme="dark"] .mcf-row:hover { border-color:rgba(239,194,90,0.45); box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 6px 16px rgba(0,0,0,0.32); }
+  [data-create-theme="dark"] .mcf-row-icon { width:44px; height:44px; background:rgba(167,139,250,0.14); color:#C4B5FD; box-shadow:inset 0 0 0 1px rgba(167,139,250,0.25); }
+  [data-create-theme="dark"] .mcf-row-title { font-size:16px; color:#FFFFFF; }
+  [data-create-theme="dark"] .mcf-row-hint { font-size:13.5px; color:rgba(237,233,254,0.62); }
+  [data-create-theme="dark"] .mcf-row-lock { color:rgba(255,255,255,0.5); }
+  [data-create-theme="dark"] .mcf-switch {
+    width:54px; height:30px; background:#2B2542; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.14),inset 0 2px 4px rgba(0,0,0,0.45);
+  }
+  [data-create-theme="dark"] .mcf-switch::after { background:linear-gradient(180deg,#DDD7EE 0%,#ACA4C6 100%); }
+  [data-create-theme="dark"] .mcf-switch:checked { background:linear-gradient(180deg,#34D058 0%,#16A34A 100%); box-shadow:0 0 14px rgba(34,197,94,0.55),inset 0 1px 2px rgba(0,60,20,0.3); }
+  [data-create-theme="dark"] .mcf-switch:checked::after { background:#FFFFFF; transform:translateX(24px); }
+  [data-create-theme="dark"] .mcf-field-label, [data-create-theme="dark"] .mcf-seg legend { font-size:15px; color:#EDE9FE; }
+  [data-create-theme="dark"] .mcf-select {
+    height:52px; background:rgba(10,6,22,0.55); border:1px solid rgba(239,194,90,0.45); box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);
+    transition:border-color 0.15s ease;
+  }
+  [data-create-theme="dark"] .mcf-select:hover { border-color:rgba(239,194,90,0.75); }
+  [data-create-theme="dark"] .mcf-select-icon { color:#C4B5FD; }
+  [data-create-theme="dark"] .mcf-select-chevron { color:#E9B949; }
+  [data-create-theme="dark"] .mcf-select select { color:#FFFFFF; color-scheme:dark; }
+  [data-create-theme="dark"] .mcf-select select option { background:#1A1233; color:#FFFFFF; }
+  [data-create-theme="dark"] .mcf-seg-track { background:rgba(10,6,22,0.55); border:1px solid rgba(239,194,90,0.4); box-shadow:none; }
+  [data-create-theme="dark"] .mcf-seg-option { min-height:44px; color:rgba(237,233,254,0.72); }
+  [data-create-theme="dark"] .mcf-seg-option:hover:not(:has(input:checked)) { background:rgba(255,255,255,0.05); }
+  [data-create-theme="dark"] .mcf-info { background:rgba(255,255,255,0.04); border:1px solid rgba(167,139,250,0.22); color:rgba(237,233,254,0.86); box-shadow:none; }
+  [data-create-theme="dark"] .mcf-actions { margin-top:10px; }
+  [data-create-theme="dark"] .mcf-cta {
+    height:58px; border:1px solid rgba(255,236,170,0.9) !important; border-radius:14px; color:#1A1200; font-size:21px;
+    background:linear-gradient(180deg,#FDE59A 0%,#F2C14E 45%,#D69417 100%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.6),0 4px 0 #8F620A,0 12px 26px rgba(217,154,28,0.32);
+    transition:filter 0.15s ease, transform 0.1s ease;
+  }
+  [data-create-theme="dark"] .mcf-cta svg { color:#3B2600; }
+  [data-create-theme="dark"] .mcf-cta:hover { filter:brightness(1.06); }
+  [data-create-theme="dark"] .mcf-cta:active { transform:translateY(2px); box-shadow:inset 0 1px 0 rgba(255,255,255,0.5),0 2px 0 #8F620A; }
+  [data-create-theme="dark"] .mcf-secondary { background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.16); color:#EDE9FE; }
+  [data-create-theme="dark"] .mcf-message { color:rgba(237,233,254,0.72); }
 `
 
 export function ensureMobileCreateFormStyles(): void {

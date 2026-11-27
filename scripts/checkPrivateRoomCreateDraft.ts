@@ -118,7 +118,8 @@ try {
     await openPopup()
 
     const defaults = await readForm(page)
-    const variantIsLight = await page.locator('[role="dialog"][aria-label="Нова маса"]').count() > 0
+    // Десктоп картата носи data-create-theme="dark" (и двата варианта са role=dialog).
+    const variantIsLight = await page.locator('[role="dialog"][aria-label="Нова маса"]:not([data-create-theme="dark"])').count() > 0
     const reactionValues = await page.$$eval(`${FORM} select[name="humanTurnTimeoutMs"] option`, (options) => options.map((o) => (o as HTMLOptionElement).value))
     const reaction = reactionValues.find((value) => value !== defaults?.humanTurnTimeoutMs) ?? null
 

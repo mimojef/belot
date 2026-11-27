@@ -102,7 +102,8 @@ try {
     await page.evaluate('window.__prcdHarness.openCreatePopup()')
     await page.locator(`${FORM} [data-private-room-voice-checkbox="1"]`).waitFor({ state: 'visible', timeout: 10_000 })
     await page.waitForFunction(`document.querySelectorAll('${FORM} select[name="stake"] option').length === 3`, null, { timeout: 10_000 })
-    const isLight = await page.locator('[role="dialog"][aria-label="Нова маса"]').count() > 0
+    // Десктоп картата носи data-create-theme="dark" (и двата варианта са role=dialog).
+    const isLight = await page.locator('[role="dialog"][aria-label="Нова маса"]:not([data-create-theme="dark"])').count() > 0
     await watchPopup(page)
 
     // [K1] Фокус върху падащо меню, после външни обновявания.

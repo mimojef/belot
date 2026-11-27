@@ -111,7 +111,10 @@ try {
           assert.equal(await form.locator('[name="entryFee"] option:checked').textContent(), `${grouped(fee)} жълтици`)
           assert.equal(await form.locator('[data-svara-create-chips]').textContent(), `Получаваш: ${grouped(fee / 10)} виртуални чипа`)
           assert.equal(await form.locator('[data-svara-create-ante]').textContent(), `Анте за раздаване: ${grouped(fee / 1000)} чипа`)
-          assert.equal(await form.locator('[data-svara-create-prize]').textContent(), `Награда за победителя: ${grouped(fee * count * 4 / 5)} жълтици`)
+          // Наградата е в картата „Вход / Награда“ (без дублиращ ред „Награда за победителя“).
+          assert.equal(await first.locator('[data-svara-create-panel] [data-entry-picker-field-entry]').textContent(), grouped(fee))
+          assert.equal(await first.locator('[data-svara-create-panel] [data-entry-picker-field-prize]').textContent(), grouped(fee * count * 4 / 5))
+          assert.equal(await form.locator('[data-svara-create-prize]').count(), 0, 'дублиращ ред „Награда за победителя“')
         }
         // Compare the actual Ludo dialog, read-only; never create a Ludo room.
         const ludo = await open(users.at(-1)!, '/games/ludo')
@@ -137,7 +140,7 @@ try {
             return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, overflow: element.scrollWidth > element.clientWidth }
           })
           assert(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= width! && bounds.bottom <= height! && !bounds.overflow)
-          assert.equal(Math.round(bounds.width), Math.min(420, width! - 28), 'Shell scaling made the modal too small')
+          assert.equal(Math.round(bounds.width), Math.min(600, width! - 28), 'Shell scaling made the modal too small')
           await form.locator('[data-svara-create-close]').scrollIntoViewIfNeeded()
           assert(await form.locator('[data-svara-create-close]').isVisible())
           await first.screenshot({ path: join(artifacts, `create-${width}x${height}.png`) })

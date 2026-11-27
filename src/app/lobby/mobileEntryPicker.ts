@@ -39,6 +39,8 @@ export type MobileEntryPickerConfig = {
   open?: boolean
   /** Временно избраният (непотвърден) ред при отворен екран. */
   pending?: number | null
+  /** 'dark' — десктоп вариантът (картата носи и data-create-theme="dark"). */
+  theme?: 'light' | 'dark'
 }
 
 export type MobileEntryPickerState = { open: boolean; pending: number | null }
@@ -197,6 +199,116 @@ const PICKER_CSS = `
     .mep-row { min-height:58px; padding-top:5px; padding-bottom:5px; }
     .mep-confirm { height:46px; font-size:17px; }
   }
+  .mep-field-wrap { position:relative; min-width:0; }
+  /* Скритият select (стойността на формата): визуално скрит, но видим за
+     автоматизираните тестове (selectOption); промяната му обновява полето. */
+  .mep-select-proxy {
+    position:absolute; left:0; top:0; width:1px; height:1px; margin:0; padding:0; border:0;
+    opacity:0; pointer-events:none; overflow:hidden; -webkit-appearance:none; appearance:none;
+  }
+  .mep-foot-summary { display:none; }
+
+  /* ─── Десктоп (тъмна тема): data-create-theme="dark" на картата ─── */
+  [data-create-theme="dark"][data-entry-picker-card][data-entry-picker-open="1"] { background:#150E2A !important; }
+  [data-create-theme="dark"] .mep-screen {
+    background:radial-gradient(110% 45% at 75% 0%,rgba(124,58,237,0.30) 0%,rgba(124,58,237,0) 62%),linear-gradient(180deg,#1E1438 0%,#140D27 100%);
+    color:#F3EEFF;
+  }
+  [data-create-theme="dark"] .mep-head { gap:16px; padding:26px 22px 18px 26px; }
+  [data-create-theme="dark"] .mep-head-icon {
+    width:58px; height:58px; border-radius:16px; background:linear-gradient(160deg,#3B2774 0%,#1F1446 100%);
+    border:1px solid rgba(239,194,90,0.6); box-shadow:0 0 20px rgba(239,194,90,0.16),inset 0 1px 0 rgba(255,255,255,0.12);
+  }
+  [data-create-theme="dark"] .mep-head-icon img { width:44px; height:44px; }
+  [data-create-theme="dark"] .mep-title {
+    font-size:32px; color:#F6D27A;
+    background:linear-gradient(180deg,#FFF3CF 0%,#F4CB62 55%,#D99A1C 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+  }
+  [data-create-theme="dark"] .mep-subtitle { font-size:16px; color:rgba(237,233,254,0.72); }
+  [data-create-theme="dark"] .mep-close {
+    width:42px; height:42px; background:rgba(255,255,255,0.08); color:#FFFFFF; border:1px solid rgba(255,255,255,0.14);
+    transition:background 0.15s ease, border-color 0.15s ease;
+  }
+  [data-create-theme="dark"] .mep-close:hover { background:rgba(255,255,255,0.15); border-color:rgba(239,194,90,0.5); }
+  [data-create-theme="dark"] .mep-list { gap:12px; padding:6px 24px 14px; scrollbar-color:rgba(167,139,250,0.45) transparent; }
+  [data-create-theme="dark"] .mep-row {
+    grid-template-columns:50px minmax(0,1fr) 1px minmax(0,1fr) 34px; column-gap:18px; min-height:82px; padding:10px 18px 10px 20px;
+    background:linear-gradient(180deg,rgba(46,32,84,0.94) 0%,rgba(29,20,55,0.94) 100%); border:1px solid rgba(167,139,250,0.30); border-radius:14px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.05),0 4px 12px rgba(0,0,0,0.28);
+    transition:border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  }
+  [data-create-theme="dark"] .mep-row:not([data-unavailable="1"]):not([data-selected="1"]):hover {
+    border-color:rgba(239,194,90,0.55); transform:translateY(-1px);
+    background:linear-gradient(180deg,rgba(56,39,100,0.96) 0%,rgba(34,24,64,0.96) 100%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.07),0 8px 20px rgba(0,0,0,0.35),0 0 14px rgba(239,194,90,0.12);
+  }
+  [data-create-theme="dark"] .mep-row[data-selected="1"] {
+    border:2px solid #EFC25A; padding:9px 17px 9px 19px;
+    background:linear-gradient(180deg,rgba(66,46,108,0.97) 0%,rgba(40,28,72,0.97) 100%);
+    box-shadow:0 0 0 1px rgba(239,194,90,0.22),0 0 24px rgba(239,194,90,0.28),inset 0 0 28px rgba(239,194,90,0.08);
+  }
+  [data-create-theme="dark"] .mep-row[data-unavailable="1"] { background:rgba(28,20,50,0.7); border-color:rgba(255,255,255,0.08); box-shadow:none; }
+  [data-create-theme="dark"] .mep-stack { width:50px; height:50px; }
+  [data-create-theme="dark"] .mep-label { font-size:15px; font-weight:700; color:#C4B5FD; }
+  [data-create-theme="dark"] .mep-amount { font-size:27px; gap:7px; color:#FFFFFF; }
+  [data-create-theme="dark"] .mep-amount.mep-amount-md { font-size:24px; }
+  [data-create-theme="dark"] .mep-amount.mep-amount-sm { font-size:20px; }
+  [data-create-theme="dark"] .mep-amount.mep-amount-xs { font-size:16px; }
+  [data-create-theme="dark"] .mep-amount img { width:20px; height:20px; }
+  [data-create-theme="dark"] .mep-prize { color:#7CF15A; text-shadow:0 0 14px rgba(124,241,90,0.22); }
+  [data-create-theme="dark"] .mep-divider { height:40px; background:rgba(196,181,253,0.28); }
+  [data-create-theme="dark"] .mep-mark { width:32px; height:32px; border:2px solid rgba(196,181,253,0.22); background:transparent; color:#2A1A00; }
+  [data-create-theme="dark"] .mep-row[data-selected="1"] .mep-mark {
+    border:0; background:linear-gradient(180deg,#FBE08A 0%,#E7B53C 100%); box-shadow:0 0 12px rgba(239,194,90,0.55);
+  }
+  [data-create-theme="dark"] .mep-row[data-unavailable="1"] .mep-mark { border-color:rgba(255,255,255,0.12); background:rgba(255,255,255,0.05); color:rgba(255,255,255,0.55); }
+  [data-create-theme="dark"] .mep-reason { color:#FCA5A5; font-size:13px; }
+  [data-create-theme="dark"] .mep-foot {
+    display:flex; align-items:center; gap:14px; margin:4px 22px 22px; padding:12px 12px 12px 18px;
+    background:rgba(255,255,255,0.04); border:1px solid rgba(167,139,250,0.30); border-radius:16px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);
+  }
+  [data-create-theme="dark"] .mep-foot-summary {
+    display:flex; align-items:center; flex-wrap:wrap; column-gap:14px; row-gap:2px; flex:1 1 auto; min-width:0;
+    font-size:16px; font-weight:700; color:rgba(237,233,254,0.8);
+  }
+  [data-create-theme="dark"] .mep-foot-summary > span { white-space:nowrap; }
+  [data-create-theme="dark"] .mep-foot-summary b { font-weight:900; font-variant-numeric:tabular-nums; }
+  [data-create-theme="dark"] .mep-foot-entry { color:#F4CB62; }
+  [data-create-theme="dark"] .mep-foot-prize { color:#7CF15A; }
+  [data-create-theme="dark"] .mep-foot-sep { width:1px; height:28px; flex:0 0 auto; background:rgba(196,181,253,0.3); }
+  [data-create-theme="dark"] .mep-confirm {
+    width:auto; flex:0 0 auto; min-width:150px; height:52px; padding:0 24px; border:1px solid rgba(255,236,170,0.9); border-radius:12px;
+    background:linear-gradient(180deg,#FDE59A 0%,#F2C14E 45%,#D69417 100%); color:#1A1200; font-size:20px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.6),0 4px 0 #8F620A,0 10px 22px rgba(217,154,28,0.32);
+    transition:filter 0.15s ease, transform 0.1s ease;
+  }
+  [data-create-theme="dark"] .mep-confirm:not(:disabled):hover { filter:brightness(1.06); }
+  [data-create-theme="dark"] .mep-confirm:not(:disabled):active { transform:translateY(2px); box-shadow:inset 0 1px 0 rgba(255,255,255,0.5),0 2px 0 #8F620A; }
+  /* Обобщаващата карта на избрания вход — десктоп */
+  [data-create-theme="dark"] .mep-field {
+    gap:14px; padding:18px 20px 16px; border-radius:20px; border:1.5px solid rgba(239,194,90,0.85);
+    background:radial-gradient(80% 120% at 12% 0%,rgba(124,58,237,0.42) 0%,rgba(124,58,237,0) 60%),linear-gradient(160deg,#2E1D5E 0%,#1E1340 60%,#170E33 100%);
+    box-shadow:0 0 0 3px rgba(239,194,90,0.08),0 12px 28px rgba(0,0,0,0.45),inset 0 1px 0 rgba(255,255,255,0.08);
+    transition:box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  [data-create-theme="dark"] .mep-field:hover { border-color:#F4CB62; box-shadow:0 0 0 3px rgba(239,194,90,0.14),0 14px 30px rgba(0,0,0,0.5),0 0 22px rgba(239,194,90,0.18),inset 0 1px 0 rgba(255,255,255,0.08); }
+  [data-create-theme="dark"] .mep-field-main { grid-template-columns:64px minmax(0,1fr) 1px minmax(0,1fr); column-gap:18px; }
+  [data-create-theme="dark"] .mep-field .mep-stack { width:64px; height:64px; }
+  [data-create-theme="dark"] .mep-field-label { font-size:15px; color:#C4B5FD; }
+  [data-create-theme="dark"] .mep-field-value { font-size:30px; gap:7px; }
+  [data-create-theme="dark"] .mep-field-value.mep-amount-md { font-size:26px; }
+  [data-create-theme="dark"] .mep-field-value.mep-amount-sm { font-size:21px; }
+  [data-create-theme="dark"] .mep-field-value.mep-amount-xs { font-size:17px; }
+  [data-create-theme="dark"] .mep-field-value.mep-field-prize { color:#7CF15A; text-shadow:0 0 14px rgba(124,241,90,0.22); }
+  [data-create-theme="dark"] .mep-field img.mep-coin { width:22px; height:22px; }
+  [data-create-theme="dark"] .mep-field-divider { height:46px; }
+  [data-create-theme="dark"] .mep-field-action {
+    height:42px; background:rgba(239,194,90,0.10); border:1px solid rgba(239,194,90,0.55); color:#F6D27A; box-shadow:none; font-size:15px;
+    transition:background 0.15s ease;
+  }
+  [data-create-theme="dark"] .mep-field:hover .mep-field-action { background:rgba(239,194,90,0.18); }
+  [data-create-theme="dark"] .mep-field-reason { color:#FCA5A5; font-size:13px; }
 `
 
 export function ensureMobileEntryPickerStyles(): void {
@@ -258,7 +370,7 @@ export function renderMobileEntryPickerField(config: MobileEntryPickerConfig): s
   const options = config.rows
     .map((row) => `<option value="${row.value}"${row === selectedRow ? ' selected' : ''}>${formatCoins(row.value)} жълтици</option>`)
     .join('')
-  return `<select name="${attr(config.fieldName)}" data-entry-picker-select="1" hidden tabindex="-1" aria-hidden="true">${options}</select>
+  return `<div class="mep-field-wrap"><select name="${attr(config.fieldName)}" class="mep-select-proxy" data-entry-picker-select="1" tabindex="-1" aria-hidden="true">${options}</select>
     <button type="button" class="mep-field" data-entry-picker-open-button="1" aria-haspopup="dialog">
       <span class="mep-field-main">
         <img class="mep-stack" src="${COIN_STACK_URL}" alt="" aria-hidden="true">
@@ -268,7 +380,7 @@ export function renderMobileEntryPickerField(config: MobileEntryPickerConfig): s
       </span>
       <span class="mep-field-action">Промени ${CHEVRON_SVG}</span>
     </button>
-    <div class="mep-field-reason" data-entry-picker-field-reason="1" role="status" hidden></div>`
+    <div class="mep-field-reason" data-entry-picker-field-reason="1" role="status" hidden></div></div>`
 }
 
 /** Екранът „Избери вход“ — пряк наследник на картата на модалния прозорец. */
@@ -300,7 +412,8 @@ export function renderMobileEntryPickerScreen(config: MobileEntryPickerConfig): 
       </div>
       <div class="mep-list" role="radiogroup" aria-label="Вход">${rowsHtml}</div>
       <div class="mep-foot">
-        <button type="button" class="mep-confirm lobby-violet-btn violet-3d-btn" data-entry-picker-confirm="1">Потвърди</button>
+        <div class="mep-foot-summary" aria-live="polite"><span>Избран вход: <b class="mep-foot-entry" data-entry-picker-pending-entry="1">—</b></span><span class="mep-foot-sep" aria-hidden="true"></span><span>Награда: <b class="mep-foot-prize" data-entry-picker-pending-prize="1">—</b></span></div>
+        <button type="button" class="mep-confirm${config.theme === 'dark' ? '' : ' lobby-violet-btn violet-3d-btn'}" data-entry-picker-confirm="1">Потвърди</button>
       </div>
     </div>`
 }
@@ -376,6 +489,12 @@ export function bindMobileEntryPicker(cardOrNull: HTMLElement | null, callbacks:
     }
     const current = findRow(pending)
     if (confirm) confirm.disabled = !current || rowReason(current) !== null
+    // Десктоп: „Избран вход / Награда“ до „Потвърди“ (временният избор).
+    const pendingEntryEl = screen.querySelector('[data-entry-picker-pending-entry]')
+    const pendingPrizeEl = screen.querySelector('[data-entry-picker-pending-prize]')
+    const currentPrize = current ? rowPrize(current) : null
+    if (pendingEntryEl) pendingEntryEl.textContent = current ? formatCoins(Number(current.dataset.entryPickerRow)) : '—'
+    if (pendingPrizeEl) pendingPrizeEl.textContent = currentPrize === null ? '—' : formatCoins(currentPrize)
   }
 
   function syncField(): void {
@@ -433,6 +552,8 @@ export function bindMobileEntryPicker(cardOrNull: HTMLElement | null, callbacks:
     close()
   })
   variantField?.addEventListener('change', () => { syncField(); syncRows() })
+  // Външна промяна на стойността (напр. автоматизиран тест) — полето я показва.
+  select.addEventListener('change', syncField)
   syncRows()
   syncField()
   // Ако диалогът е прерисуван с отворен екран — показваме избрания ред.
