@@ -1,4 +1,6 @@
 import { getCampaignPackageUnits, renderCampaignPackageUnitsBadge } from './campaignShopBonus'
+import { ensureMobileCreateFormStyles, MOBILE_CREATE_BACKDROP_STYLE, MOBILE_CREATE_CARD_STYLE, MOBILE_CREATE_ICONS, renderMobileCreateHeader, renderMobileCreateSelect, renderMobileCreateSubmit, renderMobileCreateToggleRow } from './mobileCreateForm'
+import { bindMobileEntryPicker, mobileEntryPickerCardAttributes, renderMobileEntryPickerField, renderMobileEntryPickerScreen, type MobileEntryPickerConfig } from './mobileEntryPicker'
 import { bindAdminSvaraHeldSection, renderAdminSvaraHeldSection, type AdminSvaraHeldCallbacks, type AdminSvaraHeldState } from './adminSvaraHeldPayouts'
 import {
   DEFAULT_HUMAN_TURN_TIMEOUT_MS,
@@ -14863,7 +14865,6 @@ const PRIVATE_ROOMS_LIGHT_SECONDARY_BUTTON_STYLE = 'border:1px solid #D0D5DD;bor
 const PRIVATE_ROOMS_LIGHT_META_STYLE = 'font-size:12.5px;line-height:1.4;font-weight:600;color:#667085;'
 const PRIVATE_ROOMS_LIGHT_POPUP_BACKDROP_STYLE = 'position:fixed;inset:0;z-index:9500;background:rgba(16,24,40,0.45);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;overflow-y:auto;font-family:inherit;'
 const PRIVATE_ROOMS_LIGHT_POPUP_CARD_STYLE = 'background:#FFFFFF;border:1px solid #E4E7EC;border-radius:16px;box-shadow:0 20px 48px rgba(16,24,40,0.18);max-width:100%;max-height:92vh;max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;padding:20px;margin:auto;'
-const PRIVATE_ROOMS_LIGHT_POPUP_CLOSE_STYLE = 'width:36px;height:36px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border:0;border-radius:8px;background:#F2F4F7;color:#667085;font-family:inherit;font-size:20px;font-weight:700;line-height:1;cursor:pointer;'
 const PRIVATE_ROOMS_LIGHT_EMPTY_STYLE =`${PRIVATE_ROOMS_LIGHT_CARD_STYLE}border:1px solid #E4E7EC;padding:28px 16px;text-align:center;color:#667085;font-size:14px;font-weight:600;line-height:1.45;`
 const PRIVATE_ROOMS_LIGHT_TEAM_SLOT_CSS = `
   [data-private-room-light="1"] .prl-teams { grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); }
@@ -15505,29 +15506,20 @@ function renderPrivateRoomVoiceCreateRow(state: LobbyScreenState, light = true):
   // Изборът се пази при прерисуване, докато прозорецът е отворен.
   const checkedAttr = state.privateRoomCreateDraft?.voiceEnabled === true ? ' checked' : ''
   if (!light) return renderPrivateRoomVoiceCreateRowDark(option.canCreate, checkedAttr)
-  const vipBadge = '<span style="display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:999px;background:#FEF0C7;color:#93370D;font-size:10px;font-weight:800;letter-spacing:0.04em;">VIP</span>'
-  const title = `<span style="display:inline-flex;align-items:center;gap:6px;"><span style="color:#6941C6;display:inline-flex;">${PRIVATE_ROOM_VOICE_MIC_ICON}</span>Гласов чат ${vipBadge}</span>`
-  const hint = 'Разговор с микрофон между играчите на масата'
+  // Мобилният дизайн на „Нова маса“ (mobileCreateForm.ts): превключвател,
+  // а без VIP — заключен ред, който отваря VIP прозореца (не е поле на формата).
+  const vipBadge = '<span style="display:inline-flex;align-items:center;height:18px;padding:0 7px;border-radius:999px;background:linear-gradient(180deg,#F8D978 0%,#D9A520 100%);color:#3B2600;font-size:10px;font-weight:900;letter-spacing:0.04em;">VIP</span>'
+  const title = `Гласов чат ${vipBadge}`
   if (!option.canCreate) {
     return `
-      <button type="button" data-private-room-voice-vip="1" style="display:flex;align-items:flex-start;gap:10px;width:100%;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#FFFFFF;cursor:pointer;text-align:left;font-family:inherit;">
-        <span style="width:18px;height:18px;margin:1px 0 0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;color:#98A2B3;">${PRIVATE_ROOM_VOICE_LOCK_ICON}</span>
-        <span style="min-width:0;display:grid;gap:2px;">
-          <span style="font-size:14px;font-weight:700;line-height:1.3;color:#111827;">${title}</span>
-          <span style="font-size:12px;font-weight:500;line-height:1.35;color:#667085;">Създаването на гласова маса е VIP привилегия.</span>
-        </span>
+      <button type="button" data-private-room-voice-vip="1" class="mcf-row">
+        <span class="mcf-row-icon">${MOBILE_CREATE_ICONS.mic}</span>
+        <span class="mcf-row-text"><span class="mcf-row-title">${title}</span><span class="mcf-row-hint">Създаването на гласова маса е VIP привилегия.</span></span>
+        <span class="mcf-row-lock">${PRIVATE_ROOM_VOICE_LOCK_ICON}</span>
       </button>
     `
   }
-  return `
-    <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#FFFFFF;cursor:pointer;user-select:none;">
-      <input type="checkbox" name="voiceEnabled" data-private-room-voice-checkbox="1"${checkedAttr} style="width:18px;height:18px;margin:1px 0 0;flex-shrink:0;cursor:pointer;accent-color:#7950E8;">
-      <span style="min-width:0;display:grid;gap:2px;">
-        <span style="font-size:14px;font-weight:700;line-height:1.3;color:#111827;">${title}</span>
-        <span style="font-size:12px;font-weight:500;line-height:1.35;color:#667085;">${hint}</span>
-      </span>
-    </label>
-  `
+  return renderMobileCreateToggleRow(`name="voiceEnabled" data-private-room-voice-checkbox="1"${checkedAttr}`, MOBILE_CREATE_ICONS.mic, title, 'Разговор с микрофон между играчите на масата')
 }
 
 /** Desktop (Етап 5): същият ред в тъмния стил на desktop формата „Нова маса“. */
@@ -15622,57 +15614,46 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState, light = false): 
   // Светъл мобилен вариант — същите полета (name/стойности/по подразбиране)
   // и data-* атрибути; формата се обработва от същия submit handler.
   if (light) {
-    const lightHeaderHtml = `
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;">
-        <h2 style="margin:0;min-width:0;color:#17233C;font-size:20px;font-weight:800;line-height:1.2;">Нова маса</h2>
-        <button type="button" data-private-rooms-create-close="1" aria-label="Затвори" style="${PRIVATE_ROOMS_LIGHT_POPUP_CLOSE_STYLE}">×</button>
-      </div>
-    `
-    const fieldLabelStyle = 'font-size:13px;font-weight:700;color:#17233C;margin-bottom:6px;'
-    const selectStyle = 'width:100%;height:44px;box-sizing:border-box;padding:0 12px;background:#FFFFFF;border:1px solid #D0D5DD;border-radius:8px;color:#111827;font-family:inherit;font-size:16px;color-scheme:light;'
-    const checkboxRow = (inputAttributes: string, title: string, hint: string): string => `
-      <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#FFFFFF;cursor:pointer;user-select:none;">
-        <input type="checkbox" ${inputAttributes} style="width:18px;height:18px;margin:1px 0 0;flex-shrink:0;cursor:pointer;accent-color:#7950E8;">
-        <span style="min-width:0;display:grid;gap:2px;">
-          <span style="font-size:14px;font-weight:700;line-height:1.3;color:#111827;">${title}</span>
-          <span style="font-size:12px;font-weight:500;line-height:1.35;color:#667085;">${hint}</span>
-        </span>
-      </label>
-    `
+    // Мобилният дизайн на прозореца (mobileCreateForm.ts) — общ с Ludo и Свара.
+    ensureMobileCreateFormStyles()
+    const lightHeaderHtml = renderMobileCreateHeader('Нова маса', 'data-private-rooms-create-close="1"')
+    // Мобилен избор на вход: наградата е сървърната (match_rooms snapshot),
+    // ограниченията са същите като сървърните при създаване (ниво, баланс).
+    const profileLevel = state.profile.level ?? 1
+    const balance = state.profile.yellowCoinsBalance
+    const entryPickerConfig: MobileEntryPickerConfig = {
+      fieldName: 'stake',
+      iconUrl: '/assets/lobby-mobile/icons/icon-private-tables-belot.webp',
+      selected: draft?.stake ?? AVAILABLE_STAKES[0] ?? null,
+      variant: '',
+      rows: state.matchRooms.filter((r) => r.isEnabled).map((room) => ({
+        value: room.stakeAmount,
+        prizes: { '': room.prizeAmount },
+        unavailableReason: profileLevel < room.minLevel
+          ? `Изисква ниво ${room.minLevel}`
+          : balance !== null && balance < room.stakeAmount ? 'Недостатъчен баланс' : null,
+      })),
+    }
     const bodyHtml = AVAILABLE_STAKES.length === 0
-      ? `<div style="font-size:14px;font-weight:600;line-height:1.45;color:#667085;text-align:center;padding:8px 0 4px;">В момента няма налични конфигурирани залози за частни маси.</div>`
+      ? `<p class="mcf-message">В момента няма налични конфигурирани залози за частни маси.</p>`
       : `
-        <form data-private-room-create-form="1" style="display:flex;flex-direction:column;gap:12px;">
-          <div>
-            <div style="${fieldLabelStyle}">Вход</div>
-            <select name="stake" style="${selectStyle}">
-              ${AVAILABLE_STAKES.map((s) => `<option value="${s}"${stakeSelectedAttr(s)}>${formatStake(s)} жълтици</option>`).join('')}
-            </select>
-          </div>
-          ${checkboxRow(`name="isLocked"${checkedAttr('isLocked')}`, 'Заключена маса', 'Само с покана')}
-          ${checkboxRow(`name="manualStart"${checkedAttr('manualStart')}`, 'Ръчен старт от създателя', 'Маса 4/4 чака бутон „СТАРТ“')}
-          ${checkboxRow(`name="invitePartner" data-private-room-invite-partner-checkbox="1"${checkedAttr('invitePartner')}`, 'Покани партньор', 'Мястото до вас се пази за поканен приятел')}
+        <form data-private-room-create-form="1" class="mcf-form">
+          ${renderMobileEntryPickerField(entryPickerConfig)}
+          ${renderMobileCreateToggleRow(`name="isLocked"${checkedAttr('isLocked')}`, MOBILE_CREATE_ICONS.lock, 'Заключена маса', 'Само с покана')}
+          ${renderMobileCreateToggleRow(`name="manualStart"${checkedAttr('manualStart')}`, MOBILE_CREATE_ICONS.play, 'Ръчен старт от създателя', 'Маса 4/4 чака бутон „СТАРТ“')}
+          ${renderMobileCreateToggleRow(`name="invitePartner" data-private-room-invite-partner-checkbox="1"${checkedAttr('invitePartner')}`, MOBILE_CREATE_ICONS.users, 'Покани партньор', 'Мястото до вас се пази за поканен приятел')}
           ${renderPrivateRoomVoiceCreateRow(state)}
-          <div>
-            <div style="${fieldLabelStyle}">Време за изчакване на играчи</div>
-            <select name="waitMinutes" style="${selectStyle}">
-              ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === selectedWaitMinutes ? ' selected' : ''}>${m} минути</option>`).join('')}
-            </select>
-          </div>
-          <div>
-            <div style="${fieldLabelStyle}">Време за реакция</div>
-            <select name="humanTurnTimeoutMs" data-private-room-reaction-time="1" style="${selectStyle}">
-              ${HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === selectedHumanTurnTimeoutMs ? ' selected' : ''}>${ms / 1000} секунди</option>`).join('')}
-            </select>
-          </div>
-          <button type="submit" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="${PRIVATE_ROOMS_LIGHT_PRIMARY_BUTTON_STYLE}margin-top:4px;height:46px;border-radius:10px;font-size:15px;">Създай маса</button>
+          ${renderMobileCreateSelect('Време за изчакване на играчи', MOBILE_CREATE_ICONS.clock, 'name="waitMinutes"', WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === selectedWaitMinutes ? ' selected' : ''}>${m} минути</option>`).join(''))}
+          ${renderMobileCreateSelect('Време за реакция', MOBILE_CREATE_ICONS.bolt, 'name="humanTurnTimeoutMs" data-private-room-reaction-time="1"', HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === selectedHumanTurnTimeoutMs ? ' selected' : ''}>${ms / 1000} секунди</option>`).join(''))}
+          <div class="mcf-actions">${renderMobileCreateSubmit('Създай маса', `lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}`)}</div>
         </form>
       `
     return `
-      <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="${PRIVATE_ROOMS_LIGHT_POPUP_BACKDROP_STYLE}">
-        <div role="dialog" aria-modal="true" aria-label="Нова маса" style="${PRIVATE_ROOMS_LIGHT_POPUP_CARD_STYLE}width:380px;">
+      <div data-private-rooms-create-backdrop="1" data-lobby-keep-form="private-room-create" style="${MOBILE_CREATE_BACKDROP_STYLE}">
+        <div role="dialog" aria-modal="true" aria-label="Нова маса" ${AVAILABLE_STAKES.length === 0 ? '' : mobileEntryPickerCardAttributes()} style="${MOBILE_CREATE_CARD_STYLE}width:400px;">
           ${lightHeaderHtml}
           ${bodyHtml}
+          ${AVAILABLE_STAKES.length === 0 ? '' : renderMobileEntryPickerScreen(entryPickerConfig)}
         </div>
       </div>
     `
@@ -22201,6 +22182,8 @@ export function renderLobbyScreen(
       ?.addEventListener('click', (e) => {
         if (e.target === e.currentTarget) options.onPrivateRoomsCreateClose()
       })
+    // Мобилен избор на вход (само светлият вариант има картата).
+    bindMobileEntryPicker(root.querySelector<HTMLElement>('[data-private-rooms-create-backdrop="1"] [data-entry-picker-card]'))
   }
 
   root.querySelectorAll<HTMLButtonElement>('[data-private-rooms-tab]').forEach((btn) => {

@@ -19,6 +19,8 @@ import type {
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
 import { detectSvaraAnteChange, formatSvaraAnteCountdown, SVARA_ANTE_FLASH_MS, type SvaraAnteSeen } from './table/svaraAnteIndicator'
+import { ensureMobileCreateFormStyles, MOBILE_CREATE_CARD_STYLE, MOBILE_CREATE_ICONS, renderMobileCreateHeader, renderMobileCreateSegmented, renderMobileCreateSelect, renderMobileCreateSubmit } from '../../lobby/mobileCreateForm'
+import { bindMobileEntryPicker, mobileEntryPickerCardAttributes, renderMobileEntryPickerField, renderMobileEntryPickerScreen, type MobileEntryPickerConfig, type MobileEntryPickerState } from '../../lobby/mobileEntryPicker'
 import { isGameSoundsEnabled, setGameSoundsEnabled } from '../../audio/gameSoundSettings'
 import {
   renderSvaraActiveTable,
@@ -58,6 +60,8 @@ type Options = {
   localProfileId: string
   apiBaseUrl?: string
   createDialogState?: SvaraCreateDialogState
+  /** Текущият баланс (null — неизвестен) — недостъпните входове се обозначават в мобилния избор на вход. */
+  getBalance?: () => number | null
   onRefresh: () => void
   onCreate: (capacity: 2 | 3 | 4, entryFee: number, startMode: SvaraStartMode) => void
   onJoin: (matchId: string) => void
@@ -83,7 +87,6 @@ const LIGHT_PRIMARY_BUTTON_STYLE = 'border:0;border-radius:10px;color:#FFFFFF;fo
 const LIGHT_SECONDARY_BUTTON_STYLE = 'box-sizing:border-box;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;color:#6941C6;font-family:inherit;font-weight:800;cursor:pointer;white-space:nowrap;'
 const LIGHT_DANGER_BUTTON_STYLE = 'box-sizing:border-box;border:1px solid #FECDCA;border-radius:10px;background:#FFFFFF;color:#B42318;font-family:inherit;font-weight:800;cursor:pointer;white-space:nowrap;'
 const LIGHT_META_STYLE = 'font-size:12.5px;line-height:1.4;font-weight:600;color:#667085;'
-const LIGHT_FIELD_STYLE = 'width:100%;max-width:100%;min-width:0;box-sizing:border-box;height:44px;background:#FFFFFF;color:#111827;border:1px solid #D0D5DD;border-radius:8px;padding:0 12px;font-family:inherit;font-size:16px;color-scheme:light;'
 const LIGHT_MESSAGE_STYLE = 'background:#FFFAEB;border:1px solid #FEDF89;color:#B54708;'
 const LIGHT_FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif"
 const LIGHT_PRIMARY_CLASS = `lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}`
@@ -131,6 +134,8 @@ export function createSvaraLobbyController(options: Options) {
   let creationLoading = false
   let creationRequest = 0
   let createDraft = dialogState.draft
+  // Мобилният избор на вход (светлият вариант) — пази се при прерисуване.
+  let entryPicker: MobileEntryPickerState = { open: false, pending: null }
   let message = ''
   let leavePending = false
   let joinPendingMatchId: string | null = null
@@ -1017,27 +1022,40 @@ export function createSvaraLobbyController(options: Options) {
   // същите data-атрибути и обработчици — различен е само видът. Диалогът се
   // мести в document.body (извън рамката), затова шрифтът е зададен изрично.
   function renderLightCreateModal(): string {
-    const labelStyle = 'display:grid;gap:6px;margin-bottom:14px;min-width:0;font-size:13px;font-weight:700;color:#17233C;'
-    const choiceStyle = 'display:flex;align-items:center;gap:10px;min-height:44px;padding:0 12px;box-sizing:border-box;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;font-size:14px;font-weight:700;color:#111827;cursor:pointer;'
-    const radioStyle = 'width:18px;height:18px;margin:0;flex-shrink:0;accent-color:#7950E8;cursor:pointer;'
-    const cancel = `<button type="button" data-svara-create-close="1" style="${LIGHT_SECONDARY_BUTTON_STYLE}height:44px;color:#344054;font-size:14px;">Отказ</button>`
+    // Мобилният дизайн на прозореца (mobileCreateForm.ts) — общ с Белот и Ludo.
+    ensureMobileCreateFormStyles()
     const entry = creationOptions?.entries.find((option) => option.entryFee === createDraft.entryFee)
-    // Етап 3В.2: наградата идва от сървъра (prizeByCapacity) — без локален разчет.
-    const createPrize = entry?.prizeByCapacity?.[createDraft.capacity as 2 | 3 | 4] ?? null
-    const content = entry && creationOptions ? `<form data-svara-create-form="1">
-      <label style="${labelStyle}">Брой играчи<select name="capacity" style="${LIGHT_FIELD_STYLE}">${[2, 3, 4].map((count) => `<option value="${count}" ${count === createDraft.capacity ? 'selected' : ''}>${count}</option>`).join('')}</select></label>
-      <label style="${labelStyle}">Вход<select name="entryFee" style="${LIGHT_FIELD_STYLE}">${creationOptions.entries.map((option) => `<option value="${option.entryFee}" ${option.entryFee === createDraft.entryFee ? 'selected' : ''}>${formatAmount(option.entryFee)} жълтици</option>`).join('')}</select></label>
-      <div style="display:grid;gap:4px;margin:0 0 16px;padding:10px 12px;border:1px solid #E4E7EC;border-radius:10px;background:#F9FAFB;font-size:13px;font-weight:600;line-height:1.4;color:#344054;" aria-live="polite">
+    // Мобилен избор на вход: входовете и наградите (prizeByCapacity) са сървърните.
+    const balance = options.getBalance?.() ?? null
+    const entryPickerConfig: MobileEntryPickerConfig | null = entry && creationOptions ? {
+      fieldName: 'entryFee',
+      iconUrl: '/assets/lobby-mobile/icons/icon-private-tables-svara.webp',
+      selected: createDraft.entryFee,
+      variant: String(createDraft.capacity),
+      variantFieldName: 'capacity',
+      variantUnavailableText: 'Недостъпен за {n} играчи',
+      open: entryPicker.open,
+      pending: entryPicker.pending,
+      rows: creationOptions.entries.map((option) => ({
+        value: option.entryFee,
+        prizes: { '2': option.prizeByCapacity?.[2] ?? null, '3': option.prizeByCapacity?.[3] ?? null, '4': option.prizeByCapacity?.[4] ?? null },
+        unavailableReason: balance !== null && balance < option.entryFee ? 'Недостатъчен баланс' : null,
+      })),
+    } : null
+    const content = entry && creationOptions && entryPickerConfig ? `<form data-svara-create-form="1" class="mcf-form">
+      ${renderMobileEntryPickerField(entryPickerConfig)}
+      ${renderMobileCreateSelect('Брой играчи', MOBILE_CREATE_ICONS.players, 'name="capacity"', [2, 3, 4].map((count) => `<option value="${count}" ${count === createDraft.capacity ? 'selected' : ''}>${count} играчи</option>`).join(''))}
+      <div class="mcf-info" aria-live="polite">
         <div data-svara-create-chips="1">Получаваш: ${formatAmount(entry.startingChips)} виртуални чипа</div>
         <div data-svara-create-ante="1">Анте за раздаване: ${formatAmount(entry.entryChips)} чипа</div>
-        <div data-svara-create-prize="1" style="color:#B54708;" ${createPrize === null ? 'hidden' : ''}>${createPrizeText(createPrize)}</div>
       </div>
-      <fieldset style="border:0;padding:0;margin:0 0 18px;display:grid;gap:8px;min-width:0;"><legend style="padding:0;margin-bottom:6px;font-size:13px;font-weight:700;color:#17233C;">Старт</legend><label style="${choiceStyle}"><input type="radio" name="startMode" value="auto" ${createDraft.startMode === 'auto' ? 'checked' : ''} style="${radioStyle}"> При запълване</label><label style="${choiceStyle}"><input type="radio" name="startMode" value="manual" ${createDraft.startMode === 'manual' ? 'checked' : ''} style="${radioStyle}"> Ръчен старт</label></fieldset>
-      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">${cancel}<button type="submit" class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}height:44px;font-size:15px;">Създай</button></div>
-    </form>` : `<p role="status" style="margin:0 0 16px;font-size:14px;font-weight:600;color:#667085;">${creationLoading ? 'Зареждане на настройките…' : 'Настройките за създаване не са достъпни. Опитай отново.'}</p>
-      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">${cancel}${creationLoading ? '' : `<button type="button" data-svara-create-retry="1" style="${LIGHT_SECONDARY_BUTTON_STYLE}height:44px;font-size:14px;">Опитай отново</button>`}</div>`
-    return `<dialog data-svara-create-backdrop="1" aria-labelledby="svara-create-title" style="position:fixed;inset:0;margin:0;border:0;width:100vw;height:100dvh;max-width:none;max-height:none;box-sizing:border-box;background:rgba(16,24,40,0.45);color:#111827;font-family:${LIGHT_FONT_FAMILY};font-size:16px;display:grid;place-items:center;padding:16px;"><div data-svara-create-panel="1" style="width:min(100%,420px);max-width:100%;min-width:0;max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;padding:20px;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:16px;box-shadow:0 20px 48px rgba(16,24,40,0.18);color:#111827;">
-      <h2 id="svara-create-title" style="margin:0 0 16px;letter-spacing:0;color:#17233C;font-size:20px;font-weight:800;line-height:1.2;">Създай игра</h2>${content}</div></dialog>`
+      ${renderMobileCreateSegmented('Старт', 'startMode', [{ value: 'auto', label: 'При запълване', checked: createDraft.startMode === 'auto' }, { value: 'manual', label: 'Ръчен старт', checked: createDraft.startMode === 'manual' }])}
+      <div class="mcf-actions">${renderMobileCreateSubmit('Създай игра', LIGHT_PRIMARY_CLASS)}</div>
+    </form>${renderMobileEntryPickerScreen(entryPickerConfig)}` : `<p role="status" class="mcf-message">${creationLoading ? 'Зареждане на настройките…' : 'Настройките за създаване не са достъпни. Опитай отново.'}</p>
+      ${creationLoading ? '' : `<div class="mcf-actions"><button type="button" data-svara-create-retry="1" class="mcf-secondary">Опитай отново</button></div>`}`
+    // Затварянето е бутонът × в заглавието (същият data-svara-create-close).
+    return `<dialog data-svara-create-backdrop="1" aria-labelledby="svara-create-title" style="position:fixed;inset:0;margin:0;border:0;width:100vw;height:100dvh;max-width:none;max-height:none;box-sizing:border-box;background:rgba(30,14,78,0.55);color:#1C1442;font-family:${LIGHT_FONT_FAMILY};font-size:16px;display:grid;place-items:center;padding:max(12px,env(safe-area-inset-top)) 12px max(12px,env(safe-area-inset-bottom));"><div data-svara-create-panel="1" ${entryPickerConfig ? mobileEntryPickerCardAttributes(entryPicker.open) : ''} style="${MOBILE_CREATE_CARD_STYLE}width:min(100%,420px);min-width:0;">
+      <div>${renderMobileCreateHeader('Създай игра', 'data-svara-create-close="1"', 'svara-create-title')}</div>${content}</div></dialog>`
   }
 
   function renderCreateModal(): string {
@@ -1113,6 +1131,7 @@ export function createSvaraLobbyController(options: Options) {
     on(options.root.querySelector('[data-svara-create-open]'), 'click', () => {
       dialogState.open = createOpen = true
       dialogState.draft = createDraft = { capacity: 2, entryFee: 5000, startMode: 'auto' }
+      entryPicker = { open: false, pending: null }
       void loadCreationOptions()
     })
     on(createDialog?.querySelector('[data-svara-create-retry]'), 'click', () => { void loadCreationOptions() })
@@ -1145,6 +1164,7 @@ export function createSvaraLobbyController(options: Options) {
       if (player && !player.isBot) options.onOpenProfile?.(player.playerId, player.displayName ?? null) // ВРЕМЕННО: ботовете нямат профил
     }))
     const createForm = createDialog?.querySelector<HTMLFormElement>('[data-svara-create-form]')
+    if (light) bindMobileEntryPicker(createDialog?.querySelector<HTMLElement>('[data-svara-create-panel][data-entry-picker-card]') ?? null, { onStateChange: (next) => { entryPicker = next } })
     if (createForm) on(createForm, 'change', () => {
       const data = new FormData(createForm)
       const capacity = Number(data.get('capacity'))

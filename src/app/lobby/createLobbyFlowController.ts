@@ -4112,11 +4112,11 @@ export function createLobbyFlowController(
       showMoreGamesPage()
       return
     }
-    // "Създай игра" в основното лоби: /games/svara със съществуващата форма
-    // (същото dialog състояние като бутона в лобито на играта). Не се отваря,
-    // ако профилът вече е в игра.
+    // "Създай игра" в основното лоби: като "Не се сърди човече" — само
+    // страницата /games/svara (Чакащи / Играещи / Приключили). Прозорецът
+    // „Създай игра“ НЕ се отваря автоматично — само от бутона в страницата.
     if (target.closest('[data-lobby-svara-create="1"]')) {
-      if (!state.svaraActiveGame) svaraCreateDialogState.open = true
+      svaraCreateDialogState.open = false
       showSvaraPage()
       return
     }
@@ -4163,6 +4163,8 @@ export function createLobbyFlowController(
         root: liveMountRoot,
         localProfileId: profileId,
         stakes: state.matchRooms.filter((room) => room.isEnabled).map((room) => room.stakeAmount),
+        siteCommissionBpsByStake: Object.fromEntries(state.matchRooms.map((room) => [room.stakeAmount, room.siteCommissionBps ?? null])),
+        getBalance: () => options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null,
         onBack: showMoreGamesPage,
         onRefresh: () => options.onLudoRoomsOpen?.(),
         onRefreshGames: () => options.onLudoGamesOpen?.(),
@@ -4207,6 +4209,7 @@ export function createLobbyFlowController(
         localProfileId: profileId,
         apiBaseUrl: options.getApiBaseUrl?.() ?? '',
         createDialogState: svaraCreateDialogState,
+        getBalance: () => options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null,
         onOpenProfile: (profileId, displayNameHint) => { void openProtectedProfileById(profileId, displayNameHint, 'other') },
         onRefresh: () => options.onSvaraTablesOpen?.(),
         onCreate: (capacity, entryFee, startMode) => options.onSvaraTableCreate?.(capacity, entryFee, startMode),

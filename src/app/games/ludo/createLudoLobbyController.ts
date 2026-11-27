@@ -1,10 +1,17 @@
 import type { LudoRoomMatchSnapshot, LudoRoomSnapshot, MatchStake } from '../../network/createGameServerClient'
 import { VIOLET_3D_BUTTON_CLASS } from '../../../ui/layout/violet3dButton'
+import { computeLudoEntryPrize } from './ludoFormulaPrize'
+import { ensureMobileCreateFormStyles, MOBILE_CREATE_BACKDROP_STYLE, MOBILE_CREATE_CARD_STYLE, MOBILE_CREATE_ICONS, renderMobileCreateHeader, renderMobileCreateSegmented, renderMobileCreateSelect, renderMobileCreateSubmit } from '../../lobby/mobileCreateForm'
+import { bindMobileEntryPicker, mobileEntryPickerCardAttributes, renderMobileEntryPickerField, renderMobileEntryPickerScreen, type MobileEntryPickerConfig, type MobileEntryPickerState } from '../../lobby/mobileEntryPicker'
 
 type Options = {
   root: HTMLElement
   localProfileId: string
   stakes: MatchStake[]
+  /** Общата комисиона на входа (match_rooms; null — по подразбиране) — за наградата в мобилния избор на вход. */
+  siteCommissionBpsByStake?: Record<number, number | null | undefined>
+  /** Текущият баланс (null — неизвестен) — недостъпните входове се обозначават. */
+  getBalance?: () => number | null
   onBack: () => void
   onRefresh: () => void
   onRefreshGames: () => void
@@ -117,7 +124,6 @@ const LIGHT_PRIMARY_BUTTON_STYLE = 'border:0;border-radius:10px;color:#FFFFFF;fo
 const LIGHT_SECONDARY_BUTTON_STYLE = 'box-sizing:border-box;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;color:#6941C6;font-family:inherit;font-weight:800;cursor:pointer;white-space:nowrap;'
 const LIGHT_DANGER_BUTTON_STYLE = 'box-sizing:border-box;border:1px solid #FECDCA;border-radius:10px;background:#FFFFFF;color:#B42318;font-family:inherit;font-weight:800;cursor:pointer;white-space:nowrap;'
 const LIGHT_META_STYLE = 'font-size:12.5px;line-height:1.4;font-weight:600;color:#667085;'
-const LIGHT_FIELD_STYLE = 'width:100%;max-width:100%;min-width:0;box-sizing:border-box;height:44px;background:#FFFFFF;color:#111827;border:1px solid #D0D5DD;border-radius:8px;padding:0 12px;font-family:inherit;font-size:16px;color-scheme:light;'
 const LIGHT_MESSAGE_STYLE: Record<LudoLobbyMessageKind, string> = {
   info: 'background:#EFF8FF;border:1px solid #B2DDFF;color:#175CD3;',
   warning: 'background:#FFFAEB;border:1px solid #FEDF89;color:#B54708;',
@@ -141,6 +147,9 @@ export function createLudoLobbyController(options: Options) {
   let finishedGames: LudoRoomMatchSnapshot[] = []
   let lifecycleTab: LifecycleTab = 'waiting'
   let createOpen = false
+  // Изборът във формата „Създай игра“ — пази се при прерисуване, докато е отворена.
+  let createDraft: { stake: number | null; playerCount: 2 | 4; manualStart: boolean } = { stake: null, playerCount: 2, manualStart: false }
+  let entryPicker: MobileEntryPickerState = { open: false, pending: null }
   let message = ''
   let messageKind: LudoLobbyMessageKind = 'error'
   let leavePending = false
@@ -475,15 +484,39 @@ export function createLudoLobbyController(options: Options) {
     if (light) {
       // z-index 9500 — над общия хедър (120), менюто (140) и долната навигация
       // (110) в същия stacking context на лобито; същият слой като "Нова маса".
-      const labelStyle = 'display:grid;gap:6px;margin-bottom:14px;min-width:0;font-size:13px;font-weight:700;color:#17233C;'
-      const choiceStyle = 'display:flex;align-items:center;gap:10px;min-height:44px;padding:0 12px;box-sizing:border-box;border:1px solid #D0D5DD;border-radius:10px;background:#FFFFFF;font-size:14px;font-weight:700;color:#111827;cursor:pointer;'
-      const radioStyle = 'width:18px;height:18px;margin:0;flex-shrink:0;accent-color:#7950E8;cursor:pointer;'
-      return `<div data-ludo-create-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(16,24,40,0.45);display:grid;place-items:center;padding:16px;box-sizing:border-box;overflow-y:auto;font-family:inherit;"><form data-ludo-create-form="1" role="dialog" aria-modal="true" aria-label="Създай игра" style="width:min(100%,420px);max-width:100%;min-width:0;max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;margin:auto;padding:20px;background:#FFFFFF;border:1px solid #E4E7EC;border-radius:16px;box-shadow:0 20px 48px rgba(16,24,40,0.18);color:#111827;">
-      <h2 style="margin:0 0 16px;letter-spacing:0;color:#17233C;font-size:20px;font-weight:800;line-height:1.2;">Създай игра</h2>
-      <label style="${labelStyle}">Брой играчи<select name="playerCount" style="${LIGHT_FIELD_STYLE}"><option value="2">2</option><option value="4">4</option></select></label>
-      <label style="${labelStyle}">Вход<select name="stake" style="${LIGHT_FIELD_STYLE}">${stakes.map((stake) => `<option value="${stake}">${stake} жълтици</option>`).join('')}</select></label>
-      <fieldset style="border:0;padding:0;margin:0 0 18px;display:grid;gap:8px;min-width:0;"><legend style="padding:0;margin-bottom:6px;font-size:13px;font-weight:700;color:#17233C;">Старт</legend><label style="${choiceStyle}"><input type="radio" name="startMode" value="auto" checked style="${radioStyle}"> При запълване</label><label style="${choiceStyle}"><input type="radio" name="startMode" value="manual" style="${radioStyle}"> Ръчен старт</label></fieldset>
-      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;"><button type="button" data-ludo-create-close="1" style="${LIGHT_SECONDARY_BUTTON_STYLE}height:44px;color:#344054;font-size:14px;">Отказ</button><button type="submit" class="lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}height:44px;font-size:15px;">Създай</button></div>
+      // Мобилният дизайн на прозореца (mobileCreateForm.ts) — общ с Белот и Свара.
+      ensureMobileCreateFormStyles()
+      // Мобилен избор на вход: наградата — по общата сървърна формула
+      // (огледало на ludoEconomyStore — ludoFormulaPrize.ts) с комисионата на входа.
+      const balance = options.getBalance?.() ?? null
+      const entryPickerConfig: MobileEntryPickerConfig = {
+        fieldName: 'stake',
+        iconUrl: LIGHT_TITLE_ICON_URL,
+        selected: createDraft.stake ?? stakes[0] ?? null,
+        variant: String(createDraft.playerCount),
+        variantFieldName: 'playerCount',
+        variantUnavailableText: 'Недостъпен за {n} играчи',
+        open: entryPicker.open,
+        pending: entryPicker.pending,
+        rows: stakes.map((stake) => {
+          const bps = options.siteCommissionBpsByStake?.[stake] ?? null
+          const prizeFor = (paidEntries: number): number | null => computeLudoEntryPrize(stake, paidEntries, bps)
+          return {
+            value: stake,
+            prizes: { '2': prizeFor(2), '4': prizeFor(4) },
+            unavailableReason: balance !== null && balance < stake ? 'Недостатъчен баланс' : null,
+          }
+        }),
+      }
+      const playerCountOption = (count: 2 | 4): string => `<option value="${count}"${createDraft.playerCount === count ? ' selected' : ''}>${count} играчи</option>`
+      // Затварянето е бутонът × в заглавието (същият data-ludo-create-close).
+      return `<div data-ludo-create-backdrop="1" style="${MOBILE_CREATE_BACKDROP_STYLE}"><form data-ludo-create-form="1" class="mcf-form" ${mobileEntryPickerCardAttributes(entryPicker.open)} role="dialog" aria-modal="true" aria-label="Създай игра" style="${MOBILE_CREATE_CARD_STYLE}width:min(100%,420px);min-width:0;">
+      <div>${renderMobileCreateHeader('Създай игра', 'data-ludo-create-close="1"')}</div>
+      ${renderMobileEntryPickerField(entryPickerConfig)}
+      ${renderMobileCreateSelect('Брой играчи', MOBILE_CREATE_ICONS.players, 'name="playerCount"', `${playerCountOption(2)}${playerCountOption(4)}`)}
+      ${renderMobileCreateSegmented('Старт', 'startMode', [{ value: 'auto', label: 'При запълване', checked: !createDraft.manualStart }, { value: 'manual', label: 'Ръчен старт', checked: createDraft.manualStart }])}
+      <div class="mcf-actions">${renderMobileCreateSubmit('Създай игра', `lobby-violet-btn ${VIOLET_3D_BUTTON_CLASS}`)}</div>
+      ${renderMobileEntryPickerScreen(entryPickerConfig)}
     </form></div>`
     }
     return `<div data-ludo-create-backdrop="1" style="position:fixed;inset:0;background:rgba(0,0,0,.78);display:grid;place-items:center;padding:14px;z-index:2;"><form data-ludo-create-form="1" style="${panel}width:min(100%,420px);max-width:100%;min-width:0;max-height:calc(100dvh - 28px);overflow-y:auto;box-sizing:border-box;">
@@ -505,8 +538,26 @@ export function createLudoLobbyController(options: Options) {
       lifecycleTab = tab
       render()
     }))
-    options.root.querySelector('[data-ludo-create-open]')?.addEventListener('click', () => { createOpen = true; render() })
-    options.root.querySelector('[data-ludo-create-close]')?.addEventListener('click', () => { createOpen = false; render() })
+    options.root.querySelector('[data-ludo-create-open]')?.addEventListener('click', () => {
+      createOpen = true
+      createDraft = { stake: null, playerCount: 2, manualStart: false }
+      entryPicker = { open: false, pending: null }
+      render()
+    })
+    options.root.querySelector('[data-ludo-create-close]')?.addEventListener('click', () => { createOpen = false; entryPicker = { open: false, pending: null }; render() })
+    const createForm = options.root.querySelector<HTMLFormElement>('[data-ludo-create-form]')
+    if (light && createForm) {
+      createForm.addEventListener('change', () => {
+        const data = new FormData(createForm)
+        const stake = Number(data.get('stake'))
+        createDraft = {
+          stake: Number.isSafeInteger(stake) && stake > 0 ? stake : null,
+          playerCount: Number(data.get('playerCount')) === 4 ? 4 : 2,
+          manualStart: data.get('startMode') === 'manual',
+        }
+      })
+      bindMobileEntryPicker(createForm, { onStateChange: (next) => { entryPicker = next } })
+    }
     options.root.querySelectorAll<HTMLElement>('[data-ludo-room-join]').forEach((el) => el.addEventListener('click', () => options.onJoin(el.dataset.ludoRoomJoin!)))
     options.root.querySelector('[data-ludo-room-leave]')?.addEventListener('click', () => {
       requestExit()
@@ -518,6 +569,7 @@ export function createLudoLobbyController(options: Options) {
       event.preventDefault()
       const data = new FormData(event.currentTarget as HTMLFormElement)
       createOpen = false
+      entryPicker = { open: false, pending: null }
       options.onCreate(Number(data.get('stake')), Number(data.get('playerCount')) as 2 | 4, data.get('startMode') === 'manual')
       render()
     })

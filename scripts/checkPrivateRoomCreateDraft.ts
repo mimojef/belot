@@ -107,6 +107,14 @@ try {
       await page.locator(`${FORM} [data-private-room-voice-checkbox="1"]`).waitFor({ state: 'visible', timeout: 10_000 })
       await page.waitForFunction(`document.querySelectorAll('${FORM} select[name="stake"] option').length === 3`, null, { timeout: 10_000 })
     }
+    // Mobile: входът се избира от екрана „Избери вход“ в същия прозорец (select-ът е скрит).
+    const chooseStake = async (value: string) => {
+      if (!vp.mobile) { await page.selectOption(`${FORM} select[name="stake"]`, value); return }
+      await page.locator('[data-entry-picker-open-button="1"]').click()
+      await page.locator(`[data-entry-picker-row="${value}"]`).click()
+      await page.locator('[data-entry-picker-confirm="1"]').click()
+      await page.locator('[data-entry-picker-card][data-entry-picker-open="1"]').waitFor({ state: 'detached', timeout: 5_000 })
+    }
     await openPopup()
 
     const defaults = await readForm(page)
@@ -115,7 +123,7 @@ try {
     const reaction = reactionValues.find((value) => value !== defaults?.humanTurnTimeoutMs) ?? null
 
     // Реални действия на потребителя.
-    await page.selectOption(`${FORM} select[name="stake"]`, '8000')
+    await chooseStake('8000')
     for (const name of ['isLocked', 'manualStart', 'invitePartner', 'voiceEnabled']) await page.check(`${FORM} input[name="${name}"]`)
     await page.selectOption(`${FORM} select[name="waitMinutes"]`, '30')
     if (reaction !== null) await page.selectOption(`${FORM} select[name="humanTurnTimeoutMs"]`, reaction)
@@ -145,7 +153,7 @@ try {
       same(await readForm(page), { stake: '5000', isLocked: false, manualStart: false, invitePartner: false, voiceEnabled: false, waitMinutes: '15', humanTurnTimeoutMs: defaults?.humanTurnTimeoutMs ?? null }, 'ново отваряне')
     })
 
-    await page.selectOption(`${FORM} select[name="stake"]`, '10000')
+    await chooseStake('10000')
     await page.check(`${FORM} input[name="invitePartner"]`)
     await page.check(`${FORM} input[name="voiceEnabled"]`)
     await page.selectOption(`${FORM} select[name="waitMinutes"]`, '5')
@@ -156,6 +164,23 @@ try {
       // (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs, invitePartner, voiceEnabled)
       assert(JSON.stringify(args) === JSON.stringify([10000, false, 5, false, Number(defaults?.humanTurnTimeoutMs), true, true]), `args: ${JSON.stringify(args)}`)
     })
+
+    if (vp.mobile) {
+      // [D6] Екранът „Избери вход“ остава отворен при външни обновявания; × пази предишния избор.
+      await openPopup()
+      await chooseStake('8000')
+      await page.locator('[data-entry-picker-open-button="1"]').click()
+      await page.locator('[data-entry-picker-row="10000"]').click()
+      await pushExternalUpdates(page, 2)
+      const stillOpen = await page.locator('[data-entry-picker-card][data-entry-picker-open="1"]').count()
+      const pendingKept = await page.locator('[data-entry-picker-row="10000"][data-selected="1"]').count()
+      await page.locator('[data-entry-picker-close="1"]').click()
+      const afterClose = await readForm(page)
+      await check(`[${vp.label}] [D6] „Избери вход“: остава отворен при обновявания; затваряне без потвърждение пази предишния вход`, async () => {
+        assert(stillOpen === 1 && pendingKept === 1, `open=${stillOpen} pending=${pendingKept}`)
+        assert(afterClose?.stake === '8000', `stake=${afterClose?.stake}`)
+      })
+    }
 
     await check(`[${vp.label}] [D5] Без грешки в конзолата`, async () => {
       assert(errors.length === 0, errors.join(' | '))

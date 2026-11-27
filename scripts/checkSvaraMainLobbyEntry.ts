@@ -162,6 +162,39 @@ try {
     }
     await context.close()
   }
+  console.log('\n[5] „Създай игра“ от лобито → /games/svara без автоматичен прозорец (като „Не се сърди човече“)')
+  {
+    const context = await browser!.newContext({ baseURL: `http://127.0.0.1:${port}`, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 1 })
+    await context.addInitScript({ content: 'window.__name = (f) => f' })
+    // Сървърната проверка за достъп (GET /api/games/svara/access) — granted, с настройките за създаване.
+    await context.route('**/api/games/svara/access', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      ok: true, access: 'granted', creationOptions: { entryPercent: 1, entries: [{ entryFee: 5000, startingChips: 500, entryChips: 5, prizeByCapacity: { 2: 8000, 3: 12000, 4: 16000 } }] },
+    }) }))
+    const p = await context.newPage()
+    const pageErrors: string[] = []
+    p.on('pageerror', (error) => pageErrors.push(error.message))
+    await p.goto('/scripts/fixtures/svaraMainLobbyHarness.html?access=1&role=player')
+    await p.waitForSelector('[data-lobby-svara-create="1"]')
+    await p.evaluate(() => (document.querySelector('[data-lobby-svara-create="1"]') as HTMLElement).click())
+    // URL-ът (/games/svara) се синхронизира от main.ts по екрана 'svara' — харнесът проверява екрана.
+    await check('отваря страницата /games/svara с „Чакащи / Играещи / Приключили“ и бутона за създаване', async () => {
+      await p.waitForSelector('[data-svara-lobby-mount="1"]', { timeout: 10_000 })
+      await p.waitForSelector('[data-svara-lifecycle-tab="waiting"]', { timeout: 10_000 })
+      assert(await p.locator('[data-svara-lifecycle-tab]').count() === 3, 'разделите')
+      assert(await p.locator('[data-svara-create-open]').count() === 1, 'няма бутон за създаване')
+    })
+    await check('прозорецът „Създай игра“ НЕ се отваря автоматично', async () => {
+      await p.waitForTimeout(600)
+      assert(await p.locator('dialog[data-svara-create-backdrop]').count() === 0, 'прозорецът е отворен')
+    })
+    await check('прозорецът се отваря от бутона в страницата', async () => {
+      await p.locator('[data-svara-create-open]').click()
+      await p.waitForSelector('dialog[data-svara-create-backdrop] [data-svara-create-form]', { timeout: 10_000 })
+      assert(pageErrors.length === 0, pageErrors.join('; '))
+    })
+    await context.close()
+  }
+
   console.log(`\nРезултат: ${passed} PASS, ${failed} FAIL`)
   if (failed > 0) process.exitCode = 1
 } finally {
