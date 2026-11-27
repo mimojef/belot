@@ -50,11 +50,12 @@ const lobbySource = await readFile('src/app/lobby/renderLobbyScreen.ts', 'utf8')
 const regexSource = /const isSectionTitle = \/(.+)\/\.test\(block\)/.exec(lobbySource)?.[1]
 const sectionTitle = regexSource === undefined ? null : new RegExp(regexSource)
 
-await check('[L1] Заглавията на разделите (вкл. 6А/19А) се разпознават; броят на разделите е 32 / 16; котвите voice-chat са зададени', () => {
+await check('[L1] Заглавията на разделите (вкл. 6А/10А/19А) се разпознават; броят на разделите е 33 / 16; котвите voice-chat са зададени', () => {
   assert(sectionTitle !== null, 'регулярният израз за заглавие е намерен')
   const termsTitles = blocks(terms).filter((block) => sectionTitle!.test(block))
   const privacyTitles = blocks(privacy).filter((block) => sectionTitle!.test(block))
-  assert(termsTitles.length === 32, `Общи условия: ${termsTitles.length} раздела (31 + 19А)`)
+  assert(termsTitles.length === 33, `Общи условия: ${termsTitles.length} раздела (31 + 10А + 19А)`)
+  assert(termsTitles.includes('10А. Играта „Свара“'), 'раздел 10А за „Свара“')
   assert(privacyTitles.length === 16, `Политика: ${privacyTitles.length} раздела (15 + 6А)`)
   assert(termsTitles.includes('19А. Гласов чат в частните маси') && privacyTitles.includes('6А. Гласов чат в частните маси'), 'новите заглавия')
   assert(PUBLIC_LEGAL_PAGES.privacy.sectionAnchors?.['6А. Гласов чат в частните маси'] === VOICE_CHAT_LEGAL_ANCHOR, 'котва в Политиката')
