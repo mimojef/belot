@@ -132,6 +132,7 @@ import { canSessionAccessSvara, setSvaraPublicAccessProvider } from './games/sva
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import { createPersistentSvaraLobby } from './games/svara/createPersistentSvaraLobby.js'
 import { isSvaraPaidMatchesEnabled } from './games/svara/svaraPaidEconomy.js'
+import { hasStartedTournamentCommitment } from './games/svara/svaraTournamentCommitment.js'
 import { createSvaraRealClock } from './games/svara/runtime/createSvaraLifecycle.js'
 import { createSvaraTestBotsFactory } from './games/svara/testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
 import { isSvaraTestBotsEnabled } from './games/svara/testBots/svaraTestBotsFeatureFlag.js' // ВРЕМЕННО — тестови ботове
@@ -5510,10 +5511,27 @@ const svaraService = await createPersistentSvaraLobby({
   getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
   // Достъпът на всички човешки участници се проверява при старт на нов мач.
   getProfileRole: (profileId) => authStore.getAccountRoleForProfile(profileId),
-  hasOtherGameCommitment: (profileId) =>
-    isProfileInActiveGame(profileId) || findProfileInGameSession(profileId) !== null ||
-    findActiveBelotCommitment(profileId) !== null || findActiveLudoCommitment(profileId) !== null ||
-    tournamentCoordinator === null || tournamentCoordinator.getActiveTournamentIdForProfile(profileId) !== null,
+  // Турнир блокира само след старта; записване в предстоящ ('open') — не
+  // (виж svaraTournamentCommitment.ts). Без координатор → fail closed.
+  hasOtherGameCommitment: (profileId, purpose = 'admission') => {
+    // Бариерата при рестарт: турнир, започнал докато профилът играе „Свара“
+    // (вкл. мястото му в турнирната стая), е допустим и не бива да спира
+    // възстановяването на всички маси. Другите игри остават конфликт.
+    if (purpose === 'recovery') {
+      const session = findProfileInGameSession(profileId)
+      const sessionRoom = session === null ? null : (serverState.rooms[session.roomId] ?? null)
+      return isProfileInActiveGame(profileId, { skipTournamentRooms: true }) ||
+        (sessionRoom !== null && !isTournamentMatchRoom(sessionRoom)) ||
+        findActiveBelotCommitment(profileId) !== null || findActiveLudoCommitment(profileId) !== null
+    }
+    const coordinator = tournamentCoordinator
+    return isProfileInActiveGame(profileId) || findProfileInGameSession(profileId) !== null ||
+      findActiveBelotCommitment(profileId) !== null || findActiveLudoCommitment(profileId) !== null ||
+      coordinator === null || hasStartedTournamentCommitment(profileId, {
+        getActiveTournamentIdForProfile: (id) => coordinator.getActiveTournamentIdForProfile(id),
+        getTournamentStatus: (id) => tournamentStore.getTournamentById(id)?.status ?? null,
+      })
+  },
   onError: (error) => console.error('[svara-lobby] request failed', error),
   onAdmission: (profileId) => endBelotSpectatingForProfile(profileId, 'game_commitment'),
   clock: createSvaraRealClock((label, durationMs) => mainThreadTimings.record('timer', label, durationMs)),
@@ -8402,9 +8420,9 @@ function sendPlayerProfileToConnection(
   })
 }
 
-function isProfileInActiveGame(profileId: string): boolean {
+function isProfileInActiveGame(profileId: string, options?: { skipTournamentRooms?: boolean }): boolean {
   for (const room of Object.values(serverState.rooms)) {
-    if (room.status !== 'playing') {
+    if (room.status !== 'playing' || (options?.skipTournamentRooms === true && isTournamentMatchRoom(room))) {
       continue
     }
 

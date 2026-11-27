@@ -9,7 +9,8 @@ import { isSvaraPaidMatchesEnabled, type SvaraPaidEconomy } from './svaraPaidEco
 /** Isolate Svara startup failures from the rest of the platform. No migrations here. */
 export async function createPersistentSvaraLobby(deps: {
   databaseFilePath: string
-  hasOtherGameCommitment: (profileId: string) => boolean
+  /** purpose 'recovery' — бариерата при рестарт (виж initializeRecovery). */
+  hasOtherGameCommitment: (profileId: string, purpose?: 'admission' | 'recovery') => boolean
   getPublicProfile?: (profileId: string) => { displayName: string; avatarUrl: string | null; gender?: 'male' | 'female' | null } | null
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void

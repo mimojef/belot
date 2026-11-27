@@ -30,7 +30,8 @@ export const SVARA_FINISHED_REVIEW_RETENTION_MS = 10 * 60_000
 export const SVARA_FINISHED_VISIBILITY_HOURS = 2
 
 export function createSvaraLobby(deps: {
-  hasOtherGameCommitment: (profileId: string) => boolean
+  /** purpose 'recovery' — бариерата при рестарт (виж initializeRecovery). */
+  hasOtherGameCommitment: (profileId: string, purpose?: 'admission' | 'recovery') => boolean
   getPublicProfile?: (profileId: string) => { displayName: string; avatarUrl: string | null; gender?: 'male' | 'female' | null } | null
   runtime?: SvaraMatchRuntime
   persistence?: SvaraMatchPersistence
@@ -421,7 +422,7 @@ export function createSvaraLobby(deps: {
       try {
         const snapshots = deps.persistence!.loadActiveMatches()
         for (const snapshot of snapshots) for (const playerId of snapshot.state.seats) {
-          if (['active', 'absent'].includes(snapshot.state.status[playerId]!) && deps.hasOtherGameCommitment(playerId)) {
+          if (['active', 'absent'].includes(snapshot.state.status[playerId]!) && deps.hasOtherGameCommitment(playerId, 'recovery')) {
             throw new SvaraPersistenceError('commitment-conflict')
           }
         }

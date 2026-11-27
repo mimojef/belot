@@ -13,6 +13,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { createTournamentEconomyStore } from '../src/db/tournamentEconomyStore.js'
 import { createTournamentCoordinator } from '../src/tournament/tournamentCoordinator.js'
 import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
+import { hasStartedTournamentCommitment } from '../src/games/svara/svaraTournamentCommitment.js'
+import { createTournamentStore } from '../src/db/tournamentStore.js'
+import { createSvaraMatchSnapshotStore } from '../src/db/svaraMatchSnapshotStore.js'
 import { createSvaraMatchRuntime } from '../src/games/svara/runtime/svaraMatchRuntime.js'
 import type { SvaraAccessSession } from '../src/games/svara/svaraAccess.js'
 import type { ServerRoom } from '../src/core/serverTypes.js'
@@ -144,6 +147,7 @@ function fillWithSoloEntries(tournamentId: string, count: number): void {
 }
 
 const economyStore = await createTournamentEconomyStore(dbPath)
+const tournamentStore = await createTournamentStore(dbPath)
 const rooms = new Map<string, ServerRoom>()
 const coordinator = await createTournamentCoordinator({
   databaseFilePath: dbPath,
@@ -228,9 +232,19 @@ try {
 
   console.log('\n[2] Свара — блокиране и освобождаване')
   {
+    const svaraGuardSource = indexSource.match(/hasOtherGameCommitment: \(profileId, purpose = 'admission'\) => \{[\s\S]*?\r?\n {2}\},\r?\n/)?.[0] ?? ''
+    const svaraRecoverySource = svaraGuardSource.match(/if \(purpose === 'recovery'\) \{[\s\S]*?\r?\n {4}\}/)?.[0] ?? ''
     check(
-      'index.ts: hasOtherGameCommitment на Свара ползва getActiveTournamentIdForProfile',
-      /hasOtherGameCommitment:[\s\S]{0,400}tournamentCoordinator\.getActiveTournamentIdForProfile\(profileId\) !== null/.test(indexSource),
+      'index.ts: hasOtherGameCommitment на Свара ползва hasStartedTournamentCommitment (getActiveTournamentIdForProfile + статус)',
+      /coordinator === null \|\| hasStartedTournamentCommitment\(profileId, \{[\s\S]{0,200}coordinator\.getActiveTournamentIdForProfile\(id\)[\s\S]{0,200}tournamentStore\.getTournamentById\(id\)\?\.status/.test(svaraGuardSource),
+    )
+    check(
+      'index.ts: бариерата при рестарт пази другите игри и пропуска само турнира',
+      svaraRecoverySource.includes('isProfileInActiveGame(profileId, { skipTournamentRooms: true })') &&
+        svaraRecoverySource.includes('!isTournamentMatchRoom(sessionRoom)') &&
+        svaraRecoverySource.includes('findActiveBelotCommitment(profileId) !== null') &&
+        svaraRecoverySource.includes('findActiveLudoCommitment(profileId) !== null') &&
+        !svaraRecoverySource.includes('Tournament('),
     )
     check(
       'index.ts: login push tournament_active_participation ползва getActiveTournamentIdForProfile',
@@ -241,9 +255,14 @@ try {
     process.env.SVARA_TEST_ENABLED = '1'
     try {
       const runtime = createSvaraMatchRuntime({ random: { nextInt: () => 0 } })
+      // Същият предикат и същите източници като index.ts (реална SQL заявка + tournamentStore).
+      const startedTournament = (profileId: string): boolean => hasStartedTournamentCommitment(profileId, {
+        getActiveTournamentIdForProfile: (id) => coordinator.getActiveTournamentIdForProfile(id),
+        getTournamentStatus: (id) => tournamentStore.getTournamentById(id)?.status ?? null,
+      })
       const lobby = createSvaraLobby({
         runtime,
-        hasOtherGameCommitment: (profileId) => coordinator.getActiveTournamentIdForProfile(profileId) !== null,
+        hasOtherGameCommitment: (profileId) => startedTournament(profileId),
       })
       const frames = new Map<string, Array<Record<string, unknown>>>()
       const attach = (profileId: string): void => {
@@ -288,6 +307,96 @@ try {
       setEntryStatus('svara-semi', 'svara-loser', 'eliminated')
       check('отпаднал, турнирът продължава → Свара допуска', tryCreateTable('svara-loser') === 'admitted')
       leaveOwnTable('svara-loser')
+
+      // Записан в предстоящ турнир ('open') → Свара допуска; след старта → отказва.
+      insertTournament('svara-open', 'open')
+      insertEntry('svara-open', 'svara-registered', 'confirmed')
+      attach('svara-registered')
+      check('записан в open турнир → активен за турнира (без промяна)', coordinator.getActiveTournamentIdForProfile('svara-registered') === 'svara-open')
+      check('записан в open турнир → Свара допуска създаване', tryCreateTable('svara-registered') === 'admitted')
+      const seatedMatchId = lobby.findCommitment('svara-registered')?.matchId ?? ''
+      insertProfile('svara-joiner')
+      attach('svara-joiner')
+      lobby.handle('svara-joiner', { type: 'join_svara_table', requestId: randomUUID(), matchId: seatedMatchId } as never)
+      check('друг профил влиза на масата → и двамата седят', lobby.findCommitment('svara-joiner')?.matchId === seatedMatchId)
+      leaveOwnTable('svara-joiner')
+      insertEntry('svara-open', 'svara-joiner', 'confirmed')
+      lobby.handle('svara-joiner', { type: 'join_svara_table', requestId: randomUUID(), matchId: seatedMatchId } as never)
+      check('записан в open турнир → Свара допуска влизане в чужда маса', lobby.findCommitment('svara-joiner')?.matchId === seatedMatchId)
+
+      // Турнирът започва, докато играчът е на маса → мястото на „Свара“ остава.
+      setTournamentStatus('svara-open', 'starting')
+      check('турнирът започна по време на Свара → мястото остава', lobby.findCommitment('svara-registered')?.matchId === seatedMatchId)
+      leaveOwnTable('svara-registered')
+      leaveOwnTable('svara-joiner')
+      for (const status of ['starting', 'semifinal_in_progress', 'final_in_progress']) {
+        setTournamentStatus('svara-open', status)
+        check(`започнал турнир (${status}) → Свара отказва създаване`, tryCreateTable('svara-registered') === 'other_game_commitment')
+      }
+      setTournamentStatus('svara-open', 'final_in_progress')
+      attach('svara-free-host')
+      check('започнал турнир → Свара отказва влизане (other_game_commitment)', (() => {
+        tryCreateTable('svara-free-host')
+        const hostTable = lobby.findCommitment('svara-free-host')?.matchId ?? ''
+        lobby.handle('svara-joiner', { type: 'join_svara_table', requestId: randomUUID(), matchId: hostTable } as never)
+        const lastError = frames.get('svara-joiner')!.findLast((frame) => frame.type === 'svara_lobby_error')
+        return hostTable !== '' && lobby.findCommitment('svara-joiner') === null && lastError?.code === 'other_game_commitment'
+      })())
+      leaveOwnTable('svara-free-host')
+
+      // open регистрация + друг, вече започнал турнир → отказ (започналият е с приоритет).
+      insertTournament('svara-open-2', 'open')
+      insertTournament('svara-running', 'semifinal_in_progress')
+      insertEntry('svara-open-2', 'svara-both', 'confirmed', '2026-11-01 10:00:00')
+      insertEntry('svara-running', 'svara-both', 'confirmed', '2026-11-02 10:00:00')
+      attach('svara-both')
+      check('open + започнал турнир → Свара отказва', tryCreateTable('svara-both') === 'other_game_commitment')
+
+      // Без турнир / неизвестен статус.
+      check('без турнир → не блокира', hasStartedTournamentCommitment('x', { getActiveTournamentIdForProfile: () => null, getTournamentStatus: () => 'open' }) === false)
+      check('неизвестен статус → блокира (fail closed)', hasStartedTournamentCommitment('x', { getActiveTournamentIdForProfile: () => 't', getTournamentStatus: () => null }) === true)
+
+      // Рестарт по време на Свара след старта на турнира: бариерата получава
+      // purpose 'recovery' и възстановяването продължава; истински конфликт → failed.
+      const svaraStore = await createSvaraMatchSnapshotStore(dbPath)
+      try {
+        const durable = createSvaraLobby({ persistence: svaraStore, hasOtherGameCommitment: () => false })
+        check('durable лоби → готово', durable.initializeRecovery() === 'ready')
+        insertTournament('svara-restart', 'open')
+        insertEntry('svara-restart', 'svara-restart-p', 'confirmed')
+        const durableFrames: Array<Record<string, unknown>> = []
+        durable.attachConnection('svara-restart-p', {
+          profileId: 'svara-restart-p',
+          getSession: () => ({ account: { role: 'admin' }, profile: { profileId: 'svara-restart-p' } }),
+          send: (frame) => durableFrames.push(typeof frame === 'string' ? JSON.parse(frame) : frame),
+        })
+        durable.handle('svara-restart-p', {
+          type: 'create_svara_table', requestId: randomUUID(), capacity: 2, entryFee: 5000, entryPercent: 1, startMode: 'manual',
+        } as never)
+        const durableMatchId = durable.findCommitment('svara-restart-p')?.matchId ?? ''
+        check('записан в open турнир → седи на durable маса', durableMatchId !== '')
+        durable.shutdown()
+        setTournamentStatus('svara-restart', 'starting')
+
+        const purposes: string[] = []
+        const restarted = createSvaraLobby({
+          persistence: svaraStore,
+          hasOtherGameCommitment: (profileId, purpose) => {
+            purposes.push(String(purpose))
+            return purpose === 'recovery' ? false : startedTournament(profileId)
+          },
+        })
+        check('рестарт след старта на турнира → възстановяването е ready', restarted.initializeRecovery() === 'ready')
+        check('бариерата е извикана с purpose recovery', purposes.length > 0 && purposes.every((p) => p === 'recovery'))
+        check('мястото на Свара е запазено след рестарта', restarted.findCommitment('svara-restart-p')?.matchId === durableMatchId)
+        restarted.shutdown()
+
+        const conflicting = createSvaraLobby({ persistence: svaraStore, hasOtherGameCommitment: () => true })
+        check('истински конфликт с друга игра при рестарт → failed (строго)', conflicting.initializeRecovery() === 'failed')
+        conflicting.shutdown()
+      } finally {
+        svaraStore.close()
+      }
     } finally {
       if (previousFlag === undefined) delete process.env.SVARA_TEST_ENABLED
       else process.env.SVARA_TEST_ENABLED = previousFlag
@@ -444,6 +553,7 @@ try {
   }
 } finally {
   coordinator.close()
+  tournamentStore.close()
   database.close()
   await rm(tempDir, { recursive: true, force: true }).catch(() => {})
 }
