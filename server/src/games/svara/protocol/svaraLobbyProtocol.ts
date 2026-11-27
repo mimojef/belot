@@ -31,6 +31,9 @@ export type SvaraLobbyErrorCode =
   | 'player_absent' | 'dealing_in_progress'
   // Етап 3В.2 (платена „Свара“, изключена по подразбиране)
   | 'insufficient_coins' | 'paid_unavailable'
+  // Недостатъчен баланс за входа: собственият (създаване/сядане/освободено място)
+  // и уведомленията към останалите при освобождаване/закриване преди старта.
+  | 'insufficient_entry_balance' | 'seat_released_insufficient_balance' | 'table_closed_insufficient_balance'
 
 /** Приключил мач за раздела „Приключили“ — без карти и вътрешно състояние. */
 export type SvaraFinishedMatch = {

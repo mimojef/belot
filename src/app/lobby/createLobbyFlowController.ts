@@ -192,6 +192,7 @@ import type { NicknameHighlightRole } from './roleNicknameColor'
 import { setProfileCustomizationExpiryHandler, type ProfileCustomizationDisplay } from '../profileCustomization/customizationDisplay'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 import { canShowSvaraEntry, fetchSvaraAccess } from '../games/svara/svaraAccess'
+import { SVARA_INSUFFICIENT_ENTRY_BALANCE_CODE, showSvaraInsufficientBalanceNotice } from '../games/svara/svaraInsufficientBalanceNotice'
 import type { SvaraPageStatus } from '../games/svara/renderSvaraPage'
 import type { SvaraCreateDialogState } from '../games/svara/createSvaraLobbyController'
 import {
@@ -22604,6 +22605,19 @@ export function createLobbyFlowController(
         clearSvaraView()
         finishSvaraReconnect()
         if (['unauthenticated', 'forbidden_role', 'feature_disabled'].includes(message.code)) showSvaraPage()
+      }
+      if (message.code === SVARA_INSUFFICIENT_ENTRY_BALANCE_CODE) {
+        // Собствен недостатъчен баланс (отказ или освободено място): прозорец
+        // „Зареди“/„Отказ“ вместо реда със съобщение; чакащите бутони се освобождават.
+        _svaraLobbyController?.showMessage('')
+        showSvaraInsufficientBalanceNotice({
+          text: message.message,
+          onTopUp: () => {
+            state.shopActiveTab = 'coins'
+            void showShopPanel()
+          },
+        })
+        return true
       }
       _svaraLobbyController?.showMessage(message.message)
       return true

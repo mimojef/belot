@@ -18,7 +18,7 @@ export function isSvaraPaidMatchesEnabled(): boolean {
 }
 
 export type SvaraPaidEconomy = Pick<SvaraEconomyStore,
-  'collectEntries' | 'refundEntries' | 'settleMatch' | 'markUnrecoverable' | 'listCollectedMatchIds' | 'previewPrize' | 'getActiveConfig' | 'getFinance'>
+  'collectEntries' | 'hasEnoughBalance' | 'refundEntries' | 'settleMatch' | 'markUnrecoverable' | 'listCollectedMatchIds' | 'previewPrize' | 'getActiveConfig' | 'getFinance'>
 
 /**
  * Участниците, ако командата ще стартира мача; иначе null. Повтаря само

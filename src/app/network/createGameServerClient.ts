@@ -1538,7 +1538,8 @@ export type SvaraLobbyErrorCode =
   | 'not_a_participant' | 'not_allowed' | 'wrong_phase' | 'command_id_conflict'
   | 'other_game_commitment' | 'svara_commitment' | 'server_unavailable'
   | 'stale_action' | 'invalid_action' | 'not_your_turn' | 'insufficient_chips' | 'look_required'
-  | 'player_absent'
+  | 'player_absent' | 'dealing_in_progress' | 'insufficient_coins' | 'paid_unavailable'
+  | 'insufficient_entry_balance' | 'seat_released_insufficient_balance' | 'table_closed_insufficient_balance'
 
 export type PrivateRoomSnapshot = {
   id: string

@@ -133,7 +133,7 @@ export function createSvaraLobby(deps: {
    * Удържа входовете ПРЕДИ командата, която стартира мача. Връща null при
    * успех (или ако командата не стартира мач); иначе кода за отказ.
    */
-  function collectBeforeStart(table: SvaraPublicTable, playerId: string, command: 'join-seat' | 'start-match'): SvaraLobbyErrorCode | null {
+  function collectBeforeStart(table: SvaraPublicTable, playerId: string, command: 'join-seat' | 'start-match'): SvaraLobbyErrorCode | { shortProfileId: string } | null {
     if (!paidMode) return null
     const participants = participantsIfCommandStartsMatch(table, playerId, command)
     if (participants === null) return null
@@ -146,8 +146,42 @@ export function createSvaraLobby(deps: {
       if (refund.ok) result = paidEconomy.collectEntries({ matchId: table.matchId, entryFee: table.entryFee, participantIds: participants })
     }
     if (result.ok) return null
+    // Потвърден недостатъчен баланс на конкретен участник (удържането е върнато
+    // изцяло — никой не е таксуван). Само тогава мястото му може да се освободи.
+    if (result.code === 'insufficient-balance' && result.profileId !== undefined && participants.includes(result.profileId)) {
+      return { shortProfileId: result.profileId }
+    }
     if (result.code !== 'insufficient-balance') deps.onError?.(new Error(`[svara-paid] entry collection failed match=${table.matchId}: ${result.code} ${result.message}`))
     return result.code === 'insufficient-balance' ? 'insufficient_coins' : 'paid_unavailable'
+  }
+  /** Само четене при създаване/сядане (удържането остава при старта). Грешка в базата → отказ без място. */
+  function entryBalanceRefusal(playerId: string, entryFee: number): SvaraLobbyErrorCode | null {
+    if (!paidMode) return null
+    if (!paidEconomy) return 'paid_unavailable'
+    try {
+      return paidEconomy.hasEnoughBalance(playerId, entryFee) ? null : 'insufficient_entry_balance'
+    } catch (cause) {
+      deps.onError?.(cause)
+      return 'server_unavailable'
+    }
+  }
+  function notifyProfile(profileId: string, code: SvaraLobbyErrorCode) {
+    for (const transport of connections.values()) if (transport.profileId === profileId) error(transport, code)
+  }
+  /**
+   * Чакащ участник без достатъчно жълтици при опит за старт: мястото му се
+   * освобождава с обичайната команда за напускане (създател → масата се
+   * закрива по случай №7). Останалите запазват местата си и биват уведомени.
+   */
+  function releaseShortSeat(matchId: string, profileId: string) {
+    const before = runtime.getPublicTable(matchId)
+    const seated = before.players.map((p) => p.playerId)
+    runtime.executeParticipantCommand(matchId, { playerId: profileId }, `balance-release:${randomUUID()}`, { type: 'leave-seat' })
+    lifecycle.refresh(matchId)
+    publish(matchId, seated)
+    notifyProfile(profileId, 'insufficient_entry_balance')
+    const closed = before.creatorId === profileId
+    for (const id of seated) if (id !== profileId) notifyProfile(id, closed ? 'table_closed_insufficient_balance' : 'seat_released_insufficient_balance')
   }
   /** Стартът не е станал (грешка/друго състояние) → входовете се връщат веднага. */
   function refundIfNotStarted(matchId: string): void {
@@ -309,6 +343,9 @@ export function createSvaraLobby(deps: {
       dealing_in_progress: 'Картите тепърва се раздават.',
       insufficient_coins: 'Някой от играчите няма достатъчно жълтици за входа. Мачът не започна.',
       paid_unavailable: 'Платените игри временно не са достъпни.',
+      insufficient_entry_balance: 'Нямаш достатъчно жълтици за входа на тази маса.',
+      seat_released_insufficient_balance: 'Мачът не започна: играч без достатъчно жълтици освободи мястото си.',
+      table_closed_insufficient_balance: 'Масата беше закрита: създателят няма достатъчно жълтици за входа.',
     }
     if (gameplay) deliver(transport, { type: 'svara_command_error', code, message: messages[code], ...(commandId ? { commandId } : {}) })
     else deliver(transport, { type: 'svara_lobby_error', code, message: messages[code], ...(requestId ? { requestId } : {}) })
@@ -573,6 +610,8 @@ export function createSvaraLobby(deps: {
           if (paidMode && prizeFor(message.entryFee, message.capacity) === null) { error(transport, 'paid_unavailable', requestId); return }
           // Етап 4В: само активен вход от конфигурацията в базата (не твърдо зададен списък).
           if (!creationEntryFees().includes(message.entryFee)) { error(transport, deps.svaraConfig === 'unavailable' ? 'server_unavailable' : 'invalid_input', requestId); return }
+          const balanceRefusal = entryBalanceRefusal(playerId, message.entryFee)
+          if (balanceRefusal) { error(transport, balanceRefusal, requestId); return }
           const matchId = randomUUID()
           let anteIncreaseIntervalMs: number | undefined
           try { anteIncreaseIntervalMs = deps.getAnteIncreaseIntervalMs?.() } catch (cause) { deps.onError?.(cause) }
@@ -597,7 +636,7 @@ export function createSvaraLobby(deps: {
           }
           error(transport, 'match_not_found', requestId); return
         }
-        const before = runtime.getPublicTable(message.matchId)
+        let before = runtime.getPublicTable(message.matchId)
         if (message.type === 'leave_svara_table' && before.phase === 'finished') {
           if (!before.players.some((p) => p.playerId === playerId)) { reject('not_a_participant'); return }
           const dismissed = finishedDismissals.get(message.matchId) ?? new Set<string>()
@@ -620,6 +659,10 @@ export function createSvaraLobby(deps: {
         if (message.type === 'join_svara_table' && before.phase === 'lobby' && before.players.length >= before.capacity) {
           error(transport, 'table_full', requestId); return
         }
+        if (message.type === 'join_svara_table' && before.phase === 'lobby') {
+          const balanceRefusal = entryBalanceRefusal(playerId, before.entryFee)
+          if (balanceRefusal) { error(transport, balanceRefusal, requestId); return }
+        }
         const type = message.type === 'join_svara_table' ? 'join-seat'
           : message.type === 'start_svara_table' ? 'start-match'
           : before.phase === 'lobby' ? 'leave-seat' : 'exit'
@@ -634,7 +677,21 @@ export function createSvaraLobby(deps: {
           if (starters && starters.some((id) => !profileMayStartMatch(id))) { error(transport, 'not_allowed', requestId); return }
           // Етап 3В.2: удържане на ВСИЧКИ входове преди командата, която стартира мача.
           const refusal = collectBeforeStart(before, playerId, type)
-          if (refusal) { error(transport, refusal, requestId); return }
+          if (typeof refusal === 'string') { error(transport, refusal, requestId); return }
+          if (refusal) {
+            // Новият участник сам няма достатъчно → само той не сяда.
+            if (type === 'join-seat' && refusal.shortProfileId === playerId) { error(transport, 'insufficient_entry_balance', requestId); return }
+            // Вече седнал участник (вкл. създателя) → освобождаване на мястото му;
+            // мачът не започва и никой не е таксуван. Еднакво за авто и ръчен старт.
+            releaseShortSeat(message.matchId, refusal.shortProfileId)
+            if (type === 'start-match') { progress(message.matchId); return }
+            // Създателят е освободен → масата е закрита; новият не сяда.
+            if (runtime.getPublicTable(message.matchId).phase !== 'lobby') {
+              error(transport, 'table_closed_insufficient_balance', requestId); progress(message.matchId); return
+            }
+            // Масата остава активна и вече не е пълна → новият сяда (без старт).
+            before = runtime.getPublicTable(message.matchId)
+          }
           try {
             runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, { type })
           } finally {

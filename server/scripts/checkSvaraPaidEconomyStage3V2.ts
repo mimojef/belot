@@ -211,7 +211,7 @@ let matchA = ''
   lobby.handle('LPOOR', { type: 'join_svara_table', matchId: matchA, requestId: randomUUID() } as never)
   const poorError = last(frames, 'LPOOR', 'svara_lobby_error')
   const tableAfterPoor = lobby.findCommitment('LPOOR')
-  check('трети с недостатъчно жълтици → insufficient_coins; мачът не започва; никой не губи', poorError?.code === 'insufficient_coins' && tableAfterPoor === null
+  check('трети с недостатъчно жълтици → insufficient_entry_balance (проверка при сядане); мачът не започва; никой не губи', poorError?.code === 'insufficient_entry_balance' && tableAfterPoor === null
     && balance('L1') === START && balance('L2') === START && balance('LPOOR') === 1_000 && economy.getFinance(matchA) === null)
   lobby.handle('L3', { type: 'join_svara_table', matchId: matchA, requestId: randomUUID() } as never)
   const saved = lobbyStore.load(matchA)

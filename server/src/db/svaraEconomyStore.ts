@@ -146,6 +146,8 @@ export type SvaraEconomyStore = {
   /** Сървърната награда за победителя (null — недостъпна/неточна конфигурация). */
   previewPrize: (entryFee: number, participants: number) => number | null
   collectEntries: (input: { matchId: string; entryFee: number; participantIds: readonly string[] }) => SvaraCollectResult
+  /** Само четене (проверка при създаване/сядане); удържането остава в collectEntries. Хвърля при грешка в базата. */
+  hasEnoughBalance: (profileId: string, amount: number) => boolean
   /** Само за мач, който НЕ е започнал. Идемпотентно. */
   refundEntries: (matchId: string) => { ok: true; refunded: boolean; status: SvaraFinanceStatus | null } | { ok: false; message: string }
   settleMatch: (matchId: string, winnerProfileId: string | null) => SvaraSettleResult
@@ -460,6 +462,7 @@ export async function createSvaraEconomyStore(databaseFilePath: string): Promise
     getActiveConfig,
     previewPrize,
     collectEntries,
+    hasEnoughBalance: (profileId, amount) => balanceOf(profileId) >= amount,
     refundEntries,
     settleMatch,
     markUnrecoverable,
