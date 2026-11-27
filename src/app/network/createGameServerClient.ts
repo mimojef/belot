@@ -1110,7 +1110,7 @@ export type ClientMessage =
   // единственият авторитет за маси/карти/банки — тук само транспортни типове.
   | { type: 'request_svara_tables_list' }
   | { type: 'create_svara_table'; requestId: string; capacity: 2 | 3 | 4; entryFee: number; entryPercent: SvaraEntryPercent; startMode: SvaraStartMode }
-  | { type: 'join_svara_table'; matchId: string; requestId: string }
+  | { type: 'join_svara_table'; matchId: string; requestId: string; seat?: number }
   | { type: 'leave_svara_table'; matchId: string; requestId: string }
   | { type: 'start_svara_table'; matchId: string; requestId: string }
   // ВРЕМЕННО — тестови ботове за Свара (docs/svara-test-bots-local.md); сървърът проверява правото.
@@ -1315,7 +1315,8 @@ export type SvaraPublicTable = {
   entryPercent: SvaraEntryPercent
   startingChips: number
   entryChips: number
-  players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null
+  /** seat — номерът на мястото (0..capacity-1) от сървъра; липсва при по-стар сървър (тогава — индексът). */
+  players: Array<{ playerId: string; status: SvaraSeatStatus; seat?: number; displayName?: string | null; avatarUrl?: string | null
     /** Полът на профила (както RoomSeatSnapshot.gender в Белот) — избира мъжки/женски глас. */
     gender?: PlayerGender | null
     /** ВРЕМЕННО — тестови ботове: сървърно обозначение (само представяне). */
@@ -3898,7 +3899,8 @@ export type GameServerClient = {
   // submitSvaraCommand приема commandId от caller-а (идемпотентност/retry).
   requestSvaraTablesList: () => void
   createSvaraTable: (capacity: 2 | 3 | 4, entryFee: number, entryPercent: SvaraEntryPercent, startMode: SvaraStartMode) => void
-  joinSvaraTable: (matchId: string) => void
+  /** seat — избраното свободно място; без него сървърът дава първото свободно. */
+  joinSvaraTable: (matchId: string, seat?: number) => void
   leaveSvaraTable: (matchId: string) => void
   startSvaraTable: (matchId: string) => void
   /** ВРЕМЕННО — тестови ботове за Свара. */
@@ -4369,7 +4371,9 @@ export function createGameServerClient(
   function createSvaraTable(capacity: 2 | 3 | 4, entryFee: number, entryPercent: SvaraEntryPercent, startMode: SvaraStartMode): void {
     send({ type: 'create_svara_table', requestId: crypto.randomUUID(), capacity, entryFee, entryPercent, startMode })
   }
-  function joinSvaraTable(matchId: string): void { send({ type: 'join_svara_table', matchId, requestId: crypto.randomUUID() }) }
+  function joinSvaraTable(matchId: string, seat?: number): void {
+    send({ type: 'join_svara_table', matchId, requestId: crypto.randomUUID(), ...(seat === undefined ? {} : { seat }) })
+  }
   function leaveSvaraTable(matchId: string): void { send({ type: 'leave_svara_table', matchId, requestId: crypto.randomUUID() }) }
   function startSvaraTable(matchId: string): void { send({ type: 'start_svara_table', matchId, requestId: crypto.randomUUID() }) }
   // ВРЕМЕННО — тестови ботове за Свара.

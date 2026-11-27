@@ -93,7 +93,8 @@ export type SvaraTrustedActor = { readonly playerId: string }
 
 /** Командите, които участник може да подаде от свое име. Без playerId и commandId. */
 export type SvaraParticipantCommand =
-  | { type: 'join-seat' }
+  /** seat — избраното място (0..capacity-1); без него — първото свободно. */
+  | { type: 'join-seat'; seat?: number }
   | { type: 'leave-seat' }
   | { type: 'start-match' }
   | { type: 'look' }
@@ -171,6 +172,8 @@ export type SvaraMatchDiagnostics = {
 export type SvaraRuntimeOptions = {
   /** Криптографски източник по подразбиране (в двигателя); seeded — само за тестове. */
   random?: SvaraRandomSource
+  /** Само за тестове: източник за случайните игрови позиции при старта (виж SvaraMatchEnv.seatOrder). */
+  seatOrder?: SvaraRandomSource
   persistence?: SvaraMatchPersistence
   now?: () => number
 }
@@ -250,6 +253,12 @@ function normalizeParticipantCommand(input: unknown, commandId: string, playerId
   if (typeof type !== 'string' || !PARTICIPANT_TYPES.has(type)) {
     fail('command-not-allowed', `command type ${String(type)} is not available to participants`)
   }
+  if (type === 'join-seat') {
+    const seat = (input as { seat?: unknown }).seat
+    if (seat === undefined) return { type, commandId, playerId }
+    if (typeof seat !== 'number' || !Number.isSafeInteger(seat) || seat < 0 || seat > 3) fail('invalid-input', 'invalid seat')
+    return { type, commandId, playerId, seat: seat as number }
+  }
   if (type !== 'act') return { type, commandId, playerId } as SvaraMatchCommand
   const action = (input as { action?: unknown }).action
   if (!action || typeof action !== 'object') fail('invalid-input', 'action required')
@@ -307,7 +316,7 @@ type MatchEntry = {
 export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): SvaraMatchRuntime {
   // Собствено състояние за всяка инстанция — без глобални променливи на модула.
   const matches = new Map<string, MatchEntry>()
-  const env: SvaraMatchEnv = options.random ? { random: options.random } : {}
+  const env: SvaraMatchEnv = { ...(options.random ? { random: options.random } : {}), ...(options.seatOrder ? { seatOrder: options.seatOrder } : {}) }
   const now = options.now ?? svaraEpochNow
   const writing = new Set<string>()
   const stored = (matchId: string, entry: Pick<MatchEntry, 'state' | 'revision' | 'deadlines' | 'deadlineSequence'>): SvaraStoredMatch =>

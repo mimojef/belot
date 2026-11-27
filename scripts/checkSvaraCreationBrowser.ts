@@ -8,12 +8,16 @@ import { createRequire } from 'node:module'
 import { DatabaseSync } from 'node:sqlite'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import type NodeSocketType from 'ws'
+import { buildSvaraConfigFromCommonEntries, type CommonEntryRow } from '../server/src/db/svaraEconomyStore'
+import { activeEntryFees } from '../server/src/economy/gameFinancialConfig'
 import { createIsolatedSvaraRoot, startIsolatedSvaraBackend, startSvaraGateway, waitForHarnessCondition } from './svaraRealIntegrationHarness'
 
 const root = resolve('.')
 const NodeSocket = createRequire(new URL('../server/package.json', import.meta.url))('ws') as typeof NodeSocketType
 const host = 'svara-integration.localhost'
-const fees = [5000, 8000, 15000, 20000, 35000, 50000, 60000, 80000, 100000, 130000, 150000, 180000, 200000]
+// Входовете — действителният каталог (match_rooms) на изолираната база, изведен
+// както от сървъра (buildSvaraConfigFromCommonEntries + activeEntryFees); не фиксиран списък.
+let fees: number[] = []
 // Expected display grouping independent of Intl's implementation (NBSP).
 const grouped = (amount: number) => String(amount).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0')
 const artifacts = join(root, 'tmp/svara-multiplayer/creation')
@@ -37,6 +41,10 @@ try {
         try { return read(connection) } finally { connection.close() }
       }
       db((connection) => connection.prepare("UPDATE admin_settings SET setting_value='direct' WHERE setting_key='registration_verification_mode'").run())
+      const catalog = buildSvaraConfigFromCommonEntries(db((connection) => connection.prepare('SELECT stake_amount, is_enabled, site_commission_bps FROM match_rooms ORDER BY stake_amount ASC').all() as CommonEntryRow[]))
+      assert(catalog.ok, 'isolated catalog has no Svara-compatible entries')
+      fees = activeEntryFees(catalog.config)
+      assert(fees.length >= 2, `isolated catalog offers ${fees.length} entries`)
       const users: Array<{ id: string; cookie: string; displayName: string; avatarUrl: string | null }> = []
       for (let i = 0; i < capacity + 1; i++) {
         const email = `create-${randomUUID()}@example.test`
@@ -130,7 +138,7 @@ try {
         const actual = await first.locator('[data-svara-create-panel]').evaluate(style)
         assert.deepEqual(actual, reference, 'Svara modal differs from Ludo panel styles')
         assert.equal(await form.locator('[name="capacity"]').inputValue(), '4', 'Parent refresh lost the draft')
-        assert.equal(await form.locator('[name="entryFee"]').inputValue(), '200000', 'Parent refresh lost the entry')
+        assert.equal(await form.locator('[name="entryFee"]').inputValue(), String(fees.at(-1)), 'Parent refresh lost the entry')
         assert.equal(await first.locator('body > dialog[data-svara-create-backdrop]').count(), 1, 'Dialog ownership leaked or remained inside the zoomed shell')
         await ludo.context().close()
         for (const [width, height] of [[1280, 900], [390, 844], [844, 390], [320, 568]]) {
@@ -156,10 +164,11 @@ try {
         await first.click('[data-svara-create-open]')
         await form.waitFor()
         await first.screenshot({ path: join(artifacts, 'create-default.png') })
-        await form.locator('[name="entryFee"]').selectOption('150000')
-        assert.equal(await form.locator('[data-svara-create-chips]').textContent(), 'Получаваш: 15\u00a0000 виртуални чипа')
-        assert.equal(await form.locator('[data-svara-create-ante]').textContent(), 'Анте за раздаване: 150 чипа')
-        await first.screenshot({ path: join(artifacts, 'create-150000.png') })
+        const sampleFee = fees.at(-1)!
+        await form.locator('[name="entryFee"]').selectOption(String(sampleFee))
+        assert.equal(await form.locator('[data-svara-create-chips]').textContent(), `Получаваш: ${grouped(sampleFee / 10)} виртуални чипа`)
+        assert.equal(await form.locator('[data-svara-create-ante]').textContent(), `Анте за раздаване: ${grouped(sampleFee / 1000)} чипа`)
+        await first.screenshot({ path: join(artifacts, `create-${sampleFee}.png`) })
       }
       // Real authenticated WS attacks use a separate profile and socket.
       attack = new NodeSocket(`ws://127.0.0.1:${backend.port}/ws`, { headers: { Cookie: users.at(-1)!.cookie } })
@@ -177,7 +186,7 @@ try {
         for (const entryPercent of [5, 2, 3, 0, '1']) await rejected({ entryPercent })
         assert.equal(db((connection) => connection.prepare('SELECT COUNT(*) AS n FROM svara_match_snapshots').get()!.n), 0)
       }
-      const fee = fees[passed === 5 ? 12 : passed]!
+      const fee = passed === 5 ? fees.at(-1)! : fees[passed % fees.length]!
       await form.locator('[name="capacity"]').selectOption(String(capacity))
       await form.locator('[name="entryFee"]').selectOption(String(fee))
       await form.locator(`[name="startMode"][value="${mode}"]`).check()
@@ -242,7 +251,8 @@ try {
       await first.locator('[data-svara-table-leave]').waitFor()
       assert.deepEqual(read(), waiting, 'Waiting refresh changed the table')
       await checkWaiting(first, [users[0]!])
-      await Promise.all(pages.slice(1).map((page) => page.locator(`[data-svara-table-join="${matchId}"]`).click()))
+      // Всеки взима различно свободно място чрез „+“ (създателят е на място 1).
+      await Promise.all(pages.slice(1).map((page, index) => page.locator(`[data-svara-seat-join="${matchId}:${index + 1}"]`).click()))
       await waitForHarnessCondition('all real UI joins are durable', () => read().state.seats.length === capacity, 5000)
       if (mode === 'manual') {
         for (const page of pages) await checkWaiting(page, users.slice(0, capacity))
@@ -274,7 +284,7 @@ try {
         await member.locator('[data-svara-table-leave]').click()
         await member.locator('[data-svara-create-open]').waitFor()
         await checkWaiting(first, users.slice(0, capacity).filter((user) => user.id !== users[1]!.id))
-        await member.locator(`[data-svara-table-join="${matchId}"]`).click()
+        await member.locator(`[data-svara-seat-join^="${matchId}:"]`).first().click()
         await checkWaiting(first, users.slice(0, capacity))
         const waitingBeforeReconnect = read()
         await first.reload({ waitUntil: 'domcontentloaded' })
@@ -325,4 +335,4 @@ try {
     }
   }
 } finally { await browser.close() }
-console.log(`PASS ${passed}/6 real creation/start scenarios; 39 previews, 13 fees, four dialog viewports; waiting tables 2/3/4 across desktop/portrait/landscape, own/other/blocked profiles, leave/rejoin, refresh and native WS reconnect`)
+console.log(`PASS ${passed}/6 real creation/start scenarios; ${fees.length * 3} previews, ${fees.length} catalog fees, four dialog viewports; waiting tables 2/3/4 across desktop/portrait/landscape, own/other/blocked profiles, leave/rejoin, refresh and native WS reconnect`)

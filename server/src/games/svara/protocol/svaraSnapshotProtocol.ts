@@ -52,7 +52,8 @@ export type SvaraPublicTable = {
   entryPercent: SvaraEntryPercent
   startingChips: number
   entryChips: number
-  players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null
+  /** seat — номерът на мястото (0..capacity-1); подредени по него. */
+  players: Array<{ playerId: string; status: SvaraSeatStatus; seat: number; displayName?: string | null; avatarUrl?: string | null
     /** Полът на профила (както в Белот) — само за избора на глас; добавя се от lobby при доставка. */
     gender?: 'male' | 'female' | null
     /** ВРЕМЕННО — тестови ботове: само представяне, добавя се от lobby при доставка. */
@@ -83,7 +84,7 @@ export function createSvaraPublicTable(matchId: string, state: SvaraMatchState):
     creatorId: state.config.creatorId, startMode: state.config.startMode,
     entryFee: state.config.entryFee, entryPercent: state.config.entryPercent,
     startingChips: state.startingChips, entryChips: state.entryChips,
-    players: state.seats.map((playerId) => ({ playerId, status: state.status[playerId]! })),
+    players: state.seats.map((playerId, index) => ({ playerId, status: state.status[playerId]!, seat: state.seatPositions?.[playerId] ?? index })),
   }
 }
 

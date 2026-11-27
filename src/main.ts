@@ -7728,7 +7728,7 @@ lobby = createLobbyFlowController({
   onSvaraWalletRefresh: () => refreshAuthSessionInBackground(),
   // The form chooses capacity/entry/start mode; new-table admission fixes 1% on the server.
   onSvaraTableCreate: (capacity, entryFee, startMode) => { client.createSvaraTable(capacity, entryFee, 1, startMode) },
-  onSvaraTableJoin: (matchId) => { client.joinSvaraTable(matchId) },
+  onSvaraTableJoin: (matchId, seat) => { client.joinSvaraTable(matchId, seat) },
   onSvaraTableLeave: (matchId) => { client.leaveSvaraTable(matchId) },
   onSvaraTableStart: (matchId) => { client.startSvaraTable(matchId) },
   onSvaraTableStateRequest: (matchId) => { client.requestSvaraTableState(matchId) },

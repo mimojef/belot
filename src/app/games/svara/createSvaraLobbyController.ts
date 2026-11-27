@@ -65,7 +65,8 @@ type Options = {
   getBalance?: () => number | null
   onRefresh: () => void
   onCreate: (capacity: 2 | 3 | 4, entryFee: number, startMode: SvaraStartMode) => void
-  onJoin: (matchId: string) => void
+  /** seat — избраното свободно място (зеленият „+“ — единственият начин за присъединяване от списъка). */
+  onJoin: (matchId: string, seat: number) => void
   onLeave: (matchId: string) => void
   onStart: (matchId: string) => void
   onRequestTableState: (matchId: string) => void
@@ -400,32 +401,72 @@ export function createSvaraLobbyController(options: Options) {
     </div>`
   }
 
+  /** Играчът на мястото (по сървърния номер; при по-стар сървър — индексът). */
+  function playerAtSeat(table: SvaraPublicTable, seat: number): SvaraPublicTable['players'][number] | undefined {
+    return table.players.find((player, index) => (player.seat ?? index) === seat)
+  }
+
+  /**
+   * Местата на чакаща маса в списъка — 2×2 (Място 1 | Място 2 / Място 3 | Място 4),
+   * само реално наличните (capacity). Заето: профилна снимка + ник; свободно:
+   * зелен „+“, който заема точно това място (сървърът потвърждава).
+   */
+  function listSeatsHtml(table: SvaraPublicTable, canJoin: boolean): string {
+    const seat = (index: number): string => {
+      const player = playerAtSeat(table, index)
+      const seatLabel = `Място ${index + 1}`
+      if (player) {
+        const displayName = player.displayName?.trim() || 'Профилът не е достъпен'
+        const avatar = player.avatarUrl
+          ? `<img data-svara-player-avatar="1" src="${esc(player.avatarUrl)}" alt="" draggable="false" style="width:100%;height:100%;object-fit:cover;display:block;" />`
+          : `<span data-svara-avatar-placeholder="1" aria-hidden="true">${esc(displayName.charAt(0).toUpperCase())}</span>`
+        const box = light
+          ? 'background:#F4F0FF;border:1px solid #D9CCFF;color:#6941C6;'
+          : 'background:#101010;border:1px solid rgba(212,165,32,.34);color:#d4a520;'
+        return `<button type="button" data-svara-list-seat="${index}" data-svara-profile-id="${esc(player.playerId)}" aria-label="${esc(`${seatLabel}: ${displayName}`)}" style="box-sizing:border-box;display:flex;align-items:center;gap:7px;min-width:0;height:44px;padding:0 8px;border-radius:10px;cursor:pointer;font:inherit;text-align:left;${light ? 'border:1px solid #E4E7EC;background:#F9FAFB;color:#111827;' : 'border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.03);color:#f8fafc;'}">
+          <span style="width:32px;height:32px;flex:0 0 32px;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;${box}">${avatar}</span>
+          <span data-svara-player-name="1" title="${esc(displayName)}" style="min-width:0;flex:1;font-size:12.5px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayName)}</span>
+          ${player.playerId === table.creatorId ? `<span data-svara-creator="1" aria-label="Създател на масата" style="flex-shrink:0;color:${light ? '#6941C6' : '#f4c95b'};">★</span>` : ''}
+        </button>`
+      }
+      const plusStyle = 'box-sizing:border-box;display:flex;align-items:center;justify-content:center;height:44px;border-radius:10px;font-size:24px;font-weight:900;line-height:1;font-family:inherit;'
+      if (canJoin) {
+        return `<button type="button" data-svara-seat-join="${esc(table.matchId)}:${index}" aria-label="Заеми ${seatLabel}" title="Заеми ${seatLabel}" style="${plusStyle}cursor:pointer;${light ? 'border:1.5px dashed #12B76A;background:#ECFDF3;color:#039855;' : 'border:1.5px dashed rgba(34,197,94,.75);background:rgba(34,197,94,.12);color:#22c55e;'}">+</button>`
+      }
+      return `<div data-svara-seat-free="${index}" aria-label="${seatLabel}: свободно" style="${plusStyle}${light ? 'border:1px dashed #D0D5DD;background:#F9FAFB;color:#98A2B3;' : 'border:1px dashed rgba(255,255,255,.14);background:rgba(255,255,255,.03);color:rgba(255,255,255,.3);'}">+</div>`
+    }
+    return `<div data-svara-list-seats="${esc(table.matchId)}" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px;min-width:0;">${Array.from({ length: table.capacity }, (_, index) => seat(index)).join('')}</div>`
+  }
+
   function tableCardHtml(table: SvaraPublicTable): string {
     const joining = joinPendingMatchId === table.matchId
     const full = table.players.length >= table.capacity
-    const disabled = joining || full
-    const actionLabel = joining ? 'Влизане…' : full ? 'Пълна' : 'Влез'
+    // Присъединяване само през „+“ на избраното място; статусът е в реда с капацитета.
+    const status = joining ? ' · Влизане…' : full ? ' · Пълна' : ''
+    // „+“ само на чакаща, непълна маса, когато играчът още няма маса и няма чакаща заявка.
+    const canJoinSeat = table.phase === 'lobby' && !full && myTable === null && joinPendingMatchId === null
+    const seatsHtml = listSeatsHtml(table, canJoinSeat)
     if (light) {
       return `<article style="${LIGHT_PANEL_STYLE}">
       <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
         <div style="flex:1;min-width:0;">
           <strong style="display:block;min-width:0;font-size:15px;font-weight:800;line-height:1.3;color:#111827;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Маса ${esc(table.matchId.slice(0, 8))}</strong>
-          <div style="${LIGHT_META_STYLE}margin-top:3px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>
+          <div data-svara-list-meta="1" style="${LIGHT_META_STYLE}margin-top:3px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}${status}</div>
           ${tableAmountsHtml(table)}
         </div>
-        <button type="button" data-svara-table-join="${esc(table.matchId)}" ${disabled ? 'disabled' : ''} class="${LIGHT_PRIMARY_CLASS}" style="${LIGHT_PRIMARY_BUTTON_STYLE}flex:0 0 auto;height:40px;padding:0 16px;font-size:14px;${disabled ? 'opacity:.55;cursor:not-allowed;' : ''}">${actionLabel}</button>
       </div>
+      ${seatsHtml}
     </article>`
     }
     return `<article style="${panel}">
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;">
         <div>
           <strong>Маса ${esc(table.matchId.slice(0, 8))}</strong>
-          <div style="margin-top:6px;color:rgba(255,255,255,.62);font-size:13px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>
+          <div data-svara-list-meta="1" style="margin-top:6px;color:rgba(255,255,255,.62);font-size:13px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}${status}</div>
           ${tableAmountsHtml(table)}
         </div>
-        <button data-svara-table-join="${esc(table.matchId)}" ${disabled ? 'disabled' : ''} style="${button}${disabled ? 'opacity:.55;cursor:not-allowed;' : ''}">${actionLabel}</button>
       </div>
+      ${seatsHtml}
     </article>`
   }
 
@@ -447,7 +488,7 @@ export function createSvaraLobbyController(options: Options) {
   }
 
   function seatSlotHtml(table: SvaraPublicTable, index: number): string {
-    const player = table.players[index]
+    const player = playerAtSeat(table, index)
     if (!player && light) return `<div style="box-sizing:border-box;min-height:52px;border-radius:10px;border:1px dashed #D0D5DD;background:#FFFFFF;color:#667085;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;">Свободно място</div>`
     if (!player) return `<div style="box-sizing:border-box;min-height:50px;border-radius:9px;border:1px dashed rgba(255,255,255,.14);background:rgba(255,255,255,.03);color:rgba(255,255,255,.35);font-size:12px;display:flex;align-items:center;justify-content:center;">Свободно място</div>`
     const isCreator = player.playerId === table.creatorId
@@ -1194,13 +1235,16 @@ export function createSvaraLobbyController(options: Options) {
     })
     on(createDialog?.querySelector('[data-svara-create-retry]'), 'click', () => { void loadCreationOptions() })
     on(createDialog?.querySelector('[data-svara-create-close]'), 'click', () => { dialogState.open = createOpen = false; creationRequest++; render() })
-    options.root.querySelectorAll<HTMLElement>('[data-svara-table-join]').forEach((el) => on(el, 'click', () => {
-      const matchId = el.dataset.svaraTableJoin!
-      if (joinPendingMatchId) return
+    options.root.querySelectorAll<HTMLElement>('[data-svara-seat-join]').forEach((el) => on(el, 'click', () => {
+      const raw = el.dataset.svaraSeatJoin ?? ''
+      const separator = raw.lastIndexOf(':')
+      const matchId = raw.slice(0, separator)
+      const seat = Number(raw.slice(separator + 1))
+      if (!matchId || !Number.isSafeInteger(seat) || seat < 0 || seat > 3 || joinPendingMatchId || myTable) return
       joinPendingMatchId = matchId
       message = ''
       render()
-      options.onJoin(matchId)
+      options.onJoin(matchId, seat)
     }))
     // Активна маса: иконата за изход първо иска потвърждение; в чакалнята
     // („Напусни“) напускането е веднага, както досега.

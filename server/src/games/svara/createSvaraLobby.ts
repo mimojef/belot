@@ -283,7 +283,7 @@ export function createSvaraLobby(deps: {
   function tableWithProfiles(table: SvaraPublicTable, fillViewerId: string | null = null): SvaraPublicTable {
     const canFill = fillViewerId !== null && fillViewerId === table.creatorId && table.phase === 'lobby' && table.players.length < table.capacity
     const payout = tablePayout(table)
-    return { ...table, ...(canFill ? { testBotFill: true } : {}), ...(payout ? { payout } : {}), prizeAmount: tablePrize(table), paid: paidMode, players: table.players.map(({ playerId, status }) => ({ playerId, status, ...presentPlayer(playerId) })) }
+    return { ...table, ...(canFill ? { testBotFill: true } : {}), ...(payout ? { payout } : {}), prizeAmount: tablePrize(table), paid: paidMode, players: table.players.map(({ playerId, status, seat }) => ({ playerId, status, seat, ...presentPlayer(playerId) })) }
   }
 
   /** Раздел „Приключили“: завършените мачове от последните часове (от записаните snapshot-и). */
@@ -346,6 +346,7 @@ export function createSvaraLobby(deps: {
       insufficient_entry_balance: 'Нямаш достатъчно жълтици за входа на тази маса.',
       seat_released_insufficient_balance: 'Мачът не започна: играч без достатъчно жълтици освободи мястото си.',
       table_closed_insufficient_balance: 'Масата беше закрита: създателят няма достатъчно жълтици за входа.',
+      seat_taken: 'Мястото вече е заето. Избери друго свободно място.',
     }
     if (gameplay) deliver(transport, { type: 'svara_command_error', code, message: messages[code], ...(commandId ? { commandId } : {}) })
     else deliver(transport, { type: 'svara_lobby_error', code, message: messages[code], ...(requestId ? { requestId } : {}) })
@@ -659,6 +660,11 @@ export function createSvaraLobby(deps: {
         if (message.type === 'join_svara_table' && before.phase === 'lobby' && before.players.length >= before.capacity) {
           error(transport, 'table_full', requestId); return
         }
+        // Избрано място: проверка преди баланса и удържането (заето → без опит за старт).
+        if (message.type === 'join_svara_table' && before.phase === 'lobby' && message.seat !== undefined) {
+          if (message.seat >= before.capacity) { error(transport, 'invalid_input', requestId); return }
+          if (before.players.some((p) => p.seat === message.seat)) { error(transport, 'seat_taken', requestId); return }
+        }
         if (message.type === 'join_svara_table' && before.phase === 'lobby') {
           const balanceRefusal = entryBalanceRefusal(playerId, before.entryFee)
           if (balanceRefusal) { error(transport, balanceRefusal, requestId); return }
@@ -692,8 +698,9 @@ export function createSvaraLobby(deps: {
             // Масата остава активна и вече не е пълна → новият сяда (без старт).
             before = runtime.getPublicTable(message.matchId)
           }
+          const seat = message.type === 'join_svara_table' ? message.seat : undefined
           try {
-            runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, { type })
+            runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, seat === undefined ? { type } : { type, seat })
           } finally {
             refundIfNotStarted(message.matchId) // no-op, ако мачът е започнал или няма удържане
           }
@@ -715,7 +722,7 @@ export function createSvaraLobby(deps: {
             'wrong-phase': 'wrong_phase', 'command-id-conflict': 'command_id_conflict',
             'stale-action': 'stale_action', 'betting:not-your-turn': 'not_your_turn',
             'betting:insufficient-chips': 'insufficient_chips', 'betting:look-required': 'look_required',
-            'player-absent': 'player_absent', 'dealing-in-progress': 'dealing_in_progress',
+            'player-absent': 'player_absent', 'seat-taken': 'seat_taken', 'dealing-in-progress': 'dealing_in_progress',
           }
           reject(codes[cause.code] ?? (cause.code.startsWith('betting:') ? 'invalid_action' : 'server_unavailable'))
         } else {

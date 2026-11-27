@@ -258,8 +258,15 @@ export type SvaraMatchState = {
   entryChips: number
   /** 'closed' — масата е закрита преди старта (създателят напусна, случай №7). */
   phase: 'lobby' | 'in-progress' | 'finished' | 'closed'
-  /** Места по часовниковата стрелка (ред на присъединяване). */
+  /** Места по часовниковата стрелка: в чакалнята — по избраното място; след старта — случайната игрова подредба. */
   seats: string[]
+  /**
+   * Мястото (0..capacity-1) на всеки седнал. В чакалнята — избраното място
+   * (seats се пази подреден по него); при старта играчите се разбъркват
+   * случайно (shuffleSeatsForStart) и мястото става игровата позиция = индексът
+   * в seats. Липсва при по-стари мачове (тогава мястото е индексът в seats).
+   */
+  seatPositions?: Record<string, number>
   status: Record<string, SvaraSeatStatus>
   stacks: Record<string, number>
   totalChips: number
@@ -291,7 +298,7 @@ export type SvaraMatchState = {
 }
 
 export type SvaraMatchCommand =
-  | { type: 'join-seat'; commandId: string; playerId: string }
+  | { type: 'join-seat'; commandId: string; playerId: string; seat?: number }
   | { type: 'leave-seat'; commandId: string; playerId: string }
   | { type: 'start-match'; commandId: string; playerId: string }
   | { type: 'start-next-round'; commandId: string }
@@ -337,6 +344,7 @@ export type SvaraMatchErrorCode =
   | 'player-absent'
   | 'invariant-violation'
   | 'dealing-in-progress'
+  | 'seat-taken'
   | `betting:${string}`
 
 export class SvaraMatchError extends Error {
@@ -349,6 +357,13 @@ export class SvaraMatchError extends Error {
 export type SvaraMatchEnv = {
   /** Криптографски източник по подразбиране. */
   random?: SvaraRandomSource
+  /**
+   * Източникът за случайните игрови позиции при старта. Без него: production
+   * (без подаден random) → криптографски; детерминистичен тест с подаден
+   * random → позициите остават в реда от чакалнята (старите сценарии са
+   * изчислени спрямо него). Production никога не подава random (createSvaraLobby).
+   */
+  seatOrder?: SvaraRandomSource
   /**
    * Етап 4Б: сървърното време на командата (ms). Подава го runtime-ът; само
    * динамичното анте го ползва. Без него времевите увеличения не се прилагат.
@@ -497,6 +512,7 @@ export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; 
     entryChips,
     phase: 'lobby',
     seats: [input.creatorId],
+    seatPositions: { [input.creatorId]: 0 },
     status: { [input.creatorId]: 'active' },
     stacks: {},
     totalChips: 0,
@@ -526,8 +542,21 @@ export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; 
  * §9: свободни стекове + внесени в текущия рунд + заключени + пренесени +
  * извадени от играта = начални игрови чипове; салдата съвпадат с дневника.
  */
+/** Местата (ако са записани): точно седналите, различни номера 0..capacity-1, seats подреден по тях. */
+export function isValidSvaraSeatPositions(state: Pick<SvaraMatchState, 'seats' | 'seatPositions' | 'config'>): boolean {
+  const positions = state.seatPositions
+  if (positions === undefined) return true
+  if (!positions || typeof positions !== 'object' || Array.isArray(positions)) return false
+  const keys = Object.keys(positions)
+  if (keys.length !== state.seats.length || !state.seats.every((id) => Object.hasOwn(positions, id))) return false
+  const values = state.seats.map((id) => positions[id])
+  if (!values.every((value) => Number.isSafeInteger(value) && value! >= 0 && value! < state.config.capacity)) return false
+  return values.every((value, index) => index === 0 || value! > values[index - 1]!)
+}
+
 export function assertSvaraMatchInvariants(state: SvaraMatchState): void {
   const violation = (message: string) => fail('invariant-violation', message)
+  if (!isValidSvaraSeatPositions(state)) violation('seat positions')
   if (state.phase === 'lobby' || state.phase === 'closed') {
     if (state.ledger.length !== 0 || state.totalChips !== 0) violation('lobby must have no chips')
     if (state.phase === 'closed' && state.seats.length !== 0) violation('closed table must release all seats')
@@ -743,7 +772,7 @@ export function applySvaraMatchCommand(state: SvaraMatchState, command: SvaraMat
 function dispatch(ctx: Ctx): void {
   const { command } = ctx
   switch (command.type) {
-    case 'join-seat': return joinSeat(ctx, command.playerId)
+    case 'join-seat': return joinSeat(ctx, command.playerId, command.seat)
     case 'leave-seat': return leaveSeat(ctx, command.playerId)
     case 'start-match': return startMatchByCreator(ctx, command.playerId)
     case 'start-next-round': return startNextRound(ctx)
@@ -804,13 +833,22 @@ function dealTo(ctx: Ctx, players: string[]): Record<string, SvaraCardCode[]> {
 
 // ── Лоби (§3) ───────────────────────────────────────────────────────────────
 
-function joinSeat(ctx: Ctx, playerId: string): void {
+function joinSeat(ctx: Ctx, playerId: string, seat?: number): void {
   requirePhase(ctx, 'lobby')
   if (!isNonEmptyString(playerId)) fail('invalid-command', 'playerId required')
   const { state } = ctx
   if (state.seats.includes(playerId)) fail('not-allowed', `${playerId} is already seated`)
   if (state.seats.length >= state.config.capacity) fail('not-allowed', 'table is full')
-  state.seats.push(playerId)
+  if (seat !== undefined && (!Number.isSafeInteger(seat) || seat < 0 || seat >= state.config.capacity)) fail('invalid-command', 'seat out of range')
+  // По-стар мач без записани места: досегашните места са индексите в seats.
+  const positions = state.seatPositions ?? Object.fromEntries(state.seats.map((id, index) => [id, index]))
+  const taken = new Set(Object.values(positions))
+  if (seat !== undefined && taken.has(seat)) fail('seat-taken', `seat ${seat} is taken`)
+  let chosen = seat
+  if (chosen === undefined) for (let index = 0; index < state.config.capacity; index += 1) if (!taken.has(index)) { chosen = index; break }
+  positions[playerId] = chosen!
+  state.seatPositions = positions
+  state.seats = [...state.seats, playerId].sort((a, b) => positions[a]! - positions[b]!)
   state.status[playerId] = 'active'
   if (state.config.startMode === 'auto' && state.seats.length === state.config.capacity) startMatch(ctx)
 }
@@ -825,10 +863,12 @@ function leaveSeat(ctx: Ctx, playerId: string): void {
     ctx.state.phase = 'closed'
     ctx.state.seats = []
     ctx.state.status = {}
+    if (ctx.state.seatPositions) ctx.state.seatPositions = {}
     return
   }
   ctx.state.seats = ctx.state.seats.filter((id) => id !== playerId)
   delete ctx.state.status[playerId]
+  if (ctx.state.seatPositions) delete ctx.state.seatPositions[playerId]
 }
 
 function startMatchByCreator(ctx: Ctx, playerId: string): void {
@@ -839,8 +879,27 @@ function startMatchByCreator(ctx: Ctx, playerId: string): void {
   startMatch(ctx)
 }
 
+/**
+ * Игровите позиции се теглят случайно точно веднъж — при успешния старт
+ * (авто и ръчен минават оттук). Последователен избор от оставащите: при
+ * равномерен източник всяка подредба е еднакво вероятна, независимо от
+ * местата в чакалнята и от реда на присъединяване. Резултатът се записва в
+ * seats/seatPositions (и в базата); възстановяване/reconnect не минават оттук.
+ */
+function shuffleSeatsForStart(seats: readonly string[], random: SvaraRandomSource): string[] {
+  const remaining = [...seats]
+  const order: string[] = []
+  while (remaining.length > 1) order.push(remaining.splice(random.nextInt(remaining.length), 1)[0]!)
+  return [...order, ...remaining]
+}
+
 function startMatch(ctx: Ctx): void {
   const { state } = ctx
+  const random = ctx.env.random ?? createCryptoSvaraRandomSource()
+  const seatOrder = ctx.env.seatOrder ?? (ctx.env.random === undefined ? random : null)
+  if (seatOrder) state.seats = shuffleSeatsForStart(state.seats, seatOrder)
+  // След старта номерът на мястото е игровата позиция (по часовниковата стрелка).
+  state.seatPositions = Object.fromEntries(state.seats.map((id, index) => [id, index]))
   state.phase = 'in-progress'
   if (state.dynamicAnte) state.dynamicAnte.startedAt = ctx.env.now ?? null
   state.totalChips = state.startingChips * state.seats.length
@@ -849,7 +908,6 @@ function startMatch(ctx: Ctx): void {
     pushLedger(ctx, { type: 'starting-chips', from: 'buy-in', to: `stack:${id}`, amount: state.startingChips, roundId: null, potId: null, playerId: id })
   }
   // §4.1: първият дилър се избира случайно.
-  const random = ctx.env.random ?? createCryptoSvaraRandomSource()
   state.firstDealerId = state.seats[random.nextInt(state.seats.length)]!
 }
 

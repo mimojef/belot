@@ -1106,7 +1106,7 @@ export type CreateLobbyFlowControllerOptions = {
   /** Баланс от сървъра (/api/auth/me): старт (удържан вход), край (изплащане), напускане на масата. */
   onSvaraWalletRefresh?: () => void
   onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number, startMode: 'auto' | 'manual') => void
-  onSvaraTableJoin?: (matchId: string) => void
+  onSvaraTableJoin?: (matchId: string, seat?: number) => void
   onSvaraTableLeave?: (matchId: string) => void
   onSvaraTableStart?: (matchId: string) => void
   onSvaraTableStateRequest?: (matchId: string) => void
@@ -4214,7 +4214,7 @@ export function createLobbyFlowController(
         onOpenProfile: (profileId, displayNameHint) => { void openProtectedProfileById(profileId, displayNameHint, 'other') },
         onRefresh: () => options.onSvaraTablesOpen?.(),
         onCreate: (capacity, entryFee, startMode) => options.onSvaraTableCreate?.(capacity, entryFee, startMode),
-        onJoin: (matchId) => options.onSvaraTableJoin?.(matchId),
+        onJoin: (matchId, seat) => options.onSvaraTableJoin?.(matchId, seat),
         onLeave: (matchId) => options.onSvaraTableLeave?.(matchId),
         onStart: (matchId) => options.onSvaraTableStart?.(matchId),
         onRequestTableState: (matchId) => options.onSvaraTableStateRequest?.(matchId),

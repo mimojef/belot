@@ -95,7 +95,7 @@ console.log('\n[2] Приключили — от записаните snapshot-�
   check('1 приключил (последните 2 часа); старият и повреденият не се показват', list?.finished?.length === 1 && list.finished[0].matchId === 'fin-recent', list?.finished)
   const fin = list?.finished?.[0]
   check('данни: вход, играчи с имена, победител, време на приключване', fin?.entryFee === 5000 && fin.capacity === 2 && fin.winnerId === 'a2'
-    && JSON.stringify(fin.players.map((p: any) => p.displayName)) === JSON.stringify(['Име a1', 'Име a2']) && Math.abs(Date.now() - 10 * 60_000 - fin.finishedAt) < 5 * 60_000, fin)
+    && JSON.stringify(fin.players.map((p: any) => p.displayName).sort()) === JSON.stringify(['Име a1', 'Име a2']) /* игровият ред е случаен (разбъркване при старта) */ && Math.abs(Date.now() - 10 * 60_000 - fin.finishedAt) < 5 * 60_000, fin)
   const json = JSON.stringify(fin)
   check('без карти, банки и вътрешно състояние', !/hand|card|deck|stack|round|ledger|seed|absence/i.test(json), json)
 }

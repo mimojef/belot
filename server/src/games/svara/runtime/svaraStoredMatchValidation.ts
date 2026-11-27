@@ -1,4 +1,4 @@
-import { assertSvaraMatchInvariants, describeSvaraLifecycle, SVARA_ANTE_INTERVAL_MAX_MS, SVARA_ANTE_INTERVAL_MIN_MS, svaraAnteChipsFor, type SvaraMatchState } from '../engine/svaraMatch.js'
+import { assertSvaraMatchInvariants, describeSvaraLifecycle, isValidSvaraSeatPositions, SVARA_ANTE_INTERVAL_MAX_MS, SVARA_ANTE_INTERVAL_MIN_MS, svaraAnteChipsFor, type SvaraMatchState } from '../engine/svaraMatch.js'
 import { parseSvaraCardCode } from '../engine/svaraCards.js'
 import { svaraStartingChipsForEntry } from '../engine/svaraChips.js'
 import { planSvaraDeadlines } from './svaraDeadlines.js'
@@ -90,6 +90,8 @@ function validateStructure(state: SvaraMatchState): void {
   }
   require(strings(s.seats) && s.seats.length <= s.config.capacity && s.seats.every((id: string) => id.length <= 128))
   require(s.phase === 'closed' ? s.seats.length === 0 : s.seats.length > 0)
+  // Избраните места (липсват при по-стари записи).
+  require(isValidSvaraSeatPositions(s))
   require(object(s.status) && exactKeys(s.status, s.seats) && Object.values(s.status).every((status) => ['active', 'absent', 'exited', 'eliminated'].includes(status as string)))
   const started = s.phase === 'in-progress' || s.phase === 'finished'
   require(object(s.stacks) && amounts(s.stacks, s.seats) && exactKeys(s.stacks, started ? s.seats : []))

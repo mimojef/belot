@@ -487,10 +487,10 @@ try {
 
   await check('[T3] userB sees the real table in the list and joins -> BOTH see 2/2 WITHOUT manual refresh', async () => {
     await sessionB.page.waitForFunction(
-      () => Array.from(document.querySelectorAll('[data-svara-table-join]')).length > 0,
+      () => Array.from(document.querySelectorAll('[data-svara-seat-join]')).length > 0,
       undefined, { timeout: 10_000 },
     )
-    await sessionB.page.click('[data-svara-table-join]')
+    await sessionB.page.locator('[data-svara-seat-join]').first().click()
     await sessionB.page.waitForFunction(
       () => document.querySelector('[data-svara-lobby="1"]')?.textContent?.includes('2/2') ?? false,
       undefined, { timeout: 10_000 },
@@ -508,7 +508,7 @@ try {
     // userB returns to the list view, where userA's still-waiting table is
     // visible again as a joinable 1/2 card (NOT an empty list — userA never left).
     await sessionB.page.waitForFunction(
-      () => Array.from(document.querySelectorAll('[data-svara-table-join]')).length > 0
+      () => Array.from(document.querySelectorAll('[data-svara-seat-join]')).length > 0
         && (document.querySelector('[data-svara-lobby="1"]')?.textContent?.includes('1/2') ?? false),
       undefined, { timeout: 10_000 },
     )
@@ -520,10 +520,10 @@ try {
 
   await check('[T5] userB rejoins, host starts the real match -> BOTH reach active view; unlooked cards stay hidden (no look/bet UI exists in this sub-stage by design)', async () => {
     await sessionB.page.waitForFunction(
-      () => Array.from(document.querySelectorAll('[data-svara-table-join]')).length > 0,
+      () => Array.from(document.querySelectorAll('[data-svara-seat-join]')).length > 0,
       undefined, { timeout: 10_000 },
     )
-    await sessionB.page.click('[data-svara-table-join]')
+    await sessionB.page.locator('[data-svara-seat-join]').first().click()
     await sessionA.page.waitForFunction(
       () => document.querySelector('[data-svara-lobby="1"]')?.textContent?.includes('2/2') ?? false,
       undefined, { timeout: 10_000 },
@@ -924,7 +924,7 @@ try {
         hasLobbyRoot: document.querySelector('[data-svara-lobby="1"]') !== null,
         hasDiagnostics: document.querySelector('[data-svara-diagnostics]') !== null,
         hasCreateButton: document.querySelector('[data-svara-create-open]') !== null,
-        hasTableList: document.querySelector('[data-svara-table-join]') !== null,
+        hasTableList: document.querySelector('[data-svara-seat-join]') !== null,
         anchorCount: document.querySelectorAll('[data-svara-seat-anchor]').length,
         bodyTextSnippet: document.body.textContent?.slice(0, 300) ?? null,
       }))

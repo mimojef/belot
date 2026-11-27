@@ -9,7 +9,9 @@ export type SvaraLobbyClientMessage =
   | SvaraGameplayClientMessage
   | { type: 'request_svara_tables_list' }
   | { type: 'create_svara_table'; requestId: string; capacity: 2 | 3 | 4; entryFee: number; entryPercent: SvaraEntryPercent; startMode: SvaraStartMode }
-  | { type: 'join_svara_table' | 'leave_svara_table' | 'start_svara_table'; matchId: string; requestId: string }
+  /** seat — избраното свободно място (0..capacity-1); без него — първото свободно. */
+  | { type: 'join_svara_table'; matchId: string; requestId: string; seat?: number }
+  | { type: 'leave_svara_table' | 'start_svara_table'; matchId: string; requestId: string }
   | { type: 'request_svara_table_state'; matchId: string }
   // ВРЕМЕННО — тестови ботове (docs/svara-test-bots-local.md). Сървърът проверява флаг, роля admin и създател.
   | { type: 'fill_svara_table_with_bots'; matchId: string; requestId: string }
@@ -34,6 +36,8 @@ export type SvaraLobbyErrorCode =
   // Недостатъчен баланс за входа: собственият (създаване/сядане/освободено място)
   // и уведомленията към останалите при освобождаване/закриване преди старта.
   | 'insufficient_entry_balance' | 'seat_released_insufficient_balance' | 'table_closed_insufficient_balance'
+  // Избраното място вече е заето (едновременни заявки — печели първата).
+  | 'seat_taken'
 
 /** Приключил мач за раздела „Приключили“ — без карти и вътрешно състояние. */
 export type SvaraFinishedMatch = {
@@ -110,7 +114,13 @@ export function parseSvaraLobbyMessage(input: Record<string, unknown>): SvaraLob
     const entryPercent = SVARA_TEST_ENTRY_PERCENT
     return { type: input.type, requestId: input.requestId, capacity: input.capacity, entryFee: input.entryFee, entryPercent, startMode: input.startMode }
   }
-  if (input.type === 'join_svara_table' || input.type === 'leave_svara_table' || input.type === 'start_svara_table' || input.type === 'fill_svara_table_with_bots') {
+  if (input.type === 'join_svara_table') {
+    if (!validId(input.matchId)) return null
+    if (input.seat === undefined) return { type: input.type, matchId: input.matchId, requestId: input.requestId }
+    if (typeof input.seat !== 'number' || !Number.isSafeInteger(input.seat) || input.seat < 0 || input.seat > 3) return null
+    return { type: input.type, matchId: input.matchId, requestId: input.requestId, seat: input.seat }
+  }
+  if (input.type === 'leave_svara_table' || input.type === 'start_svara_table' || input.type === 'fill_svara_table_with_bots') {
     return validId(input.matchId) ? { type: input.type, matchId: input.matchId, requestId: input.requestId } : null
   }
   return null

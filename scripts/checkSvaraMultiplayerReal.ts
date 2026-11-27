@@ -16,6 +16,18 @@ import { SVARA_CARD_BACK_SRC, svaraCardCodeToFaceSrc } from '../src/app/games/sv
 
 const root = process.cwd(), host = 'svara-integration.localhost'
 const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+/**
+ * Изход от приключил мач през интерфейса. Прозорецът за края на мача покрива
+ * масата и има „Към лобито“ (същата команда leave_svara_table); иконата
+ * „Напусни“ (+ потвърждение) се ползва само ако такъв прозорец няма.
+ */
+async function exitFinishedTable(page: Page): Promise<void> {
+  const resultExit = page.locator('[data-svara-result-exit]')
+  if (await resultExit.waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)) { await resultExit.click(); return }
+  await page.locator('[data-svara-table-leave]').click()
+  // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
+  if (await page.locator('[data-svara-exit-confirm]').count()) await page.click('[data-svara-exit-confirm]')
+}
 type Frame = Record<string, any>
 type Peer = { id: string; context: BrowserContext; page: Page; frames: Frame[]; sent: Frame[]; faults: string[] }
 const reports: Array<{ scenario: string; status: string; transport: string; detail?: string; evidence?: unknown }> = []
@@ -226,7 +238,7 @@ async function game(count: 2 | 3 | 4) {
     await peers[0]!.page.click('[data-svara-create-form] button[type="submit"]')
     await wait('real created table', () => !!peers[0]!.frames.findLast((f) => f.type === 'svara_table_updated'), 5000)
     matchId = peers[0]!.frames.findLast((f) => f.type === 'svara_table_updated')!.table.matchId
-    for (const p of peers.slice(1)) await p.page.locator(`[data-svara-table-join="${matchId}"]`).click()
+    for (const [index, p] of peers.slice(1).entries()) await p.page.locator(`[data-svara-seat-join="${matchId}:${index + 1}"]`).click()
     await peers[0]!.page.locator('[data-svara-table-start]:not([disabled])').click()
     for (const p of peers) await p.page.waitForSelector('[data-svara-diagnostics]')
     await sync()
@@ -347,9 +359,7 @@ async function game(count: 2 | 3 | 4) {
     const requests: Frame[] = []
     const exit = async (p: Peer) => {
       const offset = p.frames.length
-      await p.page.locator('[data-svara-table-leave]').click()
-      // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
-      if (await p.page.locator('[data-svara-exit-confirm]').count()) await p.page.click('[data-svara-exit-confirm]')
+      await exitFinishedTable(p.page)
       await wait('actual UI leave command sent', () => p.sent.some((f) => f.type === 'leave_svara_table' && f.matchId === matchId), 5000)
       const request = p.sent.findLast((f) => f.type === 'leave_svara_table' && f.matchId === matchId)!
       requests.push(request)
@@ -552,9 +562,7 @@ try {
     await g.raw(p, { type: 'request_svara_table_state', matchId: oldMatch }, (f) => f.type === 'svara_match_timing')
     await wait('original native snapshot and timing held', () => p.page.evaluate(() => (globalThis as any).__svaraHeld.length === 2), 2000)
     await p.page.evaluate(() => { (globalThis as any).__svaraHold = false })
-    await p.page.click('[data-svara-table-leave]')
-    // Активна маса: иконата за изход първо отваря потвърждение — „Напусни“.
-    if (await p.page.locator('[data-svara-exit-confirm]').count()) await p.page.click('[data-svara-exit-confirm]')
+    await exitFinishedTable(p.page)
     await wait('real exit cleared old table', async () => await p.page.locator('[data-svara-diagnostics]').count() === 0, 3000)
     await p.page.click('[data-svara-create-open]'); await p.page.click('[data-svara-create-form] button[type="submit"]')
     await p.page.waitForSelector('[data-svara-table-leave]')

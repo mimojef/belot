@@ -241,8 +241,8 @@ try {
   // B. Смесена маса: 2 души + 1 бот, „При запълване“; subadmin не вижда бутона
   {
     const matchId = await createViaUi(admin, 3, 'auto')
-    await other.page.waitForSelector(`[data-svara-table-join="${matchId}"]`, { timeout: 5000 })
-    await other.page.click(`[data-svara-table-join="${matchId}"]`)
+    await other.page.waitForSelector(`[data-svara-seat-join^="${matchId}:"]`, { timeout: 5000 })
+    await other.page.locator(`[data-svara-seat-join^="${matchId}:"]`).first().click()
     await wait('human joined', () => stored(matchId).state.seats.includes(other.id), 5000)
     await other.page.waitForSelector('[data-svara-waiting]')
     assert.equal(await other.page.locator('[data-svara-table-fill-bots]').count(), 0, 'not the creator: no button')
