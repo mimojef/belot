@@ -229,9 +229,26 @@ export function createSvaraLobby(deps: {
     return { displayName: profile?.displayName?.trim() || null, avatarUrl: profile?.avatarUrl?.trim() || null, ...(gender ? { gender } : {}) }
   }
 
+  /**
+   * Финансовият резултат на приключил платен мач — точно от svara_match_finance
+   * (сумата при 'paid' е наградата от фиксираните условия, която settleMatch
+   * изплаща). Без запис (неплатена маса) — няма поле; никакво клиентско смятане.
+   */
+  function tablePayout(table: SvaraPublicTable): SvaraPublicTable['payout'] | undefined {
+    if (!paidEconomy || table.phase !== 'finished') return undefined
+    try {
+      const finance = paidEconomy.getFinance(table.matchId)
+      if (!finance) return undefined
+      if (finance.status !== 'paid') return { status: finance.status === 'collected' ? 'pending' : finance.status, winnerId: null, amount: null }
+      const prize = (JSON.parse(finance.termsJson) as { prizes: number[] }).prizes[0]
+      return { status: 'paid', winnerId: finance.winnerProfileId, amount: typeof prize === 'number' && Number.isSafeInteger(prize) && prize > 0 ? prize : null }
+    } catch (cause) { deps.onError?.(cause); return undefined }
+  }
+
   function tableWithProfiles(table: SvaraPublicTable, fillViewerId: string | null = null): SvaraPublicTable {
     const canFill = fillViewerId !== null && fillViewerId === table.creatorId && table.phase === 'lobby' && table.players.length < table.capacity
-    return { ...table, ...(canFill ? { testBotFill: true } : {}), prizeAmount: tablePrize(table), paid: paidMode, players: table.players.map(({ playerId, status }) => ({ playerId, status, ...presentPlayer(playerId) })) }
+    const payout = tablePayout(table)
+    return { ...table, ...(canFill ? { testBotFill: true } : {}), ...(payout ? { payout } : {}), prizeAmount: tablePrize(table), paid: paidMode, players: table.players.map(({ playerId, status }) => ({ playerId, status, ...presentPlayer(playerId) })) }
   }
 
   /** Раздел „Приключили“: завършените мачове от последните часове (от записаните snapshot-и). */

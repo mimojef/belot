@@ -67,6 +67,13 @@ export type SvaraPublicTable = {
   prizeAmount?: number | null
   /** Етап 3В.2: true — платена маса (реално удържане и изплащане). */
   paid?: boolean
+  /**
+   * Финансовият резултат на ПРИКЛЮЧИЛ платен мач (добавя се от lobby при
+   * доставка, от svara_match_finance): 'paid' — изплатено (amount = реално
+   * изплатената награда); 'held' — задържано за преглед; 'pending' — още
+   * неуредено; 'refunded' — върнати входове. Липсва при неплатена маса.
+   */
+  payout?: { status: 'paid' | 'held' | 'pending' | 'refunded'; winnerId: string | null; amount: number | null }
 }
 
 /** Explicit public whitelist; never copies cards or internal state. */

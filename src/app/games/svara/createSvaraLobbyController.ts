@@ -18,6 +18,7 @@ import type {
   SvaraStartMode,
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
+import { resolveSvaraMatchEndOutcome, SVARA_MATCH_END_ANIMATION_MS } from './table/svaraMatchEndPopup'
 import { detectSvaraAnteChange, formatSvaraAnteCountdown, SVARA_ANTE_FLASH_MS, type SvaraAnteSeen } from './table/svaraAnteIndicator'
 import { DESKTOP_CREATE_CARD_STYLE, DESKTOP_CREATE_THEME_ATTRIBUTE, ensureMobileCreateFormStyles, MOBILE_CREATE_CARD_STYLE, MOBILE_CREATE_ICONS, renderMobileCreateHeader, renderMobileCreateSegmented, renderMobileCreateSelect, renderMobileCreateSubmit } from '../../lobby/mobileCreateForm'
 import { bindMobileEntryPicker, mobileEntryPickerCardAttributes, renderMobileEntryPickerField, renderMobileEntryPickerScreen, type MobileEntryPickerConfig, type MobileEntryPickerState } from '../../lobby/mobileEntryPicker'
@@ -695,6 +696,30 @@ export function createSvaraLobbyController(options: Options) {
     }
   }
 
+  // Прозорците при отпадане/край на мача (27.11.2026): кога е показан за
+  // първи път (анимациите — само тогава) и дали отпадането вече е видяно.
+  // В sessionStorage — без повторна анимация/втори прозорец при повторни
+  // съобщения, remount, reconnect или refresh.
+  const MATCH_END_STORAGE_KEY = 'svara-match-end-seen'
+  const matchEndSeen: Record<string, number> = (() => {
+    try { return JSON.parse(sessionStorage.getItem(MATCH_END_STORAGE_KEY) ?? '{}') as Record<string, number> } catch { return {} }
+  })()
+  function rememberMatchEnd(key: string, at: number): number {
+    const existing = matchEndSeen[key]
+    if (typeof existing === 'number') return existing
+    matchEndSeen[key] = at
+    try { sessionStorage.setItem(MATCH_END_STORAGE_KEY, JSON.stringify(matchEndSeen)) } catch { /* без памет — пак работи */ }
+    return at
+  }
+  function matchEndHints(table: SvaraPublicTable): { eliminatedEarlier: boolean; animate: boolean } {
+    const eliminatedEarlier = typeof matchEndSeen[`${table.matchId}:eliminated`] === 'number'
+    const outcome = resolveSvaraMatchEndOutcome({ snapshot, table, localProfileId: options.localProfileId, eliminatedEarlier })
+    if (!outcome) return { eliminatedEarlier, animate: false }
+    const now = Date.now()
+    const first = rememberMatchEnd(`${table.matchId}:${outcome.kind}`, now)
+    return { eliminatedEarlier, animate: now - first < SVARA_MATCH_END_ANIMATION_MS }
+  }
+
   function activeTableInput(table: SvaraPublicTable): RenderSvaraActiveTableInput {
     const serverNow = sharedServerClock.getServerNow()
     const dealingDeadlineAt = timing?.deadlines.find((deadline) => deadline.kind === 'dealing')?.deadlineAt ?? null
@@ -727,6 +752,7 @@ export function createSvaraLobbyController(options: Options) {
       settingsOpen,
       exitConfirmOpen,
       gameSoundsEnabled: isGameSoundsEnabled(),
+      matchEnd: matchEndHints(table),
     }
   }
 

@@ -1324,6 +1324,8 @@ export type SvaraPublicTable = {
   testBotFill?: boolean
   /** Етап 3В.2: наградата за победителя, изчислена от сървъра (null/липсва — не се показва). */
   prizeAmount?: number | null
+  /** Финансовият резултат на приключил платен мач (сървърен; виж server SvaraPublicTable.payout). */
+  payout?: { status: 'paid' | 'held' | 'pending' | 'refunded'; winnerId: string | null; amount: number | null }
   /** Етап 3В.2: true — платена маса. */
   paid?: boolean
 }

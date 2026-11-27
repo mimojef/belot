@@ -183,6 +183,14 @@ function makeLobby(store: Awaited<ReturnType<typeof createSvaraMatchSnapshotStor
   return { lobby, frames, attach }
 }
 const last = (frames: Frames, id: string, type: string) => frames.get(id)!.findLast((f) => f.type === type)
+/** Последната доставена версия на масата (svara_table_updated или списъкът). */
+const lastTable = (frames: Frames, id: string, matchId: string) => {
+  for (const f of [...(frames.get(id) ?? [])].reverse()) {
+    if (f.type === 'svara_table_updated' && f.table?.matchId === matchId) return f.table
+    if (f.type === 'svara_tables_list') { const t = f.tables?.find((x: any) => x.matchId === matchId); if (t) return t }
+  }
+  return null
+}
 
 console.log('\n[7] Lobby: удържане при действителния старт (не при създаване)')
 const lobbyStore = await createSvaraMatchSnapshotStore(dbPath)
@@ -259,8 +267,10 @@ console.log('\n[8] Рестарт по време на финансова опе
   check('доброволен изход на двама → мачът приключва с победител L3 (правилата на играта)', ended?.state.phase === 'finished' && ended.state.winnerId === 'L3', ended?.state.phase)
   check('уреждането „се срина“ → статусът е още collected, никой не е платен', economy.getFinance(matchA)?.status === 'collected' && balance('L3') === START - 20_000)
   check('доброволно напускане след старта не връща входа', balance('L1') === START - 20_000 && balance('L2') === START - 20_000)
+  // Прозорецът при край (27.11.2026): неуредено изплащане → без сума като изплатена.
+  const pendingTable = lastTable(frames, 'L3', matchA)
+  check('край без уредено изплащане: масата носи payout pending, без сума', pendingTable?.phase === 'finished' && pendingTable?.payout?.status === 'pending' && pendingTable?.payout?.amount === null, JSON.stringify(pendingTable?.payout))
   crashLobby.shutdown()
-  void frames
 
   // „Рестарт“: ново lobby + реалната икономика.
   const restartStore = await createSvaraMatchSnapshotStore(dbPath)
@@ -275,6 +285,25 @@ console.log('\n[8] Рестарт по време на финансова опе
   check('втори рестарт → без второ изплащане/връщане', balance('L3') === START - 20_000 + 48_000 && balance('C1') === START
     && ledgerRows(matchA).filter((r) => r.entry_type === 'svara_winner_payout').length === 1 && ledgerRows('crash-before-start').filter((r) => r.entry_type === 'svara_entry_refund').length === 2)
   second.shutdown()
+}
+
+console.log('\n[8б] Прозорецът при край: масата носи реално изплатената награда (27.11.2026)')
+{
+  for (const id of ['W1', 'W2']) profile(id)
+  const { lobby, frames, attach } = makeLobby(lobbyStore, economy, clock)
+  lobby.initializeRecovery()
+  attach('W1'); attach('W2')
+  lobby.handle('W1', { type: 'create_svara_table', requestId: randomUUID(), capacity: 2, entryFee: 5_000, entryPercent: 1, startMode: 'auto' } as never)
+  const matchId = last(frames, 'W1', 'svara_table_updated').table.matchId as string
+  lobby.handle('W2', { type: 'join_svara_table', matchId, requestId: randomUUID() } as never)
+  lobby.handle('W1', { type: 'leave_svara_table', matchId, requestId: randomUUID() } as never)
+  clock.advance(10 * 60_000)
+  const finance = economy.getFinance(matchId)
+  const table = lastTable(frames, 'W2', matchId)
+  check('изплатено: payout paid, победител W2, сумата = реално изплатената (8 000)', finance?.status === 'paid' && table?.phase === 'finished' && table?.payout?.status === 'paid'
+    && table?.payout?.winnerId === 'W2' && table?.payout?.amount === 8_000 && balance('W2') === START - 5_000 + 8_000,
+  JSON.stringify({ status: finance?.status, phase: table?.phase, payout: table?.payout }))
+  lobby.shutdown()
 }
 
 console.log('\n[9] Възстановяване: без победител и нечетим мач (reconcile)')

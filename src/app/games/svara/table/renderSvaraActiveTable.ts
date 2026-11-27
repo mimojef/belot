@@ -22,6 +22,7 @@ import type {
 } from '../../../network/createGameServerClient'
 import { computeSvaraRingState, SVARA_DEADLINE_LABEL, SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
 import { svaraPlaceholderAvatarSrc, svaraPlaceholderName } from './svaraTableAssets'
+import { renderSvaraMatchEndPopupHtml, resolveSvaraMatchEndOutcome } from './svaraMatchEndPopup'
 import { deriveSvaraActionButtons, type SvaraActionButton } from './svaraBettingActions'
 import { formatSvaraLastBetBadge, getLastSvaraBetBadge } from './svaraBettingBadges'
 import { svaraDealingAnimationMs, type SvaraDealingVisualState } from './svaraTableAnimation'
@@ -73,6 +74,12 @@ export type RenderSvaraActiveTableInput = {
   settingsOpen?: boolean
   /** Отворен ли е прозорецът за потвърждение на напускането (иконата за изход). */
   exitConfirmOpen?: boolean
+  /**
+   * Прозорците при отпадане/край на мача (svaraMatchEndPopup.ts):
+   * eliminatedEarlier — вече е показано отпадането за този мач в сесията;
+   * animate — първо показване (анимациите тръгват само тогава).
+   */
+  matchEnd?: { eliminatedEarlier: boolean; animate: boolean }
   /** Общата настройка „Звуци в играта“ (gameSoundSettings.ts). */
   gameSoundsEnabled?: boolean
 }
@@ -511,12 +518,12 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   const snapshot = input.snapshot && input.snapshot.matchId === table.matchId ? input.snapshot : null
   const timing = input.timing && input.timing.matchId === table.matchId ? input.timing : null
 
-  // Приключил/прекратен мач: банерът е в центъра, над сцената, с ясен „Изход“.
-  const resultBanner = snapshot?.result.finished
-    ? `<div data-svara-result-banner="1" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:30;width:max-content;max-width:80%;text-align:center;background:rgba(0,0,0,.88);border:1px solid rgba(212,165,32,.6);border-radius:10px;padding:10px 14px;font-size:clamp(11px,3vw,14px);font-weight:800;color:#f4c95b;">
-        <div>${esc(snapshot.result.message ?? 'Мачът приключи.')}</div>
-        <button data-svara-result-exit="1" ${input.leavePending ? 'disabled' : ''} style="margin-top:8px;min-height:34px;padding:0 18px;border-radius:8px;border:1px solid rgba(244,201,91,.6);background:#d4a520;color:#1a1200;font-size:13px;font-weight:900;cursor:pointer;${input.leavePending ? 'opacity:.55;cursor:wait;' : ''}">${input.leavePending ? 'Излизане…' : 'Изход'}</button>
-      </div>`
+  // Отпадане / край на мача (27.11.2026): прозорец над цялата маса с
+  // „Към лобито“ (същият изход data-svara-result-exit); изходът — само от
+  // сървърните данни (виж resolveSvaraMatchEndOutcome).
+  const matchEndOutcome = resolveSvaraMatchEndOutcome({ snapshot, table, localProfileId: input.localProfileId, eliminatedEarlier: input.matchEnd?.eliminatedEarlier ?? false })
+  const resultBanner = matchEndOutcome
+    ? renderSvaraMatchEndPopupHtml(matchEndOutcome, { animate: input.matchEnd?.animate ?? false, leavePending: input.leavePending })
     : ''
 
   // Реалните разрешени действия ТОЧНО от you.betting; „Върни се“ е независим
@@ -535,11 +542,11 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
     ${topBarHtml(input)}
     <div data-svara-felt="1" data-svara-scene-host="1" style="position:relative;flex:0 0 auto;min-height:240px;">
       ${renderSvaraAnteIndicatorHtml(snapshot, input.serverNow)}
-      ${resultBanner}
       <div data-svara-diagnostics="1" style="${SR_ONLY}">rev ${snapshot?.revision ?? '—'}</div>
     </div>
     ${actionBar}
     <div data-svara-decision-mount="1" data-structure-key="${esc(svaraDecisionStructureKey(decisionWindow, decisionPending, decisionMessage))}" style="position:absolute;inset:${SVARA_TOP_BAR_HEIGHT_PX + 2}px 6px 6px;display:grid;place-items:center;pointer-events:none;z-index:40;">${renderSvaraDecisionWindow(decisionWindow, decisionPending, decisionMessage)}</div>
+    ${resultBanner}
     ${settingsMountHtml(input)}
     ${exitConfirmMountHtml(input)}
   </div>`
