@@ -2292,6 +2292,7 @@ export type CrossGameCommitmentLocation =
   | { gameType: 'ludo'; kind: 'active_match'; matchId: string }
   | { gameType: 'belot'; kind: 'waiting_room'; privateRoomId: string }
   | { gameType: 'belot'; kind: 'matchmaking'; stake: MatchStake }
+  | { gameType: 'svara'; kind: 'waiting_room' | 'active_match'; matchId: string }
 
 export type CrossGameCommitmentBlockedMessage = {
   type: 'cross_game_commitment_blocked'

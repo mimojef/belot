@@ -1740,6 +1740,8 @@ export type LobbyFlowController = {
   navigateToSvaraTables: () => void
   /** Лобито на „Не се сърди човече“ (/games/ludo; при изключен флаг — „Игри“). */
   navigateToLudoLobby: () => void
+  /** Отказ „Вече участвате в друга игра“ (общ попъп): освобождава чакащите бутони в лобитата на игрите. */
+  releasePendingGameRequests: () => void
   // Belot Spectator Mode ("Гледай", Phase 3A) — session state getters +
   // explicit unwatch, за Phase 3B wiring и тестове (виж §7/§11 брифа).
   getSpectatingBelotRoomId: () => string | null
@@ -26010,6 +26012,7 @@ export function createLobbyFlowController(
     navigateToPrivateRooms,
     navigateToSvaraTables: () => showSvaraPage(),
     navigateToLudoLobby: () => showLudoLobbyPage(),
+    releasePendingGameRequests: () => { _svaraLobbyController?.showMessage('') },
     navigateToTournamentDetail: (tournamentId: string) => {
       showTournamentDetail(tournamentId)
     },

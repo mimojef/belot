@@ -210,6 +210,13 @@ async function ask(client: Client, payload: any, type: string) {
   send(client, payload)
   return frame(client, (f) => f.type === type && (!payload.requestId || f.requestId === payload.requestId))
 }
+/** Общият отказ при участие в друга игра (28.11.2026): попъп с „Виж“ към съществуващата маса. */
+async function blockedBy(client: Client, payload: any, gameType: string) {
+  send(client, payload)
+  const result = await frame(client, (f) => f.type === 'cross_game_commitment_blocked')
+  assert.equal(result.location.gameType, gameType, JSON.stringify(result))
+  return result
+}
 async function denied(client: Client, payload: any, code: string) {
   const result = await ask(client, payload, 'svara_lobby_error')
   assert.equal(result.code, code)
@@ -404,8 +411,7 @@ try {
       assert.equal((await frame(client, (f) => f.type === 'svara_command_error')).code, code)
     }
     // No wallet mutation; disconnect retains commitment and reverse guards.
-    send(reconnected, { type: 'join_matchmaking', stake: 5000 })
-    assert.equal((await frame(reconnected, (f) => f.type === 'error')).code, 'svara_commitment_active')
+    assert.equal((await blockedBy(reconnected, { type: 'join_matchmaking', stake: 5000 }, 'svara')).location.kind, 'active_match')
     db((database) => database.prepare("UPDATE accounts SET role = 'player' WHERE email = ?").run(passive.email!))
     // Загубен достъп по време на мач: собственият мач може да се довърши (не се
     // прекъсва), но нова маса / присъединяване — не.
@@ -434,16 +440,15 @@ try {
       { type: 'create_private_room', stake: 5000, waitMinutes: 5 },
       { type: 'join_private_room', privateRoomId: 'missing', team: 'A', slotIndex: 0 },
     ]) {
-      send(a, payload)
-      const result = await frame(a, (f) => f.type === 'error')
-      assert.equal(result.code, 'svara_commitment_active', JSON.stringify(result))
+      const result = await blockedBy(a, payload, 'svara')
+      assert.deepEqual(result.location, { gameType: 'svara', kind: 'waiting_room', matchId: id }, JSON.stringify(result))
     }
     await leave(a, id)
     send(a, { type: 'create_ludo_room', stake: 5000, playerCount: 2, manualStart: true })
     const ludo = await frame(a, (f) => f.type === 'ludo_room_updated')
-    await denied(a, create(), 'other_game_commitment')
+    assert.equal((await blockedBy(a, create(), 'ludo')).location.ludoRoomId, ludo.room.id)
     const target = await createTable(b)
-    await denied(a, command('join_svara_table', target), 'other_game_commitment')
+    assert.equal((await blockedBy(a, command('join_svara_table', target), 'ludo')).location.ludoRoomId, ludo.room.id)
     // Existing Ludo -> Belot waiting-room guard remains intact.
     send(a, { type: 'create_private_room', stake: 5000, waitMinutes: 5 })
     const blocked = await frame(a, (f) => f.type === 'cross_game_commitment_blocked')
@@ -451,11 +456,11 @@ try {
     send(a, { type: 'leave_ludo_room' }); await frame(a, (f) => f.type === 'ludo_room_left')
     send(a, { type: 'create_private_room', stake: 5000, waitMinutes: 5 })
     await frame(a, (f) => f.type === 'private_room_updated')
-    await denied(a, create(), 'other_game_commitment')
+    assert.equal((await blockedBy(a, create(), 'belot')).location.kind, 'waiting_room')
     send(a, { type: 'leave_private_room' }); await frame(a, (f) => f.type === 'private_room_left')
     send(a, { type: 'join_matchmaking', stake: 5000 })
     await frame(a, (f) => f.type === 'matchmaking_joined')
-    await denied(a, command('join_svara_table', target), 'other_game_commitment')
+    assert.equal((await blockedBy(a, command('join_svara_table', target), 'belot')).location.kind, 'matchmaking')
     send(a, { type: 'leave_matchmaking' }); await frame(a, (f) => f.type === 'matchmaking_left')
     await joinTable(a, target); await leave(a, target); await leave(b, target)
   })
@@ -487,14 +492,16 @@ try {
     const belot = await user(), ludoHost = await user(), ludoGuest = await user()
     send(belot, { type: 'create_room' })
     await frame(belot, (f) => f.type === 'room_created')
-    await denied(belot, create(), 'other_game_commitment')
+    // Активен Белот мач → съществуващото възстановяване (session_in_game), не нова маса.
+    send(belot, create())
+    await frame(belot, (f) => f.type === 'session_in_game')
     send(ludoHost, { type: 'create_ludo_room', stake: 5000, playerCount: 2, manualStart: false })
     const room = await frame(ludoHost, (f) => f.type === 'ludo_room_updated')
     send(ludoGuest, { type: 'join_ludo_room', ludoRoomId: room.room.id })
     const match = await frame(ludoHost, (f) => f.type === 'ludo_game_started')
     await frame(ludoGuest, (f) => f.type === 'ludo_game_started')
-    await denied(ludoHost, create(), 'other_game_commitment')
-    await denied(ludoGuest, create(), 'other_game_commitment')
+    assert.equal((await blockedBy(ludoHost, create(), 'ludo')).location.kind, 'active_match')
+    assert.equal((await blockedBy(ludoGuest, create(), 'ludo')).location.kind, 'active_match')
     send(ludoGuest, { type: 'leave_ludo_match', matchId: match.snapshot.matchId })
     await frame(ludoGuest, (f) => f.type === 'ludo_match_left')
   })

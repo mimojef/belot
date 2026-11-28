@@ -8887,6 +8887,12 @@ function navigateToCrossGameCommitment(location: CrossGameCommitmentLocation): v
     }
     return
   }
+  if (location.gameType === 'svara') {
+    // Чакаща маса и започнал мач: страницата на „Свара“ сама разпознава
+    // собствената маса (svara_tables_list) и възстановява мача — без нова заявка.
+    lobby.navigateToSvaraTables()
+    return
+  }
   if (location.kind === 'waiting_room') {
     lobby.goToPrivateRoomWaiting()
   } else {
@@ -9685,6 +9691,8 @@ client = createGameServerClient({
     }
 
     if (message.type === 'cross_game_commitment_blocked') {
+      // Отказаното сядане не оставя бутона „+“ да чака отговор (без премигване/повторен опит).
+      lobby.releasePendingGameRequests()
       showCrossGameCommitmentModal(message.location)
       return
     }

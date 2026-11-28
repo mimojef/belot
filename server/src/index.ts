@@ -8567,6 +8567,37 @@ function findActiveLudoCommitment(profileId: string): CrossGameCommitmentLocatio
   return null
 }
 
+/**
+ * Свара: чакаща маса или започнал мач. { matchId: '' } (недостъпно хранилище) няма
+ * местоположение → null; извикващите пазят отделния fail-closed отказ.
+ */
+function findActiveSvaraCommitment(profileId: string): CrossGameCommitmentLocation | null {
+  const commitment = svaraLobby.findCommitment(profileId) as { matchId?: unknown; phase?: unknown } | null
+  if (commitment === null || typeof commitment.matchId !== 'string' || commitment.matchId === '') return null
+  return { gameType: 'svara', kind: commitment.phase === 'lobby' ? 'waiting_room' : 'active_match', matchId: commitment.matchId }
+}
+
+/**
+ * Общият отказ „Вече участвате в друга игра“ (cross_game_commitment_blocked —
+ * попъп с „Виж“ към съществуващата маса). Нова игра: ред тук с нейния търсач +
+ * клон в клиентския navigateToCrossGameCommitment (main.ts).
+ */
+const CROSS_GAME_COMMITMENT_FINDERS: ReadonlyArray<readonly [CrossGameCommitmentLocation['gameType'], (profileId: string) => CrossGameCommitmentLocation | null]> = [
+  ['belot', (profileId) => findActiveBelotCommitment(profileId)],
+  ['ludo', (profileId) => findActiveLudoCommitment(profileId)],
+  ['svara', (profileId) => findActiveSvaraCommitment(profileId)],
+]
+
+/** Участие в ДРУГА игра (не forGame) с местоположение за бутона „Виж“; иначе null. */
+function findCrossGameCommitment(profileId: string, forGame: CrossGameCommitmentLocation['gameType']): CrossGameCommitmentLocation | null {
+  for (const [gameType, find] of CROSS_GAME_COMMITMENT_FINDERS) {
+    if (gameType === forGame) continue
+    const location = find(profileId)
+    if (location !== null) return location
+  }
+  return null
+}
+
 function findActiveBelotCommitment(profileId: string): CrossGameCommitmentLocation | null {
   const room = privateRoomsStore.getRoomByProfileId(profileId)
   if (room !== null) return { gameType: 'belot', kind: 'waiting_room', privateRoomId: room.id }
@@ -27500,6 +27531,15 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       }
 
       if (SVARA_LOBBY_MESSAGE_TYPES.has(message.type)) {
+        // Сядане/създаване в „Свара“ при участие в друга игра: същият отказ като
+        // в Белот/Човече — активен Белот мач → възстановяване (session_in_game),
+        // чакаща маса/опашка/мач другаде → попъп с „Виж“. Само за профил с
+        // достъп до „Свара“ (иначе лобито отказва достъпа както досега).
+        if ((message.type === 'create_svara_table' || message.type === 'join_svara_table') && svaraLobby.canConnectionAccess(connection.id)) {
+          const profileId = getConnectionById(serverState, connection.id)?.profileId
+          if (profileId && (sendSessionInGameIfNeeded(connection.id, profileId) ||
+              sendCrossGameCommitmentBlockedIfNeeded(connection.id, findCrossGameCommitment(profileId, 'svara')))) return
+        }
         svaraLobby.handle(connection.id, message as SvaraLobbyClientMessage, isServerShuttingDown)
         return
       }
@@ -27507,6 +27547,9 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
       if (SVARA_OTHER_GAME_ADMISSION_TYPES.has(message.type) &&
           !(message.type === 'respond_private_room_invite' && !message.accept)) {
         const profileId = getConnectionById(serverState, connection.id)?.profileId
+        // Маса/мач в „Свара“ → общият попъп с „Виж“ (както Белот/Човече).
+        if (profileId && sendCrossGameCommitmentBlockedIfNeeded(connection.id, findActiveSvaraCommitment(profileId))) return
+        // Недостъпно хранилище (без местоположение) → досегашният fail-closed отказ.
         if (profileId && svaraLobby.findCommitment(profileId) !== null) {
           safeSendToConnection(connection.id, {
             type: 'error', code: 'svara_commitment_active',

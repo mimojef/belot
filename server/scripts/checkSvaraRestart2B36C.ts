@@ -405,7 +405,7 @@ try {
     same(saved(matchId), pending, 'Pending return changed during restart'); const restoredAbsent = peers.find((p) => p.user.profileId === absentId)!
     assert.equal((await snapshot(restoredAbsent, matchId)).you.returnPending, true)
     for (const message of [{ type: 'create_ludo_room', stake: 5000, playerCount: 2, manualStart: true }, { type: 'create_private_room', stake: 5000, waitMinutes: 5 }]) {
-      send(restoredAbsent, message); const denied = await frame(restoredAbsent, (f) => f.type === 'error'); assert.equal(denied.code, 'svara_commitment_active')
+      send(restoredAbsent, message); const denied = await frame(restoredAbsent, (f) => f.type === 'cross_game_commitment_blocked'); assert.deepEqual(denied.location, { gameType: 'svara', kind: 'active_match', matchId })
     }
     assert.equal((await play(restoredAbsent, matchId, { type: 'look' })).code, 'player_absent')
     const nextPlayer = peers.find((p) => p.user.profileId === saved(matchId).deadlines[0]!.playerId)!

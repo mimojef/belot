@@ -1323,6 +1323,9 @@ export type CrossGameCommitmentLocation =
   | { gameType: 'ludo'; kind: 'active_match'; matchId: string }
   | { gameType: 'belot'; kind: 'waiting_room'; privateRoomId: string }
   | { gameType: 'belot'; kind: 'matchmaking'; stake: MatchStake }
+  // Свара: чакаща маса или започнал мач (клиентът отваря /games/svara — страницата
+  // сама разпознава собствената маса и възстановява мача).
+  | { gameType: 'svara'; kind: 'waiting_room' | 'active_match'; matchId: string }
 
 export type CrossGameCommitmentBlockedMessage = {
   type: 'cross_game_commitment_blocked'
