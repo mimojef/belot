@@ -420,6 +420,25 @@ export type ClientMessage =
       body: string
       requestId?: string
     }
+  // Общият чат на чакалните (Етап 1; server/src/tables/tableChatService.ts).
+  // gameId/tableId от клиента само се сравняват с авторитетното участие.
+  | {
+      type: 'subscribe_table_chat'
+      gameId: string
+      tableId: string
+    }
+  | {
+      type: 'unsubscribe_table_chat'
+      gameId: string
+      tableId: string
+    }
+  | {
+      type: 'send_table_chat_message'
+      gameId: string
+      tableId: string
+      body: string
+      requestId?: string
+    }
   | {
       type: 'subscribe_lobby_chat'
     }
@@ -1928,6 +1947,35 @@ export type PrivateRoomChatErrorMessage = {
   reason?: string
 }
 
+// --- Общ чат на чакалните (Етап 1). Същото съдържание като private_room_chat_*,
+// но с gameId + tableId (изолация по игра и маса). Белот продължава да
+// разпраща private_room_chat_message (кешираните PWA клиенти). ---
+
+export type TableChatHistoryMessage = {
+  type: 'table_chat_history'
+  gameId: string
+  tableId: string
+  messages: PrivateRoomChatMessageSnapshot[]
+}
+
+export type TableChatMessageReceivedMessage = PrivateRoomChatMessageSnapshot & {
+  type: 'table_chat_message'
+  gameId: string
+  tableId: string
+  requestId?: string
+}
+
+export type TableChatErrorMessage = {
+  type: 'table_chat_error'
+  gameId: string
+  tableId: string
+  code: PrivateRoomChatErrorCode
+  message: string
+  requestId?: string
+  mutedUntil?: string
+  reason?: string
+}
+
 // --- Известия за приключил мют (виж topic_mute_end_notices) ---
 export type MuteEndNoticeSnapshot = {
   noticeId: string
@@ -2063,6 +2111,9 @@ export type ServerMessage =
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageReceivedMessage
   | PrivateRoomChatErrorMessage
+  | TableChatHistoryMessage
+  | TableChatMessageReceivedMessage
+  | TableChatErrorMessage
   | MuteEndNoticesMessage
   | MuteEndNoticesClearedMessage
   | ProfileLikedMessage

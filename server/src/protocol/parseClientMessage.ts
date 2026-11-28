@@ -1,4 +1,5 @@
 import { parseVoicePresenceMessage } from '../voice/voiceChatProtocol.js'
+import { GAME_TABLE_ID_MAX_LENGTH, isGameTableGameId } from '../tables/gameTableRegistry.js'
 import {
   SUPPORTED_MATCH_STAKES,
   type MatchStake,
@@ -810,6 +811,30 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return {
         type: 'send_private_room_chat_message',
         privateRoomId,
+        body: parsed.body,
+        ...(requestId !== undefined ? { requestId } : {}),
+      }
+    }
+
+    // Общ чат на чакалните (Етап 1) — само структурна проверка; членството,
+    // mute, валидацията на текста и лимитите са в tableChatService.ts.
+    if (
+      parsed.type === 'subscribe_table_chat' ||
+      parsed.type === 'unsubscribe_table_chat' ||
+      parsed.type === 'send_table_chat_message'
+    ) {
+      const gameId = isGameTableGameId(parsed.gameId) ? parsed.gameId : null
+      const tableId = normalizeRequiredText(parsed.tableId)
+      if (gameId === null || tableId === null || tableId.length > GAME_TABLE_ID_MAX_LENGTH) return null
+      if (parsed.type !== 'send_table_chat_message') return { type: parsed.type, gameId, tableId }
+      if (typeof parsed.body !== 'string') return null
+      const requestId = typeof parsed.requestId === 'string' && parsed.requestId.trim() !== ''
+        ? parsed.requestId.trim().slice(0, 100)
+        : undefined
+      return {
+        type: 'send_table_chat_message',
+        gameId,
+        tableId,
         body: parsed.body,
         ...(requestId !== undefined ? { requestId } : {}),
       }

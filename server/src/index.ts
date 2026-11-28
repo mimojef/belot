@@ -208,10 +208,6 @@ import {
 import { validateTopicMessageBody, TOPIC_MESSAGE_MAX_BODY_CODE_POINTS } from './protocol/topicMessageValidation.js'
 import { computeTopicMessagePollAdvance } from './realtime/topicMessagePollAdvance.js'
 import { createTopicMessageLikeTracker } from './realtime/topicMessageLikeTracking.js'
-import {
-  validatePrivateRoomChatBody,
-  PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS,
-} from './protocol/privateRoomChatValidation.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
 import { SUPPORT_MESSAGE_LIMITS, describeMultilineMessageLimit, normalizeMultilineMessageBody } from './shared/multilineMessageBody.js'
 import { createAdminProfileDeletionCoordinator } from './core/adminProfileDeletionCoordinator.js'
@@ -494,7 +490,6 @@ import { resolveGameWorkerEntryUrl } from './game/resolveGameWorkerEntryUrl.js'
 import { parseClientMessage } from './protocol/parseClientMessage.js'
 import type {
   LobbyChatErrorCode,
-  PrivateRoomChatErrorCode,
   TopicMessageErrorCode,
   TopicMessageBroadcastSnapshot,
   TopicReplyBroadcastSnapshot,
@@ -523,7 +518,9 @@ import type {
   RoomReadiness,
 } from './game/privateRoomsStore.js'
 import { mapPrivateRoomSlotToSeat } from './game/mapPrivateRoomSlotToSeat.js'
-import { createPrivateRoomChatStore, PRIVATE_ROOM_CHAT_HISTORY_LIMIT } from './game/privateRoomChatStore.js'
+import { createPrivateRoomChatStore } from './game/privateRoomChatStore.js'
+import { createGameTableRegistry, type GameTableAdapter } from './tables/gameTableRegistry.js'
+import { createTableChatService } from './tables/tableChatService.js'
 import { createGuestTrialRoom } from './core/createGuestTrialRoom.js'
 import { createServerRoom } from './core/createServerRoom.js'
 import { createHumanParticipant } from './core/createHumanParticipant.js'
@@ -1080,6 +1077,9 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'subscribe_private_room_chat':
     case 'unsubscribe_private_room_chat':
     case 'send_private_room_chat_message':
+    case 'subscribe_table_chat':
+    case 'unsubscribe_table_chat':
+    case 'send_table_chat_message':
     case 'subscribe_lobby_chat':
     case 'unsubscribe_lobby_chat':
     case 'send_lobby_chat_message':
@@ -6391,7 +6391,7 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
       `[private-room] no runtime capacity for room=${initializedRoom.id}: ${ensureResult.reason}`,
     )
     notifyMembersExpired()
-    privateRoomChatStore.clearRoom(privateRoom.id)
+    tableChat.clearTable('belot', privateRoom.id)
     if (privateRoom.voiceTableId !== null) voiceChatService.onGameStartFailed(privateRoom.voiceTableId)
     return
   }
@@ -6402,7 +6402,7 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
       console.error(`[private-room] stake collection failed room=${initializedRoom.id}: ${stakeResult.message}`)
       activeRoomRuntime.removeRoom(initializedRoom.id)
       notifyMembersExpired()
-      privateRoomChatStore.clearRoom(privateRoom.id)
+      tableChat.clearTable('belot', privateRoom.id)
       if (privateRoom.voiceTableId !== null) voiceChatService.onGameStartFailed(privateRoom.voiceTableId)
       return
     }
@@ -6433,7 +6433,7 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
   }
 
   broadcastRoomSnapshots(initializedRoom, socketRegistry)
-  privateRoomChatStore.clearRoom(privateRoom.id)
+  tableChat.clearTable('belot', privateRoom.id)
 
   // Late-arriving отговори на покани за тази вече стартирала стая биха се
   // провалили тихо (стаята вече не е в rooms map-а) — проактивно ги отменяме,
@@ -6462,7 +6462,7 @@ function cancelPartnerInviteOfRemovedPrivateRoom(room: PrivateRoom): void {
 }
 
 function handlePrivateRoomExpired(room: PrivateRoom): void {
-  privateRoomChatStore.clearRoom(room.id)
+  tableChat.clearTable('belot', room.id)
   cancelPartnerInviteOfRemovedPrivateRoom(room)
   for (const invite of room.pendingInvites) {
     cancelPrivateRoomInviteTimer(invite.inviteId)
@@ -6534,7 +6534,7 @@ function schedulePrivateRoomInviteExpiry(
 }
 
 function handlePrivateRoomClosed(room: PrivateRoom): void {
-  privateRoomChatStore.clearRoom(room.id)
+  tableChat.clearTable('belot', room.id)
   cancelPartnerInviteOfRemovedPrivateRoom(room)
   for (const invite of room.pendingInvites) {
     cancelPrivateRoomInviteTimer(invite.inviteId)
@@ -6578,6 +6578,36 @@ function handlePrivateRoomMemberKicked(room: PrivateRoom, occupant: PrivateRoomH
 }
 
 const privateRoomChatStore = createPrivateRoomChatStore()
+
+// Общ регистър на игрите с частни маси (Етап 1). Белот е първата игра: участието
+// в чакалнята се извежда от privateRoomsStore (мястото, което държи ТАЗИ връзка) —
+// същата проверка като досегашния чат. Свара и Човече ще се регистрират в
+// следващите етапи.
+const belotGameTableAdapter: GameTableAdapter = {
+  gameId: 'belot',
+  chatDelivery: 'legacy-private-room',
+  findMembership: (connectionId) => {
+    const room = privateRoomsStore.getRoomByConnectionId(connectionId)
+    if (room === null) return null
+    const member = room.slots.find((slot) => slot.occupant?.kind === 'human' && slot.occupant.connectionId === connectionId)?.occupant
+    if (member?.kind !== 'human') return null
+    return {
+      tableId: room.id,
+      member: { profileId: member.profileId, displayName: member.displayName },
+      recipientConnectionIds: room.slots.flatMap((slot) => (slot.occupant?.kind === 'human' ? [slot.occupant.connectionId] : [])),
+    }
+  },
+}
+const gameTableRegistry = createGameTableRegistry([belotGameTableAdapter])
+const tableChat = createTableChatService({
+  registry: gameTableRegistry,
+  store: privateRoomChatStore,
+  getConnectionProfileId: (connectionId) => getConnectionById(serverState, connectionId)?.profileId,
+  getMuteSnapshot: (profileId) => topicModerationStore.getSectionMuteSnapshot(profileId),
+  send: (connectionId, message) => safeSendToConnection(connectionId, message),
+  mutedMessage: MUTED_SEND_MESSAGE,
+  onMessageAccepted: () => activityCounters.incrementChat('privateRoomChatMessages'),
+})
 
 // Поканата за партньор приключи без отговор (60 сек изтичане) или
 // собственикът на резервацията напусна масата.
@@ -9233,7 +9263,7 @@ function handlePrivateRoomMemberReleasedForConflict(
     sendToOpenProfileConnections(occupant.profileId, { type: 'private_room_left', privateRoomId: roomBefore.id })
   }
   if (roomAfter === null) {
-    privateRoomChatStore.clearRoom(roomBefore.id)
+    tableChat.clearTable('belot', roomBefore.id)
     return
   }
   sendPrivateRoomUpdateToMembers(roomAfter)
@@ -30498,7 +30528,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           // Room was silently deleted (last human left) — no
           // onRoomClosed/onRoomExpired callback fires for this path, so
           // clear the ephemeral chat here explicitly.
-          privateRoomChatStore.clearRoom(privateRoom.id)
+          tableChat.clearTable('belot', privateRoom.id)
         } else if (remainingRoom !== null) {
           // Remaining members (including a newly-reassigned host) must see
           // the fresh room state in realtime — the departed occupant's slot
@@ -30682,137 +30712,47 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         return
       }
 
+      // Текстов чат на чакалнята — общата услуга (server/src/tables/tableChatService.ts).
+      // Старите съобщения на Белот (кешираните PWA клиенти) и общите
+      // table_chat_* минават през ЕДНИ И СЪЩИ проверки; членството е от
+      // адаптера на играта, не от подадените от клиента идентификатори.
       if (message.type === 'subscribe_private_room_chat') {
-        const room = privateRoomsStore.getRoomByConnectionId(connection.id)
-
-        if (room === null || room.id !== message.privateRoomId) {
-          safeSendToConnection(connection.id, {
-            type: 'private_room_chat_error',
-            code: 'not_member',
-            message: 'Не си в тази чакалня.',
-          })
-          return
-        }
-
-        const history = privateRoomChatStore
-          .listRecentMessages(room.id)
-          .slice(-PRIVATE_ROOM_CHAT_HISTORY_LIMIT)
-
-        safeSendToConnection(connection.id, {
-          type: 'private_room_chat_history',
-          privateRoomId: room.id,
-          messages: history,
-        })
+        tableChat.subscribe(connection.id, { protocol: 'legacy', gameId: 'belot', tableId: message.privateRoomId })
         return
       }
 
-      if (message.type === 'unsubscribe_private_room_chat') {
+      if (message.type === 'unsubscribe_private_room_chat' || message.type === 'unsubscribe_table_chat') {
         // Няма отделен subscriber Set за освобождаване — доставката винаги
-        // се извежда наново от текущото членство в privateRoomsStore (виж
-        // send_private_room_chat_message по-долу), затова тук няма какво да
-        // се почисти. Съобщението съществува само за симетричен client-side
-        // lifecycle hook.
+        // се извежда наново от текущото участие (адаптера на играта), затова
+        // тук няма какво да се почисти. Съобщението съществува само за
+        // симетричен client-side lifecycle hook.
         return
       }
 
       if (message.type === 'send_private_room_chat_message') {
-        const requestId = message.requestId
-
-        function sendPrivateRoomChatError(code: PrivateRoomChatErrorCode, errorMessage: string): void {
-          safeSendToConnection(connection.id, {
-            type: 'private_room_chat_error',
-            code,
-            message: errorMessage,
-            ...(requestId ? { requestId } : {}),
-          })
-        }
-
-        const latestConnection = getConnectionById(serverState, connection.id)
-
-        if (latestConnection?.profileId == null) {
-          sendPrivateRoomChatError('not_authenticated', 'Трябва да влезеш в профила си.')
-          return
-        }
-
-        const room = privateRoomsStore.getRoomByConnectionId(connection.id)
-
-        if (room === null || room.id !== message.privateRoomId) {
-          sendPrivateRoomChatError('not_member', 'Не си в тази чакалня.')
-          return
-        }
-
-        const senderSlot = room.slots.find((s) => s.occupant?.kind === 'human' && s.occupant.connectionId === connection.id)
-        const senderMember = senderSlot?.occupant as PrivateRoomHumanOccupant | undefined
-
-        if (senderMember === undefined) {
-          sendPrivateRoomChatError('not_member', 'Не си в тази чакалня.')
-          return
-        }
-
-        // Единен мют (Лафче + Теми + чатовете на частните маси) — проверява
-        // се при ВСЯКО изпращане от DB по authoritative profileId на сесията
-        // (не по флаг в паметта/клиента), ПРЕДИ запис в privateRoomChatStore
-        // и broadcast. Fail-closed: ако проверката не може да се изпълни,
-        // съобщението НЕ се публикува. Връзката и мястото на масата остават.
-        let senderMuteSnapshot: ReturnType<typeof topicModerationStore.getSectionMuteSnapshot>
-        try {
-          senderMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(latestConnection.profileId)
-        } catch (error) {
-          console.error('[private-room-chat] mute check failed', error instanceof Error ? error.message : String(error))
-          sendPrivateRoomChatError('mute_check_unavailable', 'Съобщението не можа да бъде изпратено. Опитай отново.')
-          return
-        }
-        if (senderMuteSnapshot.isMuted) {
-          safeSendToConnection(connection.id, {
-            type: 'private_room_chat_error',
-            code: 'muted',
-            message: MUTED_SEND_MESSAGE,
-            ...(requestId ? { requestId } : {}),
-            ...(senderMuteSnapshot.mutedUntil ? { mutedUntil: senderMuteSnapshot.mutedUntil } : {}),
-            ...(senderMuteSnapshot.reason ? { reason: senderMuteSnapshot.reason } : {}),
-          })
-          return
-        }
-
-        const validation = validatePrivateRoomChatBody(message.body)
-
-        if (!validation.ok) {
-          const messagesByCode: Record<typeof validation.code, string> = {
-            empty_body: 'Съобщението не може да бъде празно.',
-            body_too_long: `Съобщението може да е най-много ${PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS} символа.`,
-            invalid_body: 'Съобщението съдържа неразрешени символи.',
-          }
-          sendPrivateRoomChatError(validation.code, messagesByCode[validation.code])
-          return
-        }
-
-        const sendResult = privateRoomChatStore.sendMessage(room.id, {
-          senderProfileId: senderMember.profileId,
-          senderDisplayName: senderMember.displayName,
-          body: validation.body,
+        tableChat.sendMessage(connection.id, {
+          protocol: 'legacy',
+          gameId: 'belot',
+          tableId: message.privateRoomId,
+          body: message.body,
+          ...(message.requestId ? { requestId: message.requestId } : {}),
         })
+        return
+      }
 
-        if (!sendResult.ok) {
-          const errorMessagesByCode: Record<typeof sendResult.code, string> = {
-            rate_limited: 'Твърде много съобщения. Изчакай малко и опитай пак.',
-            duplicate_message: 'Вече изпрати това съобщение.',
-          }
-          sendPrivateRoomChatError(sendResult.code, errorMessagesByCode[sendResult.code])
-          return
-        }
+      if (message.type === 'subscribe_table_chat') {
+        tableChat.subscribe(connection.id, { protocol: 'table', gameId: message.gameId, tableId: message.tableId })
+        return
+      }
 
-        activityCounters.incrementChat('privateRoomChatMessages')
-
-        for (const slot of room.slots) {
-          if (slot.occupant?.kind === 'human') {
-            safeSendToConnection(slot.occupant.connectionId, {
-              type: 'private_room_chat_message',
-              privateRoomId: room.id,
-              ...sendResult.message,
-              ...(slot.occupant.connectionId === connection.id && requestId ? { requestId } : {}),
-            })
-          }
-        }
+      if (message.type === 'send_table_chat_message') {
+        tableChat.sendMessage(connection.id, {
+          protocol: 'table',
+          gameId: message.gameId,
+          tableId: message.tableId,
+          body: message.body,
+          ...(message.requestId ? { requestId: message.requestId } : {}),
+        })
         return
       }
 
