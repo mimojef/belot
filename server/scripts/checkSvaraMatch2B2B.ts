@@ -43,6 +43,7 @@ import {
   lookAtSvaraCards,
   parseSvaraCardCode,
   revealUnlookedHands,
+  requireCallsAfterBlindClose,
   SvaraBettingError,
   SvaraMatchError,
   type SvaraBettingAction,
@@ -461,7 +462,7 @@ check('B7. Решение №1: пълна забрана на непълен з
   assert(c.s.blind.lastBlindTotal === 40, 'exact next minimum still allowed')
 })
 
-check('B7b. Решение №2 (27.11.2026): погледнал с недостатъчни чипове — ол-ин за плащане не затваря тъмната фаза; ол-ин над текущия залог е непълно повишаване и я затваря', () => {
+check('B7b. Решение №2 (27.11.2026) + 28.11.2026: погледнал с недостатъчни чипове — ол-ин за плащане е плащане и затваря тъмната фаза; ол-ин над текущия залог е непълно повишаване и я затваря', () => {
   // Част 1: ол-ин до/под текущия залог = плащане (тъмният 20 се брои за 40).
   const b = bet({ p1: 500, p2: 30, d: 500 })
   b.go('p1', { kind: 'blind-bet', total: 20 }) // currentBet = 40 (двойно)
@@ -469,13 +470,15 @@ check('B7b. Решение №2 (27.11.2026): погледнал с недост
   expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'call' }, 30), 'insufficient-chips', 'call needs 40, only 30')
   b.go('p2', { kind: 'all-in' }) // 30 ≤ 40 → ол-ин за плащане
   assert(b.s.voluntary.p2 === 30 && b.s.allIn.includes('p2') && b.s.currentBet === 40, 'all-in for a call; the current bet stays 40')
-  assert(b.s.blind.status === 'active', 'a call does not close the blind phase')
-  expectError(() => applySvaraBettingAction(b.s, 'd', { kind: 'call' }, 500), 'look-required', 'an unlooked player cannot pay blind')
-  b.s = lookAtSvaraCards(b.s, 'd')
+  assert(b.s.blind.status === 'closed', 'a looked player paying (all-in call) closes the blind phase (28.11.2026)')
+  // Както svaraMatch.ts: обръщане + обърнатият тъмен залог вече не се брои двойно.
+  b.s = requireCallsAfterBlindClose(revealUnlookedHands(b.s), 'p2')
+  expectError(() => applySvaraBettingAction(b.s, 'd', { kind: 'blind-bet', total: 80 }, 500), 'blind-not-allowed', 'no blind bet after the switch to light play')
   b.go('d', { kind: 'call' })
-  assert(b.s.voluntary.d === 40 && b.s.toAct === 'p1', 'd pays 40; p1 (blind 20 = 40) decides')
-  b.go('p1', { kind: 'stay-blind' })
-  assert(b.s.complete, 'complete')
+  assert(b.s.voluntary.d === 40 && b.s.toAct === 'p1' && b.stacks.p1 === 480, 'd pays 40; p1 (blind 20, now light) decides — nothing was taken from p1')
+  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'stay-blind' }, b.stacks.p1!), 'invalid-action', 'no staying blind after the switch')
+  b.go('p1', { kind: 'call' })
+  assert(b.s.voluntary.p1 === 40 && b.s.complete, 'p1 pays the 20 difference by choice; complete')
   // Част 2: ол-ин над текущия залог, но под минималното повишаване → непълно повишаване, затваря.
   const c = bet({ p1: 500, p2: 42, d: 500 })
   c.go('p1', { kind: 'blind-bet', total: 20 }) // currentBet = 40

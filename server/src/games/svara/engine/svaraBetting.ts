@@ -47,11 +47,14 @@
 //   • Залогът на играч, който е залагал на тъмно и още не е погледнал, се
 //     брои ДВОЙНО за изравняване със светъл залог (реалните чипове не се
 //     удвояват). currentBet е в „светла“ стойност: тъмен залог T → 2T.
-//   • Погледнал играч, който изравнява двойния тъмен залог, ПЛАЩА (call) —
-//     не повишава и не затваря тъмната фаза. Играчите на тъмно, чийто
-//     двоен залог вече е равен на текущия, получават ход за решение:
-//     „Оставам на тъмно“ (stay-blind, без чипове — не е „Пас“), поглеждане
-//     и плащане/повишаване, нов тъмен залог или „Бягам“.
+//   • Погледнал играч, който изравнява двойния тъмен залог, ПЛАЩА (call).
+//     Решение (28.11.2026): успешното плащане на погледнал играч (вкл. ол-ин
+//     за плащане) затваря тъмната фаза за цялото раздаване — както
+//     повишаването на светло. Само поглеждане или отказ не я затварят.
+//     Играчите на тъмно, чийто двоен залог е равен на текущия след нов тъмен
+//     залог, получават ход за решение: „Оставам на тъмно“ (stay-blind, без
+//     чипове — не е „Пас“), поглеждане и плащане/повишаване, нов тъмен залог
+//     или „Бягам“.
 //   • Повишаване на светло = над текущия залог с поне 1 Вход; то (както
 //     досега, правило 4) затваря тъмната фаза и разкрива картите на всички.
 //   • При сравняване тъмният залог се брои двойно и за правото на банката
@@ -329,8 +332,9 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
     }
     case 'call': {
       // 27.11.2026: погледнал играч ПЛАЩА и срещу тъмен залог — изравнява
-      // „светлата“ стойност (тъмният залог се брои двойно). Не повишава и не
-      // затваря тъмната фаза; на тъмно не се плаща (нов тъмен залог е ≥ 2×).
+      // „светлата“ стойност (тъмният залог се брои двойно); на тъмно не се
+      // плаща (нов тъмен залог е ≥ 2×). 28.11.2026: успешното плащане
+      // затваря тъмната фаза (виж горе) — svaraMatch.ts обръща картите.
       if (state.blind.status === 'active' && !looked) fail('look-required', 'during the blind phase look at the cards before paying, or continue blind')
       if (state.currentBet <= effective) fail('invalid-action', 'nothing to call')
       const need = state.currentBet - effective
@@ -339,7 +343,8 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       remove(state.pending, playerId)
       remove(state.raiseLocked, playerId)
       state.acted.push(playerId)
-      offerBlindDecision(state, playerId)
+      if (state.blind.status === 'active') state.blind.status = 'closed'
+      else offerBlindDecision(state, playerId)
       break
     }
     case 'stay-blind': {
@@ -429,12 +434,12 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         }
         if (total <= state.currentBet) {
           // Погледнал играч: ол-ин за плащане (пълно или непълно) — не
-          // повишава и не затваря тъмната фаза (27.11.2026).
+          // повишава, но като всяко плащане затваря тъмната фаза (28.11.2026).
           commitTotal(total)
           remove(state.pending, playerId)
           remove(state.raiseLocked, playerId)
           state.acted.push(playerId)
-          offerBlindDecision(state, playerId)
+          state.blind.status = 'closed'
           break
         }
         // Погледнал играч: ол-ин повишаване на светло — затваря тъмната фаза.
@@ -513,6 +518,27 @@ export function revealUnlookedHands(input: SvaraBettingState, excludePlayerIds: 
   for (const id of state.order) {
     if (!state.folded.includes(id) && !state.looked.includes(id) && !excludePlayerIds.includes(id)) state.looked.push(id)
   }
+  return state
+}
+
+/**
+ * След затварянето на тъмната фаза и автоматичното обръщане (svaraMatch.ts):
+ * обърнатият залог вече не се брои двойно (както досега след повишаване на
+ * светло). Който остане под текущия залог, трябва да плати, да повиши или да
+ * избяга, преди наддаването да приключи — дори плащането да го е изравнило
+ * по двойната стойност.
+ */
+export function requireCallsAfterBlindClose(input: SvaraBettingState, lastActor: string): SvaraBettingState {
+  const state = structuredClone(input)
+  let reopened = false
+  for (const id of state.order) {
+    if (!canAct(state, id) || state.pending.includes(id) || svaraEffectiveBet(state, id) >= state.currentBet) continue
+    state.pending.push(id)
+    reopened = true
+  }
+  if (!reopened) return input
+  state.complete = false
+  refreshCompletion(state, lastActor)
   return state
 }
 

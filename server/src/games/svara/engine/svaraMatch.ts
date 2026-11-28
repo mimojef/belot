@@ -31,6 +31,7 @@ import {
   forceSvaraFold,
   lookAtSvaraCards,
   revealUnlookedHands,
+  requireCallsAfterBlindClose,
   svaraBlindDoubledContributions,
   SvaraBettingError,
   type SvaraBettingAction,
@@ -1033,7 +1034,7 @@ function act(ctx: Ctx, playerId: string, action: SvaraBettingAction): void {
   // svaraMatch.ts, не svaraBetting.ts, знае статуса на мястото.
   if (blindWasOpen && round.betting.blind.status === 'closed') {
     const absentIds = round.participants.filter((id) => ctx.state.status[id] !== 'active')
-    round.betting = revealUnlookedHands(round.betting, absentIds)
+    round.betting = requireCallsAfterBlindClose(revealUnlookedHands(round.betting, absentIds), playerId)
   }
   if (added > 0) {
     ctx.state.stacks[playerId] = ctx.state.stacks[playerId]! - added
