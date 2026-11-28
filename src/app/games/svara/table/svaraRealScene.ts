@@ -1097,6 +1097,7 @@ export function createSvaraRealScene(options: { onOpenProfile?: (playerId: strin
       cardCache.delete(i)
       delete seat.avatar.dataset.svaraAvatar
       seat.avatar.style.filter = ''
+      if (seat.card) seat.card.style.filter = ''
       seat.node.querySelector('[data-svara-seat-bet]')?.remove()
       seat.node.querySelectorAll('[data-svara-dealer-badge]').forEach((el) => el.remove())
       seat.info.innerHTML = ''

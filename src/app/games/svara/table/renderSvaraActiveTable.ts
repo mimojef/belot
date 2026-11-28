@@ -212,7 +212,11 @@ export function renderSvaraSceneSeatHuds(rawInput: RenderSvaraActiveTableInput):
       turnTimer,
       infoHtml,
       bet: betting && !snapshot.result.finished ? seat.roundContribution : 0,
-      dim: seat.status === 'eliminated' ? 'eliminated' : seat.status === 'absent' && !snapshot.result.finished ? 'absent' : null,
+      // Окончателно извън мача до края му: отпаднал, а и след това напуснал
+      // (изход от прозореца „Играта приключи за вас!“ / изчерпано отсъствие →
+      // сървърът го води 'exited'). Само по сървърния статус: 0 свободни чипа
+      // при All-in в текущото раздаване остават 'active'.
+      dim: seat.status === 'eliminated' || seat.status === 'exited' ? 'eliminated' : seat.status === 'absent' && !snapshot.result.finished ? 'absent' : null,
       absenceDeadlineAt: seat.status === 'absent' && !snapshot.result.finished ? seat.absenceDeadlineAt ?? null : null,
     }
   })
