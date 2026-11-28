@@ -11,6 +11,8 @@
 
 export type PrivateRoomCreatedNotice = {
   notificationId: string
+  /** Играта от регистъра privateTableNoticeGames.ts (името и цветът в текста). */
+  game: { id: string; name: string; color: string; lightColor: string }
   creatorDisplayName: string
   creatorAvatarUrl: string | null
   recipientInActiveGame: boolean

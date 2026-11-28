@@ -1815,7 +1815,10 @@ export type PrivateRoomFullMessage = {
 // клиентът никога не решава сам този статус.
 export type PrivateRoomCreatedNoticeMessage = {
   type: 'private_room_created_notice'
+  /** gameId:tableId — уникално за едно създаване (общото известие за всички игри). */
   notificationId: string
+  /** Играта (ключ от клиентския регистър privateTableNoticeGames.ts); непозната → клиентът не показва нищо. */
+  gameId: string
   creatorDisplayName: string
   creatorAvatarUrl: string | null
   recipientInActiveGame: boolean

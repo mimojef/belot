@@ -131,6 +131,7 @@ import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import { canSessionAccessSvara, setSvaraPublicAccessProvider } from './games/svara/svaraAccess.js'
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import { createPersistentSvaraLobby } from './games/svara/createPersistentSvaraLobby.js'
+import { createPrivateTableCreatedNotifier } from './notifications/privateTableCreatedNotice.js'
 import { createSvaraProgression } from './games/svara/svaraProgression.js'
 import { isSvaraPaidMatchesEnabled } from './games/svara/svaraPaidEconomy.js'
 import { hasStartedTournamentCommitment } from './games/svara/svaraTournamentCommitment.js'
@@ -5513,6 +5514,8 @@ const svaraService = await createPersistentSvaraLobby({
   // Нива и рангове: същият идемпотентен запис като „Не се сърди човече“
   // (recordCompletedGameForProfile, source 'svara_match'). Без ELO.
   progression: createSvaraProgression(playerProgressStore),
+  // Общото известие „създаде маса за Свара“ (само до получатели с достъп до „Свара“).
+  onPrivateTableCreated: ({ matchId, creatorProfileId }) => notifyPrivateTableCreated('svara', matchId, creatorProfileId),
   // Достъпът на всички човешки участници се проверява при старт на нов мач.
   getProfileRole: (profileId) => authStore.getAccountRoleForProfile(profileId),
   // Турнир блокира само след старта; записване в предстоящ ('open') — не
@@ -5966,25 +5969,29 @@ function checkPrivateRoomStakeEligibility(
   return { ok: true }
 }
 
-function broadcastPrivateRoomCreatedNotice(input: {
-  creatorProfileId: string
-  creatorDisplayName: string
-  creatorAvatarUrl: string | null
-  roomId: string
-}): void {
-  for (const conn of Object.values(serverState.connections)) {
-    if (conn.status !== 'connected' || conn.profileId === null || conn.profileId === input.creatorProfileId) {
-      continue
-    }
+// Общото известие „[Никнейм] създаде маса за [Игра]“ за всички игри
+// (notifications/privateTableCreatedNotice.ts; клиентът — един попъп и
+// регистър src/ui/notifications/privateTableNoticeGames.ts). Нова игра: ред тук
+// (+ canReceive при ограничен достъп) и notifyPrivateTableCreated(...) веднага
+// след УСПЕШНО създаване на частната ѝ маса.
+const privateTableNotices = createPrivateTableCreatedNotifier({
+  games: {
+    belot: {},
+    ludo: {},
+    // Ограничен тестов достъп: само получатели със сървърно право за „Свара“.
+    svara: { canReceive: (recipient) => svaraLobby.canConnectionAccess(recipient.connectionId) },
+  },
+  listRecipients: () => Object.values(serverState.connections).flatMap((conn) =>
+    conn.status === 'connected' && conn.profileId !== null ? [{ connectionId: conn.id, profileId: conn.profileId }] : []),
+  isInActiveGame: (profileId) => isProfileInActiveGame(profileId),
+  send: (connectionId, message) => safeSendToConnection(connectionId, message),
+  onError: (cause) => console.error('[private-table-notice] delivery failed:', cause instanceof Error ? cause.message : String(cause)),
+})
 
-    safeSendToConnection(conn.id, {
-      type: 'private_room_created_notice',
-      notificationId: input.roomId,
-      creatorDisplayName: input.creatorDisplayName,
-      creatorAvatarUrl: input.creatorAvatarUrl,
-      recipientInActiveGame: isProfileInActiveGame(conn.profileId),
-    })
-  }
+function notifyPrivateTableCreated(gameId: Parameters<typeof privateTableNotices.notify>[0]['gameId'], tableId: string, creatorProfileId: string): void {
+  const creator = playerProgressStore.getPublicProfile(creatorProfileId)
+  if (!creator) return
+  privateTableNotices.notify({ gameId, tableId, creatorProfileId, creatorDisplayName: creator.displayName, creatorAvatarUrl: creator.avatarUrl })
 }
 
 /**
@@ -29646,7 +29653,10 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           manualStart: message.manualStart,
         })
         if (!result.ok) safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
-        else safeSendToConnection(connection.id, { type: 'ludo_room_updated', room: buildLudoRoomSnapshot(result.room) })
+        else {
+          safeSendToConnection(connection.id, { type: 'ludo_room_updated', room: buildLudoRoomSnapshot(result.room) })
+          notifyPrivateTableCreated('ludo', result.room.id, latestConnection.profileId)
+        }
         return
       }
 
@@ -30332,12 +30342,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           voiceSpeak: buildOwnPrivateRoomVoiceSpeak(createResult.room, latestConnection.profileId),
         })
 
-        broadcastPrivateRoomCreatedNotice({
-          creatorProfileId: latestConnection.profileId,
-          creatorDisplayName: publicProfile.displayName,
-          creatorAvatarUrl: publicProfile.avatarUrl,
-          roomId: createResult.room.id,
-        })
+        notifyPrivateTableCreated('belot', createResult.room.id, latestConnection.profileId)
         return
       }
 

@@ -1736,6 +1736,10 @@ export type LobbyFlowController = {
   handleServerMessage: (message: ServerMessage) => boolean
   navigateToShop: (noticeText: string | null) => void
   navigateToPrivateRooms: () => void
+  /** Списъкът с масите на „Свара“ (/games/svara; достъпът се презаверява от сървъра). */
+  navigateToSvaraTables: () => void
+  /** Лобито на „Не се сърди човече“ (/games/ludo; при изключен флаг — „Игри“). */
+  navigateToLudoLobby: () => void
   // Belot Spectator Mode ("Гледай", Phase 3A) — session state getters +
   // explicit unwatch, за Phase 3B wiring и тестове (виж §7/§11 брифа).
   getSpectatingBelotRoomId: () => string | null
@@ -26004,6 +26008,8 @@ export function createLobbyFlowController(
       showAdminPaymentDetailPanel(purchaseId)
     },
     navigateToPrivateRooms,
+    navigateToSvaraTables: () => showSvaraPage(),
+    navigateToLudoLobby: () => showLudoLobbyPage(),
     navigateToTournamentDetail: (tournamentId: string) => {
       showTournamentDetail(tournamentId)
     },

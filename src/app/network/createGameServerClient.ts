@@ -2692,6 +2692,8 @@ export type PrivateRoomFullMessage = {
 
 export type PrivateRoomCreatedNoticeMessage = {
   type: 'private_room_created_notice'
+  /** Играта (privateTableNoticeGames.ts); непозната → не се показва. */
+  gameId: string
   notificationId: string
   creatorDisplayName: string
   creatorAvatarUrl: string | null

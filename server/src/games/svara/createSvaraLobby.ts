@@ -74,6 +74,8 @@ export function createSvaraLobby(deps: {
    * запис (само тестове). Не участва във финансовото уреждане.
    */
   progression?: SvaraProgression
+  /** Общото известие „създаде маса за Свара“ — само след успешно създадена маса (notifications/privateTableCreatedNotice.ts). */
+  onPrivateTableCreated?: (input: { matchId: string; creatorProfileId: string }) => void
 }) {
   // An injected runtime is a test/server-owned dependency. Production always supplies persistence.
   if (deps.runtime && deps.persistence) throw new Error('Provide persistence through the injected Svara runtime')
@@ -591,6 +593,13 @@ export function createSvaraLobby(deps: {
       return recoveryState
     },
     attachConnection(connectionId: string, transport: Transport) { connections.set(connectionId, transport) },
+    /** Има ли връзката право да вижда масите на „Свара“ (същата проверка като за списъка) — за общите известия. */
+    canConnectionAccess(connectionId: string): boolean {
+      const transport = connections.get(connectionId)
+      if (!transport || stopped || recoveryState !== 'ready') return false
+      const session = transport.getSession()
+      return session?.profile.profileId === transport.profileId && evaluateSvaraAccess(session).allowed
+    },
     reconnect(connectionId: string) {
       const transport = connections.get(connectionId)
       if (!transport || stopped || recoveryState !== 'ready') return
@@ -718,6 +727,7 @@ export function createSvaraLobby(deps: {
           currentViews.set(transport, matchId)
           deliver(transport, { type: 'svara_table_updated', table: runtime.getPublicTable(matchId), requestId })
           publish(matchId, [])
+          try { deps.onPrivateTableCreated?.({ matchId, creatorProfileId: playerId }) } catch (cause) { deps.onError?.(cause) }
           return
         }
         if (!runtime.hasMatch(message.matchId)) {

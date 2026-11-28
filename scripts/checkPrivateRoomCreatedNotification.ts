@@ -65,6 +65,9 @@ const CLIENT_PATH = join(REPO_ROOT, 'src', 'app', 'network', 'createGameServerCl
 const SERVER_INDEX_PATH = join(REPO_ROOT, 'server', 'src', 'index.ts')
 const SERVER_MESSAGE_TYPES_PATH = join(REPO_ROOT, 'server', 'src', 'protocol', 'messageTypes.ts')
 const RENDER_LOBBY_SCREEN_PATH = join(REPO_ROOT, 'src', 'app', 'lobby', 'renderLobbyScreen.ts')
+// Общото известие за всички игри (сървърен нотификатор + клиентски регистър).
+const SERVER_NOTIFIER_PATH = join(REPO_ROOT, 'server', 'src', 'notifications', 'privateTableCreatedNotice.ts')
+const GAMES_REGISTRY_PATH = join(REPO_ROOT, 'src', 'ui', 'notifications', 'privateTableNoticeGames.ts')
 
 let passed = 0
 let failed = 0
@@ -126,6 +129,8 @@ const clientSrc = normalizeLineEndings(await readFile(CLIENT_PATH, 'utf8'))
 const serverSrc = normalizeLineEndings(await readFile(SERVER_INDEX_PATH, 'utf8'))
 const serverMessageTypesSrc = normalizeLineEndings(await readFile(SERVER_MESSAGE_TYPES_PATH, 'utf8'))
 const renderScreenSrc = normalizeLineEndings(await readFile(RENDER_LOBBY_SCREEN_PATH, 'utf8'))
+const notifierSrc = normalizeLineEndings(await readFile(SERVER_NOTIFIER_PATH, 'utf8'))
+const gamesRegistrySrc = normalizeLineEndings(await readFile(GAMES_REGISTRY_PATH, 'utf8'))
 
 console.log('\n=== Private Room Created Notification Checks ===\n')
 
@@ -134,6 +139,7 @@ console.log('\n=== Private Room Created Notification Checks ===\n')
 function makeNotice(overrides: Partial<PrivateRoomCreatedNotice>): PrivateRoomCreatedNotice {
   return {
     notificationId: 'room-1',
+    game: { id: 'belot', name: 'Белот', color: '#f0c040', lightColor: '#B7791F' },
     creatorDisplayName: 'Иван',
     creatorAvatarUrl: null,
     recipientInActiveGame: false,
@@ -228,61 +234,56 @@ await check('[dedup-bounded-2] createBoundedIdSet структурата същ�
 
 // ─── B) Сървърна логика (server/src/index.ts) ───────────────────────────────
 
-await check('[6] broadcastPrivateRoomCreatedNotice се извиква само СЛЕД createResult.ok (не при грешка)', () => {
-  const handlerBlock = extractBlock(serverSrc, `if (message.type === 'create_private_room') {`, 'create_private_room handler', "\n      if (message.type === 'join_private_room')")
+// Белот вика общия нотификатор (notifyPrivateTableCreated → privateTableCreatedNotice.ts).
+const BELOT_HANDLER = () => extractBlock(serverSrc, `if (message.type === 'create_private_room') {`, 'create_private_room handler', "\n      if (message.type === 'join_private_room')")
+const NOTIFY_FN = () => extractBlock(serverSrc, 'function notifyPrivateTableCreated(', 'notifyPrivateTableCreated', '\n}')
+const NOTIFIER_WIRING = () => extractBlock(serverSrc, 'const privateTableNotices = createPrivateTableCreatedNotifier({', 'privateTableNotices wiring', '\n})')
 
+await check('[6] Известието (Белот) се изпраща само СЛЕД createResult.ok (не при грешка)', () => {
+  const handlerBlock = BELOT_HANDLER()
   const errorBlock = extractBlock(handlerBlock, 'if (!createResult.ok) {', '!createResult.ok block', '\n        }')
-  assert(!errorBlock.includes('broadcastPrivateRoomCreatedNotice'), 'при неуспешно създаване НЕ трябва да се вика broadcastPrivateRoomCreatedNotice')
-
+  assert(!errorBlock.includes('notifyPrivateTableCreated'), 'при неуспешно създаване НЕ трябва да се изпраща известие')
   const okIdx = handlerBlock.indexOf('if (!createResult.ok) {')
-  const broadcastIdx = handlerBlock.indexOf('broadcastPrivateRoomCreatedNotice(')
-  assert(okIdx !== -1 && broadcastIdx !== -1 && broadcastIdx > okIdx, 'broadcastPrivateRoomCreatedNotice трябва да се извика след ok-проверката')
+  const notifyIdx = handlerBlock.indexOf("notifyPrivateTableCreated('belot'")
+  assert(okIdx !== -1 && notifyIdx !== -1 && notifyIdx > okIdx, 'notifyPrivateTableCreated(belot) трябва да се извика след ok-проверката')
 })
 
-await check('[7] Известието използва вече доверения publicProfile (не клиентски подадено име/аватар)', () => {
-  const handlerBlock = extractBlock(serverSrc, `if (message.type === 'create_private_room') {`, 'create_private_room handler', "\n      if (message.type === 'join_private_room')")
-  const broadcastCall = extractBlock(handlerBlock, 'broadcastPrivateRoomCreatedNotice({', 'broadcastPrivateRoomCreatedNotice call', '\n        })')
-
-  assert(broadcastCall.includes('creatorDisplayName: publicProfile.displayName'), 'creatorDisplayName трябва да идва от сървърния publicProfile')
-  assert(broadcastCall.includes('creatorAvatarUrl: publicProfile.avatarUrl'), 'creatorAvatarUrl трябва да идва от сървърния publicProfile')
-  assert(broadcastCall.includes('creatorProfileId: latestConnection.profileId'), 'creatorProfileId трябва да идва от сървърната сесия (latestConnection), не от клиента')
-  assert(!broadcastCall.includes('message.displayName') && !broadcastCall.includes('message.avatarUrl'), 'не трябва да ползва каквото и да е подадено от клиентското WS съобщение за име/аватар')
+await check('[7] Известието използва сървърния публичен профил (не клиентски подадено име/аватар)', () => {
+  const fn = NOTIFY_FN()
+  assert(fn.includes('playerProgressStore.getPublicProfile(creatorProfileId)'), 'името/аватарът трябва да идват от сървърния профил')
+  assert(fn.includes('creatorDisplayName: creator.displayName') && fn.includes('creatorAvatarUrl: creator.avatarUrl'), 'creatorDisplayName/creatorAvatarUrl от сървърния профил')
+  assert(BELOT_HANDLER().includes("notifyPrivateTableCreated('belot', createResult.room.id, latestConnection.profileId)"), 'creatorProfileId трябва да идва от сървърната сесия (latestConnection)')
+  assert(!fn.includes('message.'), 'не трябва да ползва нищо от клиентското WS съобщение')
 })
 
-await check('[8] roomId (notificationId) идва от createResult.room.id, генериран сървърно', () => {
-  const handlerBlock = extractBlock(serverSrc, `if (message.type === 'create_private_room') {`, 'create_private_room handler', "\n      if (message.type === 'join_private_room')")
-  const broadcastCall = extractBlock(handlerBlock, 'broadcastPrivateRoomCreatedNotice({', 'broadcastPrivateRoomCreatedNotice call', '\n        })')
-  assert(broadcastCall.includes('roomId: createResult.room.id'), 'notificationId трябва да произлиза от сървърно генерирания room.id')
+await check('[8] notificationId произлиза от сървърно генерирания room.id (gameId:tableId)', () => {
+  assert(BELOT_HANDLER().includes('createResult.room.id'), 'tableId трябва да е createResult.room.id')
+  assert(notifierSrc.includes('const notificationId = `${input.gameId}:${input.tableId}`'), 'notificationId = gameId:tableId')
 })
 
-const BROADCAST_FN_END_MARKER = 'function sendPrivateRoomUpdateToMembers(room: PrivateRoom): void {'
-
-await check('[9] broadcastPrivateRoomCreatedNotice изключва създателя по profileId (всички негови връзки, не само текущата)', () => {
-  const fn = extractBlock(serverSrc, 'function broadcastPrivateRoomCreatedNotice(input: {', 'broadcastPrivateRoomCreatedNotice', BROADCAST_FN_END_MARKER)
-  assert(fn.includes('conn.profileId === input.creatorProfileId'), 'трябва да сравнява по profileId (покрива всички connections на профила), не само по connectionId на подателя')
+await check('[9] Нотификаторът изключва създателя по profileId (всички негови връзки, не само текущата)', () => {
+  assert(notifierSrc.includes('recipient.profileId === input.creatorProfileId'), 'трябва да сравнява по profileId')
 })
 
 await check('[10] recipientInActiveGame се изчислява СЪРВЪРНО с isProfileInActiveGame, персонализирано за всеки получател', () => {
-  const fn = extractBlock(serverSrc, 'function broadcastPrivateRoomCreatedNotice(input: {', 'broadcastPrivateRoomCreatedNotice', BROADCAST_FN_END_MARKER)
-  assert(fn.includes('recipientInActiveGame: isProfileInActiveGame(conn.profileId)'), 'recipientInActiveGame трябва да се смята за всеки получател чрез isProfileInActiveGame(conn.profileId)')
+  assert(notifierSrc.includes('recipientInActiveGame: deps.isInActiveGame(recipient.profileId)'), 'на всеки получател поотделно')
+  assert(NOTIFIER_WIRING().includes('isInActiveGame: (profileId) => isProfileInActiveGame(profileId)'), 'чрез isProfileInActiveGame')
 })
 
 await check('[11] Само connected свързаности с валиден profileId получават известието (анонимни/disconnected се прескачат)', () => {
-  const fn = extractBlock(serverSrc, 'function broadcastPrivateRoomCreatedNotice(input: {', 'broadcastPrivateRoomCreatedNotice', BROADCAST_FN_END_MARKER)
-  assert(fn.includes(`conn.status !== 'connected'`), 'трябва да прескача connections, които не са connected')
-  assert(fn.includes('conn.profileId === null'), 'трябва да прескача connections без profileId (неаутентикирани)')
+  assert(NOTIFIER_WIRING().includes("conn.status === 'connected' && conn.profileId !== null"), 'само connected с profileId')
 })
 
-await check('[12] broadcastPrivateRoomCreatedNotice НЕ е закачено към onRoomsChanged (join/leave/expire не тригват известие)', () => {
+await check('[12] notifyPrivateTableCreated НЕ е закачено към onRoomsChanged (join/leave/expire не тригват известие)', () => {
   const callbacksBlock = extractBlock(serverSrc, 'onRoomsChanged: () =>', 'onRoomsChanged callback wiring', '\n')
-  assert(!callbacksBlock.includes('broadcastPrivateRoomCreatedNotice'), 'onRoomsChanged callback не трябва директно да вика broadcastPrivateRoomCreatedNotice')
+  assert(!callbacksBlock.includes('notifyPrivateTableCreated'), 'onRoomsChanged callback не трябва директно да вика broadcastPrivateRoomCreatedNotice')
 
   const bodyOfOnRoomsChanged = extractFunctionBody(serverSrc, 'function broadcastPrivateRoomsListToLobbyConnections(): void {', 'broadcastPrivateRoomsListToLobbyConnections')
-  assert(!bodyOfOnRoomsChanged.includes('broadcastPrivateRoomCreatedNotice'), 'broadcastPrivateRoomsListToLobbyConnections (общата "нещо се промени" функция) не трябва да вика broadcastPrivateRoomCreatedNotice')
+  assert(!bodyOfOnRoomsChanged.includes('notifyPrivateTableCreated'), 'broadcastPrivateRoomsListToLobbyConnections (общата "нещо се промени" функция) не трябва да вика broadcastPrivateRoomCreatedNotice')
 
   const joinHandlerIdx = serverSrc.indexOf(`if (message.type === 'join_private_room') {`)
   const joinHandlerBlock = serverSrc.slice(joinHandlerIdx, joinHandlerIdx + 2000)
-  assert(!joinHandlerBlock.includes('broadcastPrivateRoomCreatedNotice'), 'join_private_room handler-ът не трябва да вика broadcastPrivateRoomCreatedNotice')
+  assert(!joinHandlerBlock.includes('notifyPrivateTableCreated'), 'join_private_room handler-ът не трябва да вика broadcastPrivateRoomCreatedNotice')
 })
 
 await check('[13] Payload-ът не съдържа парола/код за достъп или други чувствителни полета', () => {
@@ -294,9 +295,9 @@ await check('[13] Payload-ът не съдържа парола/код за до
   }
 })
 
-await check('[14] Публична (не частна) маса не тригва известието — само create_private_room handler-ът вика broadcastPrivateRoomCreatedNotice', () => {
-  const occurrences = (serverSrc.match(/broadcastPrivateRoomCreatedNotice\(\{/g) ?? []).length
-  assertEqual(occurrences, 1, 'broadcastPrivateRoomCreatedNotice трябва да се извиква точно от едно място в целия сървърен код')
+await check('[14] Публична (не частна) маса не тригва известието — за Белот само create_private_room handler-ът вика нотификатора', () => {
+  const occurrences = (serverSrc.match(/notifyPrivateTableCreated\('belot'/g) ?? []).length
+  assertEqual(occurrences, 1, "notifyPrivateTableCreated('belot' трябва да се извиква точно от едно място")
 })
 
 // ─── C) Клиентско wiring-о ───────────────────────────────────────────────────
@@ -309,9 +310,10 @@ await check('[15] main.ts подава реалните полета от WS с�
   assert(block.includes('recipientInActiveGame: message.recipientInActiveGame'), 'recipientInActiveGame трябва да идва директно от WS съобщението')
 })
 
-await check('[16] "Влез" бутонът навигира през съществуващата SPA логика (navigateToPrivateRooms), без презареждане и без auto-join', () => {
+await check('[16] „Виж“ навигира през регистъра на игрите (Белот → navigateToPrivateRooms), без презареждане и без auto-join', () => {
   const wiring = extractBlock(mainSrc, 'const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({', 'privateRoomCreatedNotification wiring', '\n})')
-  assert(wiring.includes('lobby?.navigateToPrivateRooms()'), 'onEnterPrivateRooms трябва да вика lobby?.navigateToPrivateRooms()')
+  assert(wiring.includes('findPrivateTableNoticeGame(notice.game.id)?.openTables(lobby)'), 'onOpenTables трябва да ползва навигацията от регистъра')
+  assert(gamesRegistrySrc.includes("id: 'belot'") && gamesRegistrySrc.includes('openTables: (lobby) => lobby.navigateToPrivateRooms()'), 'Белот → navigateToPrivateRooms')
   assert(!wiring.includes('window.location') && !wiring.includes('location.reload') && !wiring.includes('location.href'), 'не трябва да презарежда страницата')
   assert(!wiring.includes('onPrivateRoomJoin') && !wiring.includes('privateRoomId'), 'не трябва да присъединява автоматично към конкретна маса')
 })
@@ -383,7 +385,7 @@ await check('[24] В игра текстът е информативен без 
   assert(notifSrc.includes('Присъедини се, ако искаш.'), 'текстът извън игра трябва да съвпада с изискването')
 })
 
-await check('[25] Клик на "Влез" затваря попъпа преди навигацията (dismiss() предхожда onEnterPrivateRooms())', () => {
+await check('[25] Клик на „Виж“ затваря попъпа преди навигацията (dismiss() предхожда onOpenTables())', () => {
   const clickBlock = extractBlock(
     notifSrc,
     `options.container.querySelector('#private-room-created-enter-btn')?.addEventListener('click', () => {`,
@@ -391,7 +393,7 @@ await check('[25] Клик на "Влез" затваря попъпа пред�
     '\n    })',
   )
   const dismissIdx = clickBlock.indexOf('dismiss()')
-  const navIdx = clickBlock.indexOf('options.onEnterPrivateRooms()')
+  const navIdx = clickBlock.indexOf('options.onOpenTables(notice)')
   assert(dismissIdx !== -1 && navIdx !== -1 && dismissIdx < navIdx, 'dismiss() трябва да предхожда навигацията')
 })
 

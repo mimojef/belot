@@ -14,7 +14,7 @@ type NotificationController = {
 const AUTO_DISMISS_MS = 8_000
 
 // Телефон (тесен екран или нисък хоризонтален тъч екран): картата заема
-// ширината на екрана, бутонът за действие („Влез“ / „Изключи в игра“) минава
+// ширината на екрана, бутонът за действие („Виж“ / „Изключи в игра“) минава
 // под текста, а X остава до името. Desktop изгледът не се променя.
 const PHONE_MEDIA_QUERY = '(max-width: 640px), (hover: none) and (pointer: coarse) and (max-height: 500px)'
 
@@ -39,7 +39,8 @@ export function createPrivateRoomCreatedNotification(options: {
   areInGameNotificationsEnabled: () => boolean
   isSoundEnabled: () => boolean
   onDisableInGameNotifications: () => void
-  onEnterPrivateRooms: () => void
+  /** „Виж“: списъкът с частните маси на играта от известието (навигацията е в регистъра). */
+  onOpenTables: (notice: PrivateRoomCreatedNotice) => void
 }): NotificationController {
   const queue = createPrivateRoomCreatedNotificationQueue()
   let current: PrivateRoomCreatedNotice | null = null
@@ -103,9 +104,12 @@ export function createPrivateRoomCreatedNotification(options: {
       ? `<img id="private-room-created-avatar-img" src="${escapeHtml(notice.creatorAvatarUrl)}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;display:block;border:2px solid ${light ? '#D9CCFF' : 'rgba(212,175,55,0.4)'};box-sizing:border-box;">`
       : fallbackAvatarHtml
 
+    // „[Никнейм] създаде маса за [Игра]. …“ — само името на играта е по-голямо,
+    // удебелено и в цвета ѝ от регистъра (един попъп за всички игри).
+    const gameNameHtml = `<span data-private-room-created-game="${escapeHtml(notice.game.id)}" style="font-size:15px;font-weight:900;color:${escapeHtml(light ? notice.game.lightColor : notice.game.color)};">${escapeHtml(notice.game.name)}</span>`
     const bodyText = notice.recipientInActiveGame
-      ? 'Създаде частна маса. Можеш да се присъединиш, след като завършиш играта.'
-      : 'Създаде частна маса. Присъедини се, ако искаш.'
+      ? `създаде маса за ${gameNameHtml}. Можеш да се присъединиш, след като завършиш играта.`
+      : `създаде маса за ${gameNameHtml}. Присъедини се, ако искаш.`
 
     const actionButtonHtml = notice.recipientInActiveGame
       ? `<button id="private-room-created-disable-in-game-btn" type="button" style="
@@ -120,7 +124,7 @@ export function createPrivateRoomCreatedNotification(options: {
           padding:0 16px;height:36px;border:0;
           border-radius:8px;color:#FFFFFF;font-family:inherit;font-size:13px;font-weight:800;cursor:pointer;
           white-space:nowrap;
-        ">Влез</button>`
+        ">Виж</button>`
         : `<button id="private-room-created-enter-btn" type="button" style="
           padding:7px 14px;border:none;
           background:linear-gradient(135deg,#b8960c,#d4af37,#f0c040);
@@ -128,7 +132,7 @@ export function createPrivateRoomCreatedNotification(options: {
           white-space:nowrap;
           transition:filter 0.15s,transform 0.15s;
           box-shadow:0 2px 8px rgba(212,175,55,0.3);
-        ">Влез</button>`
+        ">Виж</button>`
 
     options.container.innerHTML = `
       <style>
@@ -206,7 +210,7 @@ export function createPrivateRoomCreatedNotification(options: {
 
     options.container.querySelector('#private-room-created-enter-btn')?.addEventListener('click', () => {
       dismiss()
-      options.onEnterPrivateRooms()
+      options.onOpenTables(notice)
     })
 
     options.container.querySelector('#private-room-created-disable-in-game-btn')?.addEventListener('click', () => {

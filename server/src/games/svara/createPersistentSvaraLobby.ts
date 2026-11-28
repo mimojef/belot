@@ -24,6 +24,8 @@ export async function createPersistentSvaraLobby(deps: {
   getAnteIncreaseIntervalMs?: () => number
   /** Нива и рангове при приключен мач (svaraProgression.ts). */
   progression?: SvaraProgression
+  /** Общото известие при създадена маса (виж createSvaraLobby). */
+  onPrivateTableCreated?: (input: { matchId: string; creatorProfileId: string }) => void
 }) {
   let persistence: SvaraMatchPersistence
   let close = () => {}

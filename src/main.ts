@@ -135,6 +135,7 @@ import { createPartnerRatingNotification } from './ui/notifications/partnerRatin
 import { createMuteEndNoticePopupController } from './ui/notifications/muteEndNoticePopup'
 import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
 import { createPrivateRoomCreatedNotification } from './ui/notifications/privateRoomCreatedNotification'
+import { findPrivateTableNoticeGame } from './ui/notifications/privateTableNoticeGames'
 import { createTournamentEconomyNotification } from './ui/notifications/tournamentEconomyNotification'
 import type { TournamentEconomyNoticeReason } from './ui/notifications/tournamentEconomyNotificationQueue'
 import { createTournamentPartnerInvitePopup } from './ui/notifications/tournamentPartnerInvitePopup'
@@ -391,14 +392,16 @@ const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
   // присвоен по-долу в модула — optional chaining покрива closure-а,
   // ако isInActiveGame() бъде извикан преди assignment-а (established
   // pattern, mirror на onEnterPrivateRooms по-долу).
-  isInActiveGame: () => activeRoom.hasActiveRoom() || (lobby?.hasActiveLudoMatch() ?? false),
+  // + активен мач на „Свара“: „Виж“ (навигация) не се предлага по време на игра.
+  isInActiveGame: () => activeRoom.hasActiveRoom() || (lobby?.hasActiveLudoMatch() ?? false) || (lobby?.getPwaUpdateSafetySnapshot().hasActiveSvaraMatch ?? false),
   areInGameNotificationsEnabled: () => privateRoomInGameNotificationsEnabled,
   isSoundEnabled: () => privateRoomCreatedSoundEnabled,
   onDisableInGameNotifications: () => {
     setPrivateRoomInGameNotificationsEnabled(false)
   },
-  onEnterPrivateRooms: () => {
-    lobby?.navigateToPrivateRooms()
+  // Навигацията идва само от клиентския регистър за gameId (не от сървъра).
+  onOpenTables: (notice) => {
+    if (lobby) findPrivateTableNoticeGame(notice.game.id)?.openTables(lobby)
   },
 })
 
@@ -10072,8 +10075,12 @@ client = createGameServerClient({
       // Едно Белот участие: по време на търсене на случайна маса известието
       // (с бутон „Влез“) не се показва — първо се прекратява търсенето.
       if (lobby.isSearchingMatchmaking()) return
+      // Общото известие за всички игри: непозната/изключена игра → нищо.
+      const game = findPrivateTableNoticeGame(message.gameId)
+      if (!game) return
       privateRoomCreatedNotification.handleIncoming({
         notificationId: message.notificationId,
+        game: { id: game.id, name: game.name, color: game.color, lightColor: game.lightColor },
         creatorDisplayName: message.creatorDisplayName,
         creatorAvatarUrl: message.creatorAvatarUrl,
         recipientInActiveGame: message.recipientInActiveGame,
