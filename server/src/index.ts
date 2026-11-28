@@ -131,6 +131,7 @@ import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import { canSessionAccessSvara, setSvaraPublicAccessProvider } from './games/svara/svaraAccess.js'
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import { createPersistentSvaraLobby } from './games/svara/createPersistentSvaraLobby.js'
+import { createSvaraProgression } from './games/svara/svaraProgression.js'
 import { isSvaraPaidMatchesEnabled } from './games/svara/svaraPaidEconomy.js'
 import { hasStartedTournamentCommitment } from './games/svara/svaraTournamentCommitment.js'
 import { createSvaraRealClock } from './games/svara/runtime/createSvaraLifecycle.js'
@@ -5509,6 +5510,9 @@ const svaraService = await createPersistentSvaraLobby({
   // Етап 4Б: „Интервал за увеличаване на антето“ (Админ → Настройки), само за нови маси.
   getAnteIncreaseIntervalMs: () => adminSettingsStore.getSettings().svaraAnteIncreaseIntervalMinutes * 60_000,
   getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
+  // Нива и рангове: същият идемпотентен запис като „Не се сърди човече“
+  // (recordCompletedGameForProfile, source 'svara_match'). Без ELO.
+  progression: createSvaraProgression(playerProgressStore),
   // Достъпът на всички човешки участници се проверява при старт на нов мач.
   getProfileRole: (profileId) => authStore.getAccountRoleForProfile(profileId),
   // Турнир блокира само след старта; записване в предстоящ ('open') — не

@@ -67,6 +67,12 @@ export type SvaraLobbyServerMessage =
    * повтаря при reconnect.
    */
   | { type: 'svara_player_looked'; matchId: string; playerId: string; revision: number }
+  /**
+   * Нивото/рангът от приключил мач са записани. Само към участници, които не
+   * получават финалното svara_table_updated (напуснали преди края, или запис
+   * след повторен опит/рестарт) — клиентът презарежда профила. Без данни.
+   */
+  | { type: 'svara_progress_updated'; matchId: string }
   | SvaraMatchSnapshotMessage
 
 export const SVARA_LOBBY_MESSAGE_TYPES: ReadonlySet<string> = new Set([

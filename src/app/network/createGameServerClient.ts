@@ -2408,6 +2408,8 @@ export type SvaraPlayerLookedMessage = {
   playerId: string
   revision: number
 }
+/** Нивото/рангът от приключил мач са записани (за напуснали преди края / след повторен опит) — презареди профила. */
+export type SvaraProgressUpdatedMessage = { type: 'svara_progress_updated'; matchId: string }
 export type SvaraCommandResultMessage = {
   type: 'svara_command_result'
   matchId: string
@@ -3621,6 +3623,7 @@ export type ServerMessage =
   | MatchmakingWaitingCountsMessage
   | SvaraMatchTimingMessage
   | SvaraPlayerLookedMessage
+  | SvaraProgressUpdatedMessage
   | SvaraCommandResultMessage
   | SvaraCommandErrorMessage
   | SvaraTablesListMessage

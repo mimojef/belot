@@ -13,6 +13,7 @@ import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
 import { parseSvaraLobbyMessage, type SvaraFinishedMatch, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
 import { serializeSvaraSnapshotForClient, type SvaraPublicTable } from './protocol/svaraSnapshotProtocol.js'
 import { participantsIfCommandStartsMatch, reconcileSvaraPaidMatches, type SvaraPaidEconomy } from './svaraPaidEconomy.js'
+import { getSvaraProgressionParticipants, type SvaraProgression } from './svaraProgression.js'
 import { activeEntryFees, pinGameMatchFinancialTerms, SVARA_DEFAULT_FINANCIAL_CONFIG, type GameFinancialConfig } from '../../economy/gameFinancialConfig.js'
 
 type Transport = {
@@ -28,6 +29,11 @@ export const SVARA_FINISHED_REVIEW_RETENTION_MS = 10 * 60_000
 
 /** Като „Не се сърди човече“ (PRIVATE_ROOM_FINISHED_VISIBILITY_HOURS): приключилите се виждат 2 часа. */
 export const SVARA_FINISHED_VISIBILITY_HOURS = 2
+
+/** Повторен опит за записа на прогреса (ниво/ранг) след временна грешка в базата. */
+export const SVARA_PROGRESSION_RETRY_MS = 60_000
+/** При старт на сървъра: колко назад се търсят приключили мачове с недовършен запис на прогреса. */
+export const SVARA_PROGRESSION_RECOVERY_HOURS = 24
 
 export function createSvaraLobby(deps: {
   /** purpose 'recovery' — бариерата при рестарт (виж initializeRecovery). */
@@ -63,6 +69,11 @@ export function createSvaraLobby(deps: {
    * база); 'unavailable' → нови маси се отказват.
    */
   svaraConfig?: { getActiveConfig: () => { ok: true; config: GameFinancialConfig } | { ok: false; message: string } } | 'unavailable'
+  /**
+   * Нива и рангове (общата система, виж svaraProgression.ts). Липсва → без
+   * запис (само тестове). Не участва във финансовото уреждане.
+   */
+  progression?: SvaraProgression
 }) {
   // An injected runtime is a test/server-owned dependency. Production always supplies persistence.
   if (deps.runtime && deps.persistence) throw new Error('Provide persistence through the injected Svara runtime')
@@ -214,6 +225,7 @@ export function createSvaraLobby(deps: {
     if (!deps.persistence || !runtime.hasMatch(matchId) || runtime.getPublicTable(matchId).phase !== 'finished') return
     runtime.releaseMatch(matchId)
     finishedDismissals.delete(matchId)
+    progressionDone.delete(matchId)
   }
   function scheduleFinishedRelease(matchId: string): void {
     if (stopped || !deps.persistence || finishedReleases.has(matchId) || !runtime.hasMatch(matchId)) return
@@ -225,6 +237,84 @@ export function createSvaraLobby(deps: {
       if (stopped) return
       try { releaseFinishedMatch(matchId) } catch (cause) { deps.onError?.(cause) }
     }, hasPendingFinishedViewer(matchId) ? SVARA_FINISHED_REVIEW_RETENTION_MS : 0))
+  }
+
+  // ── Нива и рангове при приключен мач ───────────────────────────────────────
+  // Отделно от финансовото уреждане: грешка тук не го спира и не се спира от
+  // него. Двойно начисляване няма — ledger-ът в базата е защитата; паметта
+  // (progressionDone) само спестява излишни транзакции при следващите publish.
+  // Временна грешка → повторен опит със запазения състав (оцелява и след
+  // освобождаването на мача от RAM); рестарт по време на чакането се покрива
+  // от recoverRecentProgression() при старта.
+  const progressionDone = new Set<string>()
+  const progressionRetries = new Map<string, () => void>()
+  function recordProgression(matchId: string, playerIds: readonly string[], winnerId: string | null): boolean {
+    const progression = deps.progression
+    if (!progression) return true
+    let ok = true
+    for (const playerId of playerIds) {
+      if (testBots?.isBot(playerId)) continue // ВРЕМЕННО — тестови ботове: не са профили
+      try {
+        if (!progression.record(matchId, playerId, playerId === winnerId)) ok = false
+      } catch (cause) { ok = false; deps.onError?.(cause) }
+    }
+    return ok
+  }
+  /** Клиентът презарежда профила (виж 'svara_progress_updated'). */
+  function notifyProgressUpdated(matchId: string, profileIds: readonly string[]): void {
+    if (profileIds.length === 0) return
+    for (const transport of connections.values()) {
+      if (transport.profileId !== null && profileIds.includes(transport.profileId)) deliver(transport, { type: 'svara_progress_updated', matchId })
+    }
+  }
+  function scheduleProgressionRetry(matchId: string, playerIds: readonly string[], winnerId: string | null): void {
+    if (stopped || progressionRetries.has(matchId)) return
+    deps.onError?.(new Error(`[svara-progression] record failed match=${matchId}; retry in ${SVARA_PROGRESSION_RETRY_MS} ms`))
+    progressionRetries.set(matchId, clock.schedule(() => {
+      progressionRetries.delete(matchId)
+      if (stopped) return
+      // Финалното svara_table_updated вече е изпратено със стария профил → всички.
+      recordProgressionOnce(matchId, playerIds, winnerId, playerIds)
+    }, SVARA_PROGRESSION_RETRY_MS))
+  }
+  /** notifyIds — кои да бъдат уведомени след успешен запис (останалите получават финалния snapshot). */
+  function recordProgressionOnce(matchId: string, playerIds: readonly string[], winnerId: string | null, notifyIds: readonly string[]): void {
+    if (!deps.progression || progressionDone.has(matchId) || progressionRetries.has(matchId)) return
+    if (!recordProgression(matchId, playerIds, winnerId)) { scheduleProgressionRetry(matchId, playerIds, winnerId); return }
+    progressionDone.add(matchId)
+    notifyProgressUpdated(matchId, notifyIds)
+  }
+  /** Вика се от publish() веднага след уреждането — преди изпращането на 'finished' към клиентите. */
+  function recordProgressionIfFinished(matchId: string): void {
+    if (!deps.progression || progressionDone.has(matchId) || progressionRetries.has(matchId) || !runtime.hasMatch(matchId)) return
+    try {
+      if (runtime.getPublicTable(matchId).phase !== 'finished') return
+      const state = runtime.exportInternalStateForServer(matchId)
+      const participants = getSvaraProgressionParticipants(state)
+      // Напусналите преди края не получават финалното svara_table_updated.
+      if (participants) recordProgressionOnce(matchId, participants.playerIds, participants.winnerId, participants.playerIds.filter((id) => state.status[id] === 'exited'))
+    } catch (cause) { deps.onError?.(cause) }
+  }
+  /**
+   * При старт: приключили през последните SVARA_PROGRESSION_RECOVERY_HOURS
+   * мачове, чийто запис е недовършен (срив/рестарт между приключването и
+   * записа или по време на повторния опит). Само мачове след първия запис за
+   * „Свара“: мачовете отпреди интеграцията не се начисляват никога (няма
+   * възстановяване със задна дата). Без нито един запис — нищо не се чете.
+   */
+  function recoverRecentProgression(): void {
+    const progression = deps.progression
+    const persistence = deps.persistence
+    if (!progression || !persistence?.listRecentFinished) return
+    try {
+      const since = progression.liveSince()
+      if (since === null) return
+      for (const match of persistence.listRecentFinished(SVARA_PROGRESSION_RECOVERY_HOURS)) {
+        if (match.finishedAt < since || progressionDone.has(match.matchId)) continue
+        if (progression.recordedCount(match.matchId) >= match.playerIds.length) { progressionDone.add(match.matchId); continue }
+        recordProgressionOnce(match.matchId, match.playerIds, match.winnerId, match.playerIds)
+      }
+    } catch (cause) { deps.onError?.(cause) }
   }
 
   // ВРЕМЕННО — тестови ботове. Ботовете ползват само защитения snapshot и
@@ -413,6 +503,9 @@ export function createSvaraLobby(deps: {
     // Етап 3В.2: уреждането е преди всичко останало (вкл. по време на
     // възстановяването) — всеки преход към 'finished' минава оттук.
     settlePaidIfFinished(matchId)
+    // Нивото/рангът — преди изпращането на 'finished': клиентът презарежда
+    // профила (/api/auth/me) точно при тази фаза.
+    recordProgressionIfFinished(matchId)
     if (recoveryState !== 'ready') return
     const table = runtime.getPublicTable(matchId)
     const tables = publicChanged ? publicTables() : []
@@ -484,6 +577,7 @@ export function createSvaraLobby(deps: {
             deps.onError?.(new Error(`[svara-paid] boot reconcile ${JSON.stringify(report)}`))
           }
         }
+        recoverRecentProgression()
         // ВРЕМЕННО — тестови ботове: възстановените мачове продължават след рестарт.
         for (const matchId of runtime.listMatchIds()) testBots?.onMatchChanged(matchId)
         // Мач, приключил още при възстановяването (напр. изтекло чакане → all-absent).
@@ -519,6 +613,8 @@ export function createSvaraLobby(deps: {
       testBots?.shutdown() // ВРЕМЕННО — тестови ботове
       for (const cancel of finishedReleases.values()) cancel()
       finishedReleases.clear()
+      for (const cancel of progressionRetries.values()) cancel()
+      progressionRetries.clear()
       finishedDismissals.clear()
     },
     findCommitment,

@@ -22641,6 +22641,12 @@ export function createLobbyFlowController(
       _svaraLobbyController?.onCommandError(message.message, message.commandId)
       return true
     }
+    if (message.type === 'svara_progress_updated') {
+      // Нивото/рангът от приключил мач са записани (напр. играчът е напуснал
+      // преди края) — същото фоново презареждане на профила като при баланса.
+      options.onSvaraWalletRefresh?.()
+      return true
+    }
     if (message.type === 'svara_player_looked') {
       // Еднократно събитие „Виж“ — само към mount-натия контролер (не се кешира
       // и не се replay-ва: при reconnect/remount не се повтаря).

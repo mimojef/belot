@@ -219,6 +219,10 @@ export type PlayerProgressStore = {
     source: string,
     didWin: boolean,
   ) => { ok: boolean; recorded: boolean; winRecorded: boolean }
+  /** Read-only: брой ledger редове за scopeId от даден source (напр. колко участници на мач вече са отчетени). */
+  countCompletedGameLedgerRows: (scopeId: string, source: string) => number
+  /** Read-only: момент (ms, UTC) на най-ранния ledger запис от даден source; null — няма. */
+  getEarliestCompletedGameRecordedAt: (source: string) => number | null
   /**
    * Read-only: Ludo ledger редове (source='ludo_match', did_win=0), чийто
    * ludo_room_matches ред е finished с winner_profile_id = ledger profile_id.
@@ -915,6 +919,19 @@ export async function createPlayerProgressStore(
       scope_id, profile_id, source, did_win
     ) VALUES (?, ?, ?, ?)
     ON CONFLICT(scope_id, profile_id) DO NOTHING;
+  `)
+
+  const countCompletedGameLedgerRowsStatement = database.prepare(`
+    SELECT COUNT(*) AS row_count
+    FROM profile_completed_game_ledger
+    WHERE scope_id = ?
+      AND source = ?;
+  `)
+
+  const selectEarliestCompletedGameRecordedAtStatement = database.prepare(`
+    SELECT MIN(recorded_at) AS recorded_at
+    FROM profile_completed_game_ledger
+    WHERE source = ?;
   `)
 
   // did_win 0->1 guard (миграция 20260928_002) — changes=1 само при
@@ -1919,6 +1936,19 @@ export async function createPlayerProgressStore(
     }
   }
 
+  function countCompletedGameLedgerRows(scopeId: string, source: string): number {
+    const row = countCompletedGameLedgerRowsStatement.get(scopeId, source) as { row_count: number } | undefined
+    return row?.row_count ?? 0
+  }
+
+  // recorded_at е CURRENT_TIMESTAMP (UTC, 'YYYY-MM-DD HH:MM:SS').
+  function getEarliestCompletedGameRecordedAt(source: string): number | null {
+    const row = selectEarliestCompletedGameRecordedAtStatement.get(source) as { recorded_at: string | null } | undefined
+    if (!row?.recorded_at) return null
+    const parsed = Date.parse(`${row.recorded_at.replace(' ', 'T')}Z`)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
   function previewLudoMatchWinReconciliation(): LudoMatchWinReconciliationPreview {
     const rows = selectLudoMatchWinReconciliationPreviewStatement.all() as Array<{
       profile_id: string
@@ -2451,6 +2481,8 @@ export async function createPlayerProgressStore(
     refillCatalogBotWallets,
     recordCompletedMatch,
     recordCompletedGameForProfile,
+    countCompletedGameLedgerRows,
+    getEarliestCompletedGameRecordedAt,
     previewLudoMatchWinReconciliation,
     reconcileLudoMatchWins,
     submitPartnerRating,

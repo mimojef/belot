@@ -5,6 +5,7 @@ import type { SvaraClock } from './runtime/createSvaraLifecycle.js'
 import type { SvaraTestBotsFactory } from './testBots/createSvaraTestBots.js' // ВРЕМЕННО — тестови ботове
 import { createSvaraEconomyStore } from '../../db/svaraEconomyStore.js'
 import { isSvaraPaidMatchesEnabled, type SvaraPaidEconomy } from './svaraPaidEconomy.js'
+import type { SvaraProgression } from './svaraProgression.js'
 
 /** Isolate Svara startup failures from the rest of the platform. No migrations here. */
 export async function createPersistentSvaraLobby(deps: {
@@ -21,6 +22,8 @@ export async function createPersistentSvaraLobby(deps: {
   testBots?: SvaraTestBotsFactory
   /** Етап 4Б: интервалът за увеличаване на антето (ms) — от админ настройката. */
   getAnteIncreaseIntervalMs?: () => number
+  /** Нива и рангове при приключен мач (svaraProgression.ts). */
+  progression?: SvaraProgression
 }) {
   let persistence: SvaraMatchPersistence
   let close = () => {}
