@@ -1103,6 +1103,12 @@ export type CreateLobbyFlowControllerOptions = {
   // (bet/fold/look/all-in/request-return/...).
   onSvaraTablesOpen?: () => void
   onSvaraReconnectResolved?: () => void
+  /**
+   * Може ли започнал мач на „Свара“ да отвори автоматично своя екран (няма
+   * активна Белот маса / Белот зрител — те държат екрана извън лобито).
+   * Липсва → да.
+   */
+  canAutoOpenSvaraMatch?: () => boolean
   /** Баланс от сървъра (/api/auth/me): старт (удържан вход), край (изплащане), напускане на масата. */
   onSvaraWalletRefresh?: () => void
   onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number, startMode: 'auto' | 'manual') => void
@@ -4025,6 +4031,33 @@ export function createLobbyFlowController(
   // This is only the view to revalidate, never proof of server membership.
   let _svaraReconnect: { matchId: string; listed: boolean; snapshotRevision: number | null } | null = null
   const _svaraDismissedMatches = new Set<string>()
+  // Автоматично отваряне на започнал мач (като match_found в Белот): само по
+  // потвърждение от сървъра — собствената маса/snapshot е във фаза
+  // 'in-progress' и локалният играч е седнал (active/absent). Запълнени
+  // места или отказан старт (недостатъчен баланс) оставят фазата 'lobby'.
+  // Най-много веднъж на мач (без повторни пренасочвания); блокирано от друга
+  // игра → не се маркира и следващият snapshot на мача опитва отново.
+  // Reconnect/reload: сървърът праща snapshot на участника при свързване
+  // (svaraLobby.reconnect), а svara_tables_list — при абонамента на връзката.
+  const _svaraAutoOpenedMatches = new Set<string>()
+  function autoOpenStartedSvaraMatch(matchId: string, phase: string, status: string | undefined, table: SvaraPublicTable | null): void {
+    if (phase !== 'in-progress' || (status !== 'active' && status !== 'absent')) return
+    if (_svaraDismissedMatches.has(matchId) || _svaraAutoOpenedMatches.has(matchId)) return
+    if (state.currentScreen === 'svara') { _svaraAutoOpenedMatches.add(matchId); return }
+    if (_ludoController !== null || _ludoSpectatorMatchId !== null || !(options.canAutoOpenSvaraMatch?.() ?? true)) return
+    _svaraAutoOpenedMatches.add(matchId)
+    // Кеш от друг (приключил) мач не бива да се показва вместо започналия.
+    if (_svaraLastSnapshot && _svaraLastSnapshot.matchId !== matchId) {
+      _svaraLastSnapshot = null
+      _svaraLastTiming = null
+      _svaraLastSnapshotRevision = null
+    }
+    if (table) _svaraRemountMyTable = table
+    // Презареждане: snapshot-ът (при свързването) може да изпревари
+    // първоначалната навигация по адреса, която иначе би го презаписала.
+    if (!_navigationReady) { _loadPath = '/games/svara'; return }
+    showSvaraPage()
+  }
   function beginSvaraReconnect(): boolean {
     if (state.currentScreen !== 'svara') return false
     const matchId = _svaraLobbyController?.getMyTableId() ?? _svaraLastSnapshot?.matchId
@@ -20154,7 +20187,8 @@ export function createLobbyFlowController(
     '/settings': 'settings',
   }
 
-  const _loadPath = window.location.pathname
+  // let: започнал мач на „Свара“ преди първоначалната навигация я пренасочва (autoOpenStartedSvaraMatch).
+  let _loadPath = window.location.pathname
   let _pendingInitialNav = false
   let _navigationReady = false
 
@@ -22557,6 +22591,7 @@ export function createLobbyFlowController(
         const profileId = options.getAuthSession?.()?.profile.profileId
         const owned = message.tables.find((table) => table.players.some((p) => p.playerId === profileId && p.status !== 'exited'))
         setSvaraActiveGame(owned !== undefined && owned.phase !== 'lobby')
+        if (owned) autoOpenStartedSvaraMatch(owned.matchId, owned.phase, owned.players.find((p) => p.playerId === profileId)?.status, owned)
       }
       _svaraLobbyController?.setTables(message.tables, message.finished)
       // Значката "Частни маси – Свара" в основното лоби: сървърът праща списъка
@@ -22578,6 +22613,8 @@ export function createLobbyFlowController(
       if (!_svaraLobbyController && _svaraRemountMyTable) _svaraRemountMyTable = message.table
       setSvaraActiveGame(message.table.phase !== 'lobby')
       refreshSvaraWalletOnPhase(message.table.matchId, message.table.phase)
+      autoOpenStartedSvaraMatch(message.table.matchId, message.table.phase,
+        message.table.players.find((p) => p.playerId === options.getAuthSession?.()?.profile.profileId)?.status, message.table)
       return true
     }
     if (message.type === 'svara_table_left') {
@@ -22667,6 +22704,8 @@ export function createLobbyFlowController(
       return true
     }
     if (message.type === 'svara_match_snapshot') {
+      // Сървърът праща snapshot само на участник в собствения му мач.
+      autoOpenStartedSvaraMatch(message.matchId, message.phase, message.you.status, null)
       const expected = _svaraReconnect?.matchId ?? _svaraLobbyController?.getMyTableId() ?? _svaraLastSnapshot?.matchId
       if (_svaraDismissedMatches.has(message.matchId) || (expected && expected !== message.matchId)) return true
       // Equal revisions still confirm a fresh connection, without replaying UI.

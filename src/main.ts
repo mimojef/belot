@@ -7717,6 +7717,8 @@ lobby = createLobbyFlowController({
   onWatchBelotRoom: (roomId) => { client.watchBelotRoom(roomId) },
   onUnwatchBelotRoom: (roomId) => { client.unwatchBelotRoom(roomId) },
   onSvaraTablesOpen: () => { client.requestSvaraTablesList() },
+  // Започнал мач на „Свара“ отваря екрана си сам — освен над активна Белот маса/зрител.
+  canAutoOpenSvaraMatch: () => !activeRoom.hasActiveRoom() && !isBelotSpectatorSessionActive(),
   onSvaraReconnectResolved: () => {
     shouldReloadLobbyOnReconnect = false
     pwaIsReconnectingActiveRoom = false
